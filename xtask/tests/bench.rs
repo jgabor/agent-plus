@@ -324,6 +324,20 @@ fn the_base_does_not_build_with_the_candidates_cargo_config() {
 }
 
 #[test]
+fn a_temp_directory_inside_the_checkout_is_a_problem() {
+    let repo = Repo::new("tmpdir", BUDGETS);
+    let temp = repo.root.join("target/tmp");
+    fs::create_dir_all(&temp).unwrap();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("bench")
+        .env("TMPDIR", &temp)
+        .output()
+        .unwrap();
+    assert_problem(&output, "TMPDIR");
+}
+
+#[test]
 fn a_commit_made_during_the_bench_gets_no_result() {
     let repo = Repo::new("moved", BUDGETS);
     let real = Command::new("sh")

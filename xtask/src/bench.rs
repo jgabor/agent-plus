@@ -215,13 +215,29 @@ fn build_base(root: &Path, directory: &Path, commit: &str) -> Result<PathBuf, Pr
     let directory = directory.join("base").join(commit);
     let mut hasher = DefaultHasher::new();
     root.hash(&mut hasher);
-    let tree = env::temp_dir().join(format!("xtask-base-{:016x}-{commit}", hasher.finish()));
+    let tree = temp_outside(root)?.join(format!("xtask-base-{:016x}-{commit}", hasher.finish()));
     export(root, commit, &tree)?;
     let built = journey::build_ap(&tree, &directory.join("target"));
     let removed = fs::remove_dir_all(&tree);
     let built = built.map_err(|Problem(e)| Problem(format!("the base build: {e}")))?;
     removed.map_err(|e| Problem(format!("couldn't remove {}: {e}", tree.display())))?;
     keep(&built, &directory)
+}
+
+/// The system's temp directory, which must be outside the checkout.
+fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
+    let resolve = |path: &Path| {
+        fs::canonicalize(path)
+            .map_err(|e| Problem(format!("couldn't resolve {}: {e}", path.display())))
+    };
+    let temp = resolve(&env::temp_dir())?;
+    if temp.starts_with(resolve(root)?) {
+        return Err(Problem(format!(
+            "TMPDIR is {}, inside the checkout, so Cargo would apply the candidate's settings to the base build. Point it outside the checkout",
+            temp.display()
+        )));
+    }
+    Ok(temp)
 }
 
 fn keep(built: &Path, directory: &Path) -> Result<PathBuf, Problem> {

@@ -279,7 +279,7 @@ fn skip_attributes(lines: &[&str], mut at: usize) -> (usize, bool) {
 }
 
 /// The name of every `#[test]` function, including disabled ones.
-fn test_functions(source: &str) -> Vec<String> {
+pub fn test_functions(source: &str) -> Vec<String> {
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {

@@ -1,7 +1,8 @@
 //! `cargo xtask journey`: real use of `ap`, step by step, from a release build.
 
+use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, lock, score, toml};
+use crate::{Problem, Verdict, lock, score};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
@@ -62,8 +63,16 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
                 .str("script")
                 .ok_or_else(|| bad("has no `script`"))?
                 .to_string(),
-            floor: table.str("floor").map(str::to_string),
-            spend: table.bool("spend").unwrap_or(false),
+            floor: match table.get("floor") {
+                None => None,
+                Some(Value::Str(floor)) => Some(floor.clone()),
+                Some(_) => return Err(bad("has a `floor` that isn't a string")),
+            },
+            spend: match table.get("spend") {
+                None => false,
+                Some(Value::Bool(spend)) => *spend,
+                Some(_) => return Err(bad("has a `spend` that isn't true or false")),
+            },
         };
         if steps.insert(id, step).is_some() {
             return Err(Problem(format!("{JOURNEY_FILE}: step {id} appears twice")));
@@ -142,7 +151,6 @@ fn run_step(root: &Path, journey: &Path, bin: &Path, step: &Step) -> Result<bool
 
 /// Escape checks are tests in the package `t1`.
 fn floor_check_exists(root: &Path, floor: &str) -> Result<bool, Problem> {
-    let needle = format!("fn {floor}(");
     for package in workspace::packages(root)? {
         if package.name != "t1" {
             continue;
@@ -150,7 +158,10 @@ fn floor_check_exists(root: &Path, floor: &str) -> Result<bool, Problem> {
         for file in score::rust_files(&package.directory)? {
             let source = fs::read_to_string(&file)
                 .map_err(|e| Problem(format!("couldn't read {}: {e}", file.display())))?;
-            if source.contains(&needle) {
+            if score::test_functions(&source)
+                .iter()
+                .any(|name| name == floor)
+            {
                 return Ok(true);
             }
         }

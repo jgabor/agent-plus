@@ -49,7 +49,6 @@ fn journey(root: &Path) -> Output {
         .current_dir(root)
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("XTASK_ACTIVITY_HELD")
-        .env("HOME", "/nonexistent/from/the/test")
         .env("JOURNEY_LEAK", "from the caller")
         .output()
         .unwrap()
@@ -276,4 +275,38 @@ fn a_journey_needs_no_arguments() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn a_mistyped_spend_is_a_problem() {
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = \"true\"\n";
+    let root = workspace("spend-type", toml, &[("harness/journey/one.sh", PASS)]);
+    let output = journey(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("spend"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_mistyped_floor_is_a_problem() {
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = [\"floor_guest_host\"]\n";
+    let root = workspace("floor-type", toml, &[("harness/journey/one.sh", PASS)]);
+    let output = journey(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("floor"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_comment_is_not_a_floor_check() {
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
+    let t1 = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    let root = workspace(
+        "floor-comment",
+        toml,
+        &[
+            ("harness/journey/one.sh", PASS),
+            ("crates/t1/Cargo.toml", t1),
+            ("crates/t1/src/lib.rs", "// fn floor_guest_host() {}\n"),
+        ],
+    );
+    assert_journey(&root, "fail step 1\njourney 0 of 1\n");
 }

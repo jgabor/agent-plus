@@ -32,13 +32,6 @@ impl Table {
         }
     }
 
-    pub fn bool(&self, key: &str) -> Option<bool> {
-        match self.get(key) {
-            Some(Value::Bool(flag)) => Some(*flag),
-            _ => None,
-        }
-    }
-
     /// The integers in an array. `None` if it isn't an array of integers.
     pub fn ints(&self, key: &str) -> Option<Vec<i64>> {
         match self.get(key) {
@@ -174,7 +167,7 @@ mod tests {
         assert_eq!(tables[0].int("id"), Some(3));
         assert_eq!(tables[0].str("name"), Some("a \"b\" `c`"));
         assert_eq!(tables[0].ints("needs"), Some(vec![1, 2]));
-        assert_eq!(tables[0].bool("spend"), Some(true));
+        assert_eq!(tables[0].get("spend"), Some(&Value::Bool(true)));
         assert_eq!(tables[0].get("missing"), None);
     }
 

@@ -24,6 +24,7 @@ fn workspace(name: &str, source: &str) -> PathBuf {
     )
     .unwrap();
     fs::write(root.join("demo/src/lib.rs"), source).unwrap();
+    fs::write(root.join("SPEC.md"), "# A\n").unwrap();
     let output = Command::new("cargo")
         .arg("generate-lockfile")
         .current_dir(&root)

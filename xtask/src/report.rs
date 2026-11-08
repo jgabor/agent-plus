@@ -151,13 +151,12 @@ fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<St
     let Some(commit) = newest else {
         return Ok(None);
     };
-    if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+    if !commit.chars().all(|c| c.is_ascii_hexdigit()) {
         return Ok(None);
     }
-    let in_history = base::commit_exists(root, commit)?
-        && base::git(root, &["merge-base", "--is-ancestor", commit, "HEAD"])?
-            .status
-            .success();
+    let in_history = base::git(root, &["merge-base", "--is-ancestor", commit, "HEAD"])?
+        .status
+        .success();
     Ok(in_history.then(|| commit.to_string()))
 }
 

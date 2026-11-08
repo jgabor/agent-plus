@@ -752,7 +752,12 @@ fn a_commit_already_reported_isnt_repeated() {
 
 #[test]
 fn a_last_report_that_cant_be_used_falls_back_to_a_day() {
-    for (name, commit) in [("gone", "deadbee"), ("option", "--output=x"), ("empty", "")] {
+    for (name, commit) in [
+        ("gone", "deadbee"),
+        ("option", "--output=x"),
+        ("name", "HEAD"),
+        ("empty", ""),
+    ] {
         let repo = Repo::new(&format!("fallback-{name}"));
         repo.merge(
             "Too old (#2)",
@@ -795,13 +800,28 @@ fn a_last_report_off_this_history_falls_back_to_a_day() {
 }
 
 #[test]
-fn a_broken_record_still_fails_the_commit() {
+fn a_report_that_cant_be_built_still_fails_the_commit() {
     let repo = Repo::new("broken-record");
     repo.write("harness/ledger/5.toml", "issue = \"not a number\"\n");
-    repo.commit("Bad record (#9)", 1);
+    repo.commit("Bad record (#9)", 2);
+    repo.merge(
+        "Good record (#10)",
+        1,
+        &Recorded {
+            issue: 6,
+            pr: 10,
+            proven: 0,
+            ..CLEAN
+        },
+    );
     repo.sync();
     let head = repo.git(&["rev-parse", "HEAD"]);
     let output = repo.xtask(&["nightly"]);
+    assert!(
+        stdout(&output).contains("gate: pass\n"),
+        "{}",
+        stdout(&output)
+    );
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(
         stderr(&output).contains("harness/ledger/5.toml"),

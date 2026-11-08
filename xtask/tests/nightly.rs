@@ -1039,7 +1039,8 @@ fn mutants_run_as_one_contained_job() {
     assert_mutation_ran(&repo, &output, 0, "pass");
     let calls = repo.read_bin("systemd-calls");
     for part in [
-        "--user --scope",
+        "--user --scope --quiet --collect",
+        "TimeoutStopSec=30",
         "MemoryMax=8G",
         "MemorySwapMax=0",
         "OOMPolicy=continue",

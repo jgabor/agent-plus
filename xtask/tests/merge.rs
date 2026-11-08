@@ -69,6 +69,7 @@ struct Pr<'a> {
     closes: &'a [u64],
     elsewhere: &'a [u64],
     reviews: &'a [(&'a str, &'a str)],
+    fork: bool,
 }
 
 impl Default for Pr<'_> {
@@ -81,6 +82,7 @@ impl Default for Pr<'_> {
             closes: &[7],
             elsewhere: &[],
             reviews: &[],
+            fork: false,
         }
     }
 }
@@ -106,8 +108,9 @@ fn pr_json(pr: &Pr, state: &str) -> String {
         })
         .collect();
     format!(
-        "{{\"number\":9,\"state\":{},\"url\":\"https://github.com/o/r/pull/9\",\"headRefName\":{},\"baseRefName\":{},\"body\":{},\"labels\":{},\"closingIssuesReferences\":[{}],\"reviews\":[{}]}}\n",
+        "{{\"number\":9,\"state\":{},\"url\":\"https://github.com/o/r/pull/9\",\"isCrossRepository\":{},\"headRefName\":{},\"baseRefName\":{},\"body\":{},\"labels\":{},\"closingIssuesReferences\":[{}],\"reviews\":[{}]}}\n",
         quoted(state),
+        pr.fork,
         quoted(BRANCH),
         quoted(pr.base),
         quoted(pr.body),
@@ -622,6 +625,16 @@ fn a_change_request_that_was_answered_does_not_block() {
         });
         assert_merged(&repo, &repo.merge(&[]));
     }
+}
+
+#[test]
+fn a_pr_from_a_fork_is_refused() {
+    let repo = Repo::new("fork");
+    repo.set_pr(&Pr {
+        fork: true,
+        ..Pr::default()
+    });
+    assert_refused(&repo, &repo.merge(&["--owner"]), "fork");
 }
 
 #[test]

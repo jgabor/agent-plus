@@ -41,6 +41,11 @@ fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
         }
     }
     let refused = |why: String| Ok(Decision::Refused(why));
+    if pr.from_fork {
+        return refused(format!(
+            "PR {number} comes from a fork, and its branch isn't one this merge can rebase and push"
+        ));
+    }
     if pr.base_ref != "main" {
         return refused(format!(
             "PR {number} targets `{}`, and only `main` is merged here",

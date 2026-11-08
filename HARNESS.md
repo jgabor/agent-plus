@@ -509,8 +509,8 @@ merge can't keep the slot.
 
 1. Refuse the PR unless its issue has `auto:merge` or `--owner` is given.
    Refuse a `spec-change` PR without `--owner`. With or without it, refuse a
-   PR that doesn't close exactly one issue, doesn't target `main`, or has
-   changes requested.
+   PR that comes from a fork, doesn't close exactly one issue, doesn't target
+   `main`, or has changes requested.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.

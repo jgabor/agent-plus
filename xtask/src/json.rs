@@ -6,8 +6,8 @@ pub enum Json {
     Arr(Vec<Json>),
     Obj(Vec<(String, Json)>),
     Num(f64),
-    /// `null` or a boolean. Nothing reads their values yet.
-    Other,
+    Bool(bool),
+    Null,
 }
 
 const MAX_DEPTH: usize = 128;
@@ -31,6 +31,13 @@ impl Json {
     pub fn as_u64(&self) -> Option<u64> {
         match self {
             Json::Num(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(value) => Some(*value),
             _ => None,
         }
     }
@@ -112,9 +119,9 @@ impl Reader<'_> {
             Some(b'[') => self.array(depth),
             Some(b'"') => self.string().map(Json::Str),
             Some(b'-' | b'0'..=b'9') => self.number(),
-            Some(b't') => self.literal("true"),
-            Some(b'f') => self.literal("false"),
-            Some(b'n') => self.literal("null"),
+            Some(b't') => self.literal("true", Json::Bool(true)),
+            Some(b'f') => self.literal("false", Json::Bool(false)),
+            Some(b'n') => self.literal("null", Json::Null),
             Some(_) => Err(self.error("unexpected character")),
             None => Err(self.error("unexpected end of input")),
         }
@@ -276,11 +283,11 @@ impl Reader<'_> {
             .ok_or_else(|| self.error("bad number"))
     }
 
-    fn literal(&mut self, word: &str) -> Result<Json, String> {
+    fn literal(&mut self, word: &str, value: Json) -> Result<Json, String> {
         let end = self.at + word.len();
         if self.bytes.get(self.at..end) == Some(word.as_bytes()) {
             self.at = end;
-            Ok(Json::Other)
+            Ok(value)
         } else {
             Err(self.error("unexpected word"))
         }
@@ -294,7 +301,11 @@ mod tests {
     #[test]
     fn reads_nested_values() {
         let v = parse(r#" {"a": [1, -2.5e3, true, false, null], "b": {"c": "d"}} "#).unwrap();
-        assert_eq!(v.get("a").unwrap().as_arr().unwrap().len(), 5);
+        let items = v.get("a").unwrap().as_arr().unwrap();
+        assert_eq!(items.len(), 5);
+        assert_eq!(items[2].as_bool(), Some(true));
+        assert_eq!(items[3].as_bool(), Some(false));
+        assert_eq!(items[4], Json::Null);
         let inner = v.get("b").unwrap().get("c").unwrap();
         assert_eq!(inner.as_str(), Some("d"));
         assert_eq!(v.get("missing"), None);

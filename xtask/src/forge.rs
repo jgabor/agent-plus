@@ -32,6 +32,8 @@ pub struct Issue {
 /// A PR, as far as the merge sequence needs one.
 pub struct PullRequest {
     pub state: String,
+    /// A branch in another repository, whose name means nothing in this one.
+    pub from_fork: bool,
     pub head_ref: String,
     pub base_ref: String,
     pub body: String,
@@ -119,7 +121,7 @@ impl Gh {
             "view",
             &number.to_string(),
             "--json",
-            "url,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
+            "url,isCrossRepository,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
         ])?;
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
@@ -282,6 +284,7 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
     };
     Some(PullRequest {
         state: text("state")?,
+        from_fork: value.get("isCrossRepository")?.as_bool()?,
         head_ref: text("headRefName")?,
         base_ref: text("baseRefName")?,
         body: text("body")?,

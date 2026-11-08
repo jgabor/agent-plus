@@ -14,6 +14,7 @@ const SKIP: &str = "skip";
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let commit = tested_commit(&root)?;
+    gate::require_tools(&root)?;
 
     // A nightly has no PR, so nothing can give a reason for a slowdown. Comparing
     // `main` with itself only measures it, which is why the bench comes first,

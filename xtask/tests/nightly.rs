@@ -20,6 +20,7 @@ const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
   "issue list") cat "$(dirname "$0")/issues.json" ;;
   "issue view") cat "$(dirname "$0")/issue.json" ;;
+  "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
   "issue pin") ;;
   "issue comment")
@@ -206,13 +207,13 @@ impl Repo {
     }
 
     /// Gives the report issue these comments, oldest first.
-    fn set_report_comments(&self, bodies: &[&str]) {
-        let comments: Vec<String> = bodies
+    fn set_report_comments(&self, comments: &[(&str, &str)]) {
+        let comments: Vec<String> = comments
             .iter()
             .enumerate()
-            .map(|(id, body)| {
+            .map(|(id, (author, body))| {
                 format!(
-                    "{{\"url\":\"https://github.com/o/r/issues/12#issuecomment-{id}\",\"author\":{{\"login\":\"o\"}},\"body\":{body:?}}}"
+                    "{{\"url\":\"https://github.com/o/r/issues/12#issuecomment-{id}\",\"author\":{{\"login\":\"{author}\"}},\"body\":{body:?}}}"
                 )
             })
             .collect();
@@ -230,9 +231,12 @@ impl Repo {
     fn set_last_report(&self, commit: &str) {
         self.set_issues(REPORT_ISSUE);
         self.set_report_comments(&[
-            "# Nightly report for `0000000`\n",
-            &format!("# Nightly report for `{commit}`\n\nspec 1 of 7\n"),
-            "A remark from the owner.",
+            ("o", "# Nightly report for `0000000`\n"),
+            (
+                "o",
+                &format!("# Nightly report for `{commit}`\n\nspec 1 of 7\n"),
+            ),
+            ("o", "A remark from the owner."),
         ]);
     }
 
@@ -835,4 +839,110 @@ fn a_report_that_cant_be_built_still_fails_the_commit() {
         repo.calls()
     );
     assert!(!repo.bin.join("comment").exists());
+}
+
+#[test]
+fn a_report_heading_from_someone_else_is_ignored() {
+    let repo = Repo::new("forged");
+    repo.merge(
+        "Reported (#2)",
+        30,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    let reported = repo.short("HEAD");
+    repo.merge("Landed since (#9)", 2, &CLEAN);
+    let head = repo.short("HEAD");
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[
+        ("o", &format!("# Nightly report for `{reported}`\n")),
+        ("someone", &format!("# Nightly report for `{head}`\n")),
+    ]);
+    let report = repo.report();
+    assert!(report.contains("Landed since (#9), issue #5"), "{report}");
+    assert!(!report.contains("Reported (#2)"), "{report}");
+}
+
+#[test]
+fn a_tighter_target_later_doesnt_blame_an_earlier_commit() {
+    let repo = Repo::new("tighter");
+    repo.merge(
+        "Before (#2)",
+        30,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    repo.merge(
+        "Slower, inside the target (#9)",
+        3,
+        &Recorded {
+            boot_ms: 140.0,
+            ..CLEAN
+        },
+    );
+    repo.write("harness/budgets.toml", &BUDGETS.replace("150.0", "125.0"));
+    repo.commit("Tighten the target", 1);
+    let report = repo.report();
+    assert!(report.contains("## Regressed\n\nNothing.\n"), "{report}");
+}
+
+#[test]
+fn a_commit_with_no_budget_file_compares_no_budgets() {
+    let repo = Repo::new("no-budget-file");
+    fs::remove_file(repo.root.join("harness/budgets.toml")).unwrap();
+    repo.merge(
+        "Before (#2)",
+        30,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    repo.merge(
+        "Without the file (#9)",
+        3,
+        &Recorded {
+            boot_ms: 200.0,
+            ..CLEAN
+        },
+    );
+    repo.write("harness/budgets.toml", BUDGETS);
+    repo.commit("Add the file", 1);
+    let report = repo.report();
+    assert!(
+        report.contains("Without the file (#9), issue #5"),
+        "{report}"
+    );
+    assert!(report.contains("## Regressed\n\nNothing.\n"), "{report}");
+}
+
+#[test]
+fn a_missing_tool_stops_nightly_before_any_check() {
+    let repo = Repo::new("no-clippy");
+    let shim = repo.bin.join("cargo");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = \"clippy --version\" ]; then echo \"no clippy here\" >&2; exit 1; fi\nexec \"{}\" \"$@\"\n",
+            env::var("CARGO").expect("cargo sets CARGO for tests")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("no clippy here"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(repo.calls(), Vec::<String>::new());
+    assert!(!repo.root.join("target/bench").exists());
 }

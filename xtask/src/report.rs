@@ -1,7 +1,7 @@
 //! `cargo xtask report`: the last day on `main`, from the ledger and the open
 //! issues.
 
-use crate::bench::{self, Budget};
+use crate::bench;
 use crate::forge::{Forge, Gh, OpenIssue};
 use crate::json::quoted;
 use crate::ledger::{self, Record};
@@ -110,7 +110,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
             report.unrecorded.push(Unrecorded { commit, subject });
             continue;
         };
-        for what in regressions(root, full, &record, &budgets)? {
+        for what in regressions(root, full, &record)? {
             report.regressed.push(Regression {
                 commit: commit.clone(),
                 issue: record.issue,
@@ -137,16 +137,18 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
 }
 
 /// The commit the newest posted report was for, so that a night that ran late
-/// or not at all loses nothing. A comment is only data, so anything but a
-/// commit in this history means there's no such report.
+/// or not at all loses nothing. A comment is only data, so only the owner's
+/// count, and anything but a commit in this history means there's no report.
 fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<String>, Problem> {
     let Some(issue) = issues.iter().find(|issue| issue.title == ISSUE_TITLE) else {
         return Ok(None);
     };
     let comments = gh.issue(issue.number)?.comments;
+    let owner = gh.owner()?;
     let newest = comments
         .iter()
         .rev()
+        .filter(|comment| comment.author == owner)
         .find_map(|comment| comment.body.strip_prefix(HEADING)?.split('`').next());
     let Some(commit) = newest else {
         return Ok(None);
@@ -161,18 +163,16 @@ fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<St
 }
 
 /// What this commit's record made worse, and any reason it gave.
-fn regressions(
-    root: &Path,
-    commit: &str,
-    record: &Record,
-    budgets: &[Budget],
-) -> Result<Vec<String>, Problem> {
+fn regressions(root: &Path, commit: &str, record: &Record) -> Result<Vec<String>, Problem> {
     let mut found = Vec::new();
     let parent = format!("{commit}~1");
     if base::commit_exists(root, &parent)?
         && let Some(previous) = ledger::newest(root, &parent)?
     {
-        let met = |record: &Record| bench::met(budgets, &record.budgets).0;
+        // Both sides use this commit's targets, so that a target changed later
+        // isn't blamed on this commit.
+        let budgets = bench::budgets_at(root, commit)?;
+        let met = |record: &Record| bench::met(&budgets, &record.budgets).0;
         for (name, was, now) in [
             ("spec", previous.proven, record.proven),
             ("journey", previous.passing, record.passing),

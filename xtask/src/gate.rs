@@ -169,7 +169,7 @@ pub fn record(name: &str, passed: bool, verdict: &mut Verdict) {
 
 /// Fails before any check runs when a tool is missing, because a missing tool
 /// says nothing about the change.
-fn require_tools(root: &Path) -> Result<(), Problem> {
+pub fn require_tools(root: &Path) -> Result<(), Problem> {
     for (tool, component) in [("fmt", "rustfmt"), ("clippy", "clippy")] {
         let output = Command::new("cargo")
             .args([tool, "--version"])

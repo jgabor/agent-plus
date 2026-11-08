@@ -1,0 +1,38 @@
+# Sentences in SPEC.md that claim no behavior of `ap`, so no check can prove them.
+# Format: <heading><TAB><sentence><TAB><reason>. The gate fails on a stale line.
+Agentfile reference	An Agentfile is a text file that declares which coding-agent harness to run, what the agent knows, what it can reach, and what it may keep.	Says what the term Agentfile means; each instruction is specified on its own.
+Agentfile reference	This page describes the instructions you can use in an Agentfile.	Introduces the page and claims no behavior.
+Format	By convention they are uppercase.	States a writing convention and claims no behavior.
+Format	Use a fenced block for long text, or repeat the instruction.	Sends the reader to fenced blocks and repetition, which are specified elsewhere.
+Text values	Here `/review` is a slash command, so it is quoted.	Comments on one sample value; the bare path rule is stated separately.
+Paths	That directory is the build context.	Names the term for that directory; its effects are stated where it is used.
+Paths	Symlinks found inside a directory that `ADD` copies are handled differently (see [ADD](#add)).	Only points to the ADD section, which states the symlink behavior.
+Paths	Use `PLUGIN`, `SKILL`, `MCP`, `AUTH`, and `PERSIST` instead.	Redirects the reader to other instructions and adds no behavior.
+Sources	A local path is useful when you develop a plugin or skill and want to try it in a sandbox.	Describes when local sources are handy and claims nothing about ap.
+Grants	Grants are what an Agentfile asks of your host.	Names the term grant; approval behavior is stated in later units.
+Grants	In CI, keep that file where the code under test can't change it.	Advises CI users where to keep the file, and claims nothing about ap.
+Run	Harnesses read project instructions and settings from their working directory, and Claude Code keys session history by its path.	Describes how harnesses find project files and key their history.
+Run	Sign-in pages often redirect to a local callback (`http://localhost:<port>` or `http://127.0.0.1:<port>`).	Describes how vendor sign-in pages usually behave.
+AGENT	**Redistribution.** Claude Code is proprietary.	States the license status of a vendor's product.
+OS	Demand decides which toolchains ship.	Describes how the project picks toolchains, not anything ap does.
+OS	X11-only tools, such as `xdotool`, can't see native Wayland windows, so agents use the tools below.	Describes a limit of X11 tools under Wayland.
+OS	Apps have to expose that data, and support varies.	Describes how far desktop apps support accessibility data.
+SYSTEM	See [Text values](#text-values) for the forms.	Only points to the section that defines the text forms.
+MODE	A project's Claude Code settings can still turn a mode off: `disableAutoMode` makes `auto` start in manual mode, and `permissions.disableBypassPermissionsMode` makes Claude Code reject `full`.	Describes Claude Code settings that ap neither sets nor controls.
+MODE	Codex's `workspace-write` sandbox keeps network access off by default.	Describes a default of Codex's own sandbox.
+MODE	`auto` depends on the harness.	Introduces the harness-specific caveats that follow.
+MODE	With Claude Code, it needs a recent model, an administrator can turn it off, and its classifier calls count toward token use on the API and Enterprise plans.	Describes Claude Code's own requirements and billing.
+MODE	When `auto` isn't available, Claude Code starts in its manual mode instead, so the run behaves like `ask`.	Describes Claude Code's own fallback when its mode is unavailable.
+SECRET	Use [`AUTH`](#auth) for those.	Redirects the reader to the AUTH section and adds no behavior.
+SECRET	Use it for credentials a proxy cannot inject, such as AWS request-signing keys and SSH keys.	Advises when to choose this option; its behavior is stated in the prior unit.
+AUTH	Whether `AUTH login` and `AUTH token` fit Anthropic's terms is an open question.	Notes an unresolved question about a vendor's terms of service.
+WORKDIR	Harnesses read project instructions, settings, and MCP servers from their working directory, so where they start decides which project they see.	Describes how harnesses load project settings.
+PERSIST	Those locks protect the file, not the token exchange, so two runs can still race a refresh.	Describes a race in the harness's token refresh, outside ap.
+PERSIST	OpenAI says not to share one `auth.json` across concurrent jobs, and a lost race can sign Codex out until you sign in again.	Reports a vendor's guidance and a failure inside Codex.
+NETWORK	**Rules.**	Bold label for the table of network rule forms that follows.
+NETWORK	**Enforcement.**	Bold label for the list of enforcement mechanisms that follows.
+NETWORK	**Limits.**	Bold label for the network limits, each of which is its own unit.
+Host requirements	Debian builds the same packages for both.	States a fact about Debian's package builds.
+Host requirements	In practice, Intel Broadwell or AMD Zen and newer.	Translates the x86_64 feature floor into CPU families as an illustration.
+Host requirements	Apple M1 and newer qualify.	Names CPUs that meet the arm64 feature floor as an illustration.
+Host requirements	A Raspberry Pi 4 does not.	Names one board that misses the arm64 feature floor as an illustration.

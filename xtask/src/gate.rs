@@ -1,7 +1,7 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, base, floors, score, testrun};
+use crate::{Problem, Verdict, base, floors, lock, score, testrun};
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -32,6 +32,7 @@ const CHECKS: &[Check] = &[
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
+    let _hold = lock::shared(&root)?;
     require_tools(&root)?;
     let mut verdict = Verdict::Pass;
     let findings = floors::check(&root)?;

@@ -4,6 +4,7 @@ mod base;
 mod floors;
 mod gate;
 mod json;
+mod lock;
 mod score;
 mod spec;
 mod testrun;
@@ -17,6 +18,7 @@ usage: cargo xtask <command>
 commands:
   gate             run the checks a change must pass
   score [--json]   print the scores
+  run <command>    run a command under a shared hold of the activity lock
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -37,6 +39,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["gate"] => gate::run(),
         ["score"] => score::run(false),
         ["score", "--json"] => score::run(true),
+        ["run", command @ ..] => lock::run(command),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

@@ -19,6 +19,9 @@ const REPORT_ISSUE: &str =
 
 const GH: &str = r#"d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/calls"
+if ! flock -n "$d/../repo/.git/xtask/nightly.lock" true 2>/dev/null; then
+  echo "$1 $2" >> "$d/held"
+fi
 case "$1 $2" in
   "issue list") cat "$d/issues.json" ;;
   "issue view") cat "$d/issue.json" ;;
@@ -29,6 +32,7 @@ case "$1 $2" in
     echo "https://github.com/o/r/issues/$n" ;;
   "issue pin") ;;
   "issue comment")
+    if [ -e "$d/no-comments-on-$3" ]; then echo "comments are off" >&2; exit 1; fi
     cat > "$d/comment-$3"
     echo "https://github.com/o/r/issues/$3#issuecomment-5" ;;
   "pr create") echo "https://github.com/o/r/pull/90" ;;
@@ -537,4 +541,34 @@ fn a_response_from_someone_else_doesnt_count() {
         "{}",
         repo.comment(50)
     );
+}
+
+#[test]
+fn a_report_that_cant_be_posted_still_gets_a_response() {
+    let repo = Repo::new("no-report", FAST);
+    let bad = repo.plant(1, 0);
+    fs::write(repo.bin.join("no-comments-on-77"), "").unwrap();
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("comments are off"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(repo.calls().contains("pr create"), "{}", repo.calls());
+    assert!(
+        repo.comment(78).contains(&format!("`{bad}`")),
+        "{}",
+        repo.comment(78)
+    );
+}
+
+#[test]
+fn a_response_holds_its_slot_from_the_lookup_to_the_outcome() {
+    let repo = Repo::new("slot", FAST);
+    repo.plant(1, 0);
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let held = fs::read_to_string(repo.bin.join("held")).unwrap();
+    assert_eq!(held, "issue list\nissue create\napi repos/{owner}/{repo}/commits/START/status\npr create\nissue comment\n".replace("START", &repo.git(&["rev-parse", "HEAD~1"])));
 }

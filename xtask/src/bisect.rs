@@ -21,6 +21,7 @@ const TREE: u64 = 0;
 /// earlier night ended stops this, until the owner closes it. One with no such
 /// comment is from a run that died, so this picks it up.
 pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
+    let _slot = lock::response_slot(root)?;
     let gh = Gh::new(root);
     let open = gh
         .open_issues()?

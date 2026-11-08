@@ -72,6 +72,12 @@ pub fn merge_slot(root: &Path) -> Result<Hold, Problem> {
     slot(root, "merge.lock")
 }
 
+/// Held for a whole response to a failing gate, so that two can't share the
+/// tree its bisect checks commits out in, or file the same issue.
+pub fn response_slot(root: &Path) -> Result<Hold, Problem> {
+    slot(root, "nightly.lock")
+}
+
 fn slot(root: &Path, name: &str) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     let file = open(&directory, name)?;

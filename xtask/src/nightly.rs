@@ -44,10 +44,13 @@ pub fn run() -> Result<Verdict, Problem> {
         (Verdict::Pass, "success", PASS)
     };
     Gh::new(&root).post_status(&commit, STATUS, status)?;
+    let responded = if gated == FAIL {
+        bisect::respond(&root, &commit, STATUS)
+    } else {
+        Ok(())
+    };
     posted?;
-    if gated == FAIL {
-        bisect::respond(&root, &commit, STATUS)?;
-    }
+    responded?;
     for (name, state) in &checks {
         println!("{state} {name}");
     }

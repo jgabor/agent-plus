@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const FIELDS: &str = "number,state,body,labels,comments";
+const ISSUE_LIMIT: usize = 2000;
+/// `gh issue list` gives at most this many comments per issue.
+pub const LISTED_COMMENTS: usize = 100;
 
 #[derive(Clone, Debug)]
 pub struct Comment {
@@ -100,12 +103,17 @@ impl Forge for Gh {
     }
 
     fn issues(&self) -> Result<Vec<Issue>, Problem> {
+        let limit = ISSUE_LIMIT.to_string();
         let value = self.json(&[
-            "issue", "list", "--state", "all", "--limit", "2000", "--json", FIELDS,
+            "issue", "list", "--state", "all", "--limit", &limit, "--json", FIELDS,
         ])?;
-        value
-            .as_arr()
-            .ok_or_else(|| unexpected("gh issue list"))?
+        let items = value.as_arr().ok_or_else(|| unexpected("gh issue list"))?;
+        if items.len() >= ISSUE_LIMIT {
+            return Err(Problem(format!(
+                "this repository has {ISSUE_LIMIT} issues or more, so an open blocker could be missing. Raise `ISSUE_LIMIT`"
+            )));
+        }
+        items
             .iter()
             .map(|item| read_issue(item).ok_or_else(|| unexpected("gh issue list")))
             .collect()

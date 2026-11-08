@@ -638,3 +638,39 @@ fn a_claim_waits_for_another_claim_on_this_machine() {
     assert_eq!(child.wait().unwrap().code(), Some(1));
     assert!(repo.calls().contains("issue list"), "{}", repo.calls());
 }
+
+fn filler(count: u64) -> Vec<String> {
+    (1..=count)
+        .map(|id| {
+            format!(
+                "{{\"id\":\"IC_x\",\"author\":{{\"login\":\"someone\"}},\"body\":\"hello\",\"url\":\"https://github.com/o/r/issues/1#issuecomment-{id}\"}}"
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_issue_at_the_comment_limit_is_read_in_full() {
+    let labels = &["auto:merge", "in-progress"][..];
+    let listed = issue(7, "OPEN", labels, &body(T, ""), &filler(100));
+    let mut all = filler(100);
+    all.push(status(900, OWNER, "working", "7-x", EXPIRED));
+    let repo = Repo::new("comment-limit", &[listed]);
+    fs::write(
+        repo.bin.join("view.json"),
+        issue(7, "OPEN", labels, &body(T, ""), &all),
+    )
+    .unwrap();
+    repo.set_branch("7-x", BEFORE_EXPIRY);
+    assert_eq!(repo.numbers(), vec![7]);
+}
+
+#[test]
+fn a_listing_at_the_issue_limit_is_a_problem() {
+    let issues: Vec<String> = (1..=2000)
+        .map(|number| issue(number, "CLOSED", &[], "", &[]))
+        .collect();
+    let output = Repo::new("issue-limit", &issues).xtask(&["next"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("2000"), "{}", stderr(&output));
+}

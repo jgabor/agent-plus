@@ -1,6 +1,6 @@
 //! Which issues can be taken, and taking one. HARNESS.md defines the states.
 
-use crate::forge::{Comment, Forge, Gh, Issue};
+use crate::forge::{Comment, Forge, Gh, Issue, LISTED_COMMENTS};
 use crate::json::quoted;
 use crate::{Problem, Verdict, base, lock, workspace};
 use std::collections::{HashMap, HashSet};
@@ -238,7 +238,12 @@ fn autonomy(issue: &Issue) -> Option<&'static str> {
 impl<'a> View<'a> {
     fn read(forge: &'a dyn Forge, now: i64) -> Result<View<'a>, Problem> {
         let owner = forge.owner()?;
-        let issues = forge.issues()?;
+        let mut issues = forge.issues()?;
+        for issue in &mut issues {
+            if issue.open && has(issue, IN_PROGRESS) && issue.comments.len() >= LISTED_COMMENTS {
+                *issue = forge.issue(issue.number)?;
+            }
+        }
         let open = issues
             .iter()
             .filter(|issue| issue.open)
@@ -539,7 +544,8 @@ fn claim(
     let winner = statuses_by(&after, &view.owner)
         .into_iter()
         .find(|status| status.is_live(now));
-    if intact && winner.is_some_and(|status| status.id == mine) {
+    let eligible = after.open && !has(&after, NEEDS_OWNER);
+    if intact && eligible && winner.is_some_and(|status| status.id == mine) {
         return Ok(Claim::Won { comment: mine });
     }
     if intact {
@@ -840,6 +846,20 @@ mod tests {
                 })),
                 won: false,
                 retired: false,
+            },
+            Case {
+                name: "parked while claiming",
+                interfere: Some(Box::new(|issues| {
+                    issues[0].labels.push("needs-owner".to_string());
+                })),
+                won: false,
+                retired: true,
+            },
+            Case {
+                name: "closed while claiming",
+                interfere: Some(Box::new(|issues| issues[0].open = false)),
+                won: false,
+                retired: true,
             },
             Case {
                 name: "deleted by someone",

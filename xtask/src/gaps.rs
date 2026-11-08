@@ -5,14 +5,19 @@ use crate::json::quoted;
 use crate::{Problem, Verdict, bench, journey, ledger, lock, score, testrun, workspace};
 use std::collections::BTreeMap;
 
-/// Exits 0 whenever it could run, because a gap isn't a failure of this
-/// command. A problem in the spec's quotes goes to stderr, as `score` puts it.
+/// A gap isn't a failure of this command. A broken spec quote is, as in
+/// `score`, because the list can't be trusted while one exists.
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::shared(&root)?;
     let results = testrun::run(&root, &hold)?;
     let score = score::compute(&root, &results)?;
     score::report_findings(&score);
+    let verdict = if score.findings.is_empty() {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    };
     let outcomes = journey::outcomes(&root)?;
     drop(hold);
     let values = ledger::at_head(&root)?.map_or_else(BTreeMap::new, |record| record.budgets);
@@ -63,7 +68,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
             missed.join(","),
             promises.join(",")
         );
-        return Ok(Verdict::Pass);
+        return Ok(verdict);
     }
     for step in steps {
         println!("step {} {} {}", step.id, step.state, step.name);
@@ -80,5 +85,5 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     for (heading, sentence) in &score.unproven {
         println!("promise {heading}: {sentence}");
     }
-    Ok(Verdict::Pass)
+    Ok(verdict)
 }

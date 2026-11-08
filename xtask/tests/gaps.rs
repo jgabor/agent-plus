@@ -149,6 +149,23 @@ fn without_a_record_every_budget_with_a_target_is_missed() {
 }
 
 #[test]
+fn a_broken_quote_fails_as_it_does_in_score() {
+    let root = repository(
+        "broken-quote",
+        &[(
+            "crates/demo/src/lib.rs",
+            "// spec(A): Nope.\n#[test]\nfn nope() {}\n",
+        )],
+    );
+    for args in [&[][..], &["--json"][..]] {
+        let output = gaps(&root, args);
+        assert_eq!(output.status.code(), Some(1), "{args:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("spec: "));
+        assert!(stdout(&output).contains("Zulu."), "{args:?}");
+    }
+}
+
+#[test]
 fn a_stray_argument_exits_2() {
     let root = repository("stray", &[]);
     let output = gaps(&root, &["--wat"]);

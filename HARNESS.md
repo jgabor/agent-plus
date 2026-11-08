@@ -451,8 +451,11 @@ diagnostics go to stderr.
 
 ### Scheduling
 
-The dispatcher, planner, and nightly job are T3 Code scheduled tasks. Each run
-starts a fresh session, so no run depends on the context of an earlier one.
+The dispatcher, planner, and nightly job are T3 Code scheduled tasks. Each is
+bound to its own thread, whose settings give it its model and full access,
+because no one is there to answer a prompt. Each run starts a fresh session, so
+no run depends on the context of an earlier one. A run moves its checkout to
+`origin/main`, then follows its brief in `harness/tasks/`.
 
 ### Dispatch
 
@@ -469,10 +472,10 @@ claim race exits.
 
 ### Planning
 
-Runs every planning period, and stops at once unless fewer available issues
-exist than worker slots. The planner reads `cargo xtask gaps`, and files child
-issues under a parent the owner has labeled. Each child inherits its parent's
-`auto:*` label.
+Runs every planning period, and stops at once if the issues in progress and
+the issues `cargo xtask next` lists already fill the worker slots. The planner
+reads `cargo xtask gaps`, and files child issues under a parent the owner has
+labeled. Each child inherits its parent's `auto:*` label.
 
 Initial order, by risk:
 
@@ -638,7 +641,6 @@ The harness is built before product features.
 | Limit on model spend for workers and T3 | No unattended T3 runs |
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
-| How a T3 Code scheduled task selects its model. `schedule_task` has no model setting | Each task is bound to a thread set to its model |
 | Bands for every budget except `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

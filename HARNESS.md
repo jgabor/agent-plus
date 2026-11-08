@@ -269,10 +269,10 @@ It interleaves runs of the two builds, and compares them.
 **Activity lock.** Every build, test, and VM run started through `xtask` takes
 the lock shared. A bench takes it exclusively: it waits for current holders to
 finish, and new holders wait while a bench is pending. Every holder passes
-through a turnstile file, which a pending bench holds. A nested `xtask` inherits
-its parent's hold. The kernel releases a hold when its process exits. `cargo`
-builds `xtask` itself before it can take the lock, which is one reason `xtask`
-has no dependencies.
+through a turnstile file, which a pending bench holds. Both files live in the
+shared git directory. A nested `xtask` inherits its parent's hold. The kernel
+releases a hold when its process exits. `cargo` builds `xtask` itself before
+it can take the lock, which is one reason `xtask` has no dependencies.
 
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
 matching, and device input from the guest.

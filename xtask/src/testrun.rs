@@ -1,6 +1,7 @@
 //! Runs each package's tests, and keeps the result of every test by name.
 
 use crate::Problem;
+use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
@@ -24,28 +25,34 @@ impl Results {
     }
 }
 
-pub fn run(root: &Path) -> Result<Results, Problem> {
+pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
     let mut results = Results {
         by_test: HashMap::new(),
         all_passed: true,
     };
     for package in workspace::packages(root)? {
-        run_package(root, &package.name, &mut results)?;
+        run_package(root, &package.name, hold, &mut results)?;
     }
     Ok(results)
 }
 
 /// Test output goes to our stderr as it arrives, so that stdout carries only
 /// the result. `CC` and `CXX` point at a program that fails, as in the gate.
-fn run_package(root: &Path, package: &str, results: &mut Results) -> Result<(), Problem> {
-    let mut child = Command::new("cargo")
+fn run_package(
+    root: &Path,
+    package: &str,
+    hold: &Hold,
+    results: &mut Results,
+) -> Result<(), Problem> {
+    let mut command = Command::new("cargo");
+    command
         .args(["test", "--package", package, "--locked", "--no-fail-fast"])
         .current_dir(root)
         .env("CC", "false")
         .env("CXX", "false")
-        .stdout(Stdio::piped())
-        .spawn()
-        .map_err(no_cargo)?;
+        .stdout(Stdio::piped());
+    hold.pass_to(&mut command);
+    let mut child = command.spawn().map_err(no_cargo)?;
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::new();

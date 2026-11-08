@@ -1,7 +1,7 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
 use crate::testrun::{self, Results};
-use crate::{Problem, Verdict, spec, workspace};
+use crate::{Problem, Verdict, lock, spec, workspace};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -22,7 +22,8 @@ pub struct Score {
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let results = testrun::run(&root)?;
+    let hold = lock::shared(&root)?;
+    let results = testrun::run(&root, &hold)?;
     let score = compute(&root, &results)?;
     report_findings(&score);
     if json {

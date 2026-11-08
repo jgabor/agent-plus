@@ -61,6 +61,9 @@ const CLEAN: Recorded = Recorded {
     reason: "",
 };
 
+/// Logs its arguments, and enforces the time limit as a real scope would.
+const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"$limit\" \"$@\"\n";
+
 struct Repo {
     root: PathBuf,
     bin: PathBuf,
@@ -87,6 +90,9 @@ impl Repo {
         let gh = repo.bin.join("gh");
         fs::write(&gh, format!("#!/bin/sh\n{GH}")).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let systemd = repo.bin.join("systemd-run");
+        fs::write(&systemd, SYSTEMD_RUN).unwrap();
+        fs::set_permissions(&systemd, fs::Permissions::from_mode(0o755)).unwrap();
         repo.set_issues(NO_ISSUES);
         repo.set_report_comments(&[]);
         let files = [
@@ -251,7 +257,7 @@ impl Repo {
     fn set_mutants(&self, body: &str) {
         let path = self.bin.join("cargo-mutants");
         let script = format!(
-            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\nulimit -v > \"$d/mutants-limit\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
+            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
         );
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1025,16 +1031,23 @@ fn a_surviving_mutant_opens_an_issue() {
 }
 
 #[test]
-fn a_mutant_can_use_only_so_much_memory() {
+fn mutants_run_as_one_contained_job() {
     let repo = Repo::new("memory");
     repo.set_mutants("exit 0\n");
     repo.touch(&["ap"]);
     let output = repo.xtask(&["nightly"]);
     assert_mutation_ran(&repo, &output, 0, "pass");
-    assert_eq!(
-        repo.read_bin("mutants-limit"),
-        (8 * 1024 * 1024).to_string()
-    );
+    let calls = repo.read_bin("systemd-calls");
+    for part in [
+        "--user --scope",
+        "MemoryMax=8G",
+        "MemorySwapMax=0",
+        "OOMPolicy=continue",
+        "RuntimeMaxSec=3600",
+        "-- cargo mutants ",
+    ] {
+        assert!(calls.contains(part), "{part} in {calls}");
+    }
 }
 
 #[test]
@@ -1230,7 +1243,7 @@ fn with_fuzz(name: &str, main: &str) -> Repo {
 fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
     let repo = with_fuzz(
         "fuzz-runs",
-        "fn main() {\n    let seconds = std::env::args().nth(1).unwrap();\n    assert_eq!(seconds, \"3600\");\n    let limits = std::fs::read_to_string(\"/proc/self/limits\").unwrap();\n    assert!(limits.contains(\"8589934592\"), \"{limits}\");\n}\n",
+        "fn main() {\n    let seconds = std::env::args().nth(1).unwrap();\n    assert_eq!(seconds, \"3600\");\n}\n",
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -1238,6 +1251,17 @@ fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
         repo.comment().contains("- pass fuzz\n"),
         "{}",
         repo.comment()
+    );
+    let calls = repo.read_bin("systemd-calls");
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 2, "{calls}");
+    assert!(lines[0].contains("RuntimeMaxSec=300 "), "{calls}");
+    assert!(lines[0].contains("-- cargo build --release"), "{calls}");
+    assert!(lines[1].contains("RuntimeMaxSec=3900 "), "{calls}");
+    assert!(lines[1].ends_with("/release/fuzz 3600"), "{calls}");
+    assert!(
+        lines.iter().all(|line| line.contains("MemoryMax=8G")),
+        "{calls}"
     );
 }
 
@@ -1329,4 +1353,38 @@ fn the_fuzzer_is_built_to_panic_on_overflow() {
         "{}",
         repo.comment()
     );
+}
+
+#[test]
+fn a_mutation_run_killed_before_its_limit_fails() {
+    let repo = Repo::new("mutation-killed");
+    repo.set_mutants("kill -KILL $$\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 1, "fail");
+}
+
+#[test]
+fn a_night_mutation_failed_is_tried_again() {
+    let repo = Repo::new("mutation-retried");
+    repo.set_mutants("exit 0\n");
+    let start = repo.short("HEAD");
+    repo.write("crates/ap/note.txt", "changed\n");
+    repo.commit("Touch ap", 48);
+    repo.sync();
+    let failed = repo.short("HEAD");
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[
+        (
+            "o",
+            &format!("# Nightly report for `{start}`\n\n- pass mutation\n"),
+        ),
+        (
+            "o",
+            &format!("# Nightly report for `{failed}`\n\n- fail mutation\n"),
+        ),
+    ]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(repo.bin.join("mutants-calls").exists());
 }

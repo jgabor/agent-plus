@@ -14,6 +14,7 @@ const HEADING: &str = "# Nightly report for `";
 /// How far back to look when no earlier report can say where to start.
 const WINDOW: &str = "--since=24.hours";
 const WAITING_LABEL: &str = "needs-owner";
+const MUTATION_FAILED: &str = "- fail mutation\n";
 
 struct Scores {
     proven: usize,
@@ -70,7 +71,21 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
 
 /// The `git log` argument that limits it to what no report has covered yet.
 pub fn start(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<String, Problem> {
-    Ok(match last_reported(root, gh, issues)? {
+    start_after(root, gh, issues, |_| true)
+}
+
+/// Like `start`, but a night when the mutation step failed covered nothing.
+pub fn mutation_start(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<String, Problem> {
+    start_after(root, gh, issues, |report| !report.contains(MUTATION_FAILED))
+}
+
+fn start_after(
+    root: &Path,
+    gh: &Gh,
+    issues: &[OpenIssue],
+    counts: fn(&str) -> bool,
+) -> Result<String, Problem> {
+    Ok(match last_reported(root, gh, issues, counts)? {
         Some(commit) => format!("^{commit}"),
         None => WINDOW.to_string(),
     })
@@ -144,7 +159,12 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
 /// The commit the newest posted report was for, so that a night that ran late
 /// or not at all loses nothing. A comment is only data, so only the owner's
 /// count, and anything but a commit in this history means there's no report.
-fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<String>, Problem> {
+fn last_reported(
+    root: &Path,
+    gh: &Gh,
+    issues: &[OpenIssue],
+    counts: fn(&str) -> bool,
+) -> Result<Option<String>, Problem> {
     let Some(issue) = issues.iter().find(|issue| issue.title == ISSUE_TITLE) else {
         return Ok(None);
     };
@@ -153,7 +173,7 @@ fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<St
     let newest = comments
         .iter()
         .rev()
-        .filter(|comment| comment.author == owner)
+        .filter(|comment| comment.author == owner && counts(&comment.body))
         .find_map(|comment| comment.body.strip_prefix(HEADING)?.split('`').next());
     let Some(commit) = newest else {
         return Ok(None);

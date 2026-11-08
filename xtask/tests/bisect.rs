@@ -87,6 +87,13 @@ impl Repo {
         let mutants = repo.bin.join("cargo-mutants");
         fs::write(&mutants, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&mutants, fs::Permissions::from_mode(0o755)).unwrap();
+        let systemd = repo.bin.join("systemd-run");
+        fs::write(
+            &systemd,
+            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&systemd, fs::Permissions::from_mode(0o755)).unwrap();
         fs::write(repo.bin.join("next"), "77\n").unwrap();
         fs::write(repo.bin.join("passing"), "").unwrap();
         repo.set_issues(NO_ISSUES);

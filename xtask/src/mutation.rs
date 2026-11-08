@@ -73,7 +73,7 @@ fn changed_packages(
     gh: &Gh,
     issues: &[OpenIssue],
 ) -> Result<Vec<(Package, String)>, Problem> {
-    let start = report::start(root, gh, issues)?;
+    let start = report::mutation_start(root, gh, issues)?;
     let files = base::git_text(root, &["log", &start, "--name-only", "--format=", "HEAD"])?;
     let mut changed = Vec::new();
     for package in workspace::packages(root)? {

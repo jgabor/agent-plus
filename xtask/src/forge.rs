@@ -27,6 +27,17 @@ pub struct Issue {
     pub comments: Vec<Comment>,
 }
 
+/// A PR, as far as the merge sequence needs one.
+pub struct PullRequest {
+    pub state: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    /// Empty when no review has decided anything.
+    pub review_decision: String,
+}
+
 pub trait Forge {
     /// The login of the repository's owner.
     fn owner(&self) -> Result<String, Problem>;
@@ -88,6 +99,62 @@ impl Gh {
     fn json(&self, args: &[&str]) -> Result<Json, Problem> {
         json::parse(&self.text(args, None)?)
             .map_err(|e| Problem(format!("couldn't read `gh {}` output: {e}", args.join(" "))))
+    }
+
+    pub fn pull_request(&self, number: u64) -> Result<PullRequest, Problem> {
+        let value = self.json(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "state,headRefName,baseRefName,body,labels,reviewDecision",
+        ])?;
+        read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
+    }
+
+    /// Sets the one check this repository has on a commit.
+    pub fn post_status(&self, commit: &str, state: &str) -> Result<(), Problem> {
+        let path = format!("repos/{{owner}}/{{repo}}/statuses/{commit}");
+        let state = format!("state={state}");
+        self.text(
+            &[
+                "api",
+                "-X",
+                "POST",
+                &path,
+                "-f",
+                &state,
+                "-f",
+                "context=xtask/gate",
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Squash-merges only if the branch is still at `head`. Naming the
+    /// repository keeps `gh` away from the local branches.
+    pub fn merge_pr(&self, number: u64, head: &str) -> Result<(), Problem> {
+        let value = self.json(&["repo", "view", "--json", "nameWithOwner"])?;
+        let name = value
+            .get("nameWithOwner")
+            .and_then(Json::as_str)
+            .ok_or_else(|| unexpected("gh repo view"))?;
+        self.text(
+            &[
+                "pr",
+                "merge",
+                &number.to_string(),
+                "-R",
+                name,
+                "--squash",
+                "--delete-branch",
+                "--match-head-commit",
+                head,
+            ],
+            None,
+        )?;
+        Ok(())
     }
 }
 
@@ -190,6 +257,23 @@ fn read_issue(value: &Json) -> Option<Issue> {
             .map(|label| Some(label.get("name")?.as_str()?.to_string()))
             .collect::<Option<_>>()?,
         comments: comments.iter().map(read_comment).collect::<Option<_>>()?,
+    })
+}
+
+fn read_pull_request(value: &Json) -> Option<PullRequest> {
+    let text = |key: &str| Some(value.get(key)?.as_str()?.to_string());
+    Some(PullRequest {
+        state: text("state")?,
+        head_ref: text("headRefName")?,
+        base_ref: text("baseRefName")?,
+        body: text("body")?,
+        labels: value
+            .get("labels")?
+            .as_arr()?
+            .iter()
+            .map(|label| Some(label.get("name")?.as_str()?.to_string()))
+            .collect::<Option<_>>()?,
+        review_decision: text("reviewDecision")?,
     })
 }
 

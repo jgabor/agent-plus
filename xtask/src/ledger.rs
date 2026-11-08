@@ -179,37 +179,71 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
         )));
     }
     let commit = base::git_text(&root, &["rev-parse", "HEAD"])?;
-    let date = base::git_text(&root, &["show", "-s", "--format=%cs", "HEAD"])?;
 
     let results = testrun::run(&root, &hold)?;
     let score = score::compute(&root, &results)?;
     let (passing, steps) = journey::count(&root)?;
-    let mut budgets = at_head(&root)?.map_or_else(BTreeMap::new, |previous| previous.budgets);
-    let mut reason = String::new();
-    if let Some(measured) = read_measured(&root, commit.trim())? {
-        budgets.extend(measured.budgets);
-        reason = measured.reason;
-    }
-    let record = Record {
-        issue,
-        pr,
-        commit: commit.trim().to_string(),
-        date: date.trim().to_string(),
-        host: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    let scores = Scores {
         proven: score.proven,
         promises: score.promises.len(),
         passing,
         steps,
+    };
+    let record = compose(&root, issue, pr, commit.trim(), scores)?;
+    println!("{}", store(&root, &record)?);
+    Ok(Verdict::Pass)
+}
+
+/// What a commit earned, from runs that have already happened.
+pub struct Scores {
+    pub proven: usize,
+    pub promises: usize,
+    pub passing: usize,
+    pub steps: usize,
+}
+
+/// The record for `commit`. Budgets that weren't measured keep their last
+/// values, and the bench's result is used only if it was for this commit.
+pub fn compose(
+    root: &Path,
+    issue: usize,
+    pr: usize,
+    commit: &str,
+    scores: Scores,
+) -> Result<Record, Problem> {
+    let date = base::git_text(root, &["show", "-s", "--format=%cs", commit])?;
+    let mut budgets = at_head(root)?.map_or_else(BTreeMap::new, |previous| previous.budgets);
+    let mut reason = String::new();
+    if let Some(measured) = read_measured(root, commit)? {
+        budgets.extend(measured.budgets);
+        reason = measured.reason;
+    }
+    Ok(Record {
+        issue,
+        pr,
+        commit: commit.to_string(),
+        date: date.trim().to_string(),
+        host: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        proven: scores.proven,
+        promises: scores.promises,
+        passing: scores.passing,
+        steps: scores.steps,
         reason,
         budgets,
-    };
+    })
+}
 
-    let path = format!("{DIRECTORY}/{issue}.toml");
+pub fn path(issue: usize) -> String {
+    format!("{DIRECTORY}/{issue}.toml")
+}
+
+/// Writes the record, and returns its path from the root.
+pub fn store(root: &Path, record: &Record) -> Result<String, Problem> {
+    let path = path(record.issue);
     let problem = |e: std::io::Error| Problem(format!("couldn't write {path}: {e}"));
     fs::create_dir_all(root.join(DIRECTORY)).map_err(problem)?;
     fs::write(root.join(&path), record.render()).map_err(problem)?;
-    println!("{path}");
-    Ok(Verdict::Pass)
+    Ok(path)
 }
 
 /// How the tree differs from HEAD, leaving out the ledger, where an earlier

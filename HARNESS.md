@@ -508,8 +508,10 @@ git directory. The kernel releases the lock when the process exits, so a killed
 merge can't keep the slot.
 
 1. Refuse the PR unless its issue has `auto:merge` or `--owner` is given.
-   Refuse a `spec-change` PR without `--owner`.
-2. Take the merge slot.
+   Refuse a `spec-change` PR without `--owner`. With or without it, refuse a
+   PR that doesn't close exactly one issue, doesn't target `main`, or has
+   changes requested.
+2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Run the gate on the rebased head, the journey without `spend` steps, and the
@@ -521,7 +523,8 @@ merge can't keep the slot.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
-A merge past the merge timeout stops, releases the slot, and restarts.
+A merge past the merge timeout stops and releases the slot. Running it again
+starts over from the fetch, and so does running it after a kill at any step.
 
 `xtask/gate` is the only check. Branch protection isn't available on this
 repository's plan, so `xtask merge` enforces the sequence, not GitHub. The

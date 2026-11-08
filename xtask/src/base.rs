@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 const MAIN: &str = "refs/remotes/origin/main";
-const SPEC_CHANGE: &str = "spec-change";
+pub const SPEC_CHANGE: &str = "spec-change";
 const PROTECTED: &[&str] = &[
     "SPEC.md",
     "harness/waived.txt",
@@ -82,11 +82,7 @@ pub fn removed_checks(root: &Path, base: &str, score: &Score) -> Result<Vec<Stri
 /// Names each protected path changed without the label. `None` means a
 /// protected path changed, but the branch has no open PR to read a label from.
 pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Problem> {
-    let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
-    let touched: Vec<&str> = changed
-        .split('\0')
-        .filter(|path| PROTECTED.contains(path))
-        .collect();
+    let touched = protected_changes(root, base)?;
     if touched.is_empty() {
         return Ok(Some(Vec::new()));
     }
@@ -108,16 +104,39 @@ pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Pro
     {
         return Ok(Some(Vec::new()));
     }
-    Ok(Some(
-        touched
-            .iter()
-            .map(|path| {
-                format!(
-                    "{path} changed, but this branch's PR doesn't have the `{SPEC_CHANGE}` label. Add the label, or undo the change"
-                )
-            })
-            .collect(),
-    ))
+    Ok(Some(label_findings(&touched)))
+}
+
+/// The same check for a PR whose labels the caller has already read.
+pub fn missing_label_on(
+    root: &Path,
+    base: &str,
+    labels: &[String],
+) -> Result<Vec<String>, Problem> {
+    if labels.iter().any(|label| label == SPEC_CHANGE) {
+        return Ok(Vec::new());
+    }
+    Ok(label_findings(&protected_changes(root, base)?))
+}
+
+fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
+    let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
+    Ok(changed
+        .split('\0')
+        .filter(|path| PROTECTED.contains(path))
+        .map(str::to_string)
+        .collect())
+}
+
+fn label_findings(touched: &[String]) -> Vec<String> {
+    touched
+        .iter()
+        .map(|path| {
+            format!(
+                "{path} changed, but this branch's PR doesn't have the `{SPEC_CHANGE}` label. Add the label, or undo the change"
+            )
+        })
+        .collect()
 }
 
 /// The text of a `Budget reason: <text>` line in the body of this branch's
@@ -133,16 +152,19 @@ pub fn budget_reason(root: &Path) -> Result<Option<String>, Problem> {
             .get("body")
             .and_then(Json::as_str)
             .ok_or_else(unexpected)?;
-        let reason = body
-            .lines()
-            .filter_map(|line| line.strip_prefix("Budget reason:"))
-            .map(str::trim)
-            .find(|text| !text.is_empty());
-        if let Some(reason) = reason {
-            return Ok(Some(reason.to_string()));
+        if let Some(reason) = reason_in(body) {
+            return Ok(Some(reason));
         }
     }
     Ok(None)
+}
+
+pub fn reason_in(body: &str) -> Option<String> {
+    body.lines()
+        .filter_map(|line| line.strip_prefix("Budget reason:"))
+        .map(str::trim)
+        .find(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 fn unexpected() -> Problem {

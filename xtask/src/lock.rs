@@ -53,10 +53,20 @@ pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
 /// Held while a claim reads and writes GitHub, so that two claims on this
 /// machine can't interleave. Rules on the comments cover anything else.
 pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {
+    slot(root, "claim.lock")
+}
+
+/// Held for a whole merge, so that only one runs at a time and each is tested
+/// on top of the last.
+pub fn merge_slot(root: &Path) -> Result<Hold, Problem> {
+    slot(root, "merge.lock")
+}
+
+fn slot(root: &Path, name: &str) -> Result<Hold, Problem> {
     let directory = directory(root)?;
-    let file = open(&directory, "claim.lock")?;
+    let file = open(&directory, name)?;
     file.lock()
-        .map_err(|e| Problem(format!("couldn't take the claim lock: {e}")))?;
+        .map_err(|e| Problem(format!("couldn't take {name}: {e}")))?;
     Ok(Hold {
         _files: vec![file],
         directory,

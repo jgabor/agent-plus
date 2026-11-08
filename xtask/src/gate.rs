@@ -1,5 +1,7 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
+use crate::forge::Gh;
+use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
 use crate::{Problem, Verdict, base, floors, ledger, lock, score, testrun};
 use std::io;
@@ -30,37 +32,77 @@ const CHECKS: &[Check] = &[
     },
 ];
 
+/// What a merge already knows, which changes two of the checks.
+pub struct Merging<'a> {
+    pub labels: &'a [String],
+    pub owner: bool,
+}
+
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::shared(&root)?;
-    require_tools(&root)?;
+    let (verdict, _) = check(&root, &hold, None)?;
+    if let Err(Problem(message)) = post_result(&root, verdict) {
+        eprintln!("gate: couldn't post `xtask/gate`, so the result is only here: {message}");
+    }
+    Ok(verdict)
+}
+
+/// Posts the result where it says something about a commit others can see.
+fn post_result(root: &Path, verdict: Verdict) -> Result<(), Problem> {
+    if !root.join(".git").exists()
+        || !base::commit_exists(root, "HEAD")?
+        || !ledger::changes(root)?.is_empty()
+    {
+        return Ok(());
+    }
+    let remotes = base::git_text(root, &["branch", "-r", "--contains", "HEAD"])?;
+    if remotes.trim().is_empty() {
+        return Ok(());
+    }
+    let head = base::git_text(root, &["rev-parse", "HEAD"])?;
+    let state = match verdict {
+        Verdict::Pass => "success",
+        Verdict::Fail => "failure",
+    };
+    Gh::new(root).post_status(head.trim(), state)
+}
+
+/// Runs every check, and returns the verdict and the spec score it earned.
+pub fn check(
+    root: &Path,
+    hold: &Hold,
+    merging: Option<&Merging>,
+) -> Result<(Verdict, score::Score), Problem> {
+    require_tools(root)?;
     let mut verdict = Verdict::Pass;
-    let findings = floors::check(&root)?;
+    let findings = floors::check(root)?;
     for finding in &findings {
         eprintln!("floor: {finding}");
     }
     record("floors", findings.is_empty(), &mut verdict);
     for check in CHECKS {
-        let passed = cargo_passes(&root, check.args)?;
+        let passed = cargo_passes(root, check.args)?;
         record(check.name, passed, &mut verdict);
     }
-    let results = testrun::run(&root, &hold)?;
+    let results = testrun::run(root, hold)?;
     record("tests", results.all_passed(), &mut verdict);
-    let score = score::compute(&root, &results)?;
+    let score = score::compute(root, &results)?;
     score::report_findings(&score);
     record("spec", score.findings.is_empty(), &mut verdict);
-    compare_with_base(&root, &score, &mut verdict)?;
+    compare_with_base(root, &score, merging, &mut verdict)?;
     let word = match verdict {
         Verdict::Pass => "pass",
         Verdict::Fail => "fail",
     };
     println!("gate: {word}");
-    Ok(verdict)
+    Ok((verdict, score))
 }
 
 fn compare_with_base(
     root: &Path,
     score: &score::Score,
+    merging: Option<&Merging>,
     verdict: &mut Verdict,
 ) -> Result<(), Problem> {
     let Some(commit) = base::find(root)? else {
@@ -80,8 +122,13 @@ fn compare_with_base(
             score.proven
         );
     }
-    record("hills", score.proven >= floor, verdict);
-    match base::missing_label(root, &commit)? {
+    let allowed = merging.is_some_and(|merging| merging.owner);
+    record("hills", score.proven >= floor || allowed, verdict);
+    let missing = match merging {
+        Some(merging) => Some(base::missing_label_on(root, &commit, merging.labels)?),
+        None => base::missing_label(root, &commit)?,
+    };
+    match missing {
         Some(findings) => {
             for finding in &findings {
                 eprintln!("labels: {finding}");
@@ -96,7 +143,7 @@ fn compare_with_base(
     Ok(())
 }
 
-fn record(name: &str, passed: bool, verdict: &mut Verdict) {
+pub fn record(name: &str, passed: bool, verdict: &mut Verdict) {
     println!("{} {name}", if passed { "pass" } else { "fail" });
     if !passed {
         *verdict = Verdict::Fail;

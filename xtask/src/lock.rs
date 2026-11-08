@@ -39,8 +39,6 @@ fn inherited(directory: &Path) -> bool {
     env::var_os(INHERITED).is_some_and(|held| Path::new(&held) == directory)
 }
 
-/// `cargo xtask bench` takes this in #15.
-#[allow(dead_code)]
 pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     if inherited(&directory) {

@@ -4,9 +4,11 @@ use crate::toml::{self, Table, Value};
 use crate::{Problem, Verdict, base, journey, lock, score, testrun, workspace};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 const DIRECTORY: &str = "harness/ledger";
+const MEASURED: &str = "target/bench/result.toml";
 
 #[derive(Debug, PartialEq)]
 pub struct Record {
@@ -20,7 +22,7 @@ pub struct Record {
     pub passing: usize,
     pub steps: usize,
     reason: String,
-    budgets: BTreeMap<String, f64>,
+    pub budgets: BTreeMap<String, f64>,
 }
 
 impl Record {
@@ -38,9 +40,7 @@ impl Record {
             self.steps,
             toml::quoted(&self.reason),
         );
-        for (name, value) in &self.budgets {
-            text.push_str(&format!("{name} = {value}\n"));
-        }
+        push_budgets(&mut text, &self.budgets);
         text
     }
 
@@ -48,15 +48,6 @@ impl Record {
         let table = toml::document(text)?;
         let spec = section(&table, "spec")?;
         let journey = section(&table, "journey")?;
-        let mut budgets = BTreeMap::new();
-        for (name, value) in section(&table, "budgets")?.entries() {
-            let value = match value {
-                Value::Int(number) => *number as f64,
-                Value::Float(number) => *number,
-                _ => return Err(format!("budget `{name}` isn't a number")),
-            };
-            budgets.insert(name.to_string(), value);
-        }
         Ok(Record {
             issue: count(&table, "issue")?,
             pr: count(&table, "pr")?,
@@ -68,9 +59,81 @@ impl Record {
             passing: count(journey, "passing")?,
             steps: count(journey, "steps")?,
             reason: string(&table, "reason")?,
-            budgets,
+            budgets: read_budgets(&table)?,
         })
     }
+}
+
+/// What a passing bench measured, kept for `record`.
+pub struct Measured {
+    pub commit: String,
+    pub reason: String,
+    pub budgets: BTreeMap<String, f64>,
+}
+
+impl Measured {
+    fn render(&self) -> String {
+        let mut text = format!(
+            "commit = {}\nreason = {}\n\n[budgets]\n",
+            toml::quoted(&self.commit),
+            toml::quoted(&self.reason),
+        );
+        push_budgets(&mut text, &self.budgets);
+        text
+    }
+
+    fn parse(text: &str) -> Result<Measured, String> {
+        let table = toml::document(text)?;
+        Ok(Measured {
+            commit: string(&table, "commit")?,
+            reason: string(&table, "reason")?,
+            budgets: read_budgets(&table)?,
+        })
+    }
+}
+
+pub fn clear_measured(root: &Path) -> Result<(), Problem> {
+    match fs::remove_file(root.join(MEASURED)) {
+        Err(e) if e.kind() != ErrorKind::NotFound => {
+            Err(Problem(format!("couldn't remove {MEASURED}: {e}")))
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn write_measured(root: &Path, measured: &Measured) -> Result<(), Problem> {
+    fs::write(root.join(MEASURED), measured.render())
+        .map_err(|e| Problem(format!("couldn't write {MEASURED}: {e}")))
+}
+
+/// What the bench measured, if the last bench was of this commit.
+fn read_measured(root: &Path, commit: &str) -> Result<Option<Measured>, Problem> {
+    let text = match fs::read_to_string(root.join(MEASURED)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Problem(format!("couldn't read {MEASURED}: {e}"))),
+    };
+    let measured = Measured::parse(&text).map_err(|e| Problem(format!("{MEASURED}: {e}")))?;
+    Ok((measured.commit == commit).then_some(measured))
+}
+
+fn push_budgets(text: &mut String, budgets: &BTreeMap<String, f64>) {
+    for (name, value) in budgets {
+        text.push_str(&format!("{name} = {value}\n"));
+    }
+}
+
+fn read_budgets(table: &Table) -> Result<BTreeMap<String, f64>, String> {
+    let mut budgets = BTreeMap::new();
+    for (name, value) in section(table, "budgets")?.entries() {
+        let value = match value {
+            Value::Int(number) => *number as f64,
+            Value::Float(number) => *number,
+            _ => return Err(format!("budget `{name}` isn't a number")),
+        };
+        budgets.insert(name.to_string(), value);
+    }
+    Ok(budgets)
 }
 
 fn section<'a>(table: &'a Table, key: &str) -> Result<&'a Table, String> {
@@ -108,18 +171,7 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
         ));
     }
     let hold = lock::shared(&root)?;
-    let exclude = format!(":(exclude){DIRECTORY}");
-    let changed = base::git_text(
-        &root,
-        &[
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--",
-            ".",
-            &exclude,
-        ],
-    )?;
+    let changed = changes(&root)?;
     if !changed.is_empty() {
         return Err(Problem(format!(
             "the tree differs from HEAD, so its scores aren't that commit's. Commit or discard these first:\n{}",
@@ -132,7 +184,12 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
     let results = testrun::run(&root, &hold)?;
     let score = score::compute(&root, &results)?;
     let (passing, steps) = journey::count(&root)?;
-    let budgets = at_head(&root)?.map_or_else(BTreeMap::new, |previous| previous.budgets);
+    let mut budgets = at_head(&root)?.map_or_else(BTreeMap::new, |previous| previous.budgets);
+    let mut reason = String::new();
+    if let Some(measured) = read_measured(&root, commit.trim())? {
+        budgets.extend(measured.budgets);
+        reason = measured.reason;
+    }
     let record = Record {
         issue,
         pr,
@@ -143,7 +200,7 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
         promises: score.promises.len(),
         passing,
         steps,
-        reason: String::new(),
+        reason,
         budgets,
     };
 
@@ -153,6 +210,23 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
     fs::write(root.join(&path), record.render()).map_err(problem)?;
     println!("{path}");
     Ok(Verdict::Pass)
+}
+
+/// How the tree differs from HEAD, leaving out the ledger, where an earlier
+/// attempt at a record may be. Empty means it doesn't.
+pub fn changes(root: &Path) -> Result<String, Problem> {
+    let exclude = format!(":(exclude){DIRECTORY}");
+    base::git_text(
+        root,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            &exclude,
+        ],
+    )
 }
 
 /// The newest record in the history of HEAD. `None` outside a repository, or

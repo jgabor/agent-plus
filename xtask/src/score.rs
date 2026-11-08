@@ -1,7 +1,7 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
 use crate::testrun::{self, Results};
-use crate::{Problem, Verdict, ledger, lock, spec, workspace};
+use crate::{Problem, Verdict, bench, ledger, lock, spec, workspace};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -27,16 +27,29 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let score = compute(&root, &results)?;
     report_findings(&score);
     let (proven, promises) = (score.proven, score.promises.len());
-    let journey = ledger::at_head(&root)?.map(|record| (record.passing, record.steps));
+    let record = ledger::at_head(&root)?;
+    let journey = record.as_ref().map(|record| (record.passing, record.steps));
+    let budgets = match &record {
+        Some(record) if root.join(bench::BUDGETS_FILE).exists() => {
+            Some(bench::met(&bench::read_budgets(&root)?, &record.budgets))
+        }
+        _ => None,
+    };
     if json {
         let journey = journey.map_or(String::new(), |(passing, steps)| {
             format!(",\"journey\":{{\"passing\":{passing},\"steps\":{steps}}}")
         });
-        println!("{{\"spec\":{{\"proven\":{proven},\"promises\":{promises}}}{journey}}}");
+        let budgets = budgets.map_or(String::new(), |(met, targets)| {
+            format!(",\"budgets\":{{\"met\":{met},\"targets\":{targets}}}")
+        });
+        println!("{{\"spec\":{{\"proven\":{proven},\"promises\":{promises}}}{journey}{budgets}}}");
     } else {
         println!("spec {proven} of {promises}");
         if let Some((passing, steps)) = journey {
             println!("journey {passing} of {steps}");
+        }
+        if let Some((met, targets)) = budgets {
+            println!("budgets {met} of {targets}");
         }
     }
     Ok(if score.findings.is_empty() {

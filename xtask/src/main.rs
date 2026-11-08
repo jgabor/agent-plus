@@ -1,6 +1,7 @@
 //! The harness program. HARNESS.md defines its commands and exit statuses.
 
 mod base;
+mod bench;
 mod floors;
 mod gate;
 mod journey;
@@ -23,6 +24,7 @@ commands:
   score [--json]   print the scores
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
+  bench            compare the budgets with the base build
   record --issue <n> --pr <n>
                    write the ledger record for the current head
 
@@ -47,6 +49,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["score", "--json"] => score::run(true),
         ["run", command @ ..] => lock::run(command),
         ["journey"] => journey::run(),
+        ["bench"] => bench::run(),
         ["record", "--issue", issue, "--pr", pr] => ledger::record(issue, pr),
         ["record", ..] => Err(Problem(format!(
             "`record` takes `--issue <n> --pr <n>`\n\n{USAGE}"
@@ -56,7 +59,11 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
             Ok(Verdict::Pass)
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
-        [command @ ("gate" | "score" | "journey"), extra, ..] => Err(Problem(format!(
+        [
+            command @ ("gate" | "score" | "journey" | "bench"),
+            extra,
+            ..,
+        ] => Err(Problem(format!(
             "`{command}` takes no arguments, but got `{extra}`\n\n{USAGE}"
         ))),
         [other, ..] => Err(Problem(format!("unknown command `{other}`\n\n{USAGE}"))),

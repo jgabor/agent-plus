@@ -120,11 +120,40 @@ pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Pro
     ))
 }
 
-/// The labels of each open PR from this branch.
-fn open_prs(root: &Path, branch: &str) -> Result<Vec<Vec<String>>, Problem> {
+/// The text of a `Budget reason: <text>` line in the body of this branch's
+/// open PR. A reason with no text isn't one.
+pub fn budget_reason(root: &Path) -> Result<Option<String>, Problem> {
+    let branch = git_text(root, &["branch", "--show-current"])?;
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+    for pr in pr_list(root, branch, "body")? {
+        let body = pr
+            .get("body")
+            .and_then(Json::as_str)
+            .ok_or_else(unexpected)?;
+        let reason = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("Budget reason:"))
+            .map(str::trim)
+            .find(|text| !text.is_empty());
+        if let Some(reason) = reason {
+            return Ok(Some(reason.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn unexpected() -> Problem {
+    Problem("`gh pr list` printed an unexpected shape".to_string())
+}
+
+/// One field of each open PR from this branch.
+fn pr_list(root: &Path, branch: &str, field: &str) -> Result<Vec<Json>, Problem> {
     let output = Command::new("gh")
         .args([
-            "pr", "list", "--head", branch, "--state", "open", "--json", "labels",
+            "pr", "list", "--head", branch, "--state", "open", "--json", field,
         ])
         .current_dir(root)
         .output()
@@ -137,9 +166,13 @@ fn open_prs(root: &Path, branch: &str) -> Result<Vec<Vec<String>>, Problem> {
     }
     let value = json::parse(&String::from_utf8_lossy(&output.stdout))
         .map_err(|e| Problem(format!("couldn't read `gh pr list` output: {e}")))?;
-    let unexpected = || Problem("`gh pr list` printed an unexpected shape".to_string());
-    let prs = value.as_arr().ok_or_else(unexpected)?;
-    prs.iter()
+    Ok(value.as_arr().ok_or_else(unexpected)?.to_vec())
+}
+
+/// The labels of each open PR from this branch.
+fn open_prs(root: &Path, branch: &str) -> Result<Vec<Vec<String>>, Problem> {
+    pr_list(root, branch, "labels")?
+        .iter()
         .map(|pr| {
             pr.get("labels")
                 .and_then(Json::as_arr)

@@ -3,9 +3,9 @@
 Agent+ runs coding agents in isolated, disposable microVMs. One `Agentfile`
 declares the agent, and one pure-Rust binary, `ap`, builds and runs it.
 
-**Status: design.** There is no code yet. [SPEC.md](SPEC.md) is the contract,
-[README.md](README.md) describes the product, and [HARNESS.md](HARNESS.md) is
-how we get to v0.1.0.
+**Status: design.** The harness is being built, and the product has no code
+yet. [SPEC.md](SPEC.md) is the contract, [README.md](README.md) describes the
+product, and [HARNESS.md](HARNESS.md) is how we get to v0.1.0.
 
 ## What we don't compromise
 
@@ -290,9 +290,9 @@ it, and never silently pick one.
 
 ## Verifying
 
-There is nothing to build yet. Once the harness exists, `cargo xtask gate` is
-the check to run before you push. Until then, a docs change needs working
-links, prose lines of 80 columns or fewer, and no contradictions with SPEC.md.
+`cargo xtask gate` is the check to run before you push. A docs change also
+needs working links, prose lines of 80 columns or fewer, and no contradictions
+with SPEC.md.
 
 Run focused checks while you iterate, through `cargo xtask run`, so a bench
 can get a quiet machine. A real model turn costs money, so use

@@ -1,0 +1,53 @@
+//! The harness program. HARNESS.md defines its commands and exit statuses.
+
+mod gate;
+
+use std::process::ExitCode;
+
+const USAGE: &str = "\
+usage: cargo xtask <command>
+
+commands:
+  gate    run the checks a change must pass
+
+exit status: 0 pass, 1 failure, 2 bad usage or environment error
+";
+
+/// The result of a command that was able to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Pass,
+    Fail,
+}
+
+/// Why a command couldn't run, which is exit status 2.
+#[derive(Debug)]
+pub struct Problem(pub String);
+
+fn run(args: &[&str]) -> Result<Verdict, Problem> {
+    match args {
+        ["gate"] => gate::run(),
+        ["-h" | "--help" | "help"] => {
+            print!("{USAGE}");
+            Ok(Verdict::Pass)
+        }
+        [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
+        ["gate", extra, ..] => Err(Problem(format!(
+            "`gate` takes no arguments, but got `{extra}`\n\n{USAGE}"
+        ))),
+        [other, ..] => Err(Problem(format!("unknown command `{other}`\n\n{USAGE}"))),
+    }
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    match run(&args) {
+        Ok(Verdict::Pass) => ExitCode::SUCCESS,
+        Ok(Verdict::Fail) => ExitCode::from(1),
+        Err(Problem(message)) => {
+            eprintln!("error: {message}");
+            ExitCode::from(2)
+        }
+    }
+}

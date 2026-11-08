@@ -3,6 +3,7 @@
 mod base;
 mod bench;
 mod floors;
+mod forge;
 mod gate;
 mod journey;
 mod json;
@@ -12,6 +13,7 @@ mod score;
 mod spec;
 mod testrun;
 mod toml;
+mod work;
 mod workspace;
 
 use std::process::ExitCode;
@@ -25,6 +27,9 @@ commands:
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
   bench            compare the budgets with the base build
+  next             print the issues that can be claimed, as JSON
+  claim <issue> [--thread <link>]
+                   claim an issue for the current branch
   record --issue <n> --pr <n>
                    write the ledger record for the current head
 
@@ -50,6 +55,12 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["run", command @ ..] => lock::run(command),
         ["journey"] => journey::run(),
         ["bench"] => bench::run(),
+        ["next"] => work::run_next(),
+        ["claim", issue] => work::run_claim(issue, None),
+        ["claim", issue, "--thread", thread] => work::run_claim(issue, Some(thread)),
+        ["claim", ..] => Err(Problem(format!(
+            "`claim` takes `<issue> [--thread <link>]`\n\n{USAGE}"
+        ))),
         ["record", "--issue", issue, "--pr", pr] => ledger::record(issue, pr),
         ["record", ..] => Err(Problem(format!(
             "`record` takes `--issue <n> --pr <n>`\n\n{USAGE}"
@@ -60,7 +71,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench"),
+            command @ ("gate" | "score" | "journey" | "bench" | "next"),
             extra,
             ..,
         ] => Err(Problem(format!(

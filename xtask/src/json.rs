@@ -5,7 +5,8 @@ pub enum Json {
     Str(String),
     Arr(Vec<Json>),
     Obj(Vec<(String, Json)>),
-    /// `null`, a boolean, or a number. Nothing reads their values yet.
+    Num(f64),
+    /// `null` or a boolean. Nothing reads their values yet.
     Other,
 }
 
@@ -26,12 +27,38 @@ impl Json {
         }
     }
 
+    /// A whole number that isn't negative.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Json::Num(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+            _ => None,
+        }
+    }
+
     pub fn as_arr(&self) -> Option<&[Json]> {
         match self {
             Json::Arr(items) => Some(items),
             _ => None,
         }
     }
+}
+
+/// A string as JSON writes it.
+pub fn quoted(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub fn parse(text: &str) -> Result<Json, String> {
@@ -223,6 +250,7 @@ impl Reader<'_> {
     }
 
     fn number(&mut self) -> Result<Json, String> {
+        let first = self.at;
         self.eat(b'-');
         let leading_zero = self.peek() == Some(b'0');
         let start = self.at;
@@ -241,7 +269,11 @@ impl Reader<'_> {
                 return Err(self.error("expected a digit"));
             }
         }
-        Ok(Json::Other)
+        std::str::from_utf8(&self.bytes[first..self.at])
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .map(Json::Num)
+            .ok_or_else(|| self.error("bad number"))
     }
 
     fn literal(&mut self, word: &str) -> Result<Json, String> {

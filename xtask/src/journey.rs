@@ -49,6 +49,17 @@ pub fn outcomes(root: &Path) -> Result<Vec<Outcome>, Problem> {
     walk(root, |line| eprintln!("{line}"))
 }
 
+/// How many steps spend money, or need a step that does. None of them run.
+pub fn left_out(root: &Path) -> Result<usize, Problem> {
+    let mut out = HashSet::new();
+    for step in read_steps(root)? {
+        if step.spend || step.needs.iter().any(|need| out.contains(need)) {
+            out.insert(step.id);
+        }
+    }
+    Ok(out.len())
+}
+
 fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     let passing = outcomes.iter().filter(|o| o.state == "pass").count();
     (passing, outcomes.len())

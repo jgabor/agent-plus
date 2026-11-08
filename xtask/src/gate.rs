@@ -82,7 +82,7 @@ fn post_result(
         Verdict::Pass => "success",
         Verdict::Fail => "failure",
     };
-    Gh::new(root).post_status(&head, state)
+    Gh::new(root).post_status(&head, "xtask/gate", state)
 }
 
 /// Runs every check, and returns the verdict and the spec score it earned.
@@ -189,7 +189,7 @@ fn require_tools(root: &Path) -> Result<(), Problem> {
 /// Runs a cargo command, with its output on our stderr, so that stdout carries
 /// only the result. `CC` and `CXX` point at a program that fails, so a build
 /// that tries to compile C fails even if the floors missed it.
-fn cargo_passes(root: &Path, args: &[&str]) -> Result<bool, Problem> {
+pub fn cargo_passes(root: &Path, args: &[&str]) -> Result<bool, Problem> {
     let status = Command::new("cargo")
         .args(args)
         .current_dir(root)

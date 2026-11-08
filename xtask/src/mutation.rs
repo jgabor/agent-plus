@@ -14,8 +14,8 @@ const OUTPUT: &str = "target/mutants";
 const MAX_LISTED: usize = 100;
 /// `cargo mutants` ran to the end: nothing missed, missed, or timed out.
 const COMPLETED: [i32; 3] = [0, 2, 3];
-/// Packages that hold the harness's own fakes, fuzzer, and test lanes.
-const NOT_PRODUCT: [&str; 3] = ["fuzz", "t1", "t2"];
+/// The harness's own packages, which fakes join by their `fake-` prefix.
+const NOT_PRODUCT: [&str; 4] = ["fuzz", "t1", "t2", "xtask"];
 
 /// `None` when nothing it covers has changed. Survivors become issues, so they
 /// don't fail the night.
@@ -66,8 +66,8 @@ pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
     Ok(Some(Verdict::Pass))
 }
 
-/// The crates under `crates/` touched since the last report, sorted by name,
-/// each with its directory relative to `root`.
+/// The product's crates touched since the last report, sorted by name, each
+/// with its directory relative to `root`.
 fn changed_packages(
     root: &Path,
     gh: &Gh,
@@ -82,8 +82,7 @@ fn changed_packages(
         };
         let directory = directory.to_string_lossy().into_owned();
         let prefix = format!("{directory}/");
-        if directory.starts_with("crates/")
-            && !package.name.starts_with("fake-")
+        if !package.name.starts_with("fake-")
             && !NOT_PRODUCT.contains(&package.name.as_str())
             && files.lines().any(|file| file.starts_with(&prefix))
         {

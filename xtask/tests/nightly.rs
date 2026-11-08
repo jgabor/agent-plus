@@ -1068,6 +1068,7 @@ fn only_changed_crates_of_the_product_are_mutated() {
         manifest("t1"),
         manifest("other"),
     );
+    let tasks = manifest("xtask");
     let repo = Repo::with(
         "changed-crates",
         "fn main() {}\n",
@@ -1076,6 +1077,8 @@ fn only_changed_crates_of_the_product_are_mutated() {
             ("crates/demo/src/lib.rs", "pub fn f() {}\n"),
             ("crates/fake-x/Cargo.toml", &fake),
             ("crates/fake-x/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/xtask/Cargo.toml", &tasks),
+            ("crates/xtask/src/lib.rs", "pub fn f() {}\n"),
             ("crates/t1/Cargo.toml", &t1),
             ("crates/t1/src/lib.rs", "pub fn f() {}\n"),
             ("crates/other/Cargo.toml", &other),
@@ -1083,7 +1086,7 @@ fn only_changed_crates_of_the_product_are_mutated() {
         ],
     );
     repo.set_mutants("exit 0\n");
-    repo.touch(&["demo", "fake-x", "t1"]);
+    repo.touch(&["demo", "fake-x", "t1", "xtask"]);
     let output = repo.xtask(&["nightly"]);
     assert_mutation_ran(&repo, &output, 0, "pass");
     let calls = repo.read_bin("mutants-calls");
@@ -1269,6 +1272,58 @@ fn a_hung_fuzz_target_is_killed_and_fails() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
         repo.comment().contains("- fail fuzz\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+#[test]
+fn code_a_report_covered_isnt_mutated_again() {
+    let repo = Repo::new("mutation-reported");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    repo.set_last_report(&repo.short("HEAD"));
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "skip");
+    assert!(!repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn a_change_older_than_a_day_is_mutated_if_no_report_covered_it() {
+    let repo = Repo::new("mutation-unreported");
+    repo.set_mutants("exit 0\n");
+    let start = repo.short("HEAD");
+    repo.write("crates/ap/note.txt", "changed\n");
+    repo.commit("Touch ap", 48);
+    repo.sync();
+    repo.set_last_report(&start);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn mutants_run_under_the_activity_lock() {
+    let repo = Repo::new("mutation-lock");
+    repo.set_mutants(
+        "flock -n -x .git/xtask/activity.lock true && echo free > \"$d/lock\" || echo held > \"$d/lock\"\nexit 0\n",
+    );
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert_eq!(repo.read_bin("lock"), "held");
+}
+
+#[test]
+fn the_fuzzer_is_built_to_panic_on_overflow() {
+    let repo = with_fuzz(
+        "fuzz-checks",
+        "fn main() {\n    let args = std::env::args().count();\n    assert!(std::panic::catch_unwind(|| debug_assert_eq!(args, 0)).is_err());\n    assert!(std::panic::catch_unwind(|| u8::MAX + args as u8).is_err());\n}\n",
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- pass fuzz\n"),
         "{}",
         repo.comment()
     );

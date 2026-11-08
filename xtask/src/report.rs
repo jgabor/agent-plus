@@ -68,6 +68,14 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     Ok(Verdict::Pass)
 }
 
+/// The `git log` argument that limits it to what no report has covered yet.
+pub fn start(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<String, Problem> {
+    Ok(match last_reported(root, gh, issues)? {
+        Some(commit) => format!("^{commit}"),
+        None => WINDOW.to_string(),
+    })
+}
+
 pub fn build(root: &Path) -> Result<Report, Problem> {
     let budgets = bench::read_budgets(root)?;
     let scores = ledger::at_head(root)?.map(|record| {
@@ -94,10 +102,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
     };
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
-    let start = match last_reported(root, &gh, &issues)? {
-        Some(commit) => format!("^{commit}"),
-        None => WINDOW.to_string(),
-    };
+    let start = start(root, &gh, &issues)?;
     let log = base::git_text(root, &["log", &start, "--format=%H %h %s", "HEAD"])?;
     for line in log.lines() {
         let mut fields = line.splitn(3, ' ');

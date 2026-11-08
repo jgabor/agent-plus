@@ -135,7 +135,9 @@ impl Repo {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")
-            .env_remove("XTASK_ACTIVITY_HELD");
+            .env_remove("XTASK_ACTIVITY_HELD")
+            .env_remove("XTASK_FUZZ_SECONDS")
+            .env_remove("XTASK_MUTATION_SECONDS");
         command
     }
 

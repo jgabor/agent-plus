@@ -474,8 +474,9 @@ claim race exits.
 
 Runs every planning period, and stops at once if the issues in progress and
 the issues `cargo xtask next` lists already fill the worker slots. The planner
-reads `cargo xtask gaps`, and files child issues under a parent the owner has
-labeled. Each child inherits its parent's `auto:*` label.
+reads `cargo xtask gaps`, and files child issues under a parent: an issue the
+owner has labeled, with a `## Children` section. Each child inherits its
+parent's `auto:*` label.
 
 Initial order, by risk:
 

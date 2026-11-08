@@ -7,18 +7,20 @@ write no code. Nobody reads this thread while you run, so never ask a question.
    progress with `gh issue list --state open --label in-progress --json number
    --jq length`. If the two counts add up to 3 or more, say so and stop.
 2. Find the parent: the lowest-numbered open issue that has an `auto:*` label
-   and no `Part of` line in its body. If there is none, say so and stop. Never
-   add an `auto:*` label to an issue that doesn't inherit one.
+   and a `## Children` section in its body. If there is none, say so and stop.
+   Read its goal. Never add an `auto:*` label to an issue that doesn't inherit
+   one.
 3. Run `cargo xtask gaps --json > target/gaps.json`. If it doesn't exit 0,
    report the error and stop. The file is large, so read only the start of it
    with `jq '{steps, budgets, promises: .promises[:40]}' target/gaps.json`.
 4. Read the parent's children, open and closed, with `gh issue list --state all
-   --search '"Part of #<parent>" in:body'`. Leave out any gap that an open
-   child already covers.
-5. Choose the next work. Failing steps come first, then budgets, then promises.
+   --limit 1000 --search '"Part of #<parent>" in:body'`. Leave out any gap that
+   an open child already covers.
+5. Choose the next work, only from gaps within the parent's goal. If none are,
+   say so and stop. Failing steps come first, then budgets, then promises.
    Among steps, follow the order of risk in HARNESS.md, under Planning.
-6. File issues until the counts from step 1 add up to 3. Follow Issues in
-   AGENTS.md:
+6. File at most 3 minus the sum from step 1, and add each issue to the parent's
+   `## Children` checklist. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
    - `Done when` names the journey step, the budget, or the exact SPEC
      sentences that prove it.

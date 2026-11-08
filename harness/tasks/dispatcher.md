@@ -27,6 +27,10 @@ Worker model: `claude-opus-5-5`
    {"type": "existing_worktree", "worktreePath": "<worktree>"}
    ```
 
+   Otherwise, if `branch` is set and `git rev-parse -q --verify
+   refs/heads/<branch>` finds it, run `git worktree add ../<branch> <branch>`,
+   and use `existing_worktree` with the absolute path of that directory.
+
    Otherwise, if `branch` is set:
 
    ```json

@@ -251,6 +251,10 @@ fn the_report_covers_the_last_day_of_main() {
             "# Nightly report for `{unrecorded}`\n\nspec 1 of 7, journey 1 of 4, budgets 1 of 1\n\nJourney steps that spend money, and weren't run: 2\n\n## Merged\n\n- `{merged}` Add a thing (#9), issue #5\n\n## Regressed\n\nNothing.\n\n## Not in the ledger\n\n- `{unrecorded}` Push straight to main\n\n## Waiting on the owner\n\n- #30 Promises that end in a colon\n"
         )
     );
+    assert_eq!(
+        repo.calls(),
+        ["issue list --state open --limit 2000 --json number,title,labels,isPinned"]
+    );
 }
 
 #[test]

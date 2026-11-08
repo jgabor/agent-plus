@@ -109,7 +109,17 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
     }
     let hold = lock::shared(&root)?;
     let exclude = format!(":(exclude){DIRECTORY}");
-    let changed = base::git_text(&root, &["status", "--porcelain", "--", ".", &exclude])?;
+    let changed = base::git_text(
+        &root,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--",
+            ".",
+            &exclude,
+        ],
+    )?;
     if !changed.is_empty() {
         return Err(Problem(format!(
             "the tree differs from HEAD, so its scores aren't that commit's. Commit or discard these first:\n{}",

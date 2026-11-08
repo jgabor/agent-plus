@@ -186,6 +186,17 @@ fn record_refuses_a_tree_that_differs_from_head() {
 }
 
 #[test]
+fn record_sees_untracked_files_that_git_config_hides() {
+    let repo = Repo::new("dirty-hidden", &[]);
+    repo.git(&["config", "status.showUntrackedFiles", "no"]);
+    repo.write("notes.txt", "uncommitted\n");
+    let output = repo.record("1");
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("notes.txt"), "{}", stderr(&output));
+    assert!(!repo.root.join("harness/ledger/1.toml").exists());
+}
+
+#[test]
 fn record_outside_a_repository_is_a_problem() {
     let repo = Repo::new("no-repo", &[]);
     fs::remove_dir_all(repo.root.join(".git")).unwrap();

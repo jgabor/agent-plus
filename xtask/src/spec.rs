@@ -25,6 +25,9 @@ pub fn extract(spec: &str) -> Result<Vec<Unit>, String> {
             }
             continue;
         }
+        if !trimmed.is_empty() && !line.starts_with("  ") {
+            extractor.marked_item = false;
+        }
         if let Some(open) = opens_fence(trimmed) {
             extractor.flush();
             fence = Some(open);
@@ -47,6 +50,8 @@ pub fn extract(spec: &str) -> Result<Vec<Unit>, String> {
             let body = trimmed.strip_prefix("> ").unwrap_or(trimmed);
             if let Some(item) = list_item(body) {
                 extractor.flush();
+                extractor.marked_item = false;
+                extractor.in_item = true;
                 extractor.block.push(item);
             } else {
                 extractor.block.push(body);
@@ -63,6 +68,10 @@ struct Extractor<'a> {
     block: Vec<&'a str>,
     seen: HashSet<(String, String)>,
     units: Vec<Unit>,
+    /// The current block began as a list item.
+    in_item: bool,
+    /// A marker earlier in this list item covers what follows it.
+    marked_item: bool,
 }
 
 impl Extractor<'_> {
@@ -70,7 +79,9 @@ impl Extractor<'_> {
         let text = self.block.join(" ");
         self.block.clear();
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let marked = MARKERS.iter().any(|m| text.contains(m));
+        let marked = MARKERS.iter().any(|m| text.contains(m)) || self.marked_item;
+        self.marked_item = marked && (self.in_item || self.marked_item);
+        self.in_item = false;
         (!text.is_empty() && !marked).then_some(text)
     }
 
@@ -145,28 +156,45 @@ fn list_item(line: &str) -> Option<&str> {
     (digits > 0).then(|| line[digits..].strip_prefix(". "))?
 }
 
+fn backticks(bytes: &[u8]) -> usize {
+    bytes.iter().take_while(|b| **b == b'`').count()
+}
+
+/// Finds the end of the code span that a run of `length` backticks opens. A
+/// run with no matching close opens no span, and is literal text.
+fn closing_run(bytes: &[u8], from: usize, length: usize) -> Option<usize> {
+    let mut at = from;
+    while at < bytes.len() {
+        if bytes[at] == b'`' {
+            let run = backticks(&bytes[at..]);
+            if run == length {
+                return Some(at + run);
+            }
+            at += run;
+        } else {
+            at += 1;
+        }
+    }
+    None
+}
+
 /// Splits after `.`, `?`, or `!` followed by a space, outside code spans.
 fn sentences(text: &str) -> Vec<String> {
     let bytes = text.as_bytes();
     let mut out = Vec::new();
     let mut start = 0;
-    let mut open_span: Option<usize> = None;
     let mut at = 0;
     while at < bytes.len() {
-        if bytes[at] == b'`' {
-            let run = bytes[at..].iter().take_while(|b| **b == b'`').count();
-            match open_span {
-                None => open_span = Some(run),
-                Some(open) if open == run => open_span = None,
-                Some(_) => {}
-            }
-            at += run;
+        if bytes[at] == b'\\' {
+            at += 2;
             continue;
         }
-        let ends = matches!(bytes[at], b'.' | b'?' | b'!')
-            && bytes.get(at + 1) == Some(&b' ')
-            && open_span.is_none();
-        if ends {
+        if bytes[at] == b'`' {
+            let run = backticks(&bytes[at..]);
+            at = closing_run(bytes, at + run, run).unwrap_or(at + run);
+            continue;
+        }
+        if matches!(bytes[at], b'.' | b'?' | b'!') && bytes.get(at + 1) == Some(&b' ') {
             let sentence = &text[start..=at];
             if !sentence.ends_with("e.g.") && !sentence.ends_with("i.e.") {
                 out.push(sentence.to_string());
@@ -333,6 +361,24 @@ mod tests {
         let spec =
             "# A\n\n- *Proposed:* no.\n- Yes.\n\n| H |\n|---|\n| *Proposed:* no |\n| yes |\n";
         assert_eq!(texts(spec), ["Yes.", "| yes |"]);
+    }
+
+    #[test]
+    fn a_marker_covers_every_paragraph_of_its_list_item() {
+        let spec = "# A\n\n- *Proposed:* no.\n\n  Still no.\n\n- Yes.\n\nAlso yes.\n";
+        assert_eq!(texts(spec), ["Yes.", "Also yes."]);
+    }
+
+    #[test]
+    fn an_unmatched_backtick_opens_no_span() {
+        let spec = "# A\n\nA literal ` character. Next sentence.\n";
+        assert_eq!(texts(spec), ["A literal ` character.", "Next sentence."]);
+    }
+
+    #[test]
+    fn an_escaped_backtick_opens_no_span() {
+        let spec = "# A\n\nLiteral \\`a. b\\` is text. Next.\n";
+        assert_eq!(texts(spec), ["Literal \\`a.", "b\\` is text.", "Next."]);
     }
 
     #[test]

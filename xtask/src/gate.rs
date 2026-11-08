@@ -127,7 +127,12 @@ fn compare_with_base(
         eprintln!("base: no origin/main in this repository, so nothing was compared");
         return Ok(());
     };
-    let findings = base::removed_checks(root, &commit, score)?;
+    let allowed = merging.is_some_and(|merging| merging.owner);
+    let findings = if allowed && base::is_exact_revert(root, &commit)? {
+        Vec::new()
+    } else {
+        base::removed_checks(root, &commit, score)?
+    };
     for finding in &findings {
         eprintln!("floor: {finding}");
     }
@@ -139,7 +144,6 @@ fn compare_with_base(
             score.proven
         );
     }
-    let allowed = merging.is_some_and(|merging| merging.owner);
     record("hills", score.proven >= floor || allowed, verdict);
     let missing = match merging {
         Some(merging) => Some(base::missing_label_on(root, &commit, merging.labels)?),

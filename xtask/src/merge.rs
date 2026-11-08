@@ -242,9 +242,9 @@ fn changed_during_proof(
 /// the caller's checkout alone. It goes away with the merge. It sits outside
 /// the checkout, because Cargo reads `.cargo/config.toml` from every parent
 /// directory, and the settings of the caller's checkout aren't this commit's.
-struct Tree {
+pub struct Tree {
     root: PathBuf,
-    path: PathBuf,
+    pub path: PathBuf,
 }
 
 impl Tree {
@@ -259,7 +259,7 @@ impl Tree {
 
     /// Starts from nothing, because an earlier attempt may have died at any
     /// point in this worktree.
-    fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
+    pub fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
         let path = Tree::path(root, number)?;
         Tree::clear(root, &path);
         let name = path.to_string_lossy();

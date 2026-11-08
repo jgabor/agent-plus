@@ -79,6 +79,50 @@ pub fn removed_checks(root: &Path, base: &str, score: &Score) -> Result<Vec<Stri
     Ok(findings)
 }
 
+/// Whether the commits since `base` do nothing but undo one earlier commit in
+/// its history, apart from the ledger, going by the `git revert` message.
+pub fn is_exact_revert(root: &Path, base: &str) -> Result<bool, Problem> {
+    let messages = git_text(root, &["log", "--format=%B", &format!("{base}..HEAD")])?;
+    let Some(commit) = messages.lines().find_map(reverted_commit) else {
+        return Ok(false);
+    };
+    let parent = format!("{commit}~1");
+    let in_history = git(root, &["merge-base", "--is-ancestor", commit, base])?
+        .status
+        .success();
+    if !in_history || !commit_exists(root, &parent)? {
+        return Ok(false);
+    }
+    Ok(change(root, commit, &parent)? == change(root, base, "HEAD")?)
+}
+
+fn reverted_commit(line: &str) -> Option<&str> {
+    let commit = line
+        .strip_prefix("This reverts commit ")?
+        .strip_suffix('.')?;
+    (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())).then_some(commit)
+}
+
+/// What changes from one tree to another, without what depends on where the
+/// lines are or which blobs they're in.
+fn change(root: &Path, from: &str, to: &str) -> Result<Vec<String>, Problem> {
+    let args = [
+        "diff",
+        "--binary",
+        "-U0",
+        from,
+        to,
+        "--",
+        ".",
+        ":(exclude)harness/ledger",
+    ];
+    Ok(git_text(root, &args)?
+        .lines()
+        .filter(|line| !line.starts_with("index ") && !line.starts_with("@@ "))
+        .map(str::to_string)
+        .collect())
+}
+
 /// Names each protected path changed without the label. `None` means a
 /// protected path changed, but the branch has no open PR to read a label from.
 pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Problem> {

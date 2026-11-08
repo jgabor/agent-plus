@@ -1,7 +1,7 @@
 # Harness design
 
-> **Status: draft.** Nothing described here is implemented. Numeric settings
-> are initial values.
+> **Status: draft.** The harness is being built in the order of
+> [Build stages](#build-stages). Numeric settings are initial values.
 
 ## Purpose
 

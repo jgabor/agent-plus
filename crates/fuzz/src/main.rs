@@ -127,8 +127,17 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     println!("fuzz: seed {seed}");
-    let share = Duration::from_secs(seconds) / TARGETS.len() as u32;
-    for target in &TARGETS {
+    if run_all(&TARGETS, seconds, seed) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Splits the time between the targets. False if any of them panicked.
+fn run_all(targets: &[Target], seconds: u64, seed: u64) -> bool {
+    let share = Duration::from_secs(seconds) / targets.len() as u32;
+    for target in targets {
         match search(target, seed, Instant::now() + share) {
             Ok(count) => println!("fuzz: {} ran {count} inputs", target.name),
             Err(input) => {
@@ -136,16 +145,17 @@ fn main() -> ExitCode {
                     "fuzz: {} panicked with seed {seed} on {input:?}",
                     target.name
                 );
-                return ExitCode::FAILURE;
+                return false;
             }
         }
     }
-    ExitCode::SUCCESS
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const CLEAN: Target = Target {
         name: "clean",
@@ -208,6 +218,46 @@ mod tests {
         let inputs: Vec<String> = (0..1000).map(|_| generate(&CLEAN, &mut random)).collect();
         let unique: std::collections::HashSet<&String> = inputs.iter().collect();
         assert!(unique.len() > 200, "{}", unique.len());
+    }
+
+    #[test]
+    fn each_kind_of_edit_happens() {
+        let target = Target {
+            corpus: &["abcdefgh"],
+            words: &["WORD"],
+            ..CLEAN
+        };
+        let mut random = Random::new(3);
+        let inputs: Vec<String> = (0..4000).map(|_| generate(&target, &mut random)).collect();
+        let found = |test: &dyn Fn(&String) -> bool| inputs.iter().any(test);
+        assert!(found(
+            &|input| input.contains('W') && !input.starts_with('W')
+        ));
+        assert!(found(&|input| SPECIAL.iter().any(|c| input.contains(*c))));
+        // Only a deletion takes out the middle and keeps both ends.
+        assert!(found(&|input| input == "abgh"));
+        // Only a copy repeats text with nothing new added.
+        assert!(found(&|input| input == "abcabcdefgh"));
+        assert!(found(&|input| input == "abc"));
+    }
+
+    static RAN: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn a_clean_run_tries_inputs_and_passes() {
+        let counting = Target {
+            check: |_| {
+                RAN.fetch_add(1, Ordering::Relaxed);
+            },
+            ..CLEAN
+        };
+        assert!(run_all(&[counting], 1, 1));
+        assert!(RAN.load(Ordering::Relaxed) >= BATCH);
+    }
+
+    #[test]
+    fn a_panic_fails_the_run() {
+        assert!(!run_all(&[PLANTED], 30, 7));
     }
 
     #[test]

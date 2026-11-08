@@ -268,3 +268,106 @@ fn a_failing_test_still_fails_the_gate() {
         stdout(&output)
     );
 }
+
+fn with_waivers(name: &str, spec: &str, lib: &str, waivers: &str) -> PathBuf {
+    workspace(name, spec, lib, &[("harness/waived.txt", waivers)])
+}
+
+#[test]
+fn a_waived_unit_is_not_a_promise() {
+    let root = with_waivers("waived", SPEC, "", "A\tTwo.\tDescribes the layout.\n");
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "spec 0 of 2\n");
+}
+
+#[test]
+fn waiver_comments_and_blank_lines_are_ignored() {
+    let root = with_waivers(
+        "waiver-comments",
+        SPEC,
+        "",
+        "# why these are waived\n\nA\tTwo.\treason\n",
+    );
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "spec 0 of 2\n");
+}
+
+#[test]
+fn a_repeated_waiver_counts_once() {
+    let root = with_waivers(
+        "waiver-repeated",
+        SPEC,
+        "",
+        "A\tTwo.\tone reason\nA\tTwo.\tanother reason\n",
+    );
+    assert_eq!(stdout(&xtask(&root, &["score"])), "spec 0 of 2\n");
+}
+
+#[test]
+fn a_stale_waiver_fails_and_names_its_line() {
+    let root = with_waivers("waiver-stale", SPEC, "", "# note\nA\tGone.\treason\n");
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("harness/waived.txt:2"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "spec 0 of 3\n");
+}
+
+#[test]
+fn a_waiver_under_the_wrong_heading_is_stale() {
+    let root = with_waivers("waiver-heading", SPEC, "", "B\tOne.\treason\n");
+    assert_eq!(xtask(&root, &["score"]).status.code(), Some(1));
+}
+
+#[test]
+fn a_waiver_of_a_marked_unit_is_stale() {
+    let spec = "# A\n\n*Proposed:* One.\n\nTwo.\n";
+    let root = with_waivers("waiver-marked", spec, "", "A\tOne.\treason\n");
+    assert_eq!(xtask(&root, &["score"]).status.code(), Some(1));
+}
+
+#[test]
+fn a_stale_waiver_fails_the_gate() {
+    let root = with_waivers("waiver-gate", SPEC, "", "A\tGone.\treason\n");
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout(&output).contains("fail spec"), "{}", stdout(&output));
+}
+
+#[test]
+fn a_waiver_without_a_reason_is_a_problem() {
+    for (index, line) in ["A\tTwo.\n", "A\tTwo.\t  \n", "A Two. reason\n"]
+        .iter()
+        .enumerate()
+    {
+        let root = with_waivers(&format!("waiver-malformed-{index}"), SPEC, "", line);
+        let output = xtask(&root, &["score"]);
+        assert_eq!(output.status.code(), Some(2), "{line:?}");
+        assert!(stderr(&output).contains("harness/waived.txt:1"));
+    }
+}
+
+#[test]
+fn a_check_quoting_a_waived_unit_fails() {
+    let root = with_waivers("waiver-quoted", SPEC, CHECK_ONE, "A\tOne.\treason\n");
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("waived"), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "spec 0 of 2\n");
+}
+
+#[test]
+fn this_repository_merges_waivers_by_union() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let output = Command::new("git")
+        .args(["check-attr", "merge", "--", "harness/waived.txt"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert_eq!(stdout(&output), "harness/waived.txt: merge: union\n");
+}

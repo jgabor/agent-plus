@@ -1,5 +1,6 @@
 //! The harness program. HARNESS.md defines its commands and exit statuses.
 
+mod base;
 mod floors;
 mod gate;
 mod json;

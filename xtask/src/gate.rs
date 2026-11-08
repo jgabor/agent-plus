@@ -1,7 +1,7 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, floors, score, testrun};
+use crate::{Problem, Verdict, base, floors, score, testrun};
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -48,12 +48,43 @@ pub fn run() -> Result<Verdict, Problem> {
     let score = score::compute(&root, &results)?;
     score::report_findings(&score);
     record("spec", score.findings.is_empty(), &mut verdict);
+    compare_with_base(&root, &score, &mut verdict)?;
     let word = match verdict {
         Verdict::Pass => "pass",
         Verdict::Fail => "fail",
     };
     println!("gate: {word}");
     Ok(verdict)
+}
+
+fn compare_with_base(
+    root: &Path,
+    score: &score::Score,
+    verdict: &mut Verdict,
+) -> Result<(), Problem> {
+    let Some(commit) = base::find(root)? else {
+        println!("skip base");
+        eprintln!("base: no origin/main in this repository, so nothing was compared");
+        return Ok(());
+    };
+    let findings = base::removed_checks(root, &commit, score)?;
+    for finding in &findings {
+        eprintln!("floor: {finding}");
+    }
+    record("checks-kept", findings.is_empty(), verdict);
+    match base::missing_label(root, &commit)? {
+        Some(findings) => {
+            for finding in &findings {
+                eprintln!("labels: {finding}");
+            }
+            record("labels", findings.is_empty(), verdict);
+        }
+        None => {
+            println!("skip labels");
+            eprintln!("labels: this branch has no open PR yet, so its label wasn't checked");
+        }
+    }
+    Ok(())
 }
 
 fn record(name: &str, passed: bool, verdict: &mut Verdict) {

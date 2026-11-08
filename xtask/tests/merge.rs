@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SPEC: &str = "# A\n\nOne. Two.\n";
 const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
@@ -806,7 +806,9 @@ fn the_pr_is_read_again_after_the_slot() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !repo.calls().contains("gh issue view") {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
         thread::sleep(Duration::from_millis(10));
     }
     repo.set_pr(&Pr {

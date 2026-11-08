@@ -363,6 +363,46 @@ fn commits_since_the_lease_keep_a_claim_alive() {
 }
 
 #[test]
+fn a_commit_in_the_minute_after_expiry_keeps_a_claim_alive() {
+    let repo = Repo::new("same-minute", &[abandoned(7, "7-x")]);
+    repo.set_branch("7-x", "2001-01-01T00:00:30Z");
+    assert_eq!(repo.numbers(), Vec::<u64>::new());
+}
+
+#[test]
+fn a_parked_status_does_not_hold_an_expired_claim() {
+    let issues = [issue(
+        7,
+        "OPEN",
+        &["auto:merge", "in-progress"],
+        &body(T, ""),
+        &[
+            status(70, OWNER, "working", "7-x", EXPIRED),
+            status(71, OWNER, "parked", "7-y", LIVE),
+        ],
+    )];
+    let repo = Repo::new("parked-loser", &issues);
+    repo.set_branch("7-x", BEFORE_EXPIRY);
+    assert_eq!(repo.numbers(), vec![7]);
+    assert!(repo.next().contains("\"branch\":\"7-x\""));
+}
+
+#[test]
+fn in_progress_with_only_parked_statuses_stays_claimed() {
+    let issues = [issue(
+        7,
+        "OPEN",
+        &["auto:merge", "in-progress"],
+        &body(T, ""),
+        &[status(71, OWNER, "parked", "7-y", EXPIRED)],
+    )];
+    let repo = Repo::new("only-parked", &issues);
+    let output = repo.xtask(&["next"]);
+    assert_eq!(stdout(&output), "[]\n");
+    assert!(stderr(&output).contains("#7"), "{}", stderr(&output));
+}
+
+#[test]
 fn a_comment_from_another_account_is_ignored() {
     let label = &["auto:merge", "in-progress"][..];
     let theirs_only = |lease: &str| {
@@ -554,7 +594,7 @@ fn claim_of_a_claimed_issue_fails_without_writing() {
 }
 
 #[test]
-fn claim_labels_and_comments_then_loses_to_a_lower_live_comment() {
+fn claim_writes_through_gh_and_loses_when_its_comment_is_gone() {
     let repo = Repo::new("claim-race", &[open(7, &["auto:merge"], T)]);
     repo.git(&["checkout", "-q", "-b", "7-x"]);
     fs::write(
@@ -576,4 +616,25 @@ fn claim_labels_and_comments_then_loses_to_a_lower_live_comment() {
         "{calls}"
     );
     assert!(calls.contains("issue comment 7 --body-file -"), "{calls}");
+}
+
+#[test]
+fn a_claim_waits_for_another_claim_on_this_machine() {
+    let repo = Repo::new("claim-lock", &[claimed(7, T)]);
+    repo.git(&["checkout", "-q", "-b", "7-x"]);
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("claim.lock")).unwrap();
+    held.lock().unwrap();
+    let mut child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["claim", "7"])
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(repo.calls(), "");
+    held.unlock().unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(1));
+    assert!(repo.calls().contains("issue list"), "{}", repo.calls());
 }

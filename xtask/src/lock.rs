@@ -50,6 +50,19 @@ pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
     take_exclusive(&directory)
 }
 
+/// Held while a claim reads and writes GitHub, so that two claims on this
+/// machine can't interleave. Rules on the comments cover anything else.
+pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {
+    let directory = directory(root)?;
+    let file = open(&directory, "claim.lock")?;
+    file.lock()
+        .map_err(|e| Problem(format!("couldn't take the claim lock: {e}")))?;
+    Ok(Hold {
+        _files: vec![file],
+        directory,
+    })
+}
+
 pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
     let (program, arguments) = command
         .split_first()

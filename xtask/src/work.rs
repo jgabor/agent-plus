@@ -2,43 +2,47 @@
 
 use crate::forge::{Comment, Forge, Gh, Issue};
 use crate::json::quoted;
-use crate::{Problem, Verdict, base, workspace};
+use crate::{Problem, Verdict, base, lock, workspace};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const WORKER_SLOTS: usize = 3;
-const LEASE_MINUTES: i64 = 12 * 60;
+const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
 const NEEDS_OWNER: &str = "needs-owner";
 const STATUS_MARK: &str = "<!-- status -->";
 const DEFAULT_BRANCH: &str = "main";
 
-/// Minutes since 1970, from `2026-11-09T14:00Z`, with or without seconds.
-fn minutes(stamp: &str) -> Option<i64> {
+/// Seconds since 1970, from `2026-11-09T14:00Z`, with or without seconds.
+fn seconds(stamp: &str) -> Option<i64> {
     let (date, time) = stamp.strip_suffix('Z')?.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
     let mut time = time.split(':').map(str::parse::<i64>);
     let (hour, minute) = (time.next()?.ok()?, time.next()?.ok()?);
+    let second = time.next().unwrap_or(Ok(0)).ok()?;
     if !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
         || !(0..24).contains(&hour)
         || !(0..60).contains(&minute)
+        || !(0..60).contains(&second)
         || date.next().is_some()
+        || time.next().is_some()
     {
         return None;
     }
-    Some(days_from_civil(year, month, day) * 1440 + hour * 60 + minute)
+    Some(days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second)
 }
 
-fn stamp(minutes: i64) -> String {
-    let (year, month, day) = civil_from_days(minutes.div_euclid(1440));
-    let rest = minutes.rem_euclid(1440);
+/// The format a lease is written in, which stops at the minute.
+fn stamp(seconds: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86400));
+    let rest = seconds.rem_euclid(86400);
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}Z",
-        rest / 60,
-        rest % 60
+        rest / 3600,
+        rest / 60 % 60
     )
 }
 
@@ -112,7 +116,7 @@ impl Status {
                     status.branch = (!branch.is_empty()).then(|| branch.to_string());
                 }
                 "Lease until" => {
-                    status.lease = minutes(value).map_or(Lease::Unreadable, Lease::Until);
+                    status.lease = seconds(value).map_or(Lease::Unreadable, Lease::Until);
                 }
                 _ => {}
             }
@@ -295,10 +299,11 @@ impl<'a> View<'a> {
     /// committed since. An issue with no lease that can be read stays held,
     /// because taking it could take someone's work.
     fn holder(&self, issue: &Issue) -> Result<Option<Option<String>>, Problem> {
-        let statuses = self.statuses(issue);
+        let mut statuses = self.statuses(issue);
+        statuses.retain(|status| !status.parked);
         if statuses.is_empty() {
             eprintln!(
-                "next: #{} is `{IN_PROGRESS}` with no status comment from the owner",
+                "next: #{} is `{IN_PROGRESS}` with no status comment in use from the owner",
                 issue.number
             );
             return Ok(None);
@@ -323,7 +328,7 @@ impl<'a> View<'a> {
         let Some(date) = self.forge.branch_date(branch)? else {
             return Ok(Some(None));
         };
-        let date = minutes(&date)
+        let date = seconds(&date)
             .ok_or_else(|| Problem(format!("couldn't read the date of `{branch}`: {date}")))?;
         if newest.lease.is_after(date) || newest.lease == Lease::Until(date) {
             Ok(Some(Some(branch.clone())))
@@ -451,16 +456,16 @@ fn worktrees(root: &Path) -> Result<HashMap<String, String>, Problem> {
     Ok(found)
 }
 
-fn now_minutes() -> Result<i64, Problem> {
+fn now_seconds() -> Result<i64, Problem> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Problem(format!("the clock is before 1970: {e}")))?;
-    Ok((elapsed.as_secs() / 60) as i64)
+    Ok(elapsed.as_secs() as i64)
 }
 
 pub fn run_next() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let entries = next(&Gh::new(&root), now_minutes()?, &worktrees(&root)?)?;
+    let entries = next(&Gh::new(&root), now_seconds()?, &worktrees(&root)?)?;
     println!("{}", render_next(&entries));
     Ok(Verdict::Pass)
 }
@@ -478,9 +483,10 @@ fn render_status(thread: &str, branch: &str, lease: i64, nonce: &str) -> String 
     )
 }
 
-/// Claims an issue as AGENTS.md describes: label it, write a status comment,
-/// and read it again. The nonce tells this claim from another one that edited
-/// the same comment.
+/// Claims an issue as AGENTS.md describes: write a status comment, label it,
+/// and read it again. The comment comes first so that a claim that dies here
+/// still has a lease that runs out. The nonce tells this claim from another
+/// one that edited the same comment.
 fn claim(
     forge: &dyn Forge,
     number: u64,
@@ -497,6 +503,13 @@ fn claim(
     if !state.claimable() {
         return Ok(Claim::Lost(format!("#{number} is {}", state.word())));
     }
+    if let State::Abandoned { branch: Some(kept) } = state
+        && kept != branch
+    {
+        return Ok(Claim::Lost(format!(
+            "#{number} continues on `{kept}`, but this is `{branch}`"
+        )));
+    }
     let (held, _) = view.held(&states);
     if any_overlap(&touches(&issue.body), &held) {
         return Ok(Claim::Lost(format!(
@@ -504,8 +517,7 @@ fn claim(
         )));
     }
 
-    forge.add_label(number, IN_PROGRESS)?;
-    let body = render_status(thread, branch, now + LEASE_MINUTES, nonce);
+    let body = render_status(thread, branch, now + LEASE_SECONDS, nonce);
     let earlier = view
         .statuses(issue)
         .into_iter()
@@ -517,6 +529,7 @@ fn claim(
         }
         None => forge.post_comment(number, &body)?,
     };
+    forge.add_label(number, IN_PROGRESS)?;
 
     let after = forge.issue(number)?;
     let intact = after
@@ -548,7 +561,8 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
             "`claim` records the current branch, but this is `{branch}`. Check out the issue's branch"
         )));
     }
-    let now = now_minutes()?;
+    let _slot = lock::claim_slot(&root)?;
+    let now = now_seconds()?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.subsec_nanos());
@@ -571,13 +585,13 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
 
 #[cfg(test)]
 mod tests {
-    use super::{Claim, claim, minutes, overlap, stamp};
+    use super::{Claim, claim, overlap, seconds, stamp};
     use crate::Problem;
     use crate::forge::{Comment, Forge, Issue};
     use std::cell::{Cell, RefCell};
 
     const OWNER: &str = "owner";
-    const NOW: i64 = 1_000_000;
+    const NOW: i64 = 60_000_000;
     const TOUCHES: &str = "## Touches\n`crates/a`\n";
 
     type Interference = Box<dyn Fn(&mut Vec<Issue>)>;
@@ -589,6 +603,7 @@ mod tests {
         next_id: Cell<u64>,
         writes: RefCell<Vec<String>>,
         interfere: RefCell<Option<Interference>>,
+        branch_date: Option<String>,
     }
 
     impl Fake {
@@ -598,6 +613,7 @@ mod tests {
                 next_id: Cell::new(100),
                 writes: RefCell::new(Vec::new()),
                 interfere: RefCell::new(None),
+                branch_date: None,
             }
         }
 
@@ -639,7 +655,7 @@ mod tests {
         }
 
         fn branch_date(&self, _branch: &str) -> Result<Option<String>, Problem> {
-            Ok(None)
+            Ok(self.branch_date.clone())
         }
 
         fn add_label(&self, number: u64, label: &str) -> Result<(), Problem> {
@@ -698,7 +714,11 @@ mod tests {
     }
 
     fn try_claim(forge: &Fake) -> Claim {
-        claim(forge, 7, "7-x", "thread", NOW, "n")
+        try_claim_on(forge, "7-x")
+    }
+
+    fn try_claim_on(forge: &Fake, branch: &str) -> Claim {
+        claim(forge, 7, branch, "thread", NOW, "n")
             .map_err(|e| e.0)
             .unwrap()
     }
@@ -711,14 +731,14 @@ mod tests {
             "2026-11-09T14:00Z",
             "2100-03-01T00:01Z",
         ] {
-            assert_eq!(stamp(minutes(text).unwrap()), text);
+            assert_eq!(stamp(seconds(text).unwrap()), text);
         }
-        assert_eq!(minutes("1970-01-01T01:00Z"), Some(60));
-        assert_eq!(minutes("1970-01-02T00:00:59Z"), Some(1440));
+        assert_eq!(seconds("1970-01-01T01:00Z"), Some(3600));
+        assert_eq!(seconds("1970-01-02T00:00:59Z"), Some(86459));
     }
 
     #[test]
-    fn a_bad_stamp_has_no_minutes() {
+    fn a_bad_stamp_has_no_seconds() {
         for text in [
             "",
             "tomorrow",
@@ -727,8 +747,10 @@ mod tests {
             "2026-11-09T25:00Z",
             "2026-11-09T14:00",
             "2026-11-09-01T14:00Z",
+            "2026-11-09T14:00:60Z",
+            "2026-11-09T14:00:00:00Z",
         ] {
-            assert_eq!(minutes(text), None, "{text}");
+            assert_eq!(seconds(text), None, "{text}");
         }
     }
 
@@ -743,7 +765,7 @@ mod tests {
     fn a_first_claim_labels_and_posts_a_full_status() {
         let forge = Fake::new(vec![issue(vec![])]);
         assert_eq!(try_claim(&forge), Claim::Won { comment: 100 });
-        assert_eq!(forge.writes(), ["label 7 in-progress", "post 7"]);
+        assert_eq!(forge.writes(), ["post 7", "label 7 in-progress"]);
         let body = forge.body_of(100);
         for line in [
             "<!-- status -->\n",
@@ -756,17 +778,17 @@ mod tests {
         ] {
             assert!(body.contains(line), "{line}: {body}");
         }
-        let lease = format!("**Lease until:** {}\n", stamp(NOW + 720));
+        let lease = format!("**Lease until:** {}\n", stamp(NOW + 12 * 3600));
         assert!(body.contains(&lease), "{body}");
     }
 
     #[test]
     fn an_earlier_parked_or_expired_comment_is_edited() {
-        for (state, lease) in [("parked", NOW + 500), ("working", NOW - 1)] {
+        for (state, lease) in [("parked", NOW + 3600), ("working", NOW - 60)] {
             let earlier = comment(40, OWNER, &status(state, lease));
             let forge = Fake::new(vec![issue(vec![earlier])]);
             assert_eq!(try_claim(&forge), Claim::Won { comment: 40 });
-            assert_eq!(forge.writes(), ["label 7 in-progress", "edit 40"]);
+            assert_eq!(forge.writes(), ["edit 40", "label 7 in-progress"]);
         }
     }
 
@@ -774,7 +796,7 @@ mod tests {
         Box::new(move |issues| {
             issues[0]
                 .comments
-                .push(comment(id, author, &status("working", NOW + 100)));
+                .push(comment(id, author, &status("working", NOW + 3600)));
         })
     }
 
@@ -814,7 +836,7 @@ mod tests {
             Case {
                 name: "overwritten by another claim",
                 interfere: Some(Box::new(|issues| {
-                    issues[0].comments[0].body = status("working", NOW + 700);
+                    issues[0].comments[0].body = status("working", NOW + 7200);
                 })),
                 won: false,
                 retired: false,
@@ -852,6 +874,22 @@ mod tests {
     }
 
     #[test]
+    fn a_takeover_must_be_on_the_abandoned_branch() {
+        let taken = || {
+            let mut held = issue(vec![comment(40, OWNER, &status("working", NOW - 600))]);
+            held.labels.push("in-progress".to_string());
+            let mut forge = Fake::new(vec![held]);
+            forge.branch_date = Some(stamp(NOW - 1200));
+            forge
+        };
+        let wrong = taken();
+        assert!(matches!(try_claim_on(&wrong, "7-x"), Claim::Lost(_)));
+        assert_eq!(wrong.writes(), Vec::<String>::new());
+        let right = taken();
+        assert_eq!(try_claim_on(&right, "b"), Claim::Won { comment: 40 });
+    }
+
+    #[test]
     fn a_retired_comment_is_no_longer_live() {
         let forge = Fake::new(vec![issue(vec![])]);
         *forge.interfere.borrow_mut() = Some(rival(50, OWNER));
@@ -865,7 +903,7 @@ mod tests {
     fn an_issue_that_can_not_be_claimed_gets_no_writes() {
         let mut parked = issue(vec![]);
         parked.labels.push("needs-owner".to_string());
-        let mut live = issue(vec![comment(40, OWNER, &status("working", NOW + 5))]);
+        let mut live = issue(vec![comment(40, OWNER, &status("working", NOW + 3600))]);
         live.labels.push("in-progress".to_string());
         let mut blocked = issue(vec![]);
         blocked.body.push_str("\nBlocked by #8.\n");
@@ -875,7 +913,7 @@ mod tests {
             labels: vec![],
             ..issue(vec![])
         };
-        let mut other = issue(vec![comment(40, OWNER, &status("working", NOW + 5))]);
+        let mut other = issue(vec![comment(40, OWNER, &status("working", NOW + 3600))]);
         other.number = 2;
         other.labels.push("in-progress".to_string());
         for issues in [

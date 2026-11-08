@@ -17,20 +17,27 @@ const PROTECTED: &[&str] = &[
 ];
 
 /// The commit where this branch left `origin/main`, or `None` if there is no
-/// `origin/main` to compare with. The workspace must be the top of its
+/// `origin/main` to compare with. The workspace must be the top of its own
 /// repository, so that a workspace inside another repository's tree isn't
-/// compared with that repository.
+/// compared with that repository. Any other git failure is a problem, because
+/// skipping the comparison would pass the gate.
 pub fn find(root: &Path) -> Result<Option<String>, Problem> {
-    let top = git(root, &["rev-parse", "--show-cdup"])?;
-    if !top.status.success() || !String::from_utf8_lossy(&top.stdout).trim().is_empty() {
+    if !root.join(".git").exists() {
         return Ok(None);
     }
     let main = format!("{MAIN}^{{commit}}");
-    if !git(root, &["rev-parse", "--verify", "--quiet", &main])?
-        .status
-        .success()
-    {
-        return Ok(None);
+    let args = ["rev-parse", "--verify", "--quiet", &main];
+    let found = git(root, &args)?;
+    match found.status.code() {
+        Some(0) => {}
+        Some(1) => return Ok(None),
+        _ => {
+            return Err(Problem(format!(
+                "`git {}` failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&found.stderr).trim()
+            )));
+        }
     }
     let commit = git_text(root, &["merge-base", MAIN, "HEAD"])?;
     Ok(Some(commit.trim().to_string()))

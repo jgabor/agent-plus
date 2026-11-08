@@ -140,17 +140,19 @@ impl Repo {
         ));
     }
 
-    fn gate(&self) -> Output {
+    fn gate_command(&self) -> Command {
         let path = format!(
             "{}:{}",
             self.bin.display(),
             env::var("PATH").expect("PATH is set")
         );
-        isolated(env!("CARGO_BIN_EXE_xtask"), &self.root)
-            .arg("gate")
-            .env("PATH", path)
-            .output()
-            .unwrap()
+        let mut command = isolated(env!("CARGO_BIN_EXE_xtask"), &self.root);
+        command.arg("gate").env("PATH", path);
+        command
+    }
+
+    fn gate(&self) -> Output {
+        self.gate_command().output().unwrap()
     }
 }
 
@@ -298,6 +300,24 @@ fn without_origin_main_nothing_is_compared() {
     assert_passes(&output);
     assert!(
         stdout(&output).contains("skip base\n"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_git_that_cannot_run_is_a_problem() {
+    let repo = Repo::new("broken-git", CHECK_ONE, &[]);
+    repo.write("crates/demo/src/lib.rs", NO_CHECK);
+    repo.commit();
+    let output = repo
+        .gate_command()
+        .env("GIT_CONFIG_COUNT", "invalid")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        !stdout(&output).contains("skip base"),
         "{}",
         stdout(&output)
     );

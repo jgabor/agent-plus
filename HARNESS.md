@@ -218,7 +218,7 @@ A failing floor blocks a merge regardless of scores.
 | A closed network stays closed | `floor_closed_network`, needed by step 10 |
 | A share can't reach outside its root | `floor_share_root`, needed by step 9 |
 | The guest can't run anything on the host | `floor_guest_host`, needed by step 4 |
-| No check is removed unless the sentence it quoted is also removed | Comparison with the base |
+| No check is removed while the sentence it quoted is still a promise | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
 
 **C floor.** On Linux x86_64, Linux arm64, and macOS arm64, the resolved

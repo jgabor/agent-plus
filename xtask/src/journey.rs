@@ -13,10 +13,18 @@ const JOURNEY_FILE: &str = "harness/journey.toml";
 
 struct Step {
     id: i64,
+    name: String,
     needs: Vec<i64>,
     script: String,
     floor: Option<String>,
     spend: bool,
+}
+
+/// What happened to one step: `pass`, `fail`, or `skip`.
+pub struct Outcome {
+    pub id: i64,
+    pub name: String,
+    pub state: &'static str,
 }
 
 /// Prints each step and the count. It exits 0 whenever it could run, because
@@ -24,7 +32,7 @@ struct Step {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let _hold = lock::shared(&root)?;
-    let (passing, steps) = walk(&root, |line| println!("{line}"))?;
+    let (passing, steps) = tally(&walk(&root, |line| println!("{line}"))?);
     println!("journey {passing} of {steps}");
     Ok(Verdict::Pass)
 }
@@ -32,15 +40,27 @@ pub fn run() -> Result<Verdict, Problem> {
 /// How many steps pass, and how many there are, for a caller whose stdout is
 /// its result. The caller holds the activity lock.
 pub fn count(root: &Path) -> Result<(usize, usize), Problem> {
+    Ok(tally(&outcomes(root)?))
+}
+
+/// Each step's result in journey order, for a caller whose stdout is its
+/// result. The caller holds the activity lock.
+pub fn outcomes(root: &Path) -> Result<Vec<Outcome>, Problem> {
     walk(root, |line| eprintln!("{line}"))
 }
 
-fn walk(root: &Path, report: impl Fn(&str)) -> Result<(usize, usize), Problem> {
+fn tally(outcomes: &[Outcome]) -> (usize, usize) {
+    let passing = outcomes.iter().filter(|o| o.state == "pass").count();
+    (passing, outcomes.len())
+}
+
+fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
 
     let mut passed = HashSet::new();
+    let mut outcomes = Vec::new();
     for step in &steps {
         let word = if step.spend || !step.needs.iter().all(|need| passed.contains(need)) {
             "skip"
@@ -51,8 +71,13 @@ fn walk(root: &Path, report: impl Fn(&str)) -> Result<(usize, usize), Problem> {
             "fail"
         };
         report(&format!("{word} step {}", step.id));
+        outcomes.push(Outcome {
+            id: step.id,
+            name: step.name.clone(),
+            state: word,
+        });
     }
-    Ok((passed.len(), steps.len()))
+    Ok(outcomes)
 }
 
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
@@ -66,6 +91,10 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
         let id = table.int("id").ok_or_else(|| bad("has no integer `id`"))?;
         let step = Step {
             id,
+            name: table
+                .str("name")
+                .ok_or_else(|| bad("has no `name`"))?
+                .to_string(),
             needs: table
                 .ints("needs")
                 .ok_or_else(|| bad("has no integer array `needs`"))?,

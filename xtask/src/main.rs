@@ -4,6 +4,7 @@ mod base;
 mod bench;
 mod floors;
 mod forge;
+mod gaps;
 mod gate;
 mod journey;
 mod json;
@@ -25,6 +26,7 @@ usage: cargo xtask <command>
 commands:
   gate             run the checks a change must pass
   score [--json]   print the scores
+  gaps [--json]    list the failing steps, missed budgets, and unproven promises
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
   bench            compare the budgets with the base build
@@ -55,6 +57,9 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["gate"] => gate::run(),
         ["score"] => score::run(false),
         ["score", "--json"] => score::run(true),
+        ["gaps"] => gaps::run(false),
+        ["gaps", "--json"] => gaps::run(true),
+        ["gaps", ..] => Err(Problem(format!("`gaps` takes only `--json`\n\n{USAGE}"))),
         ["run", command @ ..] => lock::run(command),
         ["journey"] => journey::run(),
         ["bench"] => bench::run(),

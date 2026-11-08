@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 
 pub const MAIN: &str = "refs/remotes/origin/main";
 pub const SPEC_CHANGE: &str = "spec-change";
+const LEDGER: &str = "harness/ledger";
 const PROTECTED: &[&str] = &[
     "SPEC.md",
     "harness/waived.txt",
@@ -79,6 +80,42 @@ pub fn removed_checks(root: &Path, base: &str, score: &Score) -> Result<Vec<Stri
     Ok(findings)
 }
 
+/// Whether HEAD is exactly `base` with one earlier commit of its history undone,
+/// going by the `git revert` message and replaying that revert. The ledger stays
+/// as `base` has it, because a record says what was measured.
+pub fn is_exact_revert(root: &Path, base: &str) -> Result<bool, Problem> {
+    let messages = git_text(root, &["log", "--format=%B", &format!("{base}..HEAD")])?;
+    let Some(commit) = messages.lines().find_map(reverted_commit) else {
+        return Ok(false);
+    };
+    let parent = format!("{commit}~1");
+    let in_history = git(root, &["merge-base", "--is-ancestor", commit, base])?
+        .status
+        .success();
+    if !in_history {
+        return Ok(false);
+    }
+    // A conflict or a commit with no parent gives no tree that HEAD can match.
+    let from = format!("--merge-base={commit}");
+    let replayed = git(root, &["merge-tree", "--write-tree", &from, base, &parent])?;
+    let tree = String::from_utf8_lossy(&replayed.stdout);
+    let tree = tree.lines().next().unwrap_or_default();
+    let same = |args: &[&str]| -> Result<bool, Problem> {
+        Ok(git(root, &[&["diff", "--quiet"], args].concat())?
+            .status
+            .success())
+    };
+    Ok(same(&[base, "HEAD", "--", LEDGER])?
+        && same(&[tree, "HEAD", "--", ".", &format!(":(exclude){LEDGER}")])?)
+}
+
+fn reverted_commit(line: &str) -> Option<&str> {
+    let commit = line
+        .strip_prefix("This reverts commit ")?
+        .strip_suffix('.')?;
+    (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())).then_some(commit)
+}
+
 /// Names each protected path changed without the label. `None` means a
 /// protected path changed, but the branch has no open PR to read a label from.
 pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Problem> {
@@ -119,7 +156,7 @@ pub fn missing_label_on(
     Ok(label_findings(&protected_changes(root, base)?))
 }
 
-fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
+pub fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
     let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
     Ok(changed
         .split('\0')

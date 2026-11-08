@@ -2,7 +2,9 @@
 
 use crate::forge::{Forge, Gh};
 use crate::report::ISSUE_TITLE;
-use crate::{Problem, Verdict, base, bench, gate, journey, ledger, lock, report, workspace};
+use crate::{
+    Problem, Verdict, base, bench, bisect, gate, journey, ledger, lock, report, workspace,
+};
 use std::path::Path;
 
 const ISSUE_BODY: &str = "Each night's report is a comment on this issue.";
@@ -22,7 +24,8 @@ pub fn run() -> Result<Verdict, Problem> {
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""))))];
     let hold = lock::shared(&root)?;
     let gated = gate::check(&root, &hold, None).map(|(verdict, _)| verdict);
-    checks.push(("gate", state(gated)));
+    let gated = state(gated);
+    checks.push(("gate", gated));
     checks.push(("t2", t2(&root)));
     // No unattended run may spend money until HARNESS.md sets a limit.
     checks.push(("t3", SKIP));
@@ -41,7 +44,13 @@ pub fn run() -> Result<Verdict, Problem> {
         (Verdict::Pass, "success", PASS)
     };
     Gh::new(&root).post_status(&commit, STATUS, status)?;
+    let responded = if gated == FAIL {
+        bisect::respond(&root, &commit, STATUS)
+    } else {
+        Ok(())
+    };
     posted?;
+    responded?;
     for (name, state) in &checks {
         println!("{state} {name}");
     }

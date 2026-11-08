@@ -2,6 +2,7 @@
 
 mod base;
 mod bench;
+mod bisect;
 mod floors;
 mod forge;
 mod gaps;

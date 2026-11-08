@@ -159,6 +159,44 @@ impl Gh {
         issue_number(url.trim()).ok_or_else(|| unexpected("gh issue create"))
     }
 
+    /// Returns the new PR's number. It targets `main`, and the branch must
+    /// already be pushed.
+    pub fn create_pr(
+        &self,
+        branch: &str,
+        title: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> Result<u64, Problem> {
+        let mut args = vec![
+            "pr", "create", "--base", "main", "--head", branch, "--title", title, "--body", body,
+        ];
+        if let Some(label) = label {
+            args.extend(["--label", label]);
+        }
+        let url = self.text(&args, None)?;
+        url.trim()
+            .rsplit_once("/pull/")
+            .and_then(|(_, number)| number.parse().ok())
+            .ok_or_else(|| unexpected("gh pr create"))
+    }
+
+    /// Whether this status is a success on this commit.
+    pub fn status_passed(&self, commit: &str, context: &str) -> Result<bool, Problem> {
+        let value = self.json(&[
+            "api",
+            &format!("repos/{{owner}}/{{repo}}/commits/{commit}/status"),
+        ])?;
+        let statuses = value
+            .get("statuses")
+            .and_then(Json::as_arr)
+            .ok_or_else(|| unexpected("gh api"))?;
+        Ok(statuses.iter().any(|status| {
+            status.get("context").and_then(Json::as_str) == Some(context)
+                && status.get("state").and_then(Json::as_str) == Some("success")
+        }))
+    }
+
     pub fn pin_issue(&self, number: u64) -> Result<(), Problem> {
         self.text(&["issue", "pin", &number.to_string()], None)?;
         Ok(())

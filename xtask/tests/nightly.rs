@@ -22,9 +22,12 @@ case "$1 $2" in
   "issue view") cat "$(dirname "$0")/issue.json" ;;
   "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
+  "api repos/"*) echo '{"statuses":[]}' ;;
   "issue pin") ;;
   "issue comment")
-    cat > "$(dirname "$0")/comment"
+    n="$(cat "$(dirname "$0")/comments" 2>/dev/null || echo 0)"
+    echo $((n + 1)) > "$(dirname "$0")/comments"
+    cat > "$(dirname "$0")/comment-$((n + 1))"
     if [ -e "$(dirname "$0")/no-comments" ]; then echo "comments are off" >&2; exit 1; fi
     echo "https://github.com/o/r/issues/$3#issuecomment-5" ;;
   "api -X") ;;
@@ -248,7 +251,7 @@ impl Repo {
     }
 
     fn comment(&self) -> String {
-        fs::read_to_string(self.bin.join("comment")).unwrap()
+        fs::read_to_string(self.bin.join("comment-1")).unwrap()
     }
 
     fn xtask(&self, args: &[&str]) -> Output {
@@ -838,7 +841,7 @@ fn a_report_that_cant_be_built_still_fails_the_commit() {
         "{:?}",
         repo.calls()
     );
-    assert!(!repo.bin.join("comment").exists());
+    assert!(!repo.bin.join("comment-1").exists());
 }
 
 #[test]

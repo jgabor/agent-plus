@@ -1,6 +1,6 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
-use crate::{Problem, Verdict};
+use crate::{Problem, Verdict, floors};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,12 +37,14 @@ pub fn run() -> Result<Verdict, Problem> {
     let root = workspace_root()?;
     require_tools(&root)?;
     let mut verdict = Verdict::Pass;
+    let findings = floors::check(&root)?;
+    for finding in &findings {
+        eprintln!("floor: {finding}");
+    }
+    record("floors", findings.is_empty(), &mut verdict);
     for check in CHECKS {
         let passed = cargo_passes(&root, check.args)?;
-        println!("{} {}", if passed { "pass" } else { "fail" }, check.name);
-        if !passed {
-            verdict = Verdict::Fail;
-        }
+        record(check.name, passed, &mut verdict);
     }
     let word = match verdict {
         Verdict::Pass => "pass",
@@ -50,6 +52,13 @@ pub fn run() -> Result<Verdict, Problem> {
     };
     println!("gate: {word}");
     Ok(verdict)
+}
+
+fn record(name: &str, passed: bool, verdict: &mut Verdict) {
+    println!("{} {name}", if passed { "pass" } else { "fail" });
+    if !passed {
+        *verdict = Verdict::Fail;
+    }
 }
 
 fn no_cargo(error: io::Error) -> Problem {
@@ -97,11 +106,14 @@ fn require_tools(root: &Path) -> Result<(), Problem> {
 }
 
 /// Runs a cargo command, with its output on our stderr, so that stdout carries
-/// only the result.
+/// only the result. `CC` and `CXX` point at a program that fails, so a build
+/// that tries to compile C fails even if the floors missed it.
 fn cargo_passes(root: &Path, args: &[&str]) -> Result<bool, Problem> {
     let status = Command::new("cargo")
         .args(args)
         .current_dir(root)
+        .env("CC", "false")
+        .env("CXX", "false")
         .stdout(Stdio::from(io::stderr()))
         .status()
         .map_err(no_cargo)?;

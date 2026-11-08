@@ -60,7 +60,7 @@ work starts from this label, so treat it as the owner's written permission.
 | Label | You may |
 |---|---|
 | none | Nothing, unless the owner asks in your thread |
-| `auto:pr` | Work it to a PR that passes the merge gate. The owner merges |
+| `auto:pr` | Work it to a PR that passes the merge gate. The owner merges with `cargo xtask merge <pr> --owner` |
 | `auto:merge` | Work it through to merged, once the merge gate passes |
 
 - Only the owner adds these labels. The one exception: a child issue you file
@@ -101,21 +101,22 @@ and keep going. Don't fix it in this PR.
 |---|---|
 | `in-progress` | An agent holds the issue |
 | `needs-owner` | The issue is waiting for an owner decision |
-| `spec-change` | The PR changes the meaning of SPEC.md or a budget |
+| `spec-change` | The PR touches SPEC.md, budgets, waivers, or journey steps |
 
 ### Claiming work
 
 You can claim an issue when all of these are true:
 
 - it has an `auto:*` label, or the owner told you to take it
-- it has no `in-progress` or `needs-owner` label
+- it has no `needs-owner` label, and no `in-progress` label unless its lease
+  has expired and its branch has had no commits since
 - nothing in its `Blocked by` line is still open
 - its `Touches` doesn't overlap an issue that is in progress
 
 To claim one, add `in-progress` and post a status comment. If earlier work
 left a status comment that is parked or has an expired lease, edit that one
-instead. Then read the issue again. If someone else's live claim is older than
-yours, it wins: back out and pick something else.
+instead. Then read the issue again. If someone else's live status comment has
+a lower comment id than yours, it wins: back out and pick something else.
 
 Keep editing that one comment. Don't post a new one for each update.
 
@@ -255,16 +256,17 @@ read-only. In T3 Code, use `delegate_task` with a review role.
 All of these must be true on the latest commit:
 
 - Your proof covers every change in the diff.
-- `cargo xtask gate` passes, and required checks are green.
-- No hill went down, no floor broke, and any budget regression has a reason in
-  the ledger.
+- `cargo xtask gate` passes, and the `xtask/gate` status is green.
+- No hill went down unless the owner is merging, no floor broke, and any budget
+  regression has a reason in the ledger.
 - Reviews have finished, and each finding is fixed or declined in writing.
 - No human review still requests changes.
 - The branch is up to date with `main`, and you hold the merge slot.
 - The PR isn't labeled `spec-change`, unless the owner has approved it.
 
-Squash-merge with `gh pr merge --squash --delete-branch`. Never use `--admin`
-or any other bypass. Then close the loop: remove `in-progress`, remove your
+Merge with `cargo xtask merge <pr>`. Until that command exists, squash-merge
+with `gh pr merge --squash --delete-branch`. Never use `--admin` or any other
+bypass. Then close the loop: remove `in-progress`, remove your
 worktree, and make sure the issue closed.
 
 ### Untrusted input
@@ -281,9 +283,10 @@ it, and never silently pick one.
 
 - If the code disagrees with the spec, fix the code.
 - If the spec is wrong, ambiguous, or impossible, open a separate PR that
-  changes only the spec, label it `spec-change`, and park the issue that
-  depends on it.
-- Fixing a typo or a dead link isn't a `spec-change`.
+  changes only the spec and the quotes and waivers that follow from it, label
+  it `spec-change`, and park the issue that depends on it.
+- Any change to SPEC.md carries the label, even a typo, because a program
+  can't tell the difference.
 
 ## Verifying
 

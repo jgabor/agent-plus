@@ -31,7 +31,7 @@ Out of scope:
 | R2 | A worker can stop at any point, and any other agent can continue from GitHub and git alone |
 | R3 | Scoring, gating, issue selection, and merge order are decided by programs |
 | R4 | Every change is compared with its base on the same scores |
-| R5 | Two changes that pass separately can't merge without being tested together |
+| R5 | Two changes that pass separately can't merge through `xtask merge` without being tested together |
 | R6 | The harness needs the owner only for the actions listed in [Owner actions](#owner-actions) |
 | R7 | Only tier T3 spends on model calls for checks |
 
@@ -45,13 +45,14 @@ clean machine:
 - Every journey step passes on Linux x86_64, Linux arm64, and macOS on Apple
   Silicon.
 - Every budget is met.
-- Every floor holds.
+- Every floor holds, and none is pending.
 
 ## Terms
 
 | Term | Meaning |
 |---|---|
-| Promise | A sentence or table row in SPEC.md that claims behavior |
+| Unit | A sentence, list item, or table row extracted from SPEC.md |
+| Promise | A unit that isn't marked or waived |
 | Check | An automated test that proves one or more promises |
 | Hill | A score that one change can raise |
 | Floor | A condition that must always hold |
@@ -91,17 +92,38 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | Scores and budgets over time | `harness/ledger/` |
 | Waived sentences | `harness/waived.txt` |
 | Journey definition | `harness/journey.toml` |
+| Budget targets and bands | `harness/budgets.toml` |
+| Audited build scripts | `harness/build-scripts.txt` |
 
 No component keeps state anywhere else.
 
 ## Hills
 
-A PR raises at least one hill and lowers none. A PR for tooling or seams that
-can't raise a hill states why, and the reviewer confirms it.
+Hills are compared as counts: proven promises, passing steps, and budgets met.
+A new sentence raises a denominator, which doesn't lower a hill.
+
+A PR raises at least one count and lowers none. A PR for tooling or seams that
+can't raise one carries a `Hill: none, <reason>` line in its body, which
+`cargo xtask merge` requires and the reviewer confirms.
 
 ### Spec coverage
 
 **Score:** proven promises divided by all promises.
+
+`xtask` extracts units from SPEC.md by this rule:
+
+- Code fences are ignored. A unit belongs to the nearest heading above it, and
+  headings are unique.
+- A paragraph or list item is unwrapped, then split after `.`, `?`, or `!`
+  followed by a space, outside code spans. `e.g.` and `i.e.` don't end a
+  sentence.
+- A non-header table row is one unit.
+- A fragment ending in a colon isn't a unit.
+- A unit's text is its source with whitespace collapsed and any list marker
+  removed.
+- Identical units in one section count once.
+- A `*Proposed*`, `*Proposed:*`, or `**Planned.**` marker covers its whole
+  paragraph, list item, or table row. Marked units aren't promises.
 
 A check names its promise in a comment directly above the test, quoting the
 sentence exactly:
@@ -113,12 +135,17 @@ fn missing_src_fails() { /* ... */ }
 ```
 
 - `spec(<heading>)` names the SPEC.md section that holds the sentence.
+- A quote is the unit's text on one line, however long.
 - A quote that no longer matches SPEC.md fails the gate.
-- A promise is proven when a check quoting it passes, and nothing on the path
-  the sentence describes is faked.
-- Sentences marked *Proposed* aren't promises.
-- Descriptive sentences are listed in `harness/waived.txt`, each with a reason.
-- A new check must be shown failing before the change that makes it pass.
+- A promise is proven when a check quoting it passes. A test in a package that
+  depends on a `fake-*` crate earns no score. The fake harness running inside
+  a T1 guest is allowed, because it isn't linked into the test.
+- Check function names are unique within a package, which is how a test result
+  maps back to its check.
+- Descriptive units are listed in `harness/waived.txt`, each with a reason. A
+  waiver that matches no unit fails the gate.
+- A PR shows each new check failing before the change that makes it pass. This
+  is evidence for the reviewer, not something a program can check.
 - The nightly job runs mutation testing on crates changed that day. A check
   that survives a mutation of the code it covers opens an issue.
 
@@ -128,6 +155,11 @@ fn missing_src_fails() { /* ... */ }
 
 A step is a script that drives an installed release binary in a clean
 environment. A step counts only if every step in its `needs` also passes.
+
+A step marked `spend` makes a real model call. The merge sequence leaves it,
+and any step that needs it, out of the run and the score. The nightly report
+counts them. A step that names a `floor` fails while that floor's check doesn't
+exist.
 
 | # | Step | Needs |
 |---|---|---|
@@ -153,7 +185,7 @@ environment. A step counts only if every step in its `needs` also passes.
 
 ### Budgets
 
-**Score:** budgets met, out of the budgets defined.
+**Score:** budgets met, out of the budgets with a target.
 
 | Budget | Target | Band |
 |---|---|---|
@@ -163,10 +195,16 @@ environment. A step counts only if every step in its `needs` also passes.
 | `ap build` with nothing changed | under 100 ms | to be set |
 | Desktop cost until first use | disk only | none |
 | Stripped release binary | to be set | to be set |
+| `ap --version` | none | 20% or 2 ms, whichever is larger |
 
-A change that worsens a budget by more than its band fails the gate, unless
-its ledger record has a reason. The reviewer confirms the reason. The nightly
-report lists every reason given that day.
+`harness/budgets.toml` holds the targets and bands. A budget with no band is
+recorded and can't fail.
+
+The bench compares the medians of 15 interleaved pairs of base and candidate
+runs. A change that worsens a budget by more than its band fails, unless its
+ledger record has a reason, taken from a `Budget reason: <text>` line in the
+PR body. The reviewer confirms the reason. The nightly report lists every
+reason given that day.
 
 ## Floors
 
@@ -175,22 +213,38 @@ A failing floor blocks a merge regardless of scores.
 | Floor | Verified by |
 |---|---|
 | No C in the dependency tree, and no build scripts in our crates | `cargo metadata` |
-| A hidden secret can't be read from the guest | Escape checks |
-| A closed network stays closed | Escape checks |
-| A share can't reach outside its root | Escape checks |
-| The guest can't run anything on the host | Escape checks |
+| A hidden secret can't be read from the guest | `floor_hidden_secret`, needed by step 11 |
+| A closed network stays closed | `floor_closed_network`, needed by step 10 |
+| A share can't reach outside its root | `floor_share_root`, needed by step 9 |
+| The guest can't run anything on the host | `floor_guest_host`, needed by step 4 |
 | No check is removed unless the sentence it quoted is also removed | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
+
+**C floor.** On Linux x86_64, Linux arm64, and macOS arm64, the resolved
+dependency graph has no package with a `links` key, no dependency on `cc`,
+`cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly source files, and
+no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
+build script is allowed only in a dependency listed in
+`harness/build-scripts.txt`, and never in our own crates. T0 also builds with
+`CC` and `CXX` pointing at a program that fails.
+
+**Pending floors.** A floor whose check doesn't exist yet is pending. A pending
+floor passes the gate and fails a release. Escape checks are tests in T1, and
+each journey step above can't pass until its check exists.
 
 ## Check tiers
 
 | Tier | Runs | Trigger | Model spend |
 |---|---|---|---|
 | T0 | Format, lint, unit tests, spec quotes, and floors | Every gate | No |
-| T1 | The real `ap` and a real microVM, with the fake harness | Every gate, for affected sections | No |
+| T1 | The real `ap` and a real microVM, with the fake harness | Every gate | No |
 | T2 | Real Claude Code and Codex in the guest, with no credentials | Adapter changes, and nightly | No |
 | T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
 | Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
+
+T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
+change can affect a budget when its diff touches `crates/`, `Cargo.toml`, or
+`Cargo.lock`.
 
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
@@ -201,19 +255,23 @@ of `claude -p <prompt> --output-format stream-json --verbose`, which lists the
 working directory, MCP servers, skills, and commands. The Codex probe is
 undefined (see [Open decisions](#open-decisions)).
 
-**Bench.** Runs in the measuring slot, which is an exclusive hold of the
-activity lock. It interleaves runs of the base build and the candidate build,
-and compares the two.
+**Bench.** Builds the base and the candidate under a shared hold of the
+activity lock, then measures in the measuring slot, which is an exclusive hold.
+It interleaves runs of the two builds, and compares them.
 
 **Activity lock.** Every build, test, and VM run started through `xtask` takes
 the lock shared. A bench takes it exclusively: it waits for current holders to
-finish, and new holders wait while a bench is pending.
+finish, and new holders wait while a bench is pending. Every holder passes
+through a turnstile file, which a pending bench holds. A nested `xtask` inherits
+its parent's hold. The kernel releases a hold when its process exits. `cargo`
+builds `xtask` itself before it can take the lock, which is one reason `xtask`
+has no dependencies.
 
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
 matching, and device input from the guest.
 
 **Flaky tests.** A test is never retried. It is fixed, or quarantined with a
-linked issue.
+linked issue. Quarantine lowers the spec score, so it needs the owner.
 
 ## Lanes
 
@@ -240,9 +298,19 @@ Files outside any single lane follow these rules:
 |---|---|
 | `SPEC.md` | Changed only by `spec-change` PRs |
 | `harness/ledger/` | One new file per merge |
-| `harness/waived.txt` | Union merge through `.gitattributes` |
+| `harness/waived.txt` | Changed only by `spec-change` PRs, with union merge through `.gitattributes` |
 | `harness/journey.toml` | Changed only by `spec-change` PRs |
+| `harness/budgets.toml` | Changed only by `spec-change` PRs |
 | `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
+
+The gate fails when a diff touches one of these `spec-change` paths and its PR
+doesn't have the label. That includes a typo, because a program can't tell a
+typo from a change of meaning. A `spec-change` PR may also edit the `// spec(`
+lines and waivers that quote the changed text. `cargo xtask merge` refuses a
+`spec-change` PR without `--owner`.
+
+Once H5 is complete, `xtask/` and `harness/` need `spec-change` too, apart from
+`harness/ledger/` and `harness/journey/`, so a PR can't weaken its own gate.
 
 ## Data formats
 
@@ -255,6 +323,27 @@ name = "The VMM boots a kernel to guest init"
 needs = [1]
 script = "harness/journey/03-boot.sh"
 ```
+
+A step can also set `floor = "floor_guest_host"`, or `spend = true`.
+
+### Budgets
+
+```toml
+[[budget]]
+key = "version_ms"
+name = "ap --version"
+band_pct = 20.0
+band_abs = 2.0
+```
+
+`target` is optional, and so is the band.
+
+### Waivers and audited build scripts
+
+`harness/waived.txt` holds one waiver per line,
+`<heading><TAB><unit><TAB><reason>`. `harness/build-scripts.txt` holds one
+audited package per line, `<name> <version> <reason>`. Lines starting with `#`
+are comments.
 
 ### Ledger record
 
@@ -280,16 +369,26 @@ binary_bytes = 9312000
 
 | Field | Meaning |
 |---|---|
-| `commit` | The rebased head that was gated, whose tree equals the merge |
+| `commit` | The rebased head that was gated. The merge is that tree plus this record |
 | `spec`, `journey` | Scores at that commit |
 | `reason` | Required when a budget is outside its band, otherwise empty |
-| `budgets` | Only the budgets measured for this change |
+| `budgets` | Every budget's latest value. One this change didn't measure carries over from the previous record |
+
+A change's base scores are those of the newest record in the history of its
+base, or zero if there is none.
 
 ### Issue and status comment
 
 The issue body and status comment follow [AGENTS.md](AGENTS.md#issues). `xtask`
 reads the `Touches`, `Blocked by`, and `Part of` lines, and the `State` and
 `Lease until` fields.
+
+- The paths in `Touches` are its backticked words. Two issues overlap when one
+  path is a prefix of the other.
+- An issue with no `## Touches` isn't claimable, and neither is a parent: an
+  issue that another issue names in `Part of`.
+- `xtask` reads status comments only from the repository owner's account.
+- When two live claims exist, the status comment with the lowest id wins.
 
 ## Commands
 
@@ -298,20 +397,30 @@ is a failure, and 2 is bad usage or an environment error.
 
 | Command | Behavior |
 |---|---|
-| `cargo xtask gate` | Runs T0, affected T1, and the floors, compares scores with the base, and posts the result as a commit status |
+| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and posts `xtask/gate` as a commit status on a clean, pushed head. Otherwise it only prints the result |
 | `cargo xtask score` | Prints the three scores |
-| `cargo xtask gaps` | Lists unproven promises, failing steps, and missed budgets, largest risk first |
+| `cargo xtask gaps` | Lists failing steps in journey order, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |
-| `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
+| `cargo xtask claim <issue>` | Claims an issue, and exits 1 if another claim wins |
+| `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
+| `cargo xtask merge <pr> [--owner]` | Runs the [merge sequence](#merge-sequence) |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 
-`cargo xtask next` prints an array of `{"issue", "touches", "autonomy"}`, in
-planner order, leaving out any issue whose `Touches` overlaps another entry or
-an issue in progress.
+`cargo xtask next` prints an array of
+`{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
+first, with
+at most one entry per free worker slot. When two issues overlap, the lower
+number stays. Any issue that overlaps a live claim is left out, and an abandoned
+issue is included. `branch` names the existing branch of an abandoned issue, and
+`worktree` names where that branch is still checked out. Both are otherwise
+null.
+
+`score`, `gaps`, and `report` take `--json`. Results go to stdout, and
+diagnostics go to stderr.
 
 ## Issue states
 
@@ -338,8 +447,9 @@ Runs every dispatch period.
 
 1. Stop if free disk is below the minimum.
 2. Run `cargo xtask next`.
-3. For each free worker slot, start one worker in a new worktree from
-   `origin/main`, with a brief naming the issue.
+3. For each entry, start one worker with a brief naming the issue: in its
+   `worktree` if it has one, otherwise in a new worktree on its `branch`, or
+   from `origin/main` if it has neither.
 
 Dispatch is idempotent, because all state is on GitHub. A worker that loses a
 claim race exits.
@@ -367,8 +477,9 @@ Initial order, by risk:
 3. Write the check, and record it failing.
 4. Make the smallest change that passes.
 5. Run the gate, and the bench if a budget can be affected.
-6. If the score didn't rise or a floor failed, revert and try again, within
-   the attempt limit. Past the limit, park the issue.
+6. If a floor failed, or no count rose and the PR has no `Hill: none` line,
+   revert and try again, within the attempt limit. Past the limit, park the
+   issue.
 7. Get a review, within the round limit.
 8. Open the PR, and wait for checks and reviews.
 9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
@@ -379,18 +490,29 @@ worker when one is available.
 
 ### Merge sequence
 
-Only one merge runs at a time, under `flock` on a file in the shared git
-directory.
+Only one merge runs at a time, under an exclusive lock on a file in the shared
+git directory. The kernel releases the lock when the process exits, so a killed
+merge can't keep the slot.
 
-1. Take the merge slot.
-2. Fetch `main`, and rebase the branch onto it.
-3. Run the gate on the rebased head, and the bench if a budget can be affected.
-4. Write the ledger record, and push with `--force-with-lease`.
-5. Wait for required checks.
-6. Squash-merge, delete the branch, and release the slot.
+1. Refuse the PR unless its issue has `auto:merge` or `--owner` is given.
+   Refuse a `spec-change` PR without `--owner`.
+2. Take the merge slot.
+3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
+   earlier attempt left at the tip.
+4. Run the gate on the rebased head, the journey without `spend` steps, and the
+   bench if a budget can be affected. A lowered count fails without `--owner`.
+5. Commit the ledger record, whose `commit` is the gated head, and push with
+   `--force-with-lease`.
+6. Verify that the new head differs from the gated head only by that record,
+   and post `xtask/gate` on it.
+7. Squash-merge with `--match-head-commit`, delete the branch, and release the
+   slot.
 
-A merge past the merge timeout releases the slot and restarts from step 1.
-GitHub's merge queue and branch protection aren't required.
+A merge past the merge timeout stops, releases the slot, and restarts.
+
+`xtask/gate` is the only check. Branch protection isn't available on this
+repository's plan, so `xtask merge` enforces the sequence, not GitHub. The
+nightly job reports any commit on `main` with no ledger record.
 
 ### Nightly job
 
@@ -398,11 +520,14 @@ Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
 does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
-2. Run T2, T3, the journey, fuzzing, and mutation testing.
+2. Run the gate, T2, T3, the journey, fuzzing, and mutation testing.
 3. Post the report to one pinned issue: the three scores, what merged, what
    regressed and why, and what waits on the owner.
-4. If a floor failed, bisect the merges since the last passing run, and open a
-   revert PR for the first bad commit.
+4. Post status `xtask/nightly` on the tested commit.
+5. If a floor failed, file an issue, bisect from the newest commit with a
+   passing `xtask/nightly` to this one, and open a revert PR for the first bad
+   commit. The revert is an exact inverse, apart from keeping the reverted
+   ledger record, and is exempt from the removed-check floor.
 
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.
@@ -454,7 +579,7 @@ passes. No scheduled work runs on GitHub.
 | GitHub rate limit | API error | Fall back to REST, and wait for the reset |
 | No progress | Attempt or time limit | The worker parks the issue |
 | PR growth | Review round limit | Extra work becomes new issues |
-| Weakened check | Red proof, floors, and mutation testing | The gate fails, or an issue opens |
+| Weakened check | Review, the removed-check floor, and mutation testing | The gate fails, or an issue opens |
 | Spec and code diverge | Quote mismatch | The gate fails |
 | Worker collision | `Touches` overlap, and rebase conflict | Not dispatched together. On conflict, the worker reassesses |
 | Broken `main` | Nightly job | Bisect and revert PR |
@@ -465,8 +590,10 @@ passes. No scheduled work runs on GitHub.
 ## Owner actions
 
 - Add `auto:*` labels to top-level issues.
-- Approve `spec-change` PRs, which cover SPEC.md, budgets, waivers, and journey
-  steps.
+- Merge `spec-change` PRs, which cover SPEC.md, budgets, waivers, and journey
+  steps, with `cargo xtask merge <pr> --owner`.
+- Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
+- Turn the scheduled tasks on.
 - Answer `needs-owner` issues.
 - Publish releases.
 
@@ -479,8 +606,8 @@ The harness is built before product features.
 | H0 | Workspace, `xtask gate`, T0, and floors | Passes on an empty workspace, and fails on a planted C dependency |
 | H1 | Spec score, quotes, and waivers | The score prints, and editing a quoted sentence fails the gate |
 | H2 | Fake harness, fake VM, and lane seams | One promise is proven through the real parser |
-| H3 | Journey runner, ledger, and bench | Step 1 passes and writes a record, and a planted slowdown fails |
-| H4 | `xtask next`, activity lock, merge slot, and the dispatcher and planner tasks | A planted issue merges unattended, even when its worker is killed midway |
+| H3 | Activity lock, journey runner, ledger, and bench | Step 1 passes and writes a record, and a planted slowdown fails |
+| H4 | `xtask next`, `xtask claim`, merge slot, and the dispatcher and planner tasks | A planted issue merges unattended, even when its worker is killed midway |
 | H5 | `xtask nightly`, and the nightly task | A planted break on `main` is bisected, and a revert PR opens |
 
 ## Open decisions
@@ -493,5 +620,6 @@ The harness is built before product features.
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
 | How a T3 Code scheduled task selects its model. `schedule_task` has no model setting | Each task is bound to a thread set to its model |
-| Budget bands, and the binary size target | Budgets are recorded, and don't fail the gate |
+| Bands for every budget except `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
+| Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

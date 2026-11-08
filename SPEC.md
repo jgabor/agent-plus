@@ -508,8 +508,8 @@ Each harness has an adapter. The adapter defines:
 Anthropic on your machine during the build, verifies it against the
 lockfile, and never redistributes it:
 
-- `ap push` replaces proprietary harness layers with references. The
-  receiving machine downloads them from the vendor, pinned by digest.
+- **Planned.** `ap push` replaces proprietary harness layers with references.
+  The receiving machine downloads them from the vendor, pinned by digest.
 - `ap build --exe` leaves proprietary layers out, and the executable
   downloads them on first run. `--include-proprietary` embeds them in an
   executable for your own offline use, with a notice that the file must not
@@ -1084,9 +1084,10 @@ Every `SEAL` is a [grant](#grants).
   `~/.ssh` or by asking for the passphrase. A run that can't decrypt it
   fails, and the error names the secret.
 - `ap build --exe` includes sealed layers, so a handed-over executable keeps
-  the secret. `ap push` never does, so a sealed secret can't reach a
-  registry. A pulled agent has no sealed layer, so it reads the secret from
-  your environment or secret store, like any other secret.
+  the secret.
+- **Planned.** `ap push` never includes sealed layers, so a sealed secret can't
+  reach a registry. A pulled agent has no sealed layer, so it reads the secret
+  from your environment or secret store, like any other secret.
 - A name can't appear in both `SECRET` and `SEAL`.
 
 ### AUTH

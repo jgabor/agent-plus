@@ -27,6 +27,7 @@ case "$1 $2" in
   "issue view") cat "$d/issue.json" ;;
   "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create")
+    if [ -e "$d/no-create" ]; then echo "issues are off" >&2; exit 1; fi
     n="$(cat "$d/next")"
     echo $((n + 1)) > "$d/next"
     echo "https://github.com/o/r/issues/$n" ;;
@@ -571,4 +572,19 @@ fn a_response_holds_its_slot_from_the_lookup_to_the_outcome() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let held = fs::read_to_string(repo.bin.join("held")).unwrap();
     assert_eq!(held, "issue list\nissue create\napi repos/{owner}/{repo}/commits/START/status\npr create\nissue comment\n".replace("START", &repo.git(&["rev-parse", "HEAD~1"])));
+}
+
+#[test]
+fn a_response_that_cant_start_is_an_error() {
+    let repo = Repo::new("no-create", FAST);
+    repo.plant(1, 0);
+    repo.set_issues(&format!("[{REPORT_ISSUE}]"));
+    fs::write(repo.bin.join("no-create"), "").unwrap();
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("issues are off"),
+        "{}",
+        stderr(&output)
+    );
 }

@@ -2,9 +2,11 @@
 
 use crate::Problem;
 use crate::json::{self, Json};
+use crate::lock::Hold;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 const FIELDS: &str = "number,state,body,labels,comments";
 const ISSUE_LIMIT: usize = 2000;
@@ -25,6 +27,21 @@ pub struct Issue {
     pub body: String,
     pub labels: Vec<String>,
     pub comments: Vec<Comment>,
+}
+
+/// A PR, as far as the merge sequence needs one.
+pub struct PullRequest {
+    pub state: String,
+    /// A branch in another repository, whose name means nothing in this one.
+    pub from_fork: bool,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    /// The issues in this repository that GitHub will close when this merges,
+    /// from any closing word.
+    pub closing_issues: Vec<u64>,
+    pub changes_requested: bool,
 }
 
 pub trait Forge {
@@ -52,16 +69,21 @@ impl Gh {
         }
     }
 
-    fn output(&self, args: &[&str], input: Option<&str>) -> Result<std::process::Output, Problem> {
+    fn output(&self, args: &[&str], input: Option<&str>) -> Result<Output, Problem> {
+        let stdin = if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        self.spawned(args, stdin, input)
+    }
+
+    fn spawned(&self, args: &[&str], stdin: Stdio, input: Option<&str>) -> Result<Output, Problem> {
         let couldnt = |e: std::io::Error| Problem(format!("couldn't run `gh`: {e}"));
         let mut child = Command::new("gh")
             .args(args)
             .current_dir(&self.root)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -74,7 +96,10 @@ impl Gh {
     }
 
     fn text(&self, args: &[&str], input: Option<&str>) -> Result<String, Problem> {
-        let output = self.output(args, input)?;
+        self.checked(args, self.output(args, input)?)
+    }
+
+    fn checked(&self, args: &[&str], output: Output) -> Result<String, Problem> {
         if !output.status.success() {
             return Err(Problem(format!(
                 "`gh {}` failed: {}",
@@ -88,6 +113,62 @@ impl Gh {
     fn json(&self, args: &[&str]) -> Result<Json, Problem> {
         json::parse(&self.text(args, None)?)
             .map_err(|e| Problem(format!("couldn't read `gh {}` output: {e}", args.join(" "))))
+    }
+
+    pub fn pull_request(&self, number: u64) -> Result<PullRequest, Problem> {
+        let value = self.json(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "url,isCrossRepository,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
+        ])?;
+        read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
+    }
+
+    /// Sets the one check this repository has on a commit.
+    pub fn post_status(&self, commit: &str, state: &str) -> Result<(), Problem> {
+        let path = format!("repos/{{owner}}/{{repo}}/statuses/{commit}");
+        let state = format!("state={state}");
+        self.text(
+            &[
+                "api",
+                "-X",
+                "POST",
+                &path,
+                "-f",
+                &state,
+                "-f",
+                "context=xtask/gate",
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// Squash-merges only if the branch is still at `head`. Naming the
+    /// repository keeps `gh` away from the local branches. `gh` keeps the merge
+    /// slot until it exits, because a squash that lands after the next merge
+    /// took the slot would put that merge on a `main` it wasn't tested on.
+    pub fn merge_pr(&self, number: u64, head: &str, slot: &Hold) -> Result<(), Problem> {
+        let value = self.json(&["repo", "view", "--json", "nameWithOwner"])?;
+        let name = value
+            .get("nameWithOwner")
+            .and_then(Json::as_str)
+            .ok_or_else(|| unexpected("gh repo view"))?;
+        let args = [
+            "pr",
+            "merge",
+            &number.to_string(),
+            "-R",
+            name,
+            "--squash",
+            "--delete-branch",
+            "--match-head-commit",
+            head,
+        ];
+        self.checked(&args, self.spawned(&args, slot.as_stdin()?, None)?)?;
+        Ok(())
     }
 }
 
@@ -191,6 +272,57 @@ fn read_issue(value: &Json) -> Option<Issue> {
             .collect::<Option<_>>()?,
         comments: comments.iter().map(read_comment).collect::<Option<_>>()?,
     })
+}
+
+fn read_pull_request(value: &Json) -> Option<PullRequest> {
+    let text = |key: &str| Some(value.get(key)?.as_str()?.to_string());
+    let url = text("url")?;
+    let here = format!("{}/issues/", url.rsplit_once("/pull/")?.0);
+    let is_here = |issue: &&Json| {
+        let url = issue.get("url").and_then(Json::as_str);
+        url.is_some_and(|url| url.starts_with(&here))
+    };
+    Some(PullRequest {
+        state: text("state")?,
+        from_fork: value.get("isCrossRepository")?.as_bool()?,
+        head_ref: text("headRefName")?,
+        base_ref: text("baseRefName")?,
+        body: text("body")?,
+        labels: value
+            .get("labels")?
+            .as_arr()?
+            .iter()
+            .map(|label| Some(label.get("name")?.as_str()?.to_string()))
+            .collect::<Option<_>>()?,
+        closing_issues: value
+            .get("closingIssuesReferences")?
+            .as_arr()?
+            .iter()
+            .filter(is_here)
+            .map(|issue| issue.get("number")?.as_u64())
+            .collect::<Option<_>>()?,
+        changes_requested: has_standing_request(value.get("reviews")?.as_arr()?)?,
+    })
+}
+
+/// Whether a reviewer's latest decision is a change request. GitHub's own
+/// summary of this is empty on a repository with no required reviews. A comment
+/// decides nothing, so it leaves an earlier request standing.
+fn has_standing_request(reviews: &[Json]) -> Option<bool> {
+    let mut latest = HashMap::new();
+    for review in reviews {
+        // A deleted account has no author.
+        let author = review
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        let state = review.get("state")?.as_str()?;
+        if state != "COMMENTED" && state != "PENDING" {
+            latest.insert(author, state);
+        }
+    }
+    Some(latest.values().any(|state| *state == "CHANGES_REQUESTED"))
 }
 
 fn read_comment(value: &Json) -> Option<Comment> {

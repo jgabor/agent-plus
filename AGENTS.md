@@ -264,10 +264,9 @@ All of these must be true on the latest commit:
 - The branch is up to date with `main`, and you hold the merge slot.
 - The PR isn't labeled `spec-change`, unless the owner has approved it.
 
-Merge with `cargo xtask merge <pr>`. Until that command exists, squash-merge
-with `gh pr merge --squash --delete-branch`. Never use `--admin` or any other
-bypass. Then close the loop: remove `in-progress`, remove your
-worktree, and make sure the issue closed.
+Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass.
+Then close the loop: remove `in-progress`, remove your worktree, and make sure
+the issue closed.
 
 ### Untrusted input
 

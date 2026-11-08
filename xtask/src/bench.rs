@@ -115,31 +115,37 @@ pub fn met(budgets: &[Budget], values: &BTreeMap<String, f64>) -> (usize, usize)
 }
 
 pub fn run() -> Result<Verdict, Problem> {
-    let root = workspace::root()?;
-    let budgets = read_budgets(&root)?;
-    let Some(commit) = base::find(&root)? else {
+    compare(&workspace::root()?, None)
+}
+
+/// Measures HEAD against its base. A merge passes the PR body it read, which
+/// says why any slowdown is worth it. Otherwise that comes from this branch's
+/// open PR.
+pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
+    let budgets = read_budgets(root)?;
+    let Some(commit) = base::find(root)? else {
         return Err(Problem(
             "there is no origin/main to compare with. Run `git fetch origin main`".to_string(),
         ));
     };
-    ledger::clear_measured(&root)?;
-    let head = clean_head(&root)?;
+    ledger::clear_measured(root)?;
+    let head = clean_head(root)?;
 
     let directory = root.join("target/bench");
-    let hold = lock::shared(&root)?;
-    let candidate = build_candidate(&root, &directory)?;
-    let baseline = build_base(&root, &directory, &commit)?;
+    let hold = lock::shared(root)?;
+    let candidate = build_candidate(root, &directory)?;
+    let baseline = build_base(root, &directory, &commit)?;
     drop(hold);
 
-    let measuring = lock::exclusive(&root)?;
+    let measuring = lock::exclusive(root)?;
     let rows = measure(&budgets, &baseline, &candidate)?;
     drop(measuring);
 
     let any_over = rows.iter().any(|row| row.over);
-    let reason = if any_over {
-        base::budget_reason(&root)?
-    } else {
-        None
+    let reason = match (any_over, pr_body) {
+        (false, _) => None,
+        (true, Some(body)) => base::reason_in(body),
+        (true, None) => base::budget_reason(root)?,
     };
     let mut verdict = Verdict::Pass;
     let mut values = BTreeMap::new();
@@ -170,12 +176,12 @@ pub fn run() -> Result<Verdict, Problem> {
     }
     if verdict == Verdict::Pass {
         if let Some(commit) = head
-            && clean_head(&root)?.as_ref() == Some(&commit)
+            && clean_head(root)?.as_ref() == Some(&commit)
         {
             let reason = reason.unwrap_or_default();
             let budgets = values;
             ledger::write_measured(
-                &root,
+                root,
                 &Measured {
                     commit,
                     reason,
@@ -225,7 +231,7 @@ fn build_base(root: &Path, directory: &Path, commit: &str) -> Result<PathBuf, Pr
 }
 
 /// The system's temp directory, which must be outside the checkout.
-fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
+pub fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
     let resolve = |path: &Path| {
         fs::canonicalize(path)
             .map_err(|e| Problem(format!("couldn't resolve {}: {e}", path.display())))

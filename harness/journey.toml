@@ -1,0 +1,119 @@
+[[step]]
+id = 1
+name = "`ap --version` runs from a release build"
+needs = []
+script = "harness/journey/01-version.sh"
+
+[[step]]
+id = 2
+name = "`ap fmt` and parse errors work on a real Agentfile"
+needs = [1]
+script = "harness/journey/02-fmt.sh"
+
+[[step]]
+id = 3
+name = "The VMM boots a kernel to guest init"
+needs = [1]
+script = "harness/journey/03-boot.sh"
+
+[[step]]
+id = 4
+name = "A command runs in the guest and returns its exit code"
+needs = [3]
+script = "harness/journey/04-exec.sh"
+floor = "floor_guest_host"
+
+[[step]]
+id = 5
+name = "`ap build` writes layers, and a rebuild with no changes is a hit"
+needs = [2]
+script = "harness/journey/05-build.sh"
+
+[[step]]
+id = 6
+name = "The first build lists grants, and a wider grant asks again"
+needs = [5]
+script = "harness/journey/06-grants.sh"
+
+[[step]]
+id = 7
+name = "`ap run` starts the fake harness in the guest"
+needs = [4, 5]
+script = "harness/journey/07-run.sh"
+
+[[step]]
+id = 8
+name = "Claude Code and Codex start in the guest with no credentials"
+needs = [7]
+script = "harness/journey/08-harnesses.sh"
+
+[[step]]
+id = 9
+name = "A share is copy-on-write, and `ap diff` and `ap apply` work"
+needs = [7]
+script = "harness/journey/09-share.sh"
+floor = "floor_share_root"
+
+[[step]]
+id = 10
+name = "`NETWORK` rules hold, and a closed network stays closed"
+needs = [7]
+script = "harness/journey/10-network.sh"
+floor = "floor_closed_network"
+
+[[step]]
+id = 11
+name = "A hidden secret reaches only its host, and the agent can't read it"
+needs = [10]
+script = "harness/journey/11-secret.sh"
+floor = "floor_hidden_secret"
+
+[[step]]
+id = 12
+name = "A real headless prompt edits a share and lands on a branch"
+needs = [8, 9, 11]
+script = "harness/journey/12-prompt.sh"
+spend = true
+
+[[step]]
+id = 13
+name = "The same Agentfile works with one line changed to the other harness"
+needs = [12]
+script = "harness/journey/13-other-harness.sh"
+spend = true
+
+[[step]]
+id = 14
+name = "A plugin, skill, and MCP server install and translate"
+needs = [8]
+script = "harness/journey/14-extensions.sh"
+
+[[step]]
+id = 15
+name = "`AUTH login` and `PERSIST` survive a restart"
+needs = [8]
+script = "harness/journey/15-persist.sh"
+
+[[step]]
+id = 16
+name = "The desktop starts on demand, and computer-use tools work"
+needs = [7]
+script = "harness/journey/16-desktop.sh"
+
+[[step]]
+id = 17
+name = "The control API, ACP bridge, and agents calling agents work"
+needs = [8]
+script = "harness/journey/17-control.sh"
+
+[[step]]
+id = 18
+name = "Every other v0.1.0 host passes the steps above"
+needs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+script = "harness/journey/18-hosts.sh"
+
+[[step]]
+id = 19
+name = "Installed from a release, the README's quick start works as written"
+needs = [18]
+script = "harness/journey/19-quick-start.sh"

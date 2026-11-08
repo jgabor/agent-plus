@@ -178,7 +178,7 @@ pub fn quotes_in(source: &str) -> Vec<Sentence> {
     sentences
 }
 
-fn rust_files(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
+pub fn rust_files(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
     let mut files = Vec::new();
     let mut pending = vec![directory.to_path_buf()];
     while let Some(current) = pending.pop() {
@@ -279,7 +279,7 @@ fn skip_attributes(lines: &[&str], mut at: usize) -> (usize, bool) {
 }
 
 /// The name of every `#[test]` function, including disabled ones.
-fn test_functions(source: &str) -> Vec<String> {
+pub fn test_functions(source: &str) -> Vec<String> {
     let lines: Vec<&str> = source.lines().map(str::trim).collect();
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {

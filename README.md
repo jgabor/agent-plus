@@ -172,6 +172,10 @@ desktop in a native window.
 - `ap build --exe`: export a standalone executable
 - `ap push` and `ap pull`: share agents through a registry (after v0.1.0)
 
+#### About
+
+- `ap --version`: print the version
+
 ## Why Agent+?
 
 Trying a new plugin, skill, or MCP server today means installing it into the

@@ -178,7 +178,7 @@ pub fn quotes_in(source: &str) -> Vec<Sentence> {
     sentences
 }
 
-fn rust_files(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
+pub fn rust_files(directory: &Path) -> Result<Vec<PathBuf>, Problem> {
     let mut files = Vec::new();
     let mut pending = vec![directory.to_path_buf()];
     while let Some(current) = pending.pop() {

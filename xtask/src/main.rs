@@ -3,11 +3,13 @@
 mod base;
 mod floors;
 mod gate;
+mod journey;
 mod json;
 mod lock;
 mod score;
 mod spec;
 mod testrun;
+mod toml;
 mod workspace;
 
 use std::process::ExitCode;
@@ -19,6 +21,7 @@ commands:
   gate             run the checks a change must pass
   score [--json]   print the scores
   run <command>    run a command under a shared hold of the activity lock
+  journey          run the journey against a release build
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -40,12 +43,13 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["score"] => score::run(false),
         ["score", "--json"] => score::run(true),
         ["run", command @ ..] => lock::run(command),
+        ["journey"] => journey::run(),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
-        [command @ ("gate" | "score"), extra, ..] => Err(Problem(format!(
+        [command @ ("gate" | "score" | "journey"), extra, ..] => Err(Problem(format!(
             "`{command}` takes no arguments, but got `{extra}`\n\n{USAGE}"
         ))),
         [other, ..] => Err(Problem(format!("unknown command `{other}`\n\n{USAGE}"))),

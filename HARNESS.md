@@ -162,6 +162,11 @@ and any step that needs it, out of the run and the score. The nightly report
 counts them. A step that names a `floor` fails while that floor's check doesn't
 exist.
 
+`cargo xtask journey` prints each step as `pass`, `fail`, or `skip`, then the
+count out of all steps. It exits 0 whenever it could run, because what fails a
+merge is a count lower than the base's. Each step gets a new `HOME` and working
+directory, and only `HOME` and `PATH` in its environment.
+
 | # | Step | Needs |
 |---|---|---|
 | 1 | `ap --version` runs from a release build | |

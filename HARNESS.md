@@ -416,7 +416,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |
-| `cargo xtask claim <issue>` | Claims an issue, and exits 1 if another claim wins |
+| `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id as JSON, and exits 1 if another claim wins |
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
 | `cargo xtask merge <pr> [--owner]` | Runs the [merge sequence](#merge-sequence) |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock |

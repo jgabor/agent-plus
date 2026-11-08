@@ -6,33 +6,50 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Set on a command that runs under a hold, so a nested `xtask` doesn't wait
-/// behind a pending bench for a lock its parent already has.
+/// Set to the lock directory on a command that runs under a hold, so a nested
+/// `xtask` doesn't wait behind a pending bench for a lock its parent has.
 const INHERITED: &str = "XTASK_ACTIVITY_HELD";
 
 /// The kernel drops these locks when the files close, including when the
 /// process is killed.
 pub struct Hold {
     _files: Vec<File>,
+    directory: PathBuf,
+}
+
+impl Hold {
+    /// Lets a child process, and any `xtask` it starts, share this hold.
+    pub fn pass_to(&self, command: &mut Command) {
+        command.env(INHERITED, &self.directory);
+    }
 }
 
 pub fn shared(root: &Path) -> Result<Hold, Problem> {
-    if env::var_os(INHERITED).is_some() {
-        return Ok(Hold { _files: Vec::new() });
+    let directory = directory(root)?;
+    if inherited(&directory) {
+        return Ok(Hold {
+            _files: Vec::new(),
+            directory,
+        });
     }
-    take_shared(&directory(root)?)
+    take_shared(&directory)
+}
+
+fn inherited(directory: &Path) -> bool {
+    env::var_os(INHERITED).is_some_and(|held| Path::new(&held) == directory)
 }
 
 /// `cargo xtask bench` takes this in #15.
 #[allow(dead_code)]
 pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
-    if env::var_os(INHERITED).is_some() {
+    let directory = directory(root)?;
+    if inherited(&directory) {
         return Err(Problem(
             "a bench can't run under `cargo xtask run`, because it would wait for its own parent"
                 .to_string(),
         ));
     }
-    take_exclusive(&directory(root)?)
+    take_exclusive(&directory)
 }
 
 pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
@@ -40,10 +57,11 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
         .split_first()
         .ok_or_else(|| Problem("`run` needs a command to run".to_string()))?;
     let root = workspace::root()?;
-    let _hold = shared(&root)?;
-    let status = Command::new(program)
-        .args(arguments)
-        .env(INHERITED, "1")
+    let hold = shared(&root)?;
+    let mut child = Command::new(program);
+    child.args(arguments);
+    hold.pass_to(&mut child);
+    let status = child
         .status()
         .map_err(|e| Problem(format!("couldn't run `{program}`: {e}")))?;
     Ok(if status.success() {
@@ -62,6 +80,7 @@ fn take_shared(directory: &Path) -> Result<Hold, Problem> {
     activity.lock_shared().map_err(failed)?;
     Ok(Hold {
         _files: vec![activity],
+        directory: directory.to_path_buf(),
     })
 }
 
@@ -72,6 +91,7 @@ fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
     activity.lock().map_err(failed)?;
     Ok(Hold {
         _files: vec![turnstile, activity],
+        directory: directory.to_path_buf(),
     })
 }
 
@@ -110,17 +130,18 @@ fn directory(root: &Path) -> Result<PathBuf, Problem> {
     let directory = base.join("xtask");
     fs::create_dir_all(&directory)
         .map_err(|e| Problem(format!("couldn't create {}: {e}", directory.display())))?;
-    Ok(directory)
+    fs::canonicalize(&directory)
+        .map_err(|e| Problem(format!("couldn't resolve {}: {e}", directory.display())))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{take_exclusive, take_shared};
-    use std::fs;
-    use std::path::PathBuf;
+    use super::{open, take_exclusive, take_shared};
+    use std::fs::{self, TryLockError};
+    use std::path::{Path, PathBuf};
     use std::sync::mpsc::{Receiver, channel};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const WAIT: Duration = Duration::from_millis(300);
 
@@ -147,6 +168,21 @@ mod tests {
         receiver
     }
 
+    /// Returns once something holds the turnstile.
+    fn wait_for_turnstile(path: &Path) {
+        let probe = open(path, "turnstile.lock").map_err(|e| e.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match probe.try_lock() {
+                Err(TryLockError::WouldBlock) => return,
+                Ok(()) => probe.unlock().unwrap(),
+                Err(error) => panic!("{error}"),
+            }
+            assert!(Instant::now() < deadline, "nothing took the turnstile");
+            thread::yield_now();
+        }
+    }
+
     #[test]
     fn a_bench_waits_for_holders_and_new_holders_wait_for_the_bench() {
         let path = directory("priority");
@@ -154,6 +190,7 @@ mod tests {
 
         let p = path.clone();
         let bench = holder(move || take_exclusive(&p).map_err(|e| e.0).unwrap());
+        wait_for_turnstile(&path);
         assert!(bench.recv_timeout(WAIT).is_err(), "the bench didn't wait");
 
         let p = path.clone();

@@ -32,7 +32,7 @@ const CHECKS: &[Check] = &[
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let _hold = lock::shared(&root)?;
+    let hold = lock::shared(&root)?;
     require_tools(&root)?;
     let mut verdict = Verdict::Pass;
     let findings = floors::check(&root)?;
@@ -44,7 +44,7 @@ pub fn run() -> Result<Verdict, Problem> {
         let passed = cargo_passes(&root, check.args)?;
         record(check.name, passed, &mut verdict);
     }
-    let results = testrun::run(&root)?;
+    let results = testrun::run(&root, &hold)?;
     record("tests", results.all_passed(), &mut verdict);
     let score = score::compute(&root, &results)?;
     score::report_findings(&score);

@@ -263,3 +263,44 @@ fn a_repository_keeps_the_lock_in_its_shared_git_directory() {
     assert!(root.join(".git/xtask/activity.lock").exists());
     assert!(root.join(".git/xtask/turnstile.lock").exists());
 }
+
+#[test]
+fn a_hold_on_another_workspace_does_not_count() {
+    let root = workspace("other-hold");
+    let bench = activity(&root);
+    bench.lock().unwrap();
+    let child = xtask(&root, &["run", "true"])
+        .env(HOLD_ENV, "/some/other/lock/directory")
+        .spawn()
+        .unwrap();
+    assert_blocked_until_released(child, || bench.unlock().unwrap());
+}
+
+#[test]
+fn tests_run_by_score_inherit_its_hold() {
+    let root = workspace("score-inherits");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"demo\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("demo/src")).unwrap();
+    fs::write(
+        root.join("demo/Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("demo/src/lib.rs"),
+        "// spec(A): One.\n#[test]\nfn one() {\n    assert!(std::env::var_os(\"XTASK_ACTIVITY_HELD\").is_some());\n}\n",
+    )
+    .unwrap();
+    let lockfile = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(lockfile.success());
+    let output = xtask(&root, &["score"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "spec 1 of 1\n");
+}

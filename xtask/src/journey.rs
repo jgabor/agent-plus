@@ -24,25 +24,35 @@ struct Step {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let _hold = lock::shared(&root)?;
-    let steps = read_steps(&root)?;
-    let journey = root.join("target/journey");
-    let bin = install(&root, &journey)?;
+    let (passing, steps) = walk(&root, |line| println!("{line}"))?;
+    println!("journey {passing} of {steps}");
+    Ok(Verdict::Pass)
+}
 
-    let total = steps.len();
+/// How many steps pass, and how many there are, for a caller whose stdout is
+/// its result. The caller holds the activity lock.
+pub fn count(root: &Path) -> Result<(usize, usize), Problem> {
+    walk(root, |line| eprintln!("{line}"))
+}
+
+fn walk(root: &Path, report: impl Fn(&str)) -> Result<(usize, usize), Problem> {
+    let steps = read_steps(root)?;
+    let journey = root.join("target/journey");
+    let bin = install(root, &journey)?;
+
     let mut passed = HashSet::new();
     for step in &steps {
         let word = if step.spend || !step.needs.iter().all(|need| passed.contains(need)) {
             "skip"
-        } else if run_step(&root, &journey, &bin, step)? {
+        } else if run_step(root, &journey, &bin, step)? {
             passed.insert(step.id);
             "pass"
         } else {
             "fail"
         };
-        println!("{word} step {}", step.id);
+        report(&format!("{word} step {}", step.id));
     }
-    println!("journey {} of {total}", passed.len());
-    Ok(Verdict::Pass)
+    Ok((passed.len(), steps.len()))
 }
 
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {

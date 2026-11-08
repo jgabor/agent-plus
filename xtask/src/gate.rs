@@ -1,7 +1,7 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, base, floors, lock, score, testrun};
+use crate::{Problem, Verdict, base, floors, ledger, lock, score, testrun};
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -73,6 +73,14 @@ fn compare_with_base(
         eprintln!("floor: {finding}");
     }
     record("checks-kept", findings.is_empty(), verdict);
+    let floor = ledger::newest(root, &commit)?.map_or(0, |base| base.proven);
+    if score.proven < floor {
+        eprintln!(
+            "hills: proven promises fell from {floor} to {}. Restore what proved them, or hand the PR to the owner",
+            score.proven
+        );
+    }
+    record("hills", score.proven >= floor, verdict);
     match base::missing_label(root, &commit)? {
         Some(findings) => {
             for finding in &findings {

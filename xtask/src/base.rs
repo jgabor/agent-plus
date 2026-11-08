@@ -25,22 +25,28 @@ pub fn find(root: &Path) -> Result<Option<String>, Problem> {
     if !root.join(".git").exists() {
         return Ok(None);
     }
-    let main = format!("{MAIN}^{{commit}}");
-    let args = ["rev-parse", "--verify", "--quiet", &main];
-    let found = git(root, &args)?;
-    match found.status.code() {
-        Some(0) => {}
-        Some(1) => return Ok(None),
-        _ => {
-            return Err(Problem(format!(
-                "`git {}` failed: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&found.stderr).trim()
-            )));
-        }
+    if !commit_exists(root, MAIN)? {
+        return Ok(None);
     }
     let commit = git_text(root, &["merge-base", MAIN, "HEAD"])?;
     Ok(Some(commit.trim().to_string()))
+}
+
+/// Whether a name resolves to a commit. A git failure is a problem, so that it
+/// isn't mistaken for a missing commit.
+pub fn commit_exists(root: &Path, name: &str) -> Result<bool, Problem> {
+    let name = format!("{name}^{{commit}}");
+    let args = ["rev-parse", "--verify", "--quiet", &name];
+    let found = git(root, &args)?;
+    match found.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Problem(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&found.stderr).trim()
+        ))),
+    }
 }
 
 /// Names each promise that fewer checks quote than in the base. Counting
@@ -151,7 +157,7 @@ fn open_prs(root: &Path, branch: &str) -> Result<Vec<Vec<String>>, Problem> {
         .collect()
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Output, Problem> {
+pub fn git(root: &Path, args: &[&str]) -> Result<Output, Problem> {
     Command::new("git")
         .args(args)
         .current_dir(root)
@@ -159,7 +165,7 @@ fn git(root: &Path, args: &[&str]) -> Result<Output, Problem> {
         .map_err(|e| Problem(format!("couldn't run `git`: {e}")))
 }
 
-fn git_text(root: &Path, args: &[&str]) -> Result<String, Problem> {
+pub fn git_text(root: &Path, args: &[&str]) -> Result<String, Problem> {
     let output = git(root, args)?;
     if !output.status.success() {
         return Err(Problem(format!(

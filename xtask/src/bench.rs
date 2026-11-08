@@ -4,7 +4,9 @@ use crate::ledger::{self, Measured};
 use crate::toml::{self, Table, Value};
 use crate::{Problem, Verdict, base, journey, lock, workspace};
 use std::collections::{BTreeMap, HashSet};
+use std::env;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -121,6 +123,7 @@ pub fn run() -> Result<Verdict, Problem> {
         ));
     };
     ledger::clear_measured(&root)?;
+    let head = clean_head(&root)?;
 
     let directory = root.join("target/bench");
     let hold = lock::shared(&root)?;
@@ -166,15 +169,17 @@ pub fn run() -> Result<Verdict, Problem> {
         }
     }
     if verdict == Verdict::Pass {
-        // A tree that differs from HEAD says nothing about any commit.
-        if ledger::changes(&root)?.is_empty() {
-            let head = base::git_text(&root, &["rev-parse", "HEAD"])?;
+        if let Some(commit) = head
+            && clean_head(&root)?.as_ref() == Some(&commit)
+        {
+            let reason = reason.unwrap_or_default();
+            let budgets = values;
             ledger::write_measured(
                 &root,
                 &Measured {
-                    commit: head.trim().to_string(),
-                    reason: reason.unwrap_or_default(),
-                    budgets: values,
+                    commit,
+                    reason,
+                    budgets,
                 },
             )?;
         }
@@ -185,20 +190,37 @@ pub fn run() -> Result<Verdict, Problem> {
     Ok(verdict)
 }
 
+/// HEAD, if the tree is what HEAD holds. Otherwise what was built says nothing
+/// about any commit.
+fn clean_head(root: &Path) -> Result<Option<String>, Problem> {
+    if !ledger::changes(root)?.is_empty() {
+        return Ok(None);
+    }
+    let head = base::git_text(root, &["rev-parse", "HEAD"])?;
+    Ok(Some(head.trim().to_string()))
+}
+
 fn build_candidate(root: &Path, directory: &Path) -> Result<PathBuf, Problem> {
     let built = journey::build_ap(root, &root.join("target"))
         .map_err(|Problem(e)| Problem(format!("the candidate build: {e}")))?;
     keep(&built, &directory.join("candidate"))
 }
 
-/// Builds `ap` from a copy of the base commit's tree, so that the working tree
-/// isn't touched.
+/// Builds `ap` from a copy of the base commit's tree. Cargo reads
+/// `.cargo/config.toml` from every parent directory, so the copy sits outside
+/// the checkout, or the candidate's settings would apply to the base too. The
+/// output has one directory per commit, because git dates an exported file by
+/// its commit, and a base committed before an earlier build looks unchanged.
 fn build_base(root: &Path, directory: &Path, commit: &str) -> Result<PathBuf, Problem> {
-    let directory = directory.join("base");
-    let tree = directory.join("tree");
+    let directory = directory.join("base").join(commit);
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let tree = env::temp_dir().join(format!("xtask-base-{:016x}-{commit}", hasher.finish()));
     export(root, commit, &tree)?;
-    let built = journey::build_ap(&tree, &directory.join("target"))
-        .map_err(|Problem(e)| Problem(format!("the base build: {e}")))?;
+    let built = journey::build_ap(&tree, &directory.join("target"));
+    let removed = fs::remove_dir_all(&tree);
+    let built = built.map_err(|Problem(e)| Problem(format!("the base build: {e}")))?;
+    removed.map_err(|e| Problem(format!("couldn't remove {}: {e}", tree.display())))?;
     keep(&built, &directory)
 }
 

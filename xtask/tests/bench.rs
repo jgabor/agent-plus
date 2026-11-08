@@ -276,6 +276,75 @@ fn a_budget_with_no_band_can_not_fail() {
     );
 }
 
+/// Git gives an exported file its commit's date, so a base committed before
+/// an earlier build looks unchanged to Cargo.
+#[test]
+fn a_new_base_older_than_the_last_build_is_built() {
+    let repo = Repo::new("old-base", BUDGETS);
+    assert_passes(&repo.bench());
+    repo.write("crates/ap/src/main.rs", SLOW);
+    repo.git(&["add", "-A"]);
+    let output = repo
+        .command("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "-m",
+            "old",
+        ])
+        .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    repo.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    assert_passes(&repo.bench());
+}
+
+#[test]
+fn the_base_does_not_build_with_the_candidates_cargo_config() {
+    let ap = "fn main() {\n    #[cfg(candidate_only)]\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
+    let repo = Repo::with("config", BUDGETS, ap, &[]);
+    repo.set_gh("echo '[]'\n");
+    repo.write(
+        ".cargo/config.toml",
+        "[build]\nrustflags = [\"--cfg\", \"candidate_only\"]\n",
+    );
+    repo.commit();
+    let output = repo.bench();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("fail version_ms "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_commit_made_during_the_bench_gets_no_result() {
+    let repo = Repo::new("moved", BUDGETS);
+    let real = Command::new("sh")
+        .args(["-c", "command -v cargo"])
+        .output()
+        .unwrap();
+    let real = stdout(&real);
+    fs::write(
+        repo.bin.join("cargo"),
+        format!(
+            "#!/bin/sh\n'{}' \"$@\"\ncode=$?\nif [ \"$1\" = build ]; then\n  git -C '{}' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m moved\nfi\nexit $code\n",
+            real.trim(),
+            repo.root.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(repo.bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_passes(&repo.bench());
+    assert!(!repo.result_exists());
+}
+
 #[test]
 fn no_origin_main_is_a_problem() {
     let repo = Repo::new("no-base", BUDGETS);

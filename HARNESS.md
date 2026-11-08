@@ -1,0 +1,497 @@
+# Harness design
+
+> **Status: draft.** Nothing described here is implemented. Numeric settings
+> are initial values.
+
+## Purpose
+
+The harness develops Agent+ to v0.1.0 with several unattended agents working
+concurrently, over runs of hours to days. It selects work, proves changes,
+measures them, and merges them.
+
+Scope:
+
+- scoring progress toward v0.1.0
+- the gate every change passes
+- the queue, roles, and merge process
+- isolation between concurrent workers
+- recovery from failures
+
+Out of scope:
+
+- product behavior, defined in [SPEC.md](SPEC.md)
+- the conduct of an individual agent, defined in [AGENTS.md](AGENTS.md)
+- publishing releases, which the owner does
+
+## Requirements
+
+| ID | Requirement |
+|---|---|
+| R1 | Workers run concurrently, and share no mutable state outside the declared slots |
+| R2 | A worker can stop at any point, and any other agent can continue from GitHub and git alone |
+| R3 | Scoring, gating, issue selection, and merge order are decided by programs |
+| R4 | Every change is compared with its base on the same scores |
+| R5 | Two changes that pass separately can't merge without being tested together |
+| R6 | The harness needs the owner only for the actions listed in [Owner actions](#owner-actions) |
+| R7 | Only tier T3 spends on model calls for checks |
+
+## Release criteria
+
+v0.1.0 is complete when all of these hold on a release binary installed on a
+clean machine:
+
+- Every promise within v0.1.0 has a passing check.
+- No sentence within v0.1.0 is marked *Proposed*.
+- Every journey step passes on Linux x86_64, Linux arm64, and macOS on Apple
+  Silicon.
+- Every budget is met.
+- Every floor holds.
+
+## Terms
+
+| Term | Meaning |
+|---|---|
+| Promise | A sentence or table row in SPEC.md that claims behavior |
+| Check | An automated test that proves one or more promises |
+| Hill | A score that one change can raise |
+| Floor | A condition that must always hold |
+| Journey | The ordered steps of real use of `ap` |
+| Budget | A performance or size target |
+| Ledger | The per-merge record of scores and budgets |
+| Gate | The program that decides whether a change may merge |
+| Lane | An independently buildable area of the codebase |
+| Slot | An exclusive or counted right to use a shared resource |
+| Activity lock | A host-wide lock that builds and VM runs share, and a bench holds alone |
+| Lease | A time-limited claim on an issue |
+
+## Architecture
+
+```
+owner -> labeled parent issue
+planner: score gaps -> child issues
+dispatcher: claimable issues -> one worker per free slot
+worker: worktree -> check -> change -> gate -> review -> PR
+merge slot: rebase -> gate -> ledger record -> squash merge -> main
+nightly job: main -> slow tiers -> report, or a revert PR
+```
+
+| Component | Kind | Model | Responsibility |
+|---|---|---|---|
+| `xtask` | Program | None | Scoring, gating, measuring, selection, and merging |
+| Dispatcher | T3 Code scheduled task | Haiku | Starts workers for claimable issues |
+| Planner | T3 Code scheduled task | Opus | Files issues from score gaps |
+| Worker | T3 Code thread, one per issue | Opus | Takes one issue from claim to merge |
+| Reviewer | Delegated agent, one per round | Another provider | Reviews a diff, and changes nothing |
+| Nightly job | T3 Code scheduled task | Haiku | Runs `cargo xtask nightly` on `main`, and files an issue on failure |
+
+| State | Stored in |
+|---|---|
+| Work queue, claims, and progress | GitHub issues, labels, and status comments |
+| Work in flight | Pushed branches |
+| Scores and budgets over time | `harness/ledger/` |
+| Waived sentences | `harness/waived.txt` |
+| Journey definition | `harness/journey.toml` |
+
+No component keeps state anywhere else.
+
+## Hills
+
+A PR raises at least one hill and lowers none. A PR for tooling or seams that
+can't raise a hill states why, and the reviewer confirms it.
+
+### Spec coverage
+
+**Score:** proven promises divided by all promises.
+
+A check names its promise in a comment directly above the test, quoting the
+sentence exactly:
+
+```rust
+// spec(SHARE): A missing `<src>` is an error, at build time and at run time.
+#[test]
+fn missing_src_fails() { /* ... */ }
+```
+
+- `spec(<heading>)` names the SPEC.md section that holds the sentence.
+- A quote that no longer matches SPEC.md fails the gate.
+- A promise is proven when a check quoting it passes, and nothing on the path
+  the sentence describes is faked.
+- Sentences marked *Proposed* aren't promises.
+- Descriptive sentences are listed in `harness/waived.txt`, each with a reason.
+- A new check must be shown failing before the change that makes it pass.
+- The nightly job runs mutation testing on crates changed that day. A check
+  that survives a mutation of the code it covers opens an issue.
+
+### Journey
+
+**Score:** passing steps divided by all steps.
+
+A step is a script that drives an installed release binary in a clean
+environment. A step counts only if every step in its `needs` also passes.
+
+| # | Step | Needs |
+|---|---|---|
+| 1 | `ap --version` runs from a release build | |
+| 2 | `ap fmt` and parse errors work on a real Agentfile | 1 |
+| 3 | The VMM boots a kernel to guest init | 1 |
+| 4 | A command runs in the guest and returns its exit code | 3 |
+| 5 | `ap build` writes layers, and a rebuild with no changes is a hit | 2 |
+| 6 | The first build lists grants, and a wider grant asks again | 5 |
+| 7 | `ap run` starts the fake harness in the guest | 4, 5 |
+| 8 | Claude Code and Codex start in the guest with no credentials | 7 |
+| 9 | A share is copy-on-write, and `ap diff` and `ap apply` work | 7 |
+| 10 | `NETWORK` rules hold, and a closed network stays closed | 7 |
+| 11 | A hidden secret reaches only its host, and the agent can't read it | 10 |
+| 12 | A real headless prompt edits a share and lands on a branch | 8, 9, 11 |
+| 13 | The same Agentfile works with one line changed to the other harness | 12 |
+| 14 | A plugin, skill, and MCP server install and translate | 8 |
+| 15 | `AUTH login` and `PERSIST` survive a restart | 8 |
+| 16 | The desktop starts on demand, and computer-use tools work | 7 |
+| 17 | The control API, ACP bridge, and agents calling agents work | 8 |
+| 18 | Every other v0.1.0 host passes the steps above | all |
+| 19 | Installed from a release, the README's quick start works as written | 18 |
+
+### Budgets
+
+**Score:** budgets met, out of the budgets defined.
+
+| Budget | Target | Band |
+|---|---|---|
+| Boot to guest init | under 150 ms | to be set |
+| `ap run` to a ready harness, with layers cached | under 1 s | to be set |
+| Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
+| `ap build` with nothing changed | under 100 ms | to be set |
+| Desktop cost until first use | disk only | none |
+| Stripped release binary | to be set | to be set |
+
+A change that worsens a budget by more than its band fails the gate, unless
+its ledger record has a reason. The reviewer confirms the reason. The nightly
+report lists every reason given that day.
+
+## Floors
+
+A failing floor blocks a merge regardless of scores.
+
+| Floor | Verified by |
+|---|---|
+| No C in the dependency tree, and no build scripts in our crates | `cargo metadata` |
+| A hidden secret can't be read from the guest | Escape checks |
+| A closed network stays closed | Escape checks |
+| A share can't reach outside its root | Escape checks |
+| The guest can't run anything on the host | Escape checks |
+| No check is removed unless the sentence it quoted is also removed | Comparison with the base |
+| `main` builds and passes the gate | Nightly job |
+
+## Check tiers
+
+| Tier | Runs | Trigger | Model spend |
+|---|---|---|---|
+| T0 | Format, lint, unit tests, spec quotes, and floors | Every gate | No |
+| T1 | The real `ap` and a real microVM, with the fake harness | Every gate, for affected sections | No |
+| T2 | Real Claude Code and Codex in the guest, with no credentials | Adapter changes, and nightly | No |
+| T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
+| Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
+
+**Fake harness.** A guest program that implements the adapter contract and
+records its arguments, environment, files, and network view.
+
+**Harness probe (T2).** The harness starts with no credentials, and the check
+reads what it reports before sign-in. For Claude Code, that is the `init` event
+of `claude -p <prompt> --output-format stream-json --verbose`, which lists the
+working directory, MCP servers, skills, and commands. The Codex probe is
+undefined (see [Open decisions](#open-decisions)).
+
+**Bench.** Runs in the measuring slot, which is an exclusive hold of the
+activity lock. It interleaves runs of the base build and the candidate build,
+and compares the two.
+
+**Activity lock.** Every build, test, and VM run started through `xtask` takes
+the lock shared. A bench takes it exclusively: it waits for current holders to
+finish, and new holders wait while a bench is pending.
+
+**Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
+matching, and device input from the guest.
+
+**Flaky tests.** A test is never retried. It is fixed, or quarantined with a
+linked issue.
+
+## Lanes
+
+Each lane is a crate with its own tests. It builds against a fake of each
+neighboring lane, so lanes have no ordering dependency during development.
+
+| Lane | Owns | Builds against |
+|---|---|---|
+| Agentfile | Parser, formatter, lockfile, and grants | Nothing |
+| Store | Layers and image assembly | Fixtures |
+| VMM | KVM, virtio devices, and boot | A small kernel and test init |
+| Filesystem | Copy-on-write shares, `ap diff`, and `ap apply` | An in-process device |
+| Network | Proxy, rules, secrets, and TLS | Local fake upstreams |
+| Adapters | Claude Code and Codex translation | Golden files, then T2 |
+| CLI | Commands and approvals | A fake VM |
+| Guest | Init, guest agent, and built-in MCP server | A fake host channel |
+| Desktop | Compositor, Chromium, and computer-use tools | A headless display |
+| Control | Control API and ACP bridge | A fake run |
+| macOS | Hypervisor.framework backend | A macOS host |
+
+Files outside any single lane follow these rules:
+
+| File | Rule |
+|---|---|
+| `SPEC.md` | Changed only by `spec-change` PRs |
+| `harness/ledger/` | One new file per merge |
+| `harness/waived.txt` | Union merge through `.gitattributes` |
+| `harness/journey.toml` | Changed only by `spec-change` PRs |
+| `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
+
+## Data formats
+
+### Journey definition
+
+```toml
+[[step]]
+id = 3
+name = "The VMM boots a kernel to guest init"
+needs = [1]
+script = "harness/journey/03-boot.sh"
+```
+
+### Ledger record
+
+Each merge adds `harness/ledger/<issue>.toml`. Git history orders the records.
+
+```toml
+issue = 123
+pr = 130
+commit = "abc1234"
+date = "2026-11-20"
+host = "linux-x86_64"
+spec = { proven = 417, promises = 812 }
+journey = { passing = 7, steps = 19 }
+reason = ""
+
+[budgets]
+boot_ms = 141.2
+run_ms = 930
+idle_mib = 58
+noop_build_ms = 71
+binary_bytes = 9312000
+```
+
+| Field | Meaning |
+|---|---|
+| `commit` | The rebased head that was gated, whose tree equals the merge |
+| `spec`, `journey` | Scores at that commit |
+| `reason` | Required when a budget is outside its band, otherwise empty |
+| `budgets` | Only the budgets measured for this change |
+
+### Issue and status comment
+
+The issue body and status comment follow [AGENTS.md](AGENTS.md#issues). `xtask`
+reads the `Touches`, `Blocked by`, and `Part of` lines, and the `State` and
+`Lease until` fields.
+
+## Commands
+
+Every command lives in one `xtask` crate, in Rust. Exit status 0 is a pass, 1
+is a failure, and 2 is bad usage or an environment error.
+
+| Command | Behavior |
+|---|---|
+| `cargo xtask gate` | Runs T0, affected T1, and the floors, compares scores with the base, and posts the result as a commit status |
+| `cargo xtask score` | Prints the three scores |
+| `cargo xtask gaps` | Lists unproven promises, failing steps, and missed budgets, largest risk first |
+| `cargo xtask journey` | Runs the journey against a release build |
+| `cargo xtask bench` | Takes the measuring slot, and compares with the base |
+| `cargo xtask next` | Prints claimable issues as JSON |
+| `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
+| `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock |
+| `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
+| `cargo xtask report` | Builds the nightly report from the ledger |
+
+`cargo xtask next` prints an array of `{"issue", "touches", "autonomy"}`, in
+planner order, leaving out any issue whose `Touches` overlaps another entry or
+an issue in progress.
+
+## Issue states
+
+| State | Condition | Next |
+|---|---|---|
+| Unavailable | No `auto:*` label | Available, when the owner labels it |
+| Blocked | An issue in `Blocked by` is open | Available, when it closes |
+| Available | Claimable under AGENTS.md | Claimed |
+| Claimed | `in-progress`, with a live lease | Parked, Abandoned, or Closed |
+| Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
+| Parked | `needs-owner` | Available, when the owner removes the label |
+| Closed | Its PR merged | |
+
+## Processes
+
+### Scheduling
+
+The dispatcher, planner, and nightly job are T3 Code scheduled tasks. Each run
+starts a fresh session, so no run depends on the context of an earlier one.
+
+### Dispatch
+
+Runs every dispatch period.
+
+1. Stop if free disk is below the minimum.
+2. Run `cargo xtask next`.
+3. For each free worker slot, start one worker in a new worktree from
+   `origin/main`, with a brief naming the issue.
+
+Dispatch is idempotent, because all state is on GitHub. A worker that loses a
+claim race exits.
+
+### Planning
+
+Runs every planning period, and stops at once unless fewer available issues
+exist than worker slots. The planner reads `cargo xtask gaps`, and files child
+issues under a parent the owner has labeled. Each child inherits its parent's
+`auto:*` label.
+
+Initial order, by risk:
+
+1. Boot a kernel in the pure-Rust VMM, within its budget.
+2. Copy-on-write shares that real harnesses run on.
+3. Egress proxy, TLS through graviola, and secret injection.
+4. A real harness started in the guest.
+5. Boot on macOS.
+6. Desktop.
+
+### Worker
+
+1. Claim the issue.
+2. Read the issue, the sentences it names, and the base scores.
+3. Write the check, and record it failing.
+4. Make the smallest change that passes.
+5. Run the gate, and the bench if a budget can be affected.
+6. If the score didn't rise or a floor failed, revert and try again, within
+   the attempt limit. Past the limit, park the issue.
+7. Get a review, within the round limit.
+8. Open the PR, and wait for checks and reviews.
+9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
+
+Model selection escalates in a fixed order: improve the brief, raise the
+effort, then change the model. Reviewers use a different provider from the
+worker when one is available.
+
+### Merge sequence
+
+Only one merge runs at a time, under `flock` on a file in the shared git
+directory.
+
+1. Take the merge slot.
+2. Fetch `main`, and rebase the branch onto it.
+3. Run the gate on the rebased head, and the bench if a budget can be affected.
+4. Write the ledger record, and push with `--force-with-lease`.
+5. Wait for required checks.
+6. Squash-merge, delete the branch, and release the slot.
+
+A merge past the merge timeout releases the slot and restarts from step 1.
+GitHub's merge queue and branch protection aren't required.
+
+### Nightly job
+
+Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
+does the following on `main`:
+
+1. Run the bench first, because the remaining tiers are long.
+2. Run T2, T3, the journey, fuzzing, and mutation testing.
+3. Post the report to one pinned issue: the three scores, what merged, what
+   regressed and why, and what waits on the owner.
+4. If a floor failed, bisect the merges since the last passing run, and open a
+   revert PR for the first bad commit.
+
+The command's result is final. If it fails, the agent files an issue describing
+the failure, with no `auto:*` label.
+
+### Release check
+
+The owner starts this check before a release, through a GitHub workflow with a
+`workflow_dispatch` trigger. A fresh GitHub-hosted runner installs the release
+binary and runs the journey, which is what the clean-machine requirement in
+[Release criteria](#release-criteria) needs. It is built once journey step 18
+passes. No scheduled work runs on GitHub.
+
+## Isolation and limits
+
+| Resource | Rule |
+|---|---|
+| `ap` state | `HOME` is a directory inside the worktree |
+| Build output | One target directory per worktree, deleted at merge |
+| Ports | Assigned by the OS |
+| VMs | Each has a timeout and a recorded PID |
+| Builds and VM runs | Shared hold of the activity lock, through `xtask` |
+| Bench | Exclusive hold of the activity lock |
+| Merge | Exclusive merge slot |
+| GitHub API | One watcher per PR |
+
+| Setting | Initial value |
+|---|---|
+| Worker slots | 3 |
+| Measuring slots | 1 |
+| Merge slots | 1 |
+| Dispatch period | 30 minutes |
+| Planning period | 1 hour |
+| Nightly time | 03:00 local |
+| Fuzzing and mutation limit | 1 hour each |
+| Lease length | 12 hours |
+| Merge timeout | 30 minutes |
+| Attempts on one failing check | 3 |
+| Time limit on an issue | Twice its estimate |
+| Review rounds | 3, or 5 for security, data loss, or concurrency |
+| Minimum free disk | 50 GiB |
+
+## Failure handling
+
+| Fault | Detected by | Response |
+|---|---|---|
+| Session lost or context compacted | Status comment and branch | The next agent resumes from them |
+| Host reboot | Expired lease | Dispatch starts a new worker |
+| Usage limit | Harness error | The worker updates its status and stops. Dispatch retries after the reset |
+| GitHub rate limit | API error | Fall back to REST, and wait for the reset |
+| No progress | Attempt or time limit | The worker parks the issue |
+| PR growth | Review round limit | Extra work becomes new issues |
+| Weakened check | Red proof, floors, and mutation testing | The gate fails, or an issue opens |
+| Spec and code diverge | Quote mismatch | The gate fails |
+| Worker collision | `Touches` overlap, and rebase conflict | Not dispatched together. On conflict, the worker reassesses |
+| Broken `main` | Nightly job | Bisect and revert PR |
+| Noisy timing | Band and activity lock | Interleaved runs are repeated |
+| Disk exhaustion | Free-space check | Dispatch stops |
+| Stale VM | VM timeout | The VM exits, and the check fails |
+
+## Owner actions
+
+- Add `auto:*` labels to top-level issues.
+- Approve `spec-change` PRs, which cover SPEC.md, budgets, waivers, and journey
+  steps.
+- Answer `needs-owner` issues.
+- Publish releases.
+
+## Build stages
+
+The harness is built before product features.
+
+| Stage | Delivers | Acceptance |
+|---|---|---|
+| H0 | Workspace, `xtask gate`, T0, and floors | Passes on an empty workspace, and fails on a planted C dependency |
+| H1 | Spec score, quotes, and waivers | The score prints, and editing a quoted sentence fails the gate |
+| H2 | Fake harness, fake VM, and lane seams | One promise is proven through the real parser |
+| H3 | Journey runner, ledger, and bench | Step 1 passes and writes a record, and a planted slowdown fails |
+| H4 | `xtask next`, activity lock, merge slot, and the dispatcher and planner tasks | A planted issue merges unattended, even when its worker is killed midway |
+| H5 | `xtask nightly`, and the nightly task | A planted break on `main` is bisected, and a revert PR opens |
+
+## Open decisions
+
+| Decision | Default until decided |
+|---|---|
+| Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
+| Hosts for macOS and Linux arm64, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
+| Limit on model spend for workers and T3 | No unattended T3 runs |
+| Codex probe for T2 | T2 covers Claude Code only |
+| Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
+| How a T3 Code scheduled task selects its model. `schedule_task` has no model setting | Each task is bound to a thread set to its model |
+| Budget bands, and the binary size target | Budgets are recorded, and don't fail the gate |
+| Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

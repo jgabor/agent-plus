@@ -1161,6 +1161,7 @@ fn revert_of_a_check(name: &str, claimed: Option<&str>) -> (Repo, String) {
     let parent = repo.git(&["rev-parse", "HEAD"]);
     let parent = parent.trim().to_string();
     repo.write("crates/demo/src/lib.rs", CHECK_ONE);
+    repo.write("harness/ledger/8.toml", &record(0, 1, ""));
     repo.commit();
     repo.git(&["push", "-q", "origin", "main"]);
     let added = repo.git(&["rev-parse", "HEAD"]).trim().to_string();

@@ -344,6 +344,11 @@ fn a_passing_night_files_nothing() {
     let repo = Repo::new("passing", FAST);
     let output = repo.nightly();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        !stdout(&output).contains("second run"),
+        "{}",
+        stdout(&output)
+    );
     let calls = repo.calls();
     assert!(!calls.contains("fails the gate"), "{calls}");
     assert!(!calls.contains("pr create"), "{calls}");
@@ -442,4 +447,18 @@ fn a_revert_that_conflicts_is_said_and_opens_nothing() {
     );
     assert!(!repo.calls().contains("pr create"), "{}", repo.calls());
     assert_eq!(repo.leftovers(), Vec::<String>::new());
+}
+
+#[test]
+fn a_commit_that_passed_on_an_earlier_night_is_still_bisected() {
+    let repo = Repo::new("passed-before", FAST);
+    let bad = repo.plant(2, 0);
+    repo.mark_passing(&repo.head());
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        repo.comment(78).contains(&format!("`{bad}`")),
+        "{}",
+        repo.comment(78)
+    );
 }

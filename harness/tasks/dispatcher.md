@@ -54,6 +54,9 @@ Worker model: `claude-opus-5-5`
    `git show origin/main:harness/tasks/worker.md`, and follow it.
    ```
 
+   If you used the last `workspaceStrategy` above, add the sentence
+   `This checkout is new.` to the message.
+
 5. List the threads you launched, then stop.
 
 Launch each entry once. A worker that loses a claim race exits by itself, so

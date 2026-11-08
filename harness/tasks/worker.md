@@ -11,8 +11,8 @@ can't continue alone, park the issue as AGENTS.md says.
    no arguments to learn this thread's id.
 2. Run `cargo xtask claim <issue> --thread <id>`. It prints the id of your
    status comment. Go on only if it exits 0. Otherwise stop and start no work.
-   Before you stop, if `git log origin/main..HEAD` prints nothing, this
-   checkout is new, so remove it as in the last step.
+   Before you stop, if your first message says this checkout is new, remove it
+   as in the last step. Never remove a checkout it doesn't call new.
 3. If the branch or worktree holds earlier work, treat it as context, not
    proof. Follow the loop in AGENTS.md from there.
 4. For each status update, edit your comment with `gh api -X PATCH
@@ -40,8 +40,9 @@ can't continue alone, park the issue as AGENTS.md says.
    either.
 7. If the issue has `auto:merge` and the PR doesn't have `spec-change`, run
    `cargo xtask merge <pr>`. Never pass `--owner`. Otherwise run `cargo xtask
-   gate` on the clean, pushed head, so that it posts `xtask/gate`. Then park
-   the issue and say that the PR is ready to merge.
+   gate` on the clean, pushed head, so that it posts `xtask/gate`, and confirm
+   with `gh pr checks <pr>` that the status passed. Then park the issue and say
+   that the PR is ready to merge.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
 9. Remove your worktree last, because nothing can run in it afterwards:

@@ -1,6 +1,8 @@
 //! The harness program. HARNESS.md defines its commands and exit statuses.
 
+mod floors;
 mod gate;
+mod json;
 
 use std::process::ExitCode;
 

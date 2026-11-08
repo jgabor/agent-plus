@@ -1,0 +1,2 @@
+# Dependencies whose build scripts have been read and found to be pure Rust.
+# One package per line: <name> <version> <reason>

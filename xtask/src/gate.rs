@@ -35,6 +35,7 @@ const CHECKS: &[Check] = &[
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace_root()?;
+    require_tools(&root)?;
     let mut verdict = Verdict::Pass;
     for check in CHECKS {
         let passed = cargo_passes(&root, check.args)?;
@@ -74,6 +75,25 @@ fn workspace_root() -> Result<PathBuf, Problem> {
         .parent()
         .ok_or_else(|| Problem(format!("`{}` has no parent", manifest.display())))?;
     Ok(root.to_path_buf())
+}
+
+/// Fails before any check runs when a tool is missing, because a missing tool
+/// says nothing about the change.
+fn require_tools(root: &Path) -> Result<(), Problem> {
+    for (tool, component) in [("fmt", "rustfmt"), ("clippy", "clippy")] {
+        let output = Command::new("cargo")
+            .args([tool, "--version"])
+            .current_dir(root)
+            .output()
+            .map_err(no_cargo)?;
+        if !output.status.success() {
+            return Err(Problem(format!(
+                "`cargo {tool}` can't run: {}. Install it with `rustup component add {component}`",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Runs a cargo command, with its output on our stderr, so that stdout carries

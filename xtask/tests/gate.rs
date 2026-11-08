@@ -135,6 +135,20 @@ fn help_exits_0_on_stdout() {
 }
 
 #[test]
+fn missing_formatter_is_an_environment_error() {
+    let root = workspace("norustfmt", GOOD);
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("gate")
+        .current_dir(&root)
+        .env("RUSTFMT", "/nonexistent/rustfmt")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("rustfmt"), "{}", stderr(&output));
+}
+
+#[test]
 fn missing_cargo_is_an_environment_error() {
     let root = workspace("nocargo", GOOD);
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))

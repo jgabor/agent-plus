@@ -21,7 +21,8 @@ fn workspace(name: &str, extra: &str, files: &[(&str, &str)]) -> PathBuf {
     let demo =
         format!("[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n{extra}");
     let root_manifest = "[workspace]\nmembers = [\"demo\"]\nresolver = \"3\"\n";
-    let base: [(&str, &str); 3] = [
+    let base: [(&str, &str); 4] = [
+        ("ws/SPEC.md", "# A\n"),
         ("ws/Cargo.toml", root_manifest),
         ("ws/demo/Cargo.toml", &demo),
         ("ws/demo/src/lib.rs", LIB),

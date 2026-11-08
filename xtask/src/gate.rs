@@ -1,8 +1,9 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
-use crate::{Problem, Verdict, floors};
+use crate::workspace::{self, no_cargo};
+use crate::{Problem, Verdict, floors, score, testrun};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 struct Check {
@@ -27,14 +28,10 @@ const CHECKS: &[Check] = &[
             "warnings",
         ],
     },
-    Check {
-        name: "tests",
-        args: &["test", "--workspace", "--locked", "--no-fail-fast"],
-    },
 ];
 
 pub fn run() -> Result<Verdict, Problem> {
-    let root = workspace_root()?;
+    let root = workspace::root()?;
     require_tools(&root)?;
     let mut verdict = Verdict::Pass;
     let findings = floors::check(&root)?;
@@ -46,6 +43,11 @@ pub fn run() -> Result<Verdict, Problem> {
         let passed = cargo_passes(&root, check.args)?;
         record(check.name, passed, &mut verdict);
     }
+    let results = testrun::run(&root)?;
+    record("tests", results.all_passed(), &mut verdict);
+    let score = score::compute(&root, &results)?;
+    score::report_findings(&score);
+    record("spec", score.findings.is_empty(), &mut verdict);
     let word = match verdict {
         Verdict::Pass => "pass",
         Verdict::Fail => "fail",
@@ -59,31 +61,6 @@ fn record(name: &str, passed: bool, verdict: &mut Verdict) {
     if !passed {
         *verdict = Verdict::Fail;
     }
-}
-
-fn no_cargo(error: io::Error) -> Problem {
-    Problem(format!(
-        "couldn't run `cargo`: {error}. Install Rust, or add cargo to PATH"
-    ))
-}
-
-pub fn workspace_root() -> Result<PathBuf, Problem> {
-    let output = Command::new("cargo")
-        .args(["locate-project", "--workspace", "--message-format", "plain"])
-        .output()
-        .map_err(no_cargo)?;
-    if !output.status.success() {
-        return Err(Problem(format!(
-            "not inside a Cargo workspace: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
-    let manifest = String::from_utf8_lossy(&output.stdout);
-    let manifest = Path::new(manifest.trim());
-    let root = manifest
-        .parent()
-        .ok_or_else(|| Problem(format!("`{}` has no parent", manifest.display())))?;
-    Ok(root.to_path_buf())
 }
 
 /// Fails before any check runs when a tool is missing, because a missing tool

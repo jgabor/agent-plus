@@ -5,6 +5,8 @@ mod gate;
 mod json;
 mod score;
 mod spec;
+mod testrun;
+mod workspace;
 
 use std::process::ExitCode;
 
@@ -12,8 +14,8 @@ const USAGE: &str = "\
 usage: cargo xtask <command>
 
 commands:
-  gate    run the checks a change must pass
-  score   print the scores
+  gate             run the checks a change must pass
+  score [--json]   print the scores
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -32,7 +34,8 @@ pub struct Problem(pub String);
 fn run(args: &[&str]) -> Result<Verdict, Problem> {
     match args {
         ["gate"] => gate::run(),
-        ["score"] => score::run(),
+        ["score"] => score::run(false),
+        ["score", "--json"] => score::run(true),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

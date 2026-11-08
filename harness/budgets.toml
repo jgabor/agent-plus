@@ -1,0 +1,32 @@
+# Targets and bands for the budgets in HARNESS.md. A budget with no band is
+# recorded and can't fail. Times are milliseconds.
+
+[[budget]]
+key = "boot_ms"
+name = "Boot to guest init"
+target = 150.0
+
+[[budget]]
+key = "run_ms"
+name = "`ap run` to a ready harness, with layers cached"
+target = 1000.0
+
+[[budget]]
+key = "idle_mib"
+name = "Idle overhead of `ap`, the VMM, and the guest kernel"
+target = 64.0
+
+[[budget]]
+key = "noop_build_ms"
+name = "`ap build` with nothing changed"
+target = 100.0
+
+[[budget]]
+key = "binary_bytes"
+name = "Stripped release binary"
+
+[[budget]]
+key = "version_ms"
+name = "`ap --version`"
+band_pct = 20.0
+band_abs = 2.0

@@ -1,7 +1,8 @@
 //! Parses an Agentfile, as SPEC.md defines it.
 //!
 //! So far this covers comments, instruction names, and arguments. It doesn't
-//! yet check which instructions exist or read fenced blocks.
+//! yet check which instructions exist, read fenced blocks, or apply the rules
+//! for text values, so `SYSTEM`, `PROMPT`, and `ENV` keep their raw text.
 
 use std::fmt;
 

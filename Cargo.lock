@@ -7,5 +7,20 @@ name = "agentfile"
 version = "0.0.0"
 
 [[package]]
+name = "ap"
+version = "0.0.0"
+
+[[package]]
+name = "fake-harness"
+version = "0.0.0"
+
+[[package]]
+name = "fake-vm"
+version = "0.0.0"
+dependencies = [
+ "ap",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.0"

@@ -111,7 +111,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             for quote in quotes {
                 let key = (quote.heading, quote.text);
                 if promises.contains(&key) {
-                    if passed {
+                    if passed && !package.fake {
                         proven.insert(key);
                     }
                 } else if units.contains(&key) {

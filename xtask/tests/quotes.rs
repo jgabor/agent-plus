@@ -371,3 +371,132 @@ fn this_repository_merges_waivers_by_union() {
         .unwrap();
     assert_eq!(stdout(&output), "harness/waived.txt: merge: union\n");
 }
+
+/// `crates/demo` holds `CHECK_ONE`, with these lines appended to its manifest,
+/// beside `crates/fake-vm`, an empty package named like a fake.
+fn score_with_demo_manifest(name: &str, extra: &str, files: &[(&str, &str)]) -> Output {
+    let demo = format!("{}{extra}", package_manifest("demo"));
+    let fake = package_manifest("fake-vm");
+    let mut all = vec![
+        ("crates/demo/Cargo.toml", demo.as_str()),
+        ("crates/fake-vm/Cargo.toml", fake.as_str()),
+        ("crates/fake-vm/src/lib.rs", ""),
+    ];
+    all.extend_from_slice(files);
+    let root = workspace(name, SPEC, CHECK_ONE, &all);
+    xtask(&root, &["score"])
+}
+
+#[track_caller]
+fn assert_spec(output: &Output, expected: &str) {
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
+    assert_eq!(stdout(output), format!("{expected}\n"));
+}
+
+#[test]
+fn a_check_in_a_package_with_a_fake_dependency_earns_nothing() {
+    let extra = "\n[dependencies]\nfake-vm = { path = \"../fake-vm\" }\n";
+    assert_spec(
+        &score_with_demo_manifest("fake-dep", extra, &[]),
+        "spec 0 of 3",
+    );
+}
+
+#[test]
+fn a_fake_dev_dependency_earns_nothing() {
+    let extra = "\n[dev-dependencies]\nfake-vm = { path = \"../fake-vm\" }\n";
+    assert_spec(
+        &score_with_demo_manifest("fake-dev", extra, &[]),
+        "spec 0 of 3",
+    );
+}
+
+#[test]
+fn a_renamed_fake_dependency_earns_nothing() {
+    let extra = "\n[dependencies]\nvm = { package = \"fake-vm\", path = \"../fake-vm\" }\n";
+    assert_spec(
+        &score_with_demo_manifest("fake-renamed", extra, &[]),
+        "spec 0 of 3",
+    );
+}
+
+#[test]
+fn a_fake_reached_through_another_package_earns_nothing() {
+    let extra = "\n[dependencies]\nmiddle = { path = \"../middle\" }\n";
+    let middle = format!(
+        "{}\n[dependencies]\nfake-vm = {{ path = \"../fake-vm\" }}\n",
+        package_manifest("middle")
+    );
+    let files = [
+        ("crates/middle/Cargo.toml", middle.as_str()),
+        ("crates/middle/src/lib.rs", ""),
+    ];
+    assert_spec(
+        &score_with_demo_manifest("fake-transitive", extra, &files),
+        "spec 0 of 3",
+    );
+}
+
+#[test]
+fn a_dependency_with_a_fake_only_in_its_own_tests_still_earns() {
+    let extra = "\n[dependencies]\nmiddle = { path = \"../middle\" }\n";
+    let middle = format!(
+        "{}\n[dev-dependencies]\nfake-vm = {{ path = \"../fake-vm\" }}\n",
+        package_manifest("middle")
+    );
+    let files = [
+        ("crates/middle/Cargo.toml", middle.as_str()),
+        ("crates/middle/src/lib.rs", ""),
+    ];
+    assert_spec(
+        &score_with_demo_manifest("fake-dev-of-dep", extra, &files),
+        "spec 1 of 3",
+    );
+}
+
+#[test]
+fn a_check_inside_a_fake_earns_nothing() {
+    let fake = package_manifest("fake-vm");
+    let root = workspace(
+        "fake-itself",
+        SPEC,
+        "",
+        &[
+            ("crates/fake-vm/Cargo.toml", fake.as_str()),
+            ("crates/fake-vm/src/lib.rs", CHECK_ONE),
+        ],
+    );
+    assert_spec(&xtask(&root, &["score"]), "spec 0 of 3");
+}
+
+#[test]
+fn a_stale_quote_beside_a_fake_still_fails() {
+    let extra = "\n[dependencies]\nfake-vm = { path = \"../fake-vm\" }\n";
+    let demo = format!("{}{extra}", package_manifest("demo"));
+    let fake = package_manifest("fake-vm");
+    let root = workspace(
+        "fake-stale",
+        SPEC,
+        "// spec(A): Gone.\n#[test]\nfn one() {}\n",
+        &[
+            ("crates/demo/Cargo.toml", demo.as_str()),
+            ("crates/fake-vm/Cargo.toml", fake.as_str()),
+            ("crates/fake-vm/src/lib.rs", ""),
+        ],
+    );
+    assert_eq!(xtask(&root, &["score"]).status.code(), Some(1));
+}
+
+#[test]
+fn a_dependency_not_named_like_a_fake_earns() {
+    let extra = "\n[dependencies]\nfaker = { path = \"../faker\" }\n";
+    let faker = package_manifest("faker");
+    let files = [
+        ("crates/faker/Cargo.toml", faker.as_str()),
+        ("crates/faker/src/lib.rs", ""),
+    ];
+    assert_spec(
+        &score_with_demo_manifest("not-fake", extra, &files),
+        "spec 1 of 3",
+    );
+}

@@ -7,9 +7,10 @@
 use crate::forge::{Forge, Gh, PullRequest};
 use crate::gate::{self, Merging};
 use crate::ledger::{self, Record, Scores};
-use crate::{Problem, Verdict, base, bench, journey, lock, work, workspace};
+use crate::{Problem, Verdict, base, bench, journey, lock, workspace};
 use std::env;
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
@@ -22,7 +23,7 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 
 enum Decision {
-    Merged,
+    Merged(PullRequest),
     Refused(String),
     Ready { pr: PullRequest, issue: u64 },
 }
@@ -31,7 +32,7 @@ enum Decision {
 fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
     let pr = gh.pull_request(number)?;
     match pr.state.as_str() {
-        "MERGED" => return Ok(Decision::Merged),
+        "MERGED" => return Ok(Decision::Merged(pr)),
         "OPEN" => {}
         other => {
             return Err(Problem(format!(
@@ -46,13 +47,12 @@ fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
             pr.base_ref
         ));
     }
-    let issues = work::references(&pr.body, "Closes");
-    let [issue] = issues[..] else {
+    let [issue] = pr.closing_issues[..] else {
         return refused(format!(
             "the body of PR {number} needs one `Closes #<issue>` line, because the ledger records one issue per merge"
         ));
     };
-    if pr.review_decision == "CHANGES_REQUESTED" {
+    if pr.changes_requested {
         return refused(format!(
             "a review of PR {number} requested changes. Address it, or dismiss it on GitHub"
         ));
@@ -95,8 +95,9 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
     let _slot = lock::merge_slot(&root)?;
     start_timeout();
     let (pr, issue) = match decide(&gh, number, owner)? {
-        Decision::Merged => {
-            Tree::clear(&root, number);
+        Decision::Merged(pr) => {
+            Tree::clear(&root, &Tree::path(&root, number)?);
+            finish_deleting(&root, &pr)?;
             println!("merge: PR {number} is already merged");
             return Ok(Verdict::Pass);
         }
@@ -105,9 +106,9 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
     };
 
     let fetched = fetch(&root, &pr.head_ref)?;
-    let tree = Tree::create(&root, number, &fetched)?;
+    let tree = Tree::create(&root, number, &fetched.branch)?;
     drop_earlier_record(&tree.path, issue)?;
-    if !rebase(&tree.path)? {
+    if !rebase(&tree.path, &fetched.main)? {
         return refuse("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
     }
     let gated = head(&tree.path)?;
@@ -122,12 +123,19 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
         return Ok(Verdict::Fail);
     };
 
+    if let Some(why) = changed_during_proof(&gh, &root, &scoring, &fetched.main)? {
+        return refuse(&why);
+    }
+
     let path = ledger::store(&tree.path, &record)?;
     base::git_text(&tree.path, &["add", "--", &path])?;
     let message = format!("Record issue {issue} in the ledger");
     base::git_text(&tree.path, &["commit", "-q", "-m", &message])?;
     let recorded = head(&tree.path)?;
-    let lease = format!("--force-with-lease=refs/heads/{0}:{fetched}", pr.head_ref);
+    let lease = format!(
+        "--force-with-lease=refs/heads/{}:{}",
+        pr.head_ref, fetched.branch
+    );
     let target = format!("HEAD:refs/heads/{}", pr.head_ref);
     base::git_text(&tree.path, &["push", "-q", &lease, "origin", &target])?;
     let changed = base::git_text(&tree.path, &["diff", "--name-only", &gated, &recorded])?;
@@ -157,65 +165,127 @@ fn start_timeout() {
     });
 }
 
-/// Updates the two remote-tracking branches, and returns the branch's commit.
-fn fetch(root: &Path, branch: &str) -> Result<String, Problem> {
+/// The commits the merge started from.
+struct Fetched {
+    main: String,
+    branch: String,
+}
+
+/// Updates the two remote-tracking branches, and says where they are now.
+/// Other worktrees can fetch too, so the merge doesn't read these refs again.
+fn fetch(root: &Path, branch: &str) -> Result<Fetched, Problem> {
     let remote = format!("refs/remotes/origin/{branch}");
     let main = format!("+refs/heads/main:{MAIN}");
     let spec = format!("+refs/heads/{branch}:{remote}");
     base::git_text(root, &["fetch", "-q", "origin", &main, &spec])?;
-    let commit = base::git_text(root, &["rev-parse", &remote])?;
-    Ok(commit.trim().to_string())
+    let resolve = |name: &str| -> Result<String, Problem> {
+        Ok(base::git_text(root, &["rev-parse", name])?
+            .trim()
+            .to_string())
+    };
+    Ok(Fetched {
+        main: resolve(MAIN)?,
+        branch: resolve(&remote)?,
+    })
+}
+
+/// Where a ref is on GitHub now, or `None` if it isn't there.
+fn remote_commit(root: &Path, name: &str) -> Result<Option<String>, Problem> {
+    let listing = base::git_text(root, &["ls-remote", "origin", name])?;
+    Ok(listing.split_whitespace().next().map(str::to_string))
+}
+
+/// The proof takes minutes, and meanwhile a label or a review can change, or
+/// an earlier merge that was killed can land. Nothing on GitHub enforces these
+/// rules afterwards, so this is the last place to stop. Says why, if it must.
+fn changed_during_proof(
+    gh: &Gh,
+    root: &Path,
+    scoring: &Scoring,
+    main: &str,
+) -> Result<Option<String>, Problem> {
+    let number = scoring.number;
+    match decide(gh, number, scoring.owner)? {
+        Decision::Refused(why) => return Ok(Some(why)),
+        Decision::Merged(_) => {
+            return Ok(Some(format!(
+                "PR {number} was merged while this merge was running"
+            )));
+        }
+        Decision::Ready { pr, issue } => {
+            if issue != scoring.issue || pr.head_ref != scoring.pr.head_ref {
+                return Ok(Some(format!(
+                    "the issue or branch of PR {number} changed during the merge. Run it again"
+                )));
+            }
+        }
+    }
+    if remote_commit(root, "refs/heads/main")?.as_deref() != Some(main) {
+        return Ok(Some(
+            "`main` moved during the merge, so this head wasn't tested on it. Run it again"
+                .to_string(),
+        ));
+    }
+    Ok(None)
+}
+
+/// `gh pr merge` deletes the branch after the squash, so a merge that dies
+/// between the two leaves it behind. The branch goes only if it is still at the
+/// head that merged, because a name can be used again.
+fn finish_deleting(root: &Path, pr: &PullRequest) -> Result<(), Problem> {
+    let name = format!("refs/heads/{}", pr.head_ref);
+    if remote_commit(root, &name)?.as_deref() == Some(pr.head_oid.as_str()) {
+        let lease = format!("--force-with-lease={name}:{}", pr.head_oid);
+        base::git_text(root, &["push", "-q", &lease, "origin", &format!(":{name}")])?;
+    }
+    Ok(())
 }
 
 /// A detached worktree for the rebase and the gate, so that the merge leaves
-/// the caller's checkout alone. It goes away with the merge.
+/// the caller's checkout alone. It goes away with the merge. It sits outside
+/// the checkout, because Cargo reads `.cargo/config.toml` from every parent
+/// directory, and the settings of the caller's checkout aren't this commit's.
 struct Tree {
     root: PathBuf,
-    number: u64,
     path: PathBuf,
 }
 
 impl Tree {
-    fn path(root: &Path, number: u64) -> PathBuf {
-        root.join("target/merge").join(number.to_string())
+    fn path(root: &Path, number: u64) -> Result<PathBuf, Problem> {
+        let mut hasher = DefaultHasher::new();
+        root.hash(&mut hasher);
+        let name = format!("xtask-merge-{:016x}-{number}", hasher.finish());
+        Ok(bench::temp_outside(root)?.join(name))
     }
 
     /// Starts from nothing, because an earlier attempt may have died at any
     /// point in this worktree.
     fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
-        Tree::clear(root, number);
-        let path = Tree::path(root, number);
-        let parent = path.parent().expect("the path has a parent");
-        fs::create_dir_all(parent)
-            .map_err(|e| Problem(format!("couldn't create {}: {e}", parent.display())))?;
+        let path = Tree::path(root, number)?;
+        Tree::clear(root, &path);
         let name = path.to_string_lossy();
         base::git_text(root, &["worktree", "add", "-q", "--detach", &name, commit])?;
         Ok(Tree {
             root: root.to_path_buf(),
-            number,
             path,
         })
     }
 
-    /// Does what it can. What remains is under `target/`, and the next attempt
-    /// clears it. `--force` twice is what removes a locked worktree, which a
-    /// killed `git worktree add` leaves.
-    fn clear(root: &Path, number: u64) {
-        let path = Tree::path(root, number);
+    /// Does what it can, and the next attempt clears the rest. `--force` twice
+    /// is what removes a locked worktree, which a killed `git worktree add`
+    /// leaves.
+    fn clear(root: &Path, path: &Path) {
         let name = path.to_string_lossy();
         let args = ["worktree", "remove", "--force", "--force", &name];
         let _ = base::git(root, &args);
-        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_dir_all(path);
         let _ = base::git(root, &["worktree", "prune"]);
-        if let Some(parent) = path.parent() {
-            let _ = fs::remove_dir(parent);
-        }
     }
 }
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        Tree::clear(&self.root, self.number);
+        Tree::clear(&self.root, &self.path);
     }
 }
 
@@ -238,8 +308,8 @@ fn drop_earlier_record(tree: &Path, issue: u64) -> Result<(), Problem> {
 
 /// Whether the rebase worked. A failed one is left for the worktree's removal
 /// to clean up, so the branch on GitHub never sees it.
-fn rebase(tree: &Path) -> Result<bool, Problem> {
-    let output = base::git(tree, &["rebase", "-q", MAIN])?;
+fn rebase(tree: &Path, main: &str) -> Result<bool, Problem> {
+    let output = base::git(tree, &["rebase", "-q", main])?;
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr).trim());
     }

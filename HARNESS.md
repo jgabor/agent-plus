@@ -516,7 +516,8 @@ merge can't keep the slot.
    earlier attempt left at the tip.
 4. Run the gate on the rebased head, the journey without `spend` steps, and the
    bench if a budget can be affected. A lowered count fails without `--owner`.
-5. Commit the ledger record, whose `commit` is the gated head, and push with
+5. Read the PR again, and stop if it would now be refused or `main` has moved.
+   Commit the ledger record, whose `commit` is the gated head, and push with
    `--force-with-lease`.
 6. Verify that the new head differs from the gated head only by that record,
    and post `xtask/gate` on it.
@@ -525,6 +526,8 @@ merge can't keep the slot.
 
 A merge past the merge timeout stops and releases the slot. Running it again
 starts over from the fetch, and so does running it after a kill at any step.
+Running it on a PR that already merged finishes deleting the branch, if a kill
+interrupted that.
 
 `xtask/gate` is the only check. Branch protection isn't available on this
 repository's plan, so `xtask merge` enforces the sequence, not GitHub. The

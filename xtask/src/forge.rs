@@ -2,6 +2,7 @@
 
 use crate::Problem;
 use crate::json::{self, Json};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -31,11 +32,13 @@ pub struct Issue {
 pub struct PullRequest {
     pub state: String,
     pub head_ref: String,
+    pub head_oid: String,
     pub base_ref: String,
     pub body: String,
     pub labels: Vec<String>,
-    /// Empty when no review has decided anything.
-    pub review_decision: String,
+    /// The issues GitHub will close when this merges, from any closing word.
+    pub closing_issues: Vec<u64>,
+    pub changes_requested: bool,
 }
 
 pub trait Forge {
@@ -107,7 +110,7 @@ impl Gh {
             "view",
             &number.to_string(),
             "--json",
-            "state,headRefName,baseRefName,body,labels,reviewDecision",
+            "state,headRefName,headRefOid,baseRefName,body,labels,closingIssuesReferences,reviews",
         ])?;
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
@@ -265,6 +268,7 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
     Some(PullRequest {
         state: text("state")?,
         head_ref: text("headRefName")?,
+        head_oid: text("headRefOid")?,
         base_ref: text("baseRefName")?,
         body: text("body")?,
         labels: value
@@ -273,8 +277,34 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
             .iter()
             .map(|label| Some(label.get("name")?.as_str()?.to_string()))
             .collect::<Option<_>>()?,
-        review_decision: text("reviewDecision")?,
+        closing_issues: value
+            .get("closingIssuesReferences")?
+            .as_arr()?
+            .iter()
+            .map(|issue| issue.get("number")?.as_u64())
+            .collect::<Option<_>>()?,
+        changes_requested: has_standing_request(value.get("reviews")?.as_arr()?)?,
     })
+}
+
+/// Whether a reviewer's latest decision is a change request. GitHub's own
+/// summary of this is empty on a repository with no required reviews. A comment
+/// decides nothing, so it leaves an earlier request standing.
+fn has_standing_request(reviews: &[Json]) -> Option<bool> {
+    let mut latest = HashMap::new();
+    for review in reviews {
+        // A deleted account has no author.
+        let author = review
+            .get("author")
+            .and_then(|author| author.get("login"))
+            .and_then(Json::as_str)
+            .unwrap_or_default();
+        let state = review.get("state")?.as_str()?;
+        if state != "COMMENTED" && state != "PENDING" {
+            latest.insert(author, state);
+        }
+    }
+    Some(latest.values().any(|state| *state == "CHANGES_REQUESTED"))
 }
 
 fn read_comment(value: &Json) -> Option<Comment> {

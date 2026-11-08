@@ -41,31 +41,48 @@ pub struct Merging<'a> {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::shared(&root)?;
+    let before = pushed_clean_head(&root);
     let (verdict, _) = check(&root, &hold, None)?;
-    if let Err(Problem(message)) = post_result(&root, verdict) {
+    if let Err(Problem(message)) = post_result(&root, before, verdict) {
         eprintln!("gate: couldn't post `xtask/gate`, so the result is only here: {message}");
     }
     Ok(verdict)
 }
 
-/// Posts the result where it says something about a commit others can see.
-fn post_result(root: &Path, verdict: Verdict) -> Result<(), Problem> {
+/// HEAD, if the tree is what HEAD holds and a remote has that commit. Only then
+/// does a result say something about a commit others can see.
+fn pushed_clean_head(root: &Path) -> Result<Option<String>, Problem> {
     if !root.join(".git").exists()
         || !base::commit_exists(root, "HEAD")?
         || !ledger::changes(root)?.is_empty()
     {
-        return Ok(());
+        return Ok(None);
     }
     let remotes = base::git_text(root, &["branch", "-r", "--contains", "HEAD"])?;
     if remotes.trim().is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let head = base::git_text(root, &["rev-parse", "HEAD"])?;
+    Ok(Some(head.trim().to_string()))
+}
+
+/// Posts the result, if the head that was checked is still the head.
+fn post_result(
+    root: &Path,
+    before: Result<Option<String>, Problem>,
+    verdict: Verdict,
+) -> Result<(), Problem> {
+    let Some(head) = before? else {
+        return Ok(());
+    };
+    if pushed_clean_head(root)?.as_ref() != Some(&head) {
+        return Ok(());
+    }
     let state = match verdict {
         Verdict::Pass => "success",
         Verdict::Fail => "failure",
     };
-    Gh::new(root).post_status(head.trim(), state)
+    Gh::new(root).post_status(&head, state)
 }
 
 /// Runs every check, and returns the verdict and the spec score it earned.

@@ -154,7 +154,7 @@ fn touches(body: &str) -> Vec<String> {
 }
 
 /// The issue numbers on lines that start with this phrase.
-pub fn references(body: &str, phrase: &str) -> Vec<u64> {
+fn references(body: &str, phrase: &str) -> Vec<u64> {
     body.lines()
         .filter_map(|line| line.trim().strip_prefix(phrase))
         .flat_map(|rest| rest.split('#').skip(1))

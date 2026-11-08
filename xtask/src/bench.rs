@@ -231,7 +231,7 @@ fn build_base(root: &Path, directory: &Path, commit: &str) -> Result<PathBuf, Pr
 }
 
 /// The system's temp directory, which must be outside the checkout.
-fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
+pub fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
     let resolve = |path: &Path| {
         fs::canonicalize(path)
             .map_err(|e| Problem(format!("couldn't resolve {}: {e}", path.display())))

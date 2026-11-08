@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 
 pub const MAIN: &str = "refs/remotes/origin/main";
 pub const SPEC_CHANGE: &str = "spec-change";
+const LEDGER: &str = "harness/ledger";
 const PROTECTED: &[&str] = &[
     "SPEC.md",
     "harness/waived.txt",
@@ -79,8 +80,9 @@ pub fn removed_checks(root: &Path, base: &str, score: &Score) -> Result<Vec<Stri
     Ok(findings)
 }
 
-/// Whether the commits since `base` do nothing but undo one earlier commit in
-/// its history, apart from the ledger, going by the `git revert` message.
+/// Whether HEAD is exactly `base` with one earlier commit of its history undone,
+/// going by the `git revert` message and replaying that revert. The ledger stays
+/// as `base` has it, because a record says what was measured.
 pub fn is_exact_revert(root: &Path, base: &str) -> Result<bool, Problem> {
     let messages = git_text(root, &["log", "--format=%B", &format!("{base}..HEAD")])?;
     let Some(commit) = messages.lines().find_map(reverted_commit) else {
@@ -93,7 +95,20 @@ pub fn is_exact_revert(root: &Path, base: &str) -> Result<bool, Problem> {
     if !in_history || !commit_exists(root, &parent)? {
         return Ok(false);
     }
-    Ok(change(root, commit, &parent)? == change(root, base, "HEAD")?)
+    let from = format!("--merge-base={commit}");
+    let replayed = git(root, &["merge-tree", "--write-tree", &from, base, &parent])?;
+    if !replayed.status.success() {
+        return Ok(false);
+    }
+    let tree = String::from_utf8_lossy(&replayed.stdout);
+    let tree = tree.lines().next().unwrap_or_default();
+    let same = |args: &[&str]| -> Result<bool, Problem> {
+        Ok(git(root, &[&["diff", "--quiet"], args].concat())?
+            .status
+            .success())
+    };
+    Ok(same(&[base, "HEAD", "--", LEDGER])?
+        && same(&[tree, "HEAD", "--", ".", &format!(":(exclude){LEDGER}")])?)
 }
 
 fn reverted_commit(line: &str) -> Option<&str> {
@@ -101,26 +116,6 @@ fn reverted_commit(line: &str) -> Option<&str> {
         .strip_prefix("This reverts commit ")?
         .strip_suffix('.')?;
     (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())).then_some(commit)
-}
-
-/// What changes from one tree to another, without what depends on where the
-/// lines are or which blobs they're in.
-fn change(root: &Path, from: &str, to: &str) -> Result<Vec<String>, Problem> {
-    let args = [
-        "diff",
-        "--binary",
-        "-U0",
-        from,
-        to,
-        "--",
-        ".",
-        ":(exclude)harness/ledger",
-    ];
-    Ok(git_text(root, &args)?
-        .lines()
-        .filter(|line| !line.starts_with("index ") && !line.starts_with("@@ "))
-        .map(str::to_string)
-        .collect())
 }
 
 /// Names each protected path changed without the label. `None` means a
@@ -163,7 +158,7 @@ pub fn missing_label_on(
     Ok(label_findings(&protected_changes(root, base)?))
 }
 
-fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
+pub fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
     let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
     Ok(changed
         .split('\0')

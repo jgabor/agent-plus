@@ -161,14 +161,20 @@ impl Gh {
 
     /// Returns the new PR's number. It targets `main`, and the branch must
     /// already be pushed.
-    pub fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<u64, Problem> {
-        let url = self.text(
-            &[
-                "pr", "create", "--base", "main", "--head", branch, "--title", title, "--body",
-                body,
-            ],
-            None,
-        )?;
+    pub fn create_pr(
+        &self,
+        branch: &str,
+        title: &str,
+        body: &str,
+        label: Option<&str>,
+    ) -> Result<u64, Problem> {
+        let mut args = vec![
+            "pr", "create", "--base", "main", "--head", branch, "--title", title, "--body", body,
+        ];
+        if let Some(label) = label {
+            args.extend(["--label", label]);
+        }
+        let url = self.text(&args, None)?;
         url.trim()
             .rsplit_once("/pull/")
             .and_then(|(_, number)| number.parse().ok())

@@ -520,6 +520,8 @@ merge can't keep the slot.
    earlier attempt left at the tip.
 4. Run the gate on the rebased head, the journey without `spend` steps, and the
    bench if a budget can be affected. A lowered count fails without `--owner`.
+   An exact revert merged with `--owner` skips the bench, because its base may
+   be what doesn't build.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
    Commit the ledger record, whose `commit` is the gated head, and push with
    `--force-with-lease`.
@@ -550,7 +552,8 @@ does the following on `main`:
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad
    commit. The revert is an exact inverse, apart from keeping the reverted
-   ledger record, and is exempt from the removed-check floor.
+   ledger record, and is exempt from the removed-check floor when merged with
+   `--owner`. A later night leaves an issue that says how it ended alone.
 
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.

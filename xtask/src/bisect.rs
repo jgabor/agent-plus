@@ -10,37 +10,54 @@ use std::path::Path;
 
 const ISSUE_TITLE: &str = "`main` fails the gate";
 const LEDGER: &str = "harness/ledger";
+/// Starts a comment that says how a response ended.
+const RESPONDED: &str = "<!-- nightly response -->";
 /// How many commits to ask GitHub about, looking for a passing nightly.
 const REACH: usize = 200;
 /// Names the throwaway tree. An issue or PR never has this number.
 const TREE: u64 = 0;
 
-/// Files one issue and tries to open one revert PR. An open issue from an
-/// earlier night means this break already has an answer, or is waiting for one.
+/// Files one issue and tries to open one revert PR. An issue that says how an
+/// earlier night ended stops this, until the owner closes it. One with no such
+/// comment is from a run that died, so this picks it up.
 pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
     let gh = Gh::new(root);
-    let open = gh.open_issues()?;
-    if let Some(issue) = open.iter().find(|issue| issue.title == ISSUE_TITLE) {
-        println!("nightly: #{} already covers the failing gate", issue.number);
-        return Ok(());
-    }
+    let open = gh
+        .open_issues()?
+        .into_iter()
+        .find(|issue| issue.title == ISSUE_TITLE);
+    let issue = match open {
+        Some(issue) => {
+            let owner = gh.owner()?;
+            let responded = gh
+                .issue(issue.number)?
+                .comments
+                .iter()
+                .any(|comment| comment.author == owner && comment.body.starts_with(RESPONDED));
+            if responded {
+                println!("nightly: #{} already covers the failing gate", issue.number);
+                return Ok(());
+            }
+            println!("nightly: picking up #{}", issue.number);
+            issue.number
+        }
+        None => {
+            let issue = gh.create_issue(ISSUE_TITLE, &issue_body(head))?;
+            println!("nightly: filed #{issue}");
+            issue
+        }
+    };
     let hold = lock::shared(root)?;
     let tree = Tree::create(root, TREE, head)?;
-    if passes(&tree, &hold, head)? {
-        println!("nightly: the gate passed on a second run, so nothing was bisected");
-        return Ok(());
-    }
-    let issue = gh.create_issue(ISSUE_TITLE, &issue_body(head))?;
-    println!("nightly: filed #{issue}");
     let outcome = bisect_and_revert(root, &gh, &tree, &hold, head, status, issue)
         .unwrap_or_else(|Problem(message)| format!("Couldn't bisect or revert: {message}"));
-    gh.post_comment(issue, &outcome)?;
+    gh.post_comment(issue, &format!("{RESPONDED}\n{outcome}"))?;
     Ok(())
 }
 
 fn issue_body(head: &str) -> String {
     format!(
-        "`cargo xtask nightly` found that `{head}` fails the gate, and that a second run fails too.\n\n## Goal\n`main` passes the gate again.\n\n## Done when\n`cargo xtask gate` passes on `main`.\n\n## Touches\nWhatever the first bad commit touched.\n"
+        "`cargo xtask nightly` found that `{head}` fails the gate.\n\n## Goal\n`main` passes the gate again.\n\n## Done when\n`cargo xtask gate` passes on `main`.\n\n## Touches\nWhatever the first bad commit touched.\n"
     )
 }
 
@@ -146,9 +163,11 @@ fn open_revert(
     let short = base::git_text(root, &["rev-parse", "--short", bad])?;
     let branch = format!("{issue}-revert-{}", short.trim());
     let target = format!("HEAD:refs/heads/{branch}");
-    base::git_text(path, &["push", "-q", "origin", &target])?;
+    // The name is this issue's, so all that can be there is a killed run's work.
+    base::git_text(path, &["push", "-q", "--force", "origin", &target])?;
+    let label = (!base::protected_changes(path, head)?.is_empty()).then_some(base::SPEC_CHANGE);
     let body = format!(
-        "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and twice on `{head}`.\n\n## Decisions\nThe owner merges this with `cargo xtask merge <pr> --owner`.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
+        "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and took `{head}` as bad from its own run. If the bisect blames only the newest commit, that run may have hit a flaky check.\n\n## Decisions\nThe owner merges this with `cargo xtask merge <pr> --owner`.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
     );
-    gh.create_pr(&branch, &title, &body)
+    gh.create_pr(&branch, &title, &body, label)
 }

@@ -342,7 +342,13 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Record>, Problem> {
 
     let commit = base::find(tree)?
         .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
-    if budget_can_change(tree, &commit)? && bench::compare(tree, Some(&pr.body))? == Verdict::Fail {
+    // The base of a revert may be what doesn't build, and a revert puts back a
+    // tree that was already measured.
+    let revert = owner && base::is_exact_revert(tree, &commit)?;
+    if !revert
+        && budget_can_change(tree, &commit)?
+        && bench::compare(tree, Some(&pr.body))? == Verdict::Fail
+    {
         return Ok(None);
     }
     let scores = Scores {

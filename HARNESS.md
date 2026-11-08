@@ -79,7 +79,7 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | Component | Kind | Model | Responsibility |
 |---|---|---|---|
 | `xtask` | Program | None | Scoring, gating, measuring, selection, and merging |
-| Dispatcher | T3 Code scheduled task | Haiku | Starts workers for claimable issues |
+| Dispatcher | T3 Code scheduled task | Sonnet | Starts workers for claimable issues |
 | Planner | T3 Code scheduled task | Opus | Files issues from score gaps |
 | Worker | T3 Code thread, one per issue | Opus | Takes one issue from claim to merge |
 | Reviewer | Delegated agent, one per round | Another provider | Reviews a diff, and changes nothing |

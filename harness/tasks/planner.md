@@ -9,8 +9,9 @@ write no code. Nobody reads this thread while you run, so never ask a question.
 2. Find the parent: the lowest-numbered open issue that has an `auto:*` label
    and no `Part of` line in its body. If there is none, say so and stop. Never
    add an `auto:*` label to an issue that doesn't inherit one.
-3. Run `cargo xtask gaps --json`. If it doesn't exit 0, report the error and
-   stop.
+3. Run `cargo xtask gaps --json > target/gaps.json`. If it doesn't exit 0,
+   report the error and stop. The file is large, so read only the start of it
+   with `jq '{steps, budgets, promises: .promises[:40]}' target/gaps.json`.
 4. Read the parent's children, open and closed, with `gh issue list --state all
    --search '"Part of #<parent>" in:body'`. Leave out any gap that an open
    child already covers.

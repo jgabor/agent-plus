@@ -53,7 +53,8 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
         if package.name == "xtask" {
             continue;
         }
-        let mut names: HashMap<String, String> = HashMap::new();
+        let mut definitions: HashMap<String, usize> = HashMap::new();
+        let mut checks = Vec::new();
         for file in rust_files(&package.directory)? {
             let source = fs::read_to_string(&file)
                 .map_err(|e| Problem(format!("couldn't read {}: {e}", file.display())))?;
@@ -62,6 +63,9 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                 .unwrap_or(&file)
                 .display()
                 .to_string();
+            for name in test_functions(&source) {
+                *definitions.entry(name).or_default() += 1;
+            }
             for item in scan(&source) {
                 match item {
                     Scanned::Orphan { line } => findings.push(format!(
@@ -71,27 +75,28 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                         line,
                         quotes,
                         function,
-                    } => {
-                        let place = format!("{shown}:{line}");
-                        if let Some(first) = names.insert(function.clone(), place.clone()) {
-                            findings.push(format!(
-                                "{place}: `{function}` is already a check in package {} at {first}. Check names must be unique within a package",
-                                package.name
-                            ));
-                        }
-                        let passed = results.passed(&package.name, &function);
-                        for quote in quotes {
-                            let key = (quote.heading, quote.text);
-                            if !known.contains(&key) {
-                                findings.push(format!(
-                                    "{shown}:{}: no such sentence under `{}` in SPEC.md: {}. Match the quote to SPEC.md, or remove the check",
-                                    quote.line, key.0, key.1
-                                ));
-                            } else if passed {
-                                proven.insert(key);
-                            }
-                        }
-                    }
+                    } => checks.push((shown.clone(), line, quotes, function)),
+                }
+            }
+        }
+        for (shown, line, quotes, function) in checks {
+            if definitions.get(&function).copied().unwrap_or(0) > 1 {
+                findings.push(format!(
+                    "{shown}:{line}: `{function}` names more than one test in package {}. A check's name must be unique within its package",
+                    package.name
+                ));
+                continue;
+            }
+            let passed = results.passed(&package.name, &function);
+            for quote in quotes {
+                let key = (quote.heading, quote.text);
+                if !known.contains(&key) {
+                    findings.push(format!(
+                        "{shown}:{}: no such sentence under `{}` in SPEC.md: {}. Match the quote to SPEC.md, or remove the check",
+                        quote.line, key.0, key.1
+                    ));
+                } else if passed {
+                    proven.insert(key);
                 }
             }
         }
@@ -169,11 +174,8 @@ fn scan(source: &str) -> Vec<Scanned> {
             }
             at += 1;
         }
-        let mut is_test = false;
-        while at < lines.len() && lines[at].starts_with("#[") {
-            is_test |= lines[at] == "#[test]";
-            at += 1;
-        }
+        let (after, is_test) = skip_attributes(&lines, at);
+        at = after;
         let function = lines.get(at).copied().and_then(function_name);
         match function {
             Some(function) if is_test && !malformed => found.push(Scanned::Check {
@@ -185,6 +187,40 @@ fn scan(source: &str) -> Vec<Scanned> {
         }
     }
     found
+}
+
+/// Moves past any attributes, including ones spread over several lines, and
+/// says whether one of them was `#[test]`.
+fn skip_attributes(lines: &[&str], mut at: usize) -> (usize, bool) {
+    let mut is_test = false;
+    while at < lines.len() && lines[at].starts_with("#[") {
+        is_test |= lines[at] == "#[test]";
+        let mut depth = 0i32;
+        while at < lines.len() {
+            depth += lines[at].matches('[').count() as i32;
+            depth -= lines[at].matches(']').count() as i32;
+            at += 1;
+            if depth <= 0 {
+                break;
+            }
+        }
+    }
+    (at, is_test)
+}
+
+/// The name of every `#[test]` function, including disabled ones.
+fn test_functions(source: &str) -> Vec<String> {
+    let lines: Vec<&str> = source.lines().map(str::trim).collect();
+    let mut names = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if *line == "#[test]" {
+            let (after, _) = skip_attributes(&lines, index);
+            if let Some(name) = lines.get(after).copied().and_then(function_name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 fn parse_quote(line: &str) -> Option<(&str, &str)> {

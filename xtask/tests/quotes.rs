@@ -126,9 +126,26 @@ fn a_check_in_an_integration_test_counts() {
 }
 
 #[test]
-fn a_same_named_failing_test_elsewhere_blocks_the_proof() {
-    let lib = "// spec(A): One.\n#[test]\nfn one() {}\n\n#[cfg(test)]\nmod other {\n    #[test]\n    fn one() {\n        panic!();\n    }\n}\n";
-    assert_score(lib, "collision", "spec 0 of 3");
+fn a_check_sharing_a_name_with_another_test_fails() {
+    let lib = "// spec(A): One.\n#[test]\nfn one() {}\n\n#[cfg(test)]\nmod other {\n    #[test]\n    fn one() {}\n}\n";
+    let root = workspace("collision", SPEC, lib, &[]);
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("one"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_disabled_check_cannot_borrow_another_result() {
+    let lib = "// spec(A): One.\n#[test]\n#[cfg(windows)]\nfn same() {}\n\n#[cfg(test)]\nmod other {\n    #[test]\n    fn same() {}\n}\n";
+    let root = workspace("borrowed", SPEC, lib, &[]);
+    let output = xtask(&root, &["score"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+}
+
+#[test]
+fn a_multiline_attribute_is_allowed() {
+    let lib = "// spec(A): One.\n#[test]\n#[cfg(any(\n    unix,\n    windows\n))]\nfn one() {}\n";
+    assert_score(lib, "multiline", "spec 1 of 3");
 }
 
 #[test]

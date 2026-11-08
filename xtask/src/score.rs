@@ -4,11 +4,19 @@ use crate::testrun::{self, Results};
 use crate::{Problem, Verdict, spec, workspace};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+
+const WAIVERS: &str = "harness/waived.txt";
+
+/// A SPEC.md heading, and a unit's text under it.
+pub type Sentence = (String, String);
 
 pub struct Score {
     pub proven: usize,
-    pub promises: usize,
+    pub promises: HashSet<Sentence>,
+    /// How many checks quote each sentence.
+    pub quoted: HashMap<Sentence, usize>,
     pub findings: Vec<String>,
 }
 
@@ -20,10 +28,11 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     if json {
         println!(
             "{{\"spec\":{{\"proven\":{},\"promises\":{}}}}}",
-            score.proven, score.promises
+            score.proven,
+            score.promises.len()
         );
     } else {
-        println!("spec {} of {}", score.proven, score.promises);
+        println!("spec {} of {}", score.proven, score.promises.len());
     }
     Ok(if score.findings.is_empty() {
         Verdict::Pass
@@ -42,13 +51,21 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
     let text = fs::read_to_string(root.join("SPEC.md"))
         .map_err(|e| Problem(format!("couldn't read SPEC.md: {e}")))?;
     let units = spec::extract(&text).map_err(|e| Problem(format!("SPEC.md: {e}")))?;
-    let known: HashSet<(String, String)> = units
-        .iter()
-        .map(|u| (u.heading.clone(), u.text.clone()))
-        .collect();
+    let units: HashSet<Sentence> = units.into_iter().map(|u| (u.heading, u.text)).collect();
 
     let mut proven = HashSet::new();
+    let mut quoted = HashMap::new();
     let mut findings = Vec::new();
+    let mut promises = units.clone();
+    for (line, sentence) in read_waivers(root)? {
+        if !units.contains(&sentence) {
+            findings.push(format!(
+                "{WAIVERS}:{line}: no such sentence under `{}` in SPEC.md: {}. Match the waiver to SPEC.md, or remove it",
+                sentence.0, sentence.1
+            ));
+        }
+        promises.remove(&sentence);
+    }
     for package in workspace::packages(root)? {
         if package.name == "xtask" {
             continue;
@@ -63,6 +80,9 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                 .unwrap_or(&file)
                 .display()
                 .to_string();
+            for sentence in quotes_in(&source) {
+                *quoted.entry(sentence).or_default() += 1;
+            }
             for name in test_functions(&source) {
                 *definitions.entry(name).or_default() += 1;
             }
@@ -90,22 +110,71 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             let passed = results.passed(&package.name, &function);
             for quote in quotes {
                 let key = (quote.heading, quote.text);
-                if !known.contains(&key) {
+                if promises.contains(&key) {
+                    if passed {
+                        proven.insert(key);
+                    }
+                } else if units.contains(&key) {
+                    findings.push(format!(
+                        "{shown}:{}: this sentence under `{}` is waived, so it isn't a promise: {}. Remove the check or the waiver",
+                        quote.line, key.0, key.1
+                    ));
+                } else {
                     findings.push(format!(
                         "{shown}:{}: no such sentence under `{}` in SPEC.md: {}. Match the quote to SPEC.md, or remove the check",
                         quote.line, key.0, key.1
                     ));
-                } else if passed {
-                    proven.insert(key);
                 }
             }
         }
     }
     Ok(Score {
         proven: proven.len(),
-        promises: units.len(),
+        promises,
+        quoted,
         findings,
     })
+}
+
+/// Each waived sentence, with its line number. A missing file waives nothing.
+fn read_waivers(root: &Path) -> Result<Vec<(usize, Sentence)>, Problem> {
+    let text = match fs::read_to_string(root.join(WAIVERS)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(Problem(format!("couldn't read {WAIVERS}: {e}"))),
+    };
+    let mut waivers = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.splitn(3, '\t');
+        match (fields.next(), fields.next(), fields.next()) {
+            (Some(heading), Some(unit), Some(reason)) if !reason.trim().is_empty() => {
+                waivers.push((index + 1, (heading.to_string(), unit.to_string())));
+            }
+            _ => {
+                return Err(Problem(format!(
+                    "{WAIVERS}:{}: expected `<heading><TAB><unit><TAB><reason>`, got `{line}`",
+                    index + 1
+                )));
+            }
+        }
+    }
+    Ok(waivers)
+}
+
+/// Each sentence quoted by a check in this source, once per check.
+pub fn quotes_in(source: &str) -> Vec<Sentence> {
+    let mut sentences = Vec::new();
+    for item in scan(source) {
+        if let Scanned::Check { quotes, .. } = item {
+            let distinct: HashSet<Sentence> =
+                quotes.into_iter().map(|q| (q.heading, q.text)).collect();
+            sentences.extend(distinct);
+        }
+    }
+    sentences
 }
 
 fn rust_files(directory: &Path) -> Result<Vec<PathBuf>, Problem> {

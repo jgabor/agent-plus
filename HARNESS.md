@@ -143,7 +143,8 @@ fn missing_src_fails() { /* ... */ }
 - Check function names are unique within a package, which is how a test result
   maps back to its check.
 - Descriptive units are listed in `harness/waived.txt`, each with a reason. A
-  waiver that matches no unit fails the gate.
+  waiver that matches no unit fails the gate, and so does a check that quotes
+  a waived unit.
 - A PR shows each new check failing before the change that makes it pass. This
   is evidence for the reviewer, not something a program can check.
 - The nightly job runs mutation testing on crates changed that day. A check
@@ -217,7 +218,7 @@ A failing floor blocks a merge regardless of scores.
 | A closed network stays closed | `floor_closed_network`, needed by step 10 |
 | A share can't reach outside its root | `floor_share_root`, needed by step 9 |
 | The guest can't run anything on the host | `floor_guest_host`, needed by step 4 |
-| No check is removed unless the sentence it quoted is also removed | Comparison with the base |
+| No check is removed while the sentence it quoted is still a promise | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
 
 **C floor.** On Linux x86_64, Linux arm64, and macOS arm64, the resolved
@@ -227,6 +228,12 @@ no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
 build script is allowed only in a dependency listed in
 `harness/build-scripts.txt`, and never in our own crates. T0 also builds with
 `CC` and `CXX` pointing at a program that fails.
+
+**Removed-check floor.** The base is the commit where the branch left
+`origin/main`. For each promise, the gate counts the checks that quote it in the
+base and in the working tree. A lower count fails, so a check can be renamed or
+moved, but not dropped. In a repository with no `origin/main`, the gate prints
+`skip base` and compares nothing.
 
 **Pending floors.** A floor whose check doesn't exist yet is pending. A pending
 floor passes the gate and fails a release. Escape checks are tests in T1, and
@@ -306,8 +313,9 @@ Files outside any single lane follow these rules:
 The gate fails when a diff touches one of these `spec-change` paths and its PR
 doesn't have the label. That includes a typo, because a program can't tell a
 typo from a change of meaning. A `spec-change` PR may also edit the `// spec(`
-lines and waivers that quote the changed text. `cargo xtask merge` refuses a
-`spec-change` PR without `--owner`.
+lines and waivers that quote the changed text. A branch with no open PR yet
+prints `skip labels`, because `cargo xtask merge` gates it again with the PR
+open. `cargo xtask merge` refuses a `spec-change` PR without `--owner`.
 
 Once H5 is complete, `xtask/` and `harness/` need `spec-change` too, apart from
 `harness/ledger/` and `harness/journey/`, so a PR can't weaken its own gate.
@@ -343,7 +351,7 @@ band_abs = 2.0
 `harness/waived.txt` holds one waiver per line,
 `<heading><TAB><unit><TAB><reason>`. `harness/build-scripts.txt` holds one
 audited package per line, `<name> <version> <reason>`. Lines starting with `#`
-are comments.
+are comments. A missing file lists nothing.
 
 ### Ledger record
 

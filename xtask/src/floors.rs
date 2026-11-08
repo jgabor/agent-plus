@@ -5,7 +5,7 @@ use crate::Problem;
 use crate::json::{self, Json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The hosts v0.1.0 supports. Each one resolves a different dependency graph.
@@ -17,8 +17,9 @@ const TARGETS: [&str; 3] = [
 
 const C_BUILDERS: [&str; 4] = ["cc", "cmake", "bindgen", "pkg-config"];
 
-const FOREIGN_EXTENSIONS: [&str; 15] = [
-    "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "S", "s", "asm", "a", "o", "so", "dylib", "lib",
+const FOREIGN_EXTENSIONS: &[&str] = &[
+    "c", "C", "h", "H", "cc", "cp", "cpp", "cxx", "c++", "hh", "hpp", "hxx", "h++", "m", "mm", "S",
+    "s", "sx", "asm", "a", "o", "obj", "so", "dylib", "lib", "dll",
 ];
 
 const AUDIT_FILE: &str = "harness/build-scripts.txt";
@@ -43,11 +44,10 @@ pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
             .output()
             .map_err(|e| Problem(format!("couldn't run `cargo metadata`: {e}")))?;
         if !output.status.success() {
-            findings.insert(format!(
+            return Err(Problem(format!(
                 "`cargo metadata` failed for {target}: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
-            ));
-            continue;
+            )));
         }
         let text = String::from_utf8_lossy(&output.stdout);
         let metadata = json::parse(&text)
@@ -182,34 +182,43 @@ fn inspect_package(
 
     let manifest = Path::new(text(package, "manifest_path")?);
     let directory = manifest.parent().ok_or("a manifest has no parent")?;
-    find_foreign_files(directory, &label, findings).map_err(|e| e.to_string())
+    let mut visited = HashSet::new();
+    find_foreign_files(directory, true, &label, findings, &mut visited).map_err(|e| e.to_string())
 }
 
+fn is_foreign(name: &str) -> bool {
+    let extension = name.rsplit_once('.').map(|(_, extension)| extension);
+    extension.is_some_and(|e| FOREIGN_EXTENSIONS.contains(&e)) || name.contains(".so.")
+}
+
+/// Follows symbolic links, so a linked file or directory can't hide native
+/// code. Only the top of a package can hold Cargo's output or a git directory.
 fn find_foreign_files(
     directory: &Path,
+    is_top: bool,
     label: &str,
     findings: &mut BTreeSet<String>,
+    visited: &mut HashSet<PathBuf>,
 ) -> std::io::Result<()> {
+    if !visited.insert(fs::canonicalize(directory)?) {
+        return Ok(());
+    }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        let kind = entry.file_type()?;
+        let name = entry.file_name();
+        let Ok(kind) = fs::metadata(&path) else {
+            continue; // A broken link has no content to inspect.
+        };
         if kind.is_dir() {
-            let name = entry.file_name();
-            if name != "target" && name != ".git" {
-                find_foreign_files(&path, label, findings)?;
+            if !(is_top && (name == "target" || name == ".git")) {
+                find_foreign_files(&path, false, label, findings, visited)?;
             }
-        } else if kind.is_file() {
-            let foreign = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| FOREIGN_EXTENSIONS.contains(&e));
-            if foreign {
-                findings.insert(format!(
-                    "{label}: contains {}, which is C, assembly, or a prebuilt library",
-                    path.display()
-                ));
-            }
+        } else if kind.is_file() && name.to_str().is_some_and(is_foreign) {
+            findings.insert(format!(
+                "{label}: contains {}, which is C, assembly, or a prebuilt library",
+                path.display()
+            ));
         }
     }
     Ok(())

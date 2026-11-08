@@ -2,6 +2,7 @@
 //! crate named `cc` stands in for the real one, so these checks work offline.
 
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -75,11 +76,6 @@ fn assert_floor_fails(output: &Output, culprit: &str) {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(output));
     assert!(stdout(output).contains("fail floors"), "{}", stdout(output));
     assert!(stderr(output).contains(culprit), "{}", stderr(output));
-    assert!(
-        !stderr(output).contains("`cargo metadata` failed"),
-        "{}",
-        stderr(output)
-    );
 }
 
 #[test]
@@ -205,7 +201,10 @@ fn a_malformed_audit_line_is_an_environment_error() {
 
 #[test]
 fn foreign_source_and_prebuilt_files_fail() {
-    for extension in ["c", "h", "cc", "cpp", "S", "s", "asm", "a", "o", "so"] {
+    for extension in [
+        "c", "C", "h", "cc", "cpp", "c++", "hxx", "m", "mm", "S", "s", "sx", "asm", "a", "o", "so",
+        "so.1",
+    ] {
         let file = format!("vendor/dep/native/thing.{extension}");
         let name = format!("foreign-{extension}");
         let root = workspace(
@@ -259,5 +258,67 @@ fn building_with_a_c_compiler_fails() {
         stdout(&output).contains("fail tests"),
         "{}",
         stdout(&output)
+    );
+}
+
+const VENDORED_DEP: [(&str, &str); 1] = [("vendor/dep/src/lib.rs", LIB)];
+
+fn vendored_dep(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let manifest = package("dep", "");
+    let mut all = vec![("vendor/dep/Cargo.toml", manifest.as_str())];
+    all.extend_from_slice(&VENDORED_DEP);
+    all.extend_from_slice(files);
+    workspace(name, DEP_WITH_BUILD_SCRIPT, &all)
+}
+
+#[test]
+fn c_under_a_directory_named_target_fails() {
+    let root = vendored_dep(
+        "named-target",
+        &[("vendor/dep/src/target/ffi.c", "planted\n")],
+    );
+    assert_floor_fails(&gate(&root), "ffi.c");
+}
+
+#[test]
+fn a_symlink_to_a_c_file_fails() {
+    let root = vendored_dep("file-link", &[("vendor/shared/real.c", "planted\n")]);
+    let vendor = root.parent().unwrap().join("vendor");
+    fs::create_dir_all(vendor.join("dep/native")).unwrap();
+    symlink(
+        vendor.join("shared/real.c"),
+        vendor.join("dep/native/link.c"),
+    )
+    .unwrap();
+    assert_floor_fails(&gate(&root), "link.c");
+}
+
+#[test]
+fn a_symlink_to_a_directory_of_c_fails() {
+    let root = vendored_dep("dir-link", &[("vendor/shared/real.c", "planted\n")]);
+    let vendor = root.parent().unwrap().join("vendor");
+    symlink(vendor.join("shared"), vendor.join("dep/native")).unwrap();
+    assert_floor_fails(&gate(&root), "real.c");
+}
+
+#[test]
+fn a_symlink_cycle_terminates() {
+    let root = vendored_dep("cycle", &[]);
+    let vendor = root.parent().unwrap().join("vendor");
+    symlink(vendor.join("dep"), vendor.join("dep/again")).unwrap();
+    let output = gate(&root);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[test]
+fn a_missing_lockfile_is_an_environment_error() {
+    let root = workspace("no-lock", "", &[]);
+    fs::remove_file(root.join("Cargo.lock")).unwrap();
+    let output = gate(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("cargo metadata"),
+        "{}",
+        stderr(&output)
     );
 }

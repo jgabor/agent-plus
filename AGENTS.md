@@ -108,7 +108,8 @@ and keep going. Don't fix it in this PR.
 You can claim an issue when all of these are true:
 
 - it has an `auto:*` label, or the owner told you to take it
-- it has no `in-progress` or `needs-owner` label
+- it has no `needs-owner` label, and no `in-progress` label unless its lease
+  has expired and its branch has had no commits since
 - nothing in its `Blocked by` line is still open
 - its `Touches` doesn't overlap an issue that is in progress
 
@@ -256,15 +257,16 @@ All of these must be true on the latest commit:
 
 - Your proof covers every change in the diff.
 - `cargo xtask gate` passes, and the `xtask/gate` status is green.
-- No hill went down, no floor broke, and any budget regression has a reason in
-  the ledger.
+- No hill went down unless the owner is merging, no floor broke, and any budget
+  regression has a reason in the ledger.
 - Reviews have finished, and each finding is fixed or declined in writing.
 - No human review still requests changes.
 - The branch is up to date with `main`, and you hold the merge slot.
 - The PR isn't labeled `spec-change`, unless the owner has approved it.
 
-Squash-merge with `gh pr merge --squash --delete-branch`. Never use `--admin`
-or any other bypass. Then close the loop: remove `in-progress`, remove your
+Merge with `cargo xtask merge <pr>`. Until that command exists, squash-merge
+with `gh pr merge --squash --delete-branch`. Never use `--admin` or any other
+bypass. Then close the loop: remove `in-progress`, remove your
 worktree, and make sure the issue closed.
 
 ### Untrusted input

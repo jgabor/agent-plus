@@ -122,8 +122,8 @@ can't raise one carries a `Hill: none, <reason>` line in its body, which
 - A unit's text is its source with whitespace collapsed and any list marker
   removed.
 - Identical units in one section count once.
-- A `*Proposed*` or `**Planned.**` marker covers its whole paragraph, list
-  item, or table row. Marked units aren't promises.
+- A `*Proposed*`, `*Proposed:*`, or `**Planned.**` marker covers its whole
+  paragraph, list item, or table row. Marked units aren't promises.
 
 A check names its promise in a comment directly above the test, quoting the
 sentence exactly:
@@ -222,8 +222,9 @@ A failing floor blocks a merge regardless of scores.
 
 **C floor.** On Linux x86_64, Linux arm64, and macOS arm64, the resolved
 dependency graph has no package with a `links` key, no dependency on `cc`,
-`cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly source, and no
-prebuilt library. A build script is allowed only in a dependency listed in
+`cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly source files, and
+no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
+build script is allowed only in a dependency listed in
 `harness/build-scripts.txt`, and never in our own crates. T0 also builds with
 `CC` and `CXX` pointing at a program that fails.
 
@@ -371,7 +372,7 @@ binary_bytes = 9312000
 | `commit` | The rebased head that was gated. The merge is that tree plus this record |
 | `spec`, `journey` | Scores at that commit |
 | `reason` | Required when a budget is outside its band, otherwise empty |
-| `budgets` | Only the budgets measured for this change |
+| `budgets` | Every budget's latest value. One this change didn't measure carries over from the previous record |
 
 A change's base scores are those of the newest record in the history of its
 base, or zero if there is none.
@@ -396,7 +397,7 @@ is a failure, and 2 is bad usage or an environment error.
 
 | Command | Behavior |
 |---|---|
-| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and posts `xtask/gate` as a commit status on a clean, pushed head |
+| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and posts `xtask/gate` as a commit status on a clean, pushed head. Otherwise it only prints the result |
 | `cargo xtask score` | Prints the three scores |
 | `cargo xtask gaps` | Lists failing steps in journey order, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
@@ -410,10 +411,12 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask report` | Builds the nightly report from the ledger |
 
 `cargo xtask next` prints an array of
-`{"issue", "touches", "autonomy", "branch"}`, lowest issue number first, with
+`{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
+first, with
 at most one entry per free worker slot. When two issues overlap, the lower
-number stays. Any issue that overlaps an issue in progress is left out.
-`branch` names the existing branch of an abandoned issue, and is otherwise
+number stays. Any issue that overlaps a live claim is left out, and an abandoned
+issue is included. `branch` names the existing branch of an abandoned issue, and
+`worktree` names where that branch is still checked out. Both are otherwise
 null.
 
 `score`, `gaps`, and `report` take `--json`. Results go to stdout, and
@@ -444,8 +447,9 @@ Runs every dispatch period.
 
 1. Stop if free disk is below the minimum.
 2. Run `cargo xtask next`.
-3. For each entry, start one worker with a brief naming the issue, in a new
-   worktree on its `branch`, or from `origin/main` if it has none.
+3. For each entry, start one worker with a brief naming the issue: in its
+   `worktree` if it has one, otherwise in a new worktree on its `branch`, or
+   from `origin/main` if it has neither.
 
 Dispatch is idempotent, because all state is on GitHub. A worker that loses a
 claim race exits.
@@ -473,8 +477,9 @@ Initial order, by risk:
 3. Write the check, and record it failing.
 4. Make the smallest change that passes.
 5. Run the gate, and the bench if a budget can be affected.
-6. If the score didn't rise or a floor failed, revert and try again, within
-   the attempt limit. Past the limit, park the issue.
+6. If a floor failed, or no count rose and the PR has no `Hill: none` line,
+   revert and try again, within the attempt limit. Past the limit, park the
+   issue.
 7. Get a review, within the round limit.
 8. Open the PR, and wait for checks and reviews.
 9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
@@ -515,7 +520,7 @@ Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
 does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
-2. Run T2, T3, the journey, fuzzing, and mutation testing.
+2. Run the gate, T2, T3, the journey, fuzzing, and mutation testing.
 3. Post the report to one pinned issue: the three scores, what merged, what
    regressed and why, and what waits on the owner.
 4. Post status `xtask/nightly` on the tested commit.

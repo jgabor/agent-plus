@@ -18,6 +18,8 @@ pub struct Score {
     /// How many checks quote each sentence.
     pub quoted: HashMap<Sentence, usize>,
     pub findings: Vec<String>,
+    /// The promises no passing check proves, in SPEC order.
+    pub unproven: Vec<Sentence>,
 }
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
@@ -69,7 +71,8 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
     let text = fs::read_to_string(root.join("SPEC.md"))
         .map_err(|e| Problem(format!("couldn't read SPEC.md: {e}")))?;
     let units = spec::extract(&text).map_err(|e| Problem(format!("SPEC.md: {e}")))?;
-    let units: HashSet<Sentence> = units.into_iter().map(|u| (u.heading, u.text)).collect();
+    let ordered: Vec<Sentence> = units.into_iter().map(|u| (u.heading, u.text)).collect();
+    let units: HashSet<Sentence> = ordered.iter().cloned().collect();
 
     let mut proven = HashSet::new();
     let mut quoted = HashMap::new();
@@ -146,11 +149,16 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             }
         }
     }
+    let unproven = ordered
+        .into_iter()
+        .filter(|sentence| promises.contains(sentence) && !proven.contains(sentence))
+        .collect();
     Ok(Score {
         proven: proven.len(),
         promises,
         quoted,
         findings,
+        unproven,
     })
 }
 

@@ -278,6 +278,15 @@ fn a_journey_needs_no_arguments() {
 }
 
 #[test]
+fn a_step_without_a_name_is_a_problem() {
+    let toml = "[[step]]\nid = 1\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+    let root = workspace("no-name", toml, &[("harness/journey/one.sh", PASS)]);
+    let output = journey(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("`name`"), "{}", stderr(&output));
+}
+
+#[test]
 fn a_mistyped_spend_is_a_problem() {
     let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = \"true\"\n";
     let root = workspace("spend-type", toml, &[("harness/journey/one.sh", PASS)]);

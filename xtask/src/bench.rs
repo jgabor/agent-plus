@@ -103,15 +103,33 @@ fn number(table: &Table, field: &str, key: &str) -> Result<Option<f64>, String> 
 /// How many budgets with a target meet it, and how many have one. A budget
 /// with no value yet isn't met.
 pub fn met(budgets: &[Budget], values: &BTreeMap<String, f64>) -> (usize, usize) {
-    let targets: Vec<_> = budgets
+    let targets = budgets.iter().filter(|b| b.target.is_some()).count();
+    (targets - missed(budgets, values).len(), targets)
+}
+
+/// A budget with a target that isn't met.
+pub struct Missed<'a> {
+    pub key: &'a str,
+    pub name: &'a str,
+    pub target: f64,
+    pub value: Option<f64>,
+}
+
+/// The budgets that miss their targets, in the order of the budget file.
+pub fn missed<'a>(budgets: &'a [Budget], values: &BTreeMap<String, f64>) -> Vec<Missed<'a>> {
+    budgets
         .iter()
-        .filter_map(|budget| Some((&budget.key, budget.target?)))
-        .collect();
-    let met = targets
-        .iter()
-        .filter(|(key, target)| values.get(*key).is_some_and(|value| value < target))
-        .count();
-    (met, targets.len())
+        .filter_map(|budget| {
+            let target = budget.target?;
+            let value = values.get(&budget.key).copied();
+            (!value.is_some_and(|value| value < target)).then_some(Missed {
+                key: &budget.key,
+                name: &budget.name,
+                target,
+                value,
+            })
+        })
+        .collect()
 }
 
 pub fn run() -> Result<Verdict, Problem> {

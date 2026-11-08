@@ -2,10 +2,11 @@
 
 use crate::Problem;
 use crate::json::{self, Json};
+use crate::lock::Hold;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 const FIELDS: &str = "number,state,body,labels,comments";
 const ISSUE_LIMIT: usize = 2000;
@@ -32,11 +33,11 @@ pub struct Issue {
 pub struct PullRequest {
     pub state: String,
     pub head_ref: String,
-    pub head_oid: String,
     pub base_ref: String,
     pub body: String,
     pub labels: Vec<String>,
-    /// The issues GitHub will close when this merges, from any closing word.
+    /// The issues in this repository that GitHub will close when this merges,
+    /// from any closing word.
     pub closing_issues: Vec<u64>,
     pub changes_requested: bool,
 }
@@ -66,16 +67,21 @@ impl Gh {
         }
     }
 
-    fn output(&self, args: &[&str], input: Option<&str>) -> Result<std::process::Output, Problem> {
+    fn output(&self, args: &[&str], input: Option<&str>) -> Result<Output, Problem> {
+        let stdin = if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        };
+        self.spawned(args, stdin, input)
+    }
+
+    fn spawned(&self, args: &[&str], stdin: Stdio, input: Option<&str>) -> Result<Output, Problem> {
         let couldnt = |e: std::io::Error| Problem(format!("couldn't run `gh`: {e}"));
         let mut child = Command::new("gh")
             .args(args)
             .current_dir(&self.root)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(stdin)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -88,7 +94,10 @@ impl Gh {
     }
 
     fn text(&self, args: &[&str], input: Option<&str>) -> Result<String, Problem> {
-        let output = self.output(args, input)?;
+        self.checked(args, self.output(args, input)?)
+    }
+
+    fn checked(&self, args: &[&str], output: Output) -> Result<String, Problem> {
         if !output.status.success() {
             return Err(Problem(format!(
                 "`gh {}` failed: {}",
@@ -110,7 +119,7 @@ impl Gh {
             "view",
             &number.to_string(),
             "--json",
-            "state,headRefName,headRefOid,baseRefName,body,labels,closingIssuesReferences,reviews",
+            "url,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
         ])?;
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
@@ -136,27 +145,27 @@ impl Gh {
     }
 
     /// Squash-merges only if the branch is still at `head`. Naming the
-    /// repository keeps `gh` away from the local branches.
-    pub fn merge_pr(&self, number: u64, head: &str) -> Result<(), Problem> {
+    /// repository keeps `gh` away from the local branches. `gh` keeps the merge
+    /// slot until it exits, because a squash that lands after the next merge
+    /// took the slot would put that merge on a `main` it wasn't tested on.
+    pub fn merge_pr(&self, number: u64, head: &str, slot: &Hold) -> Result<(), Problem> {
         let value = self.json(&["repo", "view", "--json", "nameWithOwner"])?;
         let name = value
             .get("nameWithOwner")
             .and_then(Json::as_str)
             .ok_or_else(|| unexpected("gh repo view"))?;
-        self.text(
-            &[
-                "pr",
-                "merge",
-                &number.to_string(),
-                "-R",
-                name,
-                "--squash",
-                "--delete-branch",
-                "--match-head-commit",
-                head,
-            ],
-            None,
-        )?;
+        let args = [
+            "pr",
+            "merge",
+            &number.to_string(),
+            "-R",
+            name,
+            "--squash",
+            "--delete-branch",
+            "--match-head-commit",
+            head,
+        ];
+        self.checked(&args, self.spawned(&args, slot.as_stdin()?, None)?)?;
         Ok(())
     }
 }
@@ -265,10 +274,15 @@ fn read_issue(value: &Json) -> Option<Issue> {
 
 fn read_pull_request(value: &Json) -> Option<PullRequest> {
     let text = |key: &str| Some(value.get(key)?.as_str()?.to_string());
+    let url = text("url")?;
+    let here = format!("{}/issues/", url.rsplit_once("/pull/")?.0);
+    let is_here = |issue: &&Json| {
+        let url = issue.get("url").and_then(Json::as_str);
+        url.is_some_and(|url| url.starts_with(&here))
+    };
     Some(PullRequest {
         state: text("state")?,
         head_ref: text("headRefName")?,
-        head_oid: text("headRefOid")?,
         base_ref: text("baseRefName")?,
         body: text("body")?,
         labels: value
@@ -281,6 +295,7 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
             .get("closingIssuesReferences")?
             .as_arr()?
             .iter()
+            .filter(is_here)
             .map(|issue| issue.get("number")?.as_u64())
             .collect::<Option<_>>()?,
         changes_requested: has_standing_request(value.get("reviews")?.as_arr()?)?,

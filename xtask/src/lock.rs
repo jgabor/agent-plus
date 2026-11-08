@@ -4,7 +4,7 @@ use crate::{Problem, Verdict, workspace};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Set to the lock directory on a command that runs under a hold, so a nested
 /// `xtask` doesn't wait behind a pending bench for a lock its parent has.
@@ -13,7 +13,7 @@ const INHERITED: &str = "XTASK_ACTIVITY_HELD";
 /// The kernel drops these locks when the files close, including when the
 /// process is killed.
 pub struct Hold {
-    _files: Vec<File>,
+    files: Vec<File>,
     directory: PathBuf,
 }
 
@@ -22,13 +22,23 @@ impl Hold {
     pub fn pass_to(&self, command: &mut Command) {
         command.env(INHERITED, &self.directory);
     }
+
+    /// For a child that must keep this hold until it exits, even if this
+    /// process dies first. The kernel ties a lock to the open file, which a
+    /// child's stdin shares.
+    pub fn as_stdin(&self) -> Result<Stdio, Problem> {
+        let file = self.files[0]
+            .try_clone()
+            .map_err(|e| Problem(format!("couldn't share the lock: {e}")))?;
+        Ok(Stdio::from(file))
+    }
 }
 
 pub fn shared(root: &Path) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     if inherited(&directory) {
         return Ok(Hold {
-            _files: Vec::new(),
+            files: Vec::new(),
             directory,
         });
     }
@@ -68,7 +78,7 @@ fn slot(root: &Path, name: &str) -> Result<Hold, Problem> {
     file.lock()
         .map_err(|e| Problem(format!("couldn't take {name}: {e}")))?;
     Ok(Hold {
-        _files: vec![file],
+        files: vec![file],
         directory,
     })
 }
@@ -100,7 +110,7 @@ fn take_shared(directory: &Path) -> Result<Hold, Problem> {
     let activity = open(directory, "activity.lock")?;
     activity.lock_shared().map_err(failed)?;
     Ok(Hold {
-        _files: vec![activity],
+        files: vec![activity],
         directory: directory.to_path_buf(),
     })
 }
@@ -111,7 +121,7 @@ fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
     let activity = open(directory, "activity.lock")?;
     activity.lock().map_err(failed)?;
     Ok(Hold {
-        _files: vec![turnstile, activity],
+        files: vec![turnstile, activity],
         directory: directory.to_path_buf(),
     })
 }
@@ -131,7 +141,7 @@ fn open(directory: &Path, name: &str) -> Result<File, Problem> {
 
 /// The shared git directory, so that every worktree of a repository uses the
 /// same lock. A workspace that isn't a repository uses its target directory.
-fn directory(root: &Path) -> Result<PathBuf, Problem> {
+pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
     let base = if root.join(".git").exists() {
         let output = Command::new("git")
             .args(["rev-parse", "--git-common-dir"])

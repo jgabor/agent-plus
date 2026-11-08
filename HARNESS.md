@@ -526,8 +526,8 @@ merge can't keep the slot.
 
 A merge past the merge timeout stops and releases the slot. Running it again
 starts over from the fetch, and so does running it after a kill at any step.
-Running it on a PR that already merged finishes deleting the branch, if a kill
-interrupted that.
+A `gh pr merge` that is still running keeps the slot until it finishes, so the
+next merge can't start on a `main` that is about to move.
 
 `xtask/gate` is the only check. Branch protection isn't available on this
 repository's plan, so `xtask merge` enforces the sequence, not GitHub. The

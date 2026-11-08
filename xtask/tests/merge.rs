@@ -67,6 +67,7 @@ struct Pr<'a> {
     labels: &'a [&'a str],
     base: &'a str,
     closes: &'a [u64],
+    elsewhere: &'a [u64],
     reviews: &'a [(&'a str, &'a str)],
 }
 
@@ -78,17 +79,21 @@ impl Default for Pr<'_> {
             labels: &[],
             base: "main",
             closes: &[7],
+            elsewhere: &[],
             reviews: &[],
         }
     }
 }
 
 fn pr_json(pr: &Pr, state: &str) -> String {
-    let closes: Vec<String> = pr
-        .closes
-        .iter()
-        .map(|number| format!("{{\"number\":{number}}}"))
-        .collect();
+    let issue = |repository: &str, number: &u64| {
+        format!(
+            "{{\"number\":{number},\"url\":\"https://github.com/{repository}/issues/{number}\"}}"
+        )
+    };
+    let here = pr.closes.iter().map(|number| issue("o/r", number));
+    let there = pr.elsewhere.iter().map(|number| issue("x/y", number));
+    let closes: Vec<String> = here.chain(there).collect();
     let reviews: Vec<String> = pr
         .reviews
         .iter()
@@ -101,7 +106,7 @@ fn pr_json(pr: &Pr, state: &str) -> String {
         })
         .collect();
     format!(
-        "{{\"number\":9,\"state\":{},\"headRefName\":{},\"headRefOid\":\"HEAD_OID\",\"baseRefName\":{},\"body\":{},\"labels\":{},\"closingIssuesReferences\":[{}],\"reviews\":[{}]}}\n",
+        "{{\"number\":9,\"state\":{},\"url\":\"https://github.com/o/r/pull/9\",\"headRefName\":{},\"baseRefName\":{},\"body\":{},\"labels\":{},\"closingIssuesReferences\":[{}],\"reviews\":[{}]}}\n",
         quoted(state),
         quoted(BRANCH),
         quoted(pr.base),
@@ -201,8 +206,7 @@ impl Repo {
     /// `KILL_ON` kills `xtask` at the first call containing it, `KILL_WHEN`
     /// says whether before or after doing the call, `HANG_ON` makes a matching
     /// call sleep, and `RUN_ON` runs `RUN_COMMAND` just before the first
-    /// matching call. The fake `gh pr merge` leaves the branch alone, as a
-    /// real one that died between the squash and the deletion would.
+    /// matching call.
     fn write_tools(&self) {
         let bin = self.bin.display();
         let prelude = format!(
@@ -234,7 +238,7 @@ maybe_kill before
         let gh = format!(
             r#"{prelude}case "$1 $2" in
   "repo view") echo '{{"nameWithOwner":"o/r"}}' ;;
-  "pr view") if [ -f '{bin}/merged' ]; then sed "s/HEAD_OID/$(cat '{bin}/merged')/" '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
+  "pr view") if [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
   "pr list") echo '[]' ;;
   "pr merge") echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
   "issue view") cat '{bin}/issue.json' ;;
@@ -344,17 +348,6 @@ exit $code
 
     fn head(&self) -> String {
         self.origin(&["rev-parse", "refs/heads/7-x"])
-    }
-
-    fn branch_exists(&self) -> bool {
-        let directory = self.origin.display().to_string();
-        Command::new(real("git"))
-            .args(["--git-dir", &directory, "rev-parse", "--verify", "--quiet"])
-            .arg("refs/heads/7-x")
-            .output()
-            .unwrap()
-            .status
-            .success()
     }
 
     /// A shell command that moves a ref on the origin.
@@ -580,11 +573,16 @@ fn a_protected_path_needs_the_label_even_for_the_owner() {
 }
 
 #[test]
-fn a_pr_must_close_exactly_one_issue() {
+fn a_pr_must_close_exactly_one_issue_here() {
     let repo = Repo::new("no-issue");
-    for closes in [&[][..], &[7, 8][..]] {
+    for (closes, elsewhere) in [
+        (&[][..], &[][..]),
+        (&[7, 8][..], &[][..]),
+        (&[][..], &[7][..]),
+    ] {
         repo.set_pr(&Pr {
             closes,
+            elsewhere,
             ..Pr::default()
         });
         assert_refused(&repo, &repo.merge(&[]), "Closes #");
@@ -950,14 +948,39 @@ fn a_main_that_moved_during_the_proof_stops_the_merge() {
 
 #[test]
 fn a_pr_that_changed_during_the_proof_is_refused() {
-    let repo = Repo::new("changed-pr");
-    repo.set_next_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
-    let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
-    let output = repo.merge_running("cargo build --release", &swap);
-    assert_refused(&repo, &output, "--owner");
+    let cases = [
+        (
+            "label-refused",
+            Pr {
+                labels: &["spec-change"],
+                ..Pr::default()
+            },
+            "--owner",
+        ),
+        (
+            "label-changed",
+            Pr {
+                labels: &["other"],
+                ..Pr::default()
+            },
+            "changed",
+        ),
+        (
+            "body-changed",
+            Pr {
+                body: "Closes #7.\n\nHill: none, something else.\n",
+                ..Pr::default()
+            },
+            "changed",
+        ),
+    ];
+    for (name, next, message) in cases {
+        let repo = Repo::new(&format!("changed-{name}"));
+        repo.set_next_pr(&next);
+        let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
+        let output = repo.merge_running("cargo build --release", &swap);
+        assert_refused(&repo, &output, message);
+    }
 }
 
 #[test]
@@ -971,21 +994,40 @@ fn the_callers_cargo_settings_do_not_reach_the_merge() {
 }
 
 #[test]
-fn a_rerun_after_the_squash_finishes_deleting_the_branch() {
-    let repo = Repo::new("finish-delete");
-    assert_merged(&repo, &repo.merge(&[]));
-    assert!(repo.branch_exists());
-    assert_merged(&repo, &repo.merge(&[]));
-    assert!(!repo.branch_exists());
+fn a_killed_merge_keeps_the_slot_until_its_squash_finishes() {
+    let repo = Repo::new("squash-outlives");
+    let killed = repo.merge_running("gh pr merge", "kill -9 $PPID; sleep 2");
+    assert_eq!(killed.status.code(), None);
+    let output = repo.merge(&[]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("already merged"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.bin.join("merges")).unwrap(),
+        "merged\n"
+    );
 }
 
 #[test]
-fn a_rerun_leaves_a_branch_that_was_used_again() {
-    let repo = Repo::new("reused");
-    assert_merged(&repo, &repo.merge(&[]));
-    repo.origin(&["update-ref", "refs/heads/7-x", "refs/heads/main"]);
-    assert_merged(&repo, &repo.merge(&[]));
-    assert!(repo.branch_exists());
+fn a_merge_resumes_from_another_worktree_and_clears_the_first() {
+    let repo = Repo::new("other-worktree");
+    let killed = repo.merge_killed("cargo fmt", "before");
+    assert_eq!(killed.status.code(), None);
+    let other = repo.temp.parent().unwrap().join("other");
+    let name = other.display().to_string();
+    repo.git(&["worktree", "add", "-q", "--detach", &name, "main"]);
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert_merged(&repo, &output);
+    assert!(repo.merge_trees().is_empty(), "{:?}", repo.merge_trees());
+    assert_eq!(repo.git(&["worktree", "list"]).lines().count(), 2);
 }
 
 #[test]

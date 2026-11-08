@@ -23,7 +23,7 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 
 enum Decision {
-    Merged(PullRequest),
+    Merged,
     Refused(String),
     Ready { pr: PullRequest, issue: u64 },
 }
@@ -32,7 +32,7 @@ enum Decision {
 fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
     let pr = gh.pull_request(number)?;
     match pr.state.as_str() {
-        "MERGED" => return Ok(Decision::Merged(pr)),
+        "MERGED" => return Ok(Decision::Merged),
         "OPEN" => {}
         other => {
             return Err(Problem(format!(
@@ -92,12 +92,11 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
     if let Decision::Refused(why) = decide(&gh, number, owner)? {
         return refuse(&why);
     }
-    let _slot = lock::merge_slot(&root)?;
+    let slot = lock::merge_slot(&root)?;
     start_timeout();
     let (pr, issue) = match decide(&gh, number, owner)? {
-        Decision::Merged(pr) => {
+        Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
-            finish_deleting(&root, &pr)?;
             println!("merge: PR {number} is already merged");
             return Ok(Verdict::Pass);
         }
@@ -146,7 +145,7 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
         )));
     }
     gh.post_status(&recorded, "success")?;
-    gh.merge_pr(number, &recorded)?;
+    gh.merge_pr(number, &recorded, &slot)?;
     println!("merge: PR {number} merged at {recorded}");
     Ok(Verdict::Pass)
 }
@@ -207,15 +206,20 @@ fn changed_during_proof(
     let number = scoring.number;
     match decide(gh, number, scoring.owner)? {
         Decision::Refused(why) => return Ok(Some(why)),
-        Decision::Merged(_) => {
+        Decision::Merged => {
             return Ok(Some(format!(
                 "PR {number} was merged while this merge was running"
             )));
         }
         Decision::Ready { pr, issue } => {
-            if issue != scoring.issue || pr.head_ref != scoring.pr.head_ref {
+            let was = scoring.pr;
+            if issue != scoring.issue
+                || pr.head_ref != was.head_ref
+                || pr.body != was.body
+                || pr.labels != was.labels
+            {
                 return Ok(Some(format!(
-                    "the issue or branch of PR {number} changed during the merge. Run it again"
+                    "PR {number} changed during the merge, and the checks read what it said before. Run it again"
                 )));
             }
         }
@@ -229,18 +233,6 @@ fn changed_during_proof(
     Ok(None)
 }
 
-/// `gh pr merge` deletes the branch after the squash, so a merge that dies
-/// between the two leaves it behind. The branch goes only if it is still at the
-/// head that merged, because a name can be used again.
-fn finish_deleting(root: &Path, pr: &PullRequest) -> Result<(), Problem> {
-    let name = format!("refs/heads/{}", pr.head_ref);
-    if remote_commit(root, &name)?.as_deref() == Some(pr.head_oid.as_str()) {
-        let lease = format!("--force-with-lease={name}:{}", pr.head_oid);
-        base::git_text(root, &["push", "-q", &lease, "origin", &format!(":{name}")])?;
-    }
-    Ok(())
-}
-
 /// A detached worktree for the rebase and the gate, so that the merge leaves
 /// the caller's checkout alone. It goes away with the merge. It sits outside
 /// the checkout, because Cargo reads `.cargo/config.toml` from every parent
@@ -251,9 +243,11 @@ struct Tree {
 }
 
 impl Tree {
+    /// Named by repository, so that a rerun from another of its worktrees
+    /// finds and clears what an earlier attempt left.
     fn path(root: &Path, number: u64) -> Result<PathBuf, Problem> {
         let mut hasher = DefaultHasher::new();
-        root.hash(&mut hasher);
+        lock::directory(root)?.hash(&mut hasher);
         let name = format!("xtask-merge-{:016x}-{number}", hasher.finish());
         Ok(bench::temp_outside(root)?.join(name))
     }

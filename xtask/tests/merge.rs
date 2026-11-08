@@ -497,6 +497,12 @@ fn a_protected_path_needs_the_label_even_for_the_owner() {
         stdout(&output)
     );
     assert!(!repo.calls().contains("gh pr merge"));
+
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    assert_merged(&repo, &repo.merge(&["--owner"]));
 }
 
 #[test]

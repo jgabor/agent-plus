@@ -455,3 +455,107 @@ fn unreadable_gh_output_is_a_problem() {
     let output = repo.gate();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
 }
+
+fn record_with_proven(proven: u32) -> String {
+    format!(
+        "issue = 1\npr = 2\ncommit = \"c\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = {{ proven = {proven}, promises = 3 }}\njourney = {{ passing = 0, steps = 1 }}\nreason = \"\"\n\n[budgets]\n"
+    )
+}
+
+#[test]
+fn a_count_below_the_base_record_fails() {
+    let record = record_with_proven(2);
+    let repo = Repo::new(
+        "hills-lower",
+        CHECK_ONE,
+        &[("harness/ledger/1.toml", record.as_str())],
+    );
+    assert_fails(&repo.gate(), "hills", "2");
+}
+
+#[test]
+fn a_count_level_with_the_base_record_passes() {
+    let record = record_with_proven(1);
+    let repo = Repo::new(
+        "hills-level",
+        CHECK_ONE,
+        &[("harness/ledger/1.toml", record.as_str())],
+    );
+    let output = repo.gate();
+    assert_passes(&output);
+    assert!(stdout(&output).contains("pass hills\n"));
+}
+
+#[test]
+fn with_no_record_the_base_scores_zero() {
+    let repo = Repo::new("hills-none", NO_CHECK, &[]);
+    let output = repo.gate();
+    assert_passes(&output);
+    assert!(stdout(&output).contains("pass hills\n"));
+}
+
+#[test]
+fn the_newest_record_in_the_base_history_counts() {
+    let older = record_with_proven(5);
+    let newer = record_with_proven(1);
+    let repo = Repo::new(
+        "hills-newest",
+        CHECK_ONE,
+        &[("harness/ledger/1.toml", older.as_str())],
+    );
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("harness/ledger/2.toml", &newer);
+    repo.commit();
+    repo.publish();
+    repo.git(&["checkout", "-q", "work"]);
+    repo.git(&["reset", "-q", "--hard", "main"]);
+    assert_passes(&repo.gate());
+}
+
+#[test]
+fn a_record_main_gained_later_is_not_the_base() {
+    let later = record_with_proven(5);
+    let repo = Repo::new("hills-later", CHECK_ONE, &[]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("harness/ledger/2.toml", &later);
+    repo.commit();
+    repo.publish();
+    repo.git(&["checkout", "-q", "work"]);
+    assert_passes(&repo.gate());
+}
+
+#[test]
+fn a_deleted_record_no_longer_counts() {
+    let kept = record_with_proven(1);
+    let deleted = record_with_proven(5);
+    let repo = Repo::new(
+        "hills-deleted",
+        CHECK_ONE,
+        &[("harness/ledger/1.toml", kept.as_str())],
+    );
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("harness/ledger/2.toml", &deleted);
+    repo.commit();
+    repo.git(&["rm", "-q", "harness/ledger/2.toml"]);
+    repo.commit();
+    repo.publish();
+    repo.git(&["checkout", "-q", "work"]);
+    repo.git(&["reset", "-q", "--hard", "main"]);
+    assert_passes(&repo.gate());
+}
+
+#[test]
+fn an_unreadable_base_record_is_a_problem() {
+    let repo = Repo::new(
+        "hills-bad",
+        CHECK_ONE,
+        &[("harness/ledger/1.toml", "issue = \"nope\"\n")],
+    );
+    let output = repo.gate();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("harness/ledger/1.toml"),
+        "{}",
+        stderr(&output)
+    );
+}

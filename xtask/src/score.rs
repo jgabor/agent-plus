@@ -1,7 +1,7 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
 use crate::testrun::{self, Results};
-use crate::{Problem, Verdict, lock, spec, workspace};
+use crate::{Problem, Verdict, ledger, lock, spec, workspace};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -26,14 +26,18 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let results = testrun::run(&root, &hold)?;
     let score = compute(&root, &results)?;
     report_findings(&score);
+    let (proven, promises) = (score.proven, score.promises.len());
+    let journey = ledger::at_head(&root)?.map(|record| (record.passing, record.steps));
     if json {
-        println!(
-            "{{\"spec\":{{\"proven\":{},\"promises\":{}}}}}",
-            score.proven,
-            score.promises.len()
-        );
+        let journey = journey.map_or(String::new(), |(passing, steps)| {
+            format!(",\"journey\":{{\"passing\":{passing},\"steps\":{steps}}}")
+        });
+        println!("{{\"spec\":{{\"proven\":{proven},\"promises\":{promises}}}{journey}}}");
     } else {
-        println!("spec {} of {}", score.proven, score.promises.len());
+        println!("spec {proven} of {promises}");
+        if let Some((passing, steps)) = journey {
+            println!("journey {passing} of {steps}");
+        }
     }
     Ok(if score.findings.is_empty() {
         Verdict::Pass

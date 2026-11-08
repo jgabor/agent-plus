@@ -1,14 +1,16 @@
 //! The small part of TOML that the harness's own files use.
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Str(String),
     Int(i64),
+    Float(f64),
     Bool(bool),
     Arr(Vec<Value>),
+    Table(Table),
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Table {
     entries: Vec<(String, Value)>,
 }
@@ -16,6 +18,25 @@ pub struct Table {
 impl Table {
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    fn insert(&mut self, key: &str, value: Value) -> Result<(), String> {
+        if self.get(key).is_some() {
+            return Err(format!("`{key}` appears twice in one table"));
+        }
+        self.entries.push((key.to_string(), value));
+        Ok(())
+    }
+
+    pub fn table(&self, key: &str) -> Option<&Table> {
+        match self.get(key) {
+            Some(Value::Table(table)) => Some(table),
+            _ => None,
+        }
     }
 
     pub fn str(&self, key: &str) -> Option<&str> {
@@ -67,20 +88,75 @@ pub fn array_of_tables(text: &str, name: &str) -> Result<Vec<Table>, String> {
         let table = tables
             .last_mut()
             .ok_or_else(|| format!("line {number}: a key must come after `{header}`"))?;
-        let (key, value) = line
-            .split_once('=')
-            .ok_or_else(|| format!("line {number}: expected `key = value`, got `{line}`"))?;
-        let key = key.trim();
-        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(format!("line {number}: `{key}` isn't a plain key"));
-        }
-        if table.get(key).is_some() {
-            return Err(format!("line {number}: `{key}` appears twice in one table"));
-        }
-        let value = parse_value(value.trim()).map_err(|e| format!("line {number}: {e}"))?;
-        table.entries.push((key.to_string(), value));
+        add_line(table, line).map_err(|e| format!("line {number}: {e}"))?;
     }
     Ok(tables)
+}
+
+/// Reads a file of top-level keys, then `[name]` tables. Each table becomes a
+/// value under its name. An error names its line.
+pub fn document(text: &str) -> Result<Table, String> {
+    let mut root = Table::default();
+    let mut open: Option<(String, Table)> = None;
+    for (index, line) in text.lines().enumerate() {
+        let at = |e: String| format!("line {}: {e}", index + 1);
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            let name = line
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .filter(|name| is_plain_key(name))
+                .ok_or_else(|| at(format!("`{line}` isn't a `[name]` header")))?;
+            if let Some((closed, table)) = open.take() {
+                root.insert(&closed, Value::Table(table)).map_err(at)?;
+            }
+            if root.get(name).is_some() {
+                return Err(at(format!("`{name}` appears twice in one table")));
+            }
+            open = Some((name.to_string(), Table::default()));
+            continue;
+        }
+        let table = open.as_mut().map_or(&mut root, |(_, table)| table);
+        add_line(table, line).map_err(at)?;
+    }
+    if let Some((closed, table)) = open {
+        root.insert(&closed, Value::Table(table))?;
+    }
+    Ok(root)
+}
+
+/// A string as TOML writes it.
+pub fn quoted(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn is_plain_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn add_line(table: &mut Table, line: &str) -> Result<(), String> {
+    let (key, value) = line
+        .split_once('=')
+        .ok_or_else(|| format!("expected `key = value`, got `{line}`"))?;
+    let key = key.trim();
+    if !is_plain_key(key) {
+        return Err(format!("`{key}` isn't a plain key"));
+    }
+    table.insert(key, parse_value(value.trim())?)
 }
 
 fn parse_value(text: &str) -> Result<Value, String> {
@@ -99,19 +175,59 @@ fn read_value(text: &str) -> Result<(Value, &str), String> {
     if let Some(rest) = text.strip_prefix('[') {
         return read_array(rest);
     }
+    if let Some(rest) = text.strip_prefix('{') {
+        return read_inline_table(rest);
+    }
     let end = text
-        .find(|c: char| c == ',' || c == ']' || c == '#' || c.is_whitespace())
+        .find(|c: char| matches!(c, ',' | ']' | '}' | '#') || c.is_whitespace())
         .unwrap_or(text.len());
     let (word, rest) = text.split_at(end);
     let value = match word {
         "true" => Value::Bool(true),
         "false" => Value::Bool(false),
-        _ => Value::Int(
-            word.parse()
-                .map_err(|_| format!("`{word}` isn't a supported value"))?,
-        ),
+        _ => parse_number(word).ok_or_else(|| format!("`{word}` isn't a supported value"))?,
     };
     Ok((value, rest))
+}
+
+/// An integer, or digits on both sides of one `.`. It reads nothing else that
+/// `f64` would, such as `inf`.
+fn parse_number(word: &str) -> Option<Value> {
+    if let Ok(number) = word.parse() {
+        return Some(Value::Int(number));
+    }
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let (whole, fraction) = word.split_once('.')?;
+    if !digits(whole.strip_prefix('-').unwrap_or(whole)) || !digits(fraction) {
+        return None;
+    }
+    let number: f64 = word.parse().ok()?;
+    number.is_finite().then_some(Value::Float(number))
+}
+
+fn read_inline_table(text: &str) -> Result<(Value, &str), String> {
+    let mut table = Table::default();
+    let mut rest = text.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix('}') {
+            return Ok((Value::Table(table), after));
+        }
+        let (key, after) = rest
+            .split_once('=')
+            .ok_or_else(|| "an inline table is never closed".to_string())?;
+        let key = key.trim();
+        if !is_plain_key(key) {
+            return Err(format!("`{key}` isn't a plain key"));
+        }
+        let (value, after) = read_value(after.trim_start())?;
+        table.insert(key, value)?;
+        rest = after.trim_start();
+        if let Some(after) = rest.strip_prefix(',') {
+            rest = after.trim_start();
+        } else if !rest.starts_with('}') {
+            return Err("expected `,` or `}` in an inline table".to_string());
+        }
+    }
 }
 
 fn read_string(text: &str) -> Result<(Value, &str), String> {
@@ -156,7 +272,7 @@ fn read_array(text: &str) -> Result<(Value, &str), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, array_of_tables};
+    use super::{Value, array_of_tables, document, quoted};
 
     #[test]
     fn reads_the_value_types() {
@@ -209,7 +325,10 @@ mod tests {
             "[[step]]\nid = \"open\n",
             "[[step]]\nid = [1\n",
             "[[step]]\nid = [1 2]\n",
-            "[[step]]\nid = 1.5\n",
+            "[[step]]\nid = 1.5.5\n",
+            "[[step]]\nid = inf\n",
+            "[[step]]\nid = .5\n",
+            "[[step]]\nid = 5.\n",
             "[[step]]\nid = 1 2\n",
             "[[step]]\nid = 1\nid = 2\n",
             "[[step]]\nbad key = 1\n",
@@ -218,6 +337,53 @@ mod tests {
             let error = array_of_tables(text, "step").unwrap_err();
             assert!(error.starts_with("line "), "{text:?}: {error}");
         }
+    }
+
+    #[test]
+    fn a_float_is_not_an_integer() {
+        let tables = array_of_tables("[[step]]\nid = 1.5\n", "step").unwrap();
+        assert_eq!(tables[0].get("id"), Some(&Value::Float(1.5)));
+        assert_eq!(tables[0].int("id"), None);
+    }
+
+    #[test]
+    fn reads_keys_inline_tables_and_named_tables() {
+        let text =
+            "a = 1 # note\nspec = { proven = 2, promises = 3.5 }\n\n[one]\nb = \"x\"\n\n[two]\n";
+        let root = document(text).unwrap();
+        assert_eq!(root.int("a"), Some(1));
+        let spec = root.table("spec").unwrap();
+        assert_eq!(spec.int("proven"), Some(2));
+        assert_eq!(spec.get("promises"), Some(&Value::Float(3.5)));
+        assert_eq!(root.table("one").unwrap().str("b"), Some("x"));
+        assert_eq!(root.table("two").unwrap().entries().count(), 0);
+    }
+
+    #[test]
+    fn document_errors_name_their_line() {
+        for text in [
+            "[[a]]\n",
+            "[a b]\n",
+            "[a\n",
+            "[a]\n[a]\n",
+            "a = 1\n[a]\n",
+            "a = 1\na = 2\n",
+            "a\n",
+            "a = { b = 1\n",
+            "a = { b = 1 c = 2 }\n",
+            "a = { b = 1, b = 2 }\n",
+            "a = { b c = 1 }\n",
+        ] {
+            let error = document(text).unwrap_err();
+            assert!(error.starts_with("line "), "{text:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_string_reads_back() {
+        let text = "a \"b\" \\ c\nd\te";
+        let root = document(&format!("x = {}\n", quoted(text))).unwrap();
+        assert_eq!(root.str("x"), Some(text));
     }
 
     #[test]

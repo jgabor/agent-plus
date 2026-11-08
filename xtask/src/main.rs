@@ -5,6 +5,7 @@ mod floors;
 mod gate;
 mod journey;
 mod json;
+mod ledger;
 mod lock;
 mod score;
 mod spec;
@@ -22,6 +23,8 @@ commands:
   score [--json]   print the scores
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
+  record --issue <n> --pr <n>
+                   write the ledger record for the current head
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -44,6 +47,10 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["score", "--json"] => score::run(true),
         ["run", command @ ..] => lock::run(command),
         ["journey"] => journey::run(),
+        ["record", "--issue", issue, "--pr", pr] => ledger::record(issue, pr),
+        ["record", ..] => Err(Problem(format!(
+            "`record` takes `--issue <n> --pr <n>`\n\n{USAGE}"
+        ))),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

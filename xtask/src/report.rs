@@ -2,12 +2,16 @@
 //! issues.
 
 use crate::bench::{self, Budget};
-use crate::forge::Gh;
+use crate::forge::{Forge, Gh, OpenIssue};
 use crate::json::quoted;
 use crate::ledger::{self, Record};
 use crate::{Problem, Verdict, base, journey, workspace};
 use std::path::Path;
 
+/// The report issue's title.
+pub const ISSUE_TITLE: &str = "Nightly report";
+const HEADING: &str = "# Nightly report for `";
+/// How far back to look when no earlier report can say where to start.
 const WINDOW: &str = "--since=24.hours";
 const WAITING_LABEL: &str = "needs-owner";
 
@@ -88,7 +92,13 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         unrecorded: Vec::new(),
         waiting: Vec::new(),
     };
-    let log = base::git_text(root, &["log", WINDOW, "--format=%H %h %s", "HEAD"])?;
+    let gh = Gh::new(root);
+    let issues = gh.open_issues()?;
+    let start = match last_reported(root, &gh, &issues)? {
+        Some(commit) => format!("^{commit}"),
+        None => WINDOW.to_string(),
+    };
+    let log = base::git_text(root, &["log", &start, "--format=%H %h %s", "HEAD"])?;
     for line in log.lines() {
         let mut fields = line.splitn(3, ' ');
         let (Some(full), Some(short), subject) = (fields.next(), fields.next(), fields.next())
@@ -115,8 +125,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
             pr: record.pr,
         });
     }
-    report.waiting = Gh::new(root)
-        .open_issues()?
+    report.waiting = issues
         .into_iter()
         .filter(|issue| issue.labels.iter().any(|label| label == WAITING_LABEL))
         .map(|issue| Waiting {
@@ -125,6 +134,31 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         })
         .collect();
     Ok(report)
+}
+
+/// The commit the newest posted report was for, so that a night that ran late
+/// or not at all loses nothing. A comment is only data, so anything but a
+/// commit in this history means there's no such report.
+fn last_reported(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<Option<String>, Problem> {
+    let Some(issue) = issues.iter().find(|issue| issue.title == ISSUE_TITLE) else {
+        return Ok(None);
+    };
+    let comments = gh.issue(issue.number)?.comments;
+    let newest = comments
+        .iter()
+        .rev()
+        .find_map(|comment| comment.body.strip_prefix(HEADING)?.split('`').next());
+    let Some(commit) = newest else {
+        return Ok(None);
+    };
+    if commit.is_empty() || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let in_history = base::commit_exists(root, commit)?
+        && base::git(root, &["merge-base", "--is-ancestor", commit, "HEAD"])?
+            .status
+            .success();
+    Ok(in_history.then(|| commit.to_string()))
 }
 
 /// What this commit's record made worse, and any reason it gave.

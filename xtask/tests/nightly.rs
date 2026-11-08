@@ -11,12 +11,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const JOURNEY: &str = "[[step]]\nid = 1\nname = \"first\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
 const NO_ISSUES: &str = "[]";
+const REPORT_ISSUE: &str =
+    "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
 const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"needs-owner\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
 const CHECKS_PASSED: &str = "## Checks\n\n- pass bench\n- pass gate\n- skip t2\n- skip t3\n- pass journey\n- skip fuzz\n- skip mutation\n";
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
   "issue list") cat "$(dirname "$0")/issues.json" ;;
+  "issue view") cat "$(dirname "$0")/issue.json" ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
   "issue pin") ;;
   "issue comment")
@@ -81,6 +84,7 @@ impl Repo {
         fs::write(&gh, format!("#!/bin/sh\n{GH}")).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
         repo.set_issues(NO_ISSUES);
+        repo.set_report_comments(&[]);
         let files = [
             (
                 "Cargo.toml",
@@ -199,6 +203,37 @@ impl Repo {
 
     fn set_issues(&self, json: &str) {
         fs::write(self.bin.join("issues.json"), json).unwrap();
+    }
+
+    /// Gives the report issue these comments, oldest first.
+    fn set_report_comments(&self, bodies: &[&str]) {
+        let comments: Vec<String> = bodies
+            .iter()
+            .enumerate()
+            .map(|(id, body)| {
+                format!(
+                    "{{\"url\":\"https://github.com/o/r/issues/12#issuecomment-{id}\",\"author\":{{\"login\":\"o\"}},\"body\":{body:?}}}"
+                )
+            })
+            .collect();
+        fs::write(
+            self.bin.join("issue.json"),
+            format!(
+                "{{\"number\":12,\"state\":\"OPEN\",\"body\":\"b\",\"labels\":[],\"comments\":[{}]}}",
+                comments.join(",")
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Makes the report issue's newest comment a report on this commit.
+    fn set_last_report(&self, commit: &str) {
+        self.set_issues(REPORT_ISSUE);
+        self.set_report_comments(&[
+            "# Nightly report for `0000000`\n",
+            &format!("# Nightly report for `{commit}`\n\nspec 1 of 7\n"),
+            "A remark from the owner.",
+        ]);
     }
 
     fn calls(&self) -> Vec<String> {
@@ -670,4 +705,114 @@ fn a_commit_that_removes_a_record_wrote_none() {
         )),
         "{report}"
     );
+}
+
+#[test]
+fn a_night_that_never_ran_loses_nothing() {
+    let repo = Repo::new("missed-night");
+    repo.merge(
+        "Reported (#2)",
+        60,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    let reported = repo.short("HEAD");
+    repo.merge("Landed the night it was off (#9)", 40, &CLEAN);
+    repo.set_last_report(&reported);
+    let report = repo.report();
+    assert!(
+        report.contains("Landed the night it was off (#9), issue #5"),
+        "{report}"
+    );
+    assert!(!report.contains("Reported (#2)"), "{report}");
+}
+
+#[test]
+fn a_commit_already_reported_isnt_repeated() {
+    let repo = Repo::new("already");
+    repo.merge(
+        "Reported (#2)",
+        3,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    let reported = repo.short("HEAD");
+    repo.merge("New (#9)", 1, &CLEAN);
+    repo.set_last_report(&reported);
+    let report = repo.report();
+    assert!(report.contains("New (#9), issue #5"), "{report}");
+    assert!(!report.contains("Reported (#2)"), "{report}");
+}
+
+#[test]
+fn a_last_report_that_cant_be_used_falls_back_to_a_day() {
+    for (name, commit) in [("gone", "deadbee"), ("option", "--output=x"), ("empty", "")] {
+        let repo = Repo::new(&format!("fallback-{name}"));
+        repo.merge(
+            "Too old (#2)",
+            25,
+            &Recorded {
+                issue: 1,
+                pr: 2,
+                ..CLEAN
+            },
+        );
+        repo.merge("Today (#9)", 1, &CLEAN);
+        repo.set_last_report(commit);
+        let report = repo.report();
+        assert!(report.contains("Today (#9), issue #5"), "{name}: {report}");
+        assert!(!report.contains("Too old (#2)"), "{name}: {report}");
+    }
+}
+
+#[test]
+fn a_last_report_off_this_history_falls_back_to_a_day() {
+    let repo = Repo::new("off-history");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.commit("Elsewhere", 1);
+    let elsewhere = repo.short("HEAD");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.merge(
+        "Too old (#2)",
+        25,
+        &Recorded {
+            issue: 1,
+            pr: 2,
+            ..CLEAN
+        },
+    );
+    repo.merge("Today (#9)", 1, &CLEAN);
+    repo.set_last_report(&elsewhere);
+    let report = repo.report();
+    assert!(report.contains("Today (#9), issue #5"), "{report}");
+    assert!(!report.contains("Too old (#2)"), "{report}");
+}
+
+#[test]
+fn a_broken_record_still_fails_the_commit() {
+    let repo = Repo::new("broken-record");
+    repo.write("harness/ledger/5.toml", "issue = \"not a number\"\n");
+    repo.commit("Bad record (#9)", 1);
+    repo.sync();
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("harness/ledger/5.toml"),
+        "{}",
+        stderr(&output)
+    );
+    let status = format!("statuses/{head} -f state=failure -f context=xtask/nightly");
+    assert!(
+        repo.calls().iter().any(|call| call.ends_with(&status)),
+        "{:?}",
+        repo.calls()
+    );
+    assert!(!repo.bin.join("comment").exists());
 }

@@ -1,10 +1,10 @@
 //! `cargo xtask nightly`: the slow checks on `main`, then the report.
 
 use crate::forge::{Forge, Gh};
+use crate::report::ISSUE_TITLE;
 use crate::{Problem, Verdict, base, bench, gate, journey, ledger, lock, report, workspace};
 use std::path::Path;
 
-const ISSUE_TITLE: &str = "Nightly report";
 const ISSUE_BODY: &str = "Each night's report is a comment on this issue.";
 const STATUS: &str = "xtask/nightly";
 const PASS: &str = "pass";
@@ -30,15 +30,17 @@ pub fn run() -> Result<Verdict, Problem> {
     checks.push(("fuzz", SKIP));
     checks.push(("mutation", SKIP));
 
-    post(&root, &report::build(&root)?.markdown(&checks))?;
-
-    let failed = checks.iter().any(|(_, state)| *state == FAIL);
+    // A report that can't be built still leaves its result on the commit.
+    let built = report::build(&root);
+    let failed = built.is_err() || checks.iter().any(|(_, state)| *state == FAIL);
+    let posted = built.and_then(|report| post(&root, &report.markdown(&checks)));
     let (verdict, status, word) = if failed {
         (Verdict::Fail, "failure", FAIL)
     } else {
         (Verdict::Pass, "success", PASS)
     };
     Gh::new(&root).post_status(&commit, STATUS, status)?;
+    posted?;
     for (name, state) in &checks {
         println!("{state} {name}");
     }

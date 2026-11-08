@@ -29,6 +29,14 @@ pub struct Issue {
     pub comments: Vec<Comment>,
 }
 
+/// An open issue, as far as the nightly report needs one.
+pub struct OpenIssue {
+    pub number: u64,
+    pub title: String,
+    pub labels: Vec<String>,
+    pub pinned: bool,
+}
+
 /// A PR, as far as the merge sequence needs one.
 pub struct PullRequest {
     pub state: String,
@@ -126,24 +134,49 @@ impl Gh {
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
 
-    /// Sets the one check this repository has on a commit.
-    pub fn post_status(&self, commit: &str, state: &str) -> Result<(), Problem> {
+    /// Sets a status on a commit.
+    pub fn post_status(&self, commit: &str, context: &str, state: &str) -> Result<(), Problem> {
         let path = format!("repos/{{owner}}/{{repo}}/statuses/{commit}");
         let state = format!("state={state}");
+        let context = format!("context={context}");
         self.text(
-            &[
-                "api",
-                "-X",
-                "POST",
-                &path,
-                "-f",
-                &state,
-                "-f",
-                "context=xtask/gate",
-            ],
+            &["api", "-X", "POST", &path, "-f", &state, "-f", &context],
             None,
         )?;
         Ok(())
+    }
+
+    pub fn open_issues(&self) -> Result<Vec<OpenIssue>, Problem> {
+        self.listed("open", "number,title,labels,isPinned")?
+            .iter()
+            .map(|item| read_open_issue(item).ok_or_else(|| unexpected("gh issue list")))
+            .collect()
+    }
+
+    /// Returns the new issue's number.
+    pub fn create_issue(&self, title: &str, body: &str) -> Result<u64, Problem> {
+        let url = self.text(&["issue", "create", "--title", title, "--body", body], None)?;
+        issue_number(url.trim()).ok_or_else(|| unexpected("gh issue create"))
+    }
+
+    pub fn pin_issue(&self, number: u64) -> Result<(), Problem> {
+        self.text(&["issue", "pin", &number.to_string()], None)?;
+        Ok(())
+    }
+
+    fn listed(&self, state: &str, fields: &str) -> Result<Vec<Json>, Problem> {
+        let limit = ISSUE_LIMIT.to_string();
+        let args = [
+            "issue", "list", "--state", state, "--limit", &limit, "--json", fields,
+        ];
+        let value = self.json(&args)?;
+        let items = value.as_arr().ok_or_else(|| unexpected("gh issue list"))?;
+        if items.len() >= ISSUE_LIMIT {
+            return Err(Problem(format!(
+                "this repository has {ISSUE_LIMIT} issues or more, so an open blocker could be missing. Raise `ISSUE_LIMIT`"
+            )));
+        }
+        Ok(items.to_vec())
     }
 
     /// Squash-merges only if the branch is still at `head`. Naming the
@@ -184,17 +217,7 @@ impl Forge for Gh {
     }
 
     fn issues(&self) -> Result<Vec<Issue>, Problem> {
-        let limit = ISSUE_LIMIT.to_string();
-        let value = self.json(&[
-            "issue", "list", "--state", "all", "--limit", &limit, "--json", FIELDS,
-        ])?;
-        let items = value.as_arr().ok_or_else(|| unexpected("gh issue list"))?;
-        if items.len() >= ISSUE_LIMIT {
-            return Err(Problem(format!(
-                "this repository has {ISSUE_LIMIT} issues or more, so an open blocker could be missing. Raise `ISSUE_LIMIT`"
-            )));
-        }
-        items
+        self.listed("all", FIELDS)?
             .iter()
             .map(|item| read_issue(item).ok_or_else(|| unexpected("gh issue list")))
             .collect()
@@ -259,17 +282,36 @@ fn comment_id(url: &str) -> Option<u64> {
     url.rsplit_once("#issuecomment-")?.1.parse().ok()
 }
 
+/// An issue's number is the end of its URL.
+fn issue_number(url: &str) -> Option<u64> {
+    url.rsplit_once("/issues/")?.1.parse().ok()
+}
+
+fn read_labels(value: &Json) -> Option<Vec<String>> {
+    value
+        .get("labels")?
+        .as_arr()?
+        .iter()
+        .map(|label| Some(label.get("name")?.as_str()?.to_string()))
+        .collect()
+}
+
+fn read_open_issue(value: &Json) -> Option<OpenIssue> {
+    Some(OpenIssue {
+        number: value.get("number")?.as_u64()?,
+        title: value.get("title")?.as_str()?.to_string(),
+        labels: read_labels(value)?,
+        pinned: value.get("isPinned")?.as_bool()?,
+    })
+}
+
 fn read_issue(value: &Json) -> Option<Issue> {
-    let labels = value.get("labels")?.as_arr()?;
     let comments = value.get("comments")?.as_arr()?;
     Some(Issue {
         number: value.get("number")?.as_u64()?,
         open: value.get("state")?.as_str()? == "OPEN",
         body: value.get("body")?.as_str()?.to_string(),
-        labels: labels
-            .iter()
-            .map(|label| Some(label.get("name")?.as_str()?.to_string()))
-            .collect::<Option<_>>()?,
+        labels: read_labels(value)?,
         comments: comments.iter().map(read_comment).collect::<Option<_>>()?,
     })
 }
@@ -288,12 +330,7 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
         head_ref: text("headRefName")?,
         base_ref: text("baseRefName")?,
         body: text("body")?,
-        labels: value
-            .get("labels")?
-            .as_arr()?
-            .iter()
-            .map(|label| Some(label.get("name")?.as_str()?.to_string()))
-            .collect::<Option<_>>()?,
+        labels: read_labels(value)?,
         closing_issues: value
             .get("closingIssuesReferences")?
             .as_arr()?

@@ -11,6 +11,8 @@ mod json;
 mod ledger;
 mod lock;
 mod merge;
+mod nightly;
+mod report;
 mod score;
 mod spec;
 mod testrun;
@@ -30,6 +32,8 @@ commands:
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
   bench            compare the budgets with the base build
+  report [--json]  print the nightly report
+  nightly          run the slow checks on main, and post the report
   next             print the issues that can be claimed, as JSON
   claim <issue> [--thread <link>]
                    claim an issue for the current branch
@@ -63,6 +67,10 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["run", command @ ..] => lock::run(command),
         ["journey"] => journey::run(),
         ["bench"] => bench::run(),
+        ["report"] => report::run(false),
+        ["report", "--json"] => report::run(true),
+        ["report", ..] => Err(Problem(format!("`report` takes only `--json`\n\n{USAGE}"))),
+        ["nightly"] => nightly::run(),
         ["next"] => work::run_next(),
         ["claim", issue] => work::run_claim(issue, None),
         ["claim", issue, "--thread", thread] => work::run_claim(issue, Some(thread)),
@@ -84,7 +92,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench" | "next"),
+            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly"),
             extra,
             ..,
         ] => Err(Problem(format!(

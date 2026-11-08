@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Command, Output};
 
-const MAIN: &str = "refs/remotes/origin/main";
+pub const MAIN: &str = "refs/remotes/origin/main";
 pub const SPEC_CHANGE: &str = "spec-change";
 const PROTECTED: &[&str] = &[
     "SPEC.md",

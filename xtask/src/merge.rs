@@ -149,7 +149,7 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
             changed.trim_end()
         )));
     }
-    gh.post_status(&recorded, "success")?;
+    gh.post_status(&recorded, "xtask/gate", "success")?;
     gh.merge_pr(number, &recorded, &slot)?;
     println!("merge: PR {number} merged at {recorded}");
     Ok(Verdict::Pass)

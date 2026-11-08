@@ -47,10 +47,26 @@ fn measure_of(key: &str) -> Option<Measure> {
 }
 
 pub fn read_budgets(root: &Path) -> Result<Vec<Budget>, Problem> {
-    let bad = |e: String| Problem(format!("{BUDGETS_FILE}: {e}"));
     let text = fs::read_to_string(root.join(BUDGETS_FILE))
         .map_err(|e| Problem(format!("couldn't read {BUDGETS_FILE}: {e}")))?;
-    let tables = toml::array_of_tables(&text, "budget").map_err(bad)?;
+    parse_budgets(&text)
+}
+
+/// The budgets as a commit had them. A commit with no budget file has none.
+pub fn budgets_at(root: &Path, commit: &str) -> Result<Vec<Budget>, Problem> {
+    let object = format!("{commit}:{BUDGETS_FILE}");
+    if !base::git(root, &["cat-file", "-e", &object])?
+        .status
+        .success()
+    {
+        return Ok(Vec::new());
+    }
+    parse_budgets(&base::git_text(root, &["show", &object])?)
+}
+
+fn parse_budgets(text: &str) -> Result<Vec<Budget>, Problem> {
+    let bad = |e: String| Problem(format!("{BUDGETS_FILE}: {e}"));
+    let tables = toml::array_of_tables(text, "budget").map_err(bad)?;
     let mut seen = HashSet::new();
     let mut budgets = Vec::new();
     for table in tables {

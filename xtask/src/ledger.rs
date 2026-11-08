@@ -12,16 +12,16 @@ const MEASURED: &str = "target/bench/result.toml";
 
 #[derive(Debug, PartialEq)]
 pub struct Record {
-    issue: usize,
-    pr: usize,
+    pub issue: usize,
+    pub pr: usize,
     commit: String,
     date: String,
     host: String,
     pub proven: usize,
-    promises: usize,
+    pub promises: usize,
     pub passing: usize,
     pub steps: usize,
-    reason: String,
+    pub reason: String,
     pub budgets: BTreeMap<String, f64>,
 }
 
@@ -295,12 +295,38 @@ pub fn newest(root: &Path, commit: &str) -> Result<Option<Record>, Problem> {
         {
             continue;
         }
-        let text = base::git_text(root, &["show", &object])?;
-        let record =
-            Record::parse(&text).map_err(|e| Problem(format!("{path} at {commit}: {e}")))?;
-        return Ok(Some(record));
+        return read_at(root, commit, path).map(Some);
     }
     Ok(None)
+}
+
+/// The record this commit wrote, if it wrote one.
+pub fn of_commit(root: &Path, commit: &str) -> Result<Option<Record>, Problem> {
+    let pattern = format!(":(glob){DIRECTORY}/*.toml");
+    let listing = base::git_text(
+        root,
+        &[
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            "--diff-filter=AM",
+            commit,
+            "--",
+            &pattern,
+        ],
+    )?;
+    match listing.split('\0').find(|path| !path.is_empty()) {
+        Some(path) => read_at(root, commit, path).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn read_at(root: &Path, commit: &str, path: &str) -> Result<Record, Problem> {
+    let text = base::git_text(root, &["show", &format!("{commit}:{path}")])?;
+    Record::parse(&text).map_err(|e| Problem(format!("{path} at {commit}: {e}")))
 }
 
 #[cfg(test)]

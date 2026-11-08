@@ -31,8 +31,11 @@ pub fn run() -> Result<Verdict, Problem> {
     // No unattended run may spend money until HARNESS.md sets a limit.
     checks.push(("t3", SKIP));
     checks.push(("journey", state(journey_holds(&root))));
-    checks.push(("fuzz", fuzz::run(&root).transpose().map_or(SKIP, state)));
-    let mutated = mutation::run(&root).transpose();
+    checks.push((
+        "fuzz",
+        fuzz::run(&root, &hold).transpose().map_or(SKIP, state),
+    ));
+    let mutated = mutation::run(&root, &hold).transpose();
     checks.push(("mutation", mutated.map_or(SKIP, state)));
     drop(hold);
 

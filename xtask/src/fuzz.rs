@@ -1,5 +1,6 @@
 //! The nightly fuzz step: runs `crates/fuzz` inside its limits.
 
+use crate::lock::Hold;
 use crate::workspace;
 use crate::{Problem, Verdict, limit};
 use std::ffi::OsStr;
@@ -8,12 +9,12 @@ use std::path::Path;
 const PACKAGE: &str = "fuzz";
 const SECONDS: u64 = 3600;
 const SECONDS_OVERRIDE: &str = "XTASK_FUZZ_SECONDS";
-/// How long past its own deadline a target may run before it counts as hung.
-const GRACE: u64 = 300;
+/// Taken off the fuzzer's own deadline, so only a hung target meets the limit.
+const MARGIN: u64 = 300;
 const BUILD_SECONDS: u64 = 300;
 
 /// `None` when the workspace has no fuzzer.
-pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
+pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
     let packages = workspace::packages(root)?;
     if !packages.iter().any(|package| package.name == PACKAGE) {
         return Ok(None);
@@ -35,6 +36,7 @@ pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
     let on = OsStr::new("true");
     let no_compiler = OsStr::new("false");
     let built = limit::run(
+        hold,
         root,
         Path::new("cargo"),
         &build,
@@ -51,11 +53,12 @@ pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
         return Err(Problem("couldn't build the fuzzer".to_string()));
     }
     let finished = limit::run(
+        hold,
         root,
         &target.join("release").join(PACKAGE),
-        &[seconds.to_string()],
+        &[(seconds - MARGIN.min(seconds / 2)).to_string()],
         &[],
-        seconds + seconds.min(GRACE),
+        seconds,
     )?;
     if finished.timed_out {
         eprintln!("fuzz: a target hung past its {seconds} second limit");

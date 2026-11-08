@@ -8,6 +8,7 @@
 //! runs.
 
 use crate::Problem;
+use crate::lock::Hold;
 use std::env;
 use std::ffi::OsStr;
 use std::io;
@@ -38,8 +39,9 @@ pub fn seconds(variable: &str, default: u64) -> Result<u64, Problem> {
 }
 
 /// Runs `program` in `root`, sending its output to stderr. If `xtask` dies, the
-/// job's limits still hold.
+/// job's limits still hold, and so does the activity lock until the job ends.
 pub fn run(
+    hold: &Hold,
     root: &Path,
     program: &Path,
     arguments: &[String],
@@ -49,6 +51,7 @@ pub fn run(
     let started = Instant::now();
     let status = Command::new("systemd-run")
         .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg("--expand-environment=no")
         .args([
             "-p",
             MEMORY,
@@ -66,6 +69,7 @@ pub fn run(
         .args(arguments)
         .envs(variables.iter().copied())
         .current_dir(root)
+        .stdin(hold.as_stdin()?)
         .stdout(Stdio::from(io::stderr()))
         .status()
         .map_err(|error| Problem(format!("couldn't run `systemd-run`: {error}")))?;

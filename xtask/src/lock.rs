@@ -25,9 +25,13 @@ impl Hold {
 
     /// For a child that must keep this hold until it exits, even if this
     /// process dies first. The kernel ties a lock to the open file, which a
-    /// child's stdin shares.
+    /// child's stdin shares. A hold inherited from a parent has no file, and
+    /// the parent keeps it.
     pub fn as_stdin(&self) -> Result<Stdio, Problem> {
-        let file = self.files[0]
+        let Some(file) = self.files.first() else {
+            return Ok(Stdio::null());
+        };
+        let file = file
             .try_clone()
             .map_err(|e| Problem(format!("couldn't share the lock: {e}")))?;
         Ok(Stdio::from(file))

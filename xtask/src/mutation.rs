@@ -2,6 +2,7 @@
 //! report, and files an issue for each crate where a check didn't notice.
 
 use crate::forge::{Gh, OpenIssue};
+use crate::lock::Hold;
 use crate::workspace::{self, Package};
 use crate::{Problem, Verdict, base, limit, report};
 use std::fs;
@@ -19,7 +20,7 @@ const NOT_PRODUCT: [&str; 4] = ["fuzz", "t1", "t2", "xtask"];
 
 /// `None` when nothing it covers has changed. Survivors become issues, so they
 /// don't fail the night.
-pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
+pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
     let changed = changed_packages(root, &gh, &issues)?;
@@ -37,6 +38,7 @@ pub fn run(root: &Path) -> Result<Option<Verdict>, Problem> {
     fs::create_dir_all(&temp).map_err(|e| Problem(format!("couldn't create {OUTPUT}: {e}")))?;
     let limit = limit::seconds(SECONDS_OVERRIDE, SECONDS)?;
     let finished = limit::run(
+        hold,
         root,
         Path::new("cargo"),
         &arguments(&changed),

@@ -14,7 +14,7 @@ const HEADING: &str = "# Nightly report for `";
 /// How far back to look when no earlier report can say where to start.
 const WINDOW: &str = "--since=24.hours";
 const WAITING_LABEL: &str = "needs-owner";
-const MUTATION_FAILED: &str = "- fail mutation\n";
+const MUTATION_FAILED: &str = "\n- fail mutation\n";
 
 struct Scores {
     proven: usize,

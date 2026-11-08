@@ -1039,7 +1039,7 @@ fn mutants_run_as_one_contained_job() {
     assert_mutation_ran(&repo, &output, 0, "pass");
     let calls = repo.read_bin("systemd-calls");
     for part in [
-        "--user --scope --quiet --collect",
+        "--user --scope --quiet --collect --expand-environment=no",
         "TimeoutStopSec=30",
         "MemoryMax=8G",
         "MemorySwapMax=0",
@@ -1244,7 +1244,7 @@ fn with_fuzz(name: &str, main: &str) -> Repo {
 fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
     let repo = with_fuzz(
         "fuzz-runs",
-        "fn main() {\n    let seconds = std::env::args().nth(1).unwrap();\n    assert_eq!(seconds, \"3600\");\n}\n",
+        "fn main() {\n    let seconds = std::env::args().nth(1).unwrap();\n    assert_eq!(seconds, \"3300\");\n}\n",
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -1258,8 +1258,8 @@ fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
     assert_eq!(lines.len(), 2, "{calls}");
     assert!(lines[0].contains("RuntimeMaxSec=300 "), "{calls}");
     assert!(lines[0].contains("-- cargo build --release"), "{calls}");
-    assert!(lines[1].contains("RuntimeMaxSec=3900 "), "{calls}");
-    assert!(lines[1].ends_with("/release/fuzz 3600"), "{calls}");
+    assert!(lines[1].contains("RuntimeMaxSec=3600 "), "{calls}");
+    assert!(lines[1].ends_with("/release/fuzz 3300"), "{calls}");
     assert!(
         lines.iter().all(|line| line.contains("MemoryMax=8G")),
         "{calls}"
@@ -1388,4 +1388,39 @@ fn a_night_mutation_failed_is_tried_again() {
     let output = repo.xtask(&["nightly"]);
     assert_mutation_ran(&repo, &output, 0, "pass");
     assert!(repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn the_job_itself_keeps_the_activity_lock() {
+    let repo = Repo::new("mutation-lock-passed");
+    repo.set_mutants("readlink /proc/$$/fd/0 > \"$d/stdin\"\nexit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let stdin = repo.read_bin("stdin");
+    assert!(stdin.ends_with("/.git/xtask/activity.lock"), "{stdin}");
+}
+
+#[test]
+fn a_waiting_issue_that_mentions_failure_isnt_a_failed_night() {
+    let repo = Repo::new("mutation-title");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let head = repo.short("HEAD");
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[(
+        "o",
+        &format!("# Nightly report for `{head}`\n\n- #30 Investigate - fail mutation\n"),
+    )]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "skip");
+}
+
+#[test]
+fn a_hold_inherited_from_a_parent_still_runs_the_job() {
+    let repo = Repo::new("mutation-inherited");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["run", env!("CARGO_BIN_EXE_xtask"), "nightly"]);
+    assert_mutation_ran(&repo, &output, 1, "pass");
 }

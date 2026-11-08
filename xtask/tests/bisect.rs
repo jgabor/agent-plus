@@ -181,9 +181,13 @@ impl Repo {
 
     /// Gives the issue that `gh issue view` shows this one comment, by the owner.
     fn set_issue_comment(&self, body: Option<&str>) {
+        self.set_issue_comment_by("o", body);
+    }
+
+    fn set_issue_comment_by(&self, author: &str, body: Option<&str>) {
         let comments = body.map_or(String::new(), |body| {
             format!(
-                "{{\"url\":\"https://github.com/o/r/issues/50#issuecomment-5\",\"author\":{{\"login\":\"o\"}},\"body\":{body:?}}}"
+                "{{\"url\":\"https://github.com/o/r/issues/50#issuecomment-5\",\"author\":{{\"login\":\"{author}\"}},\"body\":{body:?}}}"
             )
         });
         fs::write(
@@ -516,4 +520,21 @@ fn an_ordinary_revert_carries_no_label() {
     let calls = repo.calls();
     assert!(calls.contains("pr create"), "{calls}");
     assert!(!calls.contains("--label"), "{calls}");
+}
+
+#[test]
+fn a_response_from_someone_else_doesnt_count() {
+    let repo = Repo::new("forged-response", FAST);
+    let bad = repo.plant(1, 0);
+    repo.set_issues(&format!(
+        "[{REPORT_ISSUE},{{\"number\":50,\"title\":\"`main` fails the gate\",\"labels\":[],\"isPinned\":false}}]"
+    ));
+    repo.set_issue_comment_by("someone", Some("<!-- nightly response -->\nHandled."));
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        repo.comment(50).contains(&format!("`{bad}`")),
+        "{}",
+        repo.comment(50)
+    );
 }

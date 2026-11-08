@@ -1247,6 +1247,7 @@ fn a_revert_of_a_commit_outside_the_history_keeps_the_floor() {
     let (repo, parent) = revert_of_a_check("revert-elsewhere", Some(&"0".repeat(40)));
     repo.git(&["checkout", "-q", "--detach", &parent]);
     repo.write("crates/demo/src/lib.rs", CHECK_ONE);
+    repo.write("order.txt", "b\na\nb\n");
     repo.git(&["add", "-A"]);
     repo.git(&["commit", "-q", "-m", "The same change, on no branch"]);
     let twin = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -1315,6 +1316,19 @@ fn a_change_that_only_looks_like_a_revert_is_benched() {
     );
     repo.change_branch("docs.txt", "and something else\n");
     let output = repo.merge(&["--owner"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("build"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_revert_without_the_owner_is_benched() {
+    let broken = "fn main() { not rust }\n";
+    let (repo, _) = revert_of(
+        "revert-no-owner-bench",
+        ("crates/ap/src/main.rs", FAST, broken),
+        None,
+    );
+    let output = repo.merge(&[]);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
 }

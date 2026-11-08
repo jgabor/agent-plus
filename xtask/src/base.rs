@@ -92,14 +92,12 @@ pub fn is_exact_revert(root: &Path, base: &str) -> Result<bool, Problem> {
     let in_history = git(root, &["merge-base", "--is-ancestor", commit, base])?
         .status
         .success();
-    if !in_history || !commit_exists(root, &parent)? {
+    if !in_history {
         return Ok(false);
     }
+    // A conflict or a commit with no parent gives no tree that HEAD can match.
     let from = format!("--merge-base={commit}");
     let replayed = git(root, &["merge-tree", "--write-tree", &from, base, &parent])?;
-    if !replayed.status.success() {
-        return Ok(false);
-    }
     let tree = String::from_utf8_lossy(&replayed.stdout);
     let tree = tree.lines().next().unwrap_or_default();
     let same = |args: &[&str]| -> Result<bool, Problem> {

@@ -3,6 +3,8 @@
 mod floors;
 mod gate;
 mod json;
+mod score;
+mod spec;
 
 use std::process::ExitCode;
 
@@ -11,6 +13,7 @@ usage: cargo xtask <command>
 
 commands:
   gate    run the checks a change must pass
+  score   print the scores
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -29,13 +32,14 @@ pub struct Problem(pub String);
 fn run(args: &[&str]) -> Result<Verdict, Problem> {
     match args {
         ["gate"] => gate::run(),
+        ["score"] => score::run(),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
-        ["gate", extra, ..] => Err(Problem(format!(
-            "`gate` takes no arguments, but got `{extra}`\n\n{USAGE}"
+        [command @ ("gate" | "score"), extra, ..] => Err(Problem(format!(
+            "`{command}` takes no arguments, but got `{extra}`\n\n{USAGE}"
         ))),
         [other, ..] => Err(Problem(format!("unknown command `{other}`\n\n{USAGE}"))),
     }

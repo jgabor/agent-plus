@@ -67,7 +67,7 @@ fn no_cargo(error: io::Error) -> Problem {
     ))
 }
 
-fn workspace_root() -> Result<PathBuf, Problem> {
+pub fn workspace_root() -> Result<PathBuf, Problem> {
     let output = Command::new("cargo")
         .args(["locate-project", "--workspace", "--message-format", "plain"])
         .output()

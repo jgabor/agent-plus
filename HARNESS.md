@@ -584,8 +584,9 @@ VMM, once a udev rule opens KVM and a systemd user session is started.
 4. Try every PR. A PR that fails gets `failure` and stays `land-needed`, and
    the command exits 1.
 
-If `main` moves during a proof, that PR goes red until the run the new push
-started proves it again.
+If `main` moves during a run, `prepare --keep-budgets` refuses the rest,
+because `xtask` was built from the older `main`. Those PRs go red until the
+run that the new push started proves them again.
 
 ### Nightly job
 

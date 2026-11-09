@@ -173,6 +173,13 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
         }
     };
     let kept = if keep_budgets {
+        // xtask compiled from this checkout, so these checks are for its `main`.
+        if head(&root)? != fetched.main {
+            unproven();
+            return refuse(&format!(
+                "these checks were built from an older `main`, so they can't prove PR {number} on the newest one"
+            ));
+        }
         if !record_at_tip(&tree.path, issue)? {
             unproven();
             return refuse(&format!(

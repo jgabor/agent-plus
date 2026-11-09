@@ -1929,7 +1929,9 @@ impl Repo {
         self.origin(&["rev-parse", &format!("refs/heads/{branch}")])
     }
 
+    /// From a checkout of `main`, as the workflow runs it.
     fn refresh(&self) -> Output {
+        self.git(&["checkout", "-q", "main"]);
         self.xtask(&["refresh"])
     }
 }
@@ -2148,4 +2150,38 @@ fn a_change_to_github_workflows_needs_the_label() {
         ..Pr::default()
     });
     assert_prepared(&repo, &repo.prepare());
+}
+
+/// The checks compile from the checkout, so older checks can't prove a newer
+/// `main`. The run that the newer push started proves this PR instead.
+#[test]
+fn a_refresh_built_from_an_older_main_proves_nothing() {
+    let repo = Repo::new("refresh-older-checks");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("older `main`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(repo.head(), head);
+    assert!(
+        repo.calls().contains(&status(&head, "failure")),
+        "{}",
+        repo.calls()
+    );
 }

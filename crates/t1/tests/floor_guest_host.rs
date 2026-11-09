@@ -492,6 +492,17 @@ impl Code {
         self.stop()
     }
 
+    /// Stops the guest if the used ring is untouched, and otherwise spins
+    /// until the timeout, which fails the case. A chain the device refuses
+    /// never reaches the ring, however many were offered.
+    fn stop_unless_refused_all(&mut self) -> Vec<u8> {
+        self.bytes(&[0x81, 0x3d]);
+        self.bytes(&USED.to_le_bytes());
+        self.bytes(&0_u32.to_le_bytes());
+        self.bytes(&[0x74, 0x02, 0xeb, 0xfe]);
+        self.stop()
+    }
+
     /// Spins forever, so that only the timeout ends the guest.
     fn spin(&mut self) -> Vec<u8> {
         self.bytes(&[0xeb, 0xfe]);
@@ -604,7 +615,7 @@ fn device_cases() -> Vec<Case> {
         build(&mut code);
         kernel_case(
             &format!("queue/{name}"),
-            code.stop_unless_consumed(),
+            code.stop_unless_refused_all(),
             STOPPED,
         )
     };
@@ -641,7 +652,7 @@ fn device_cases() -> Vec<Case> {
     code.start_device(far).publish(0, 1);
     cases.push(kernel_case(
         "queue/table-outside-ram",
-        code.stop_unless_consumed(),
+        code.stop_unless_refused_all(),
         STOPPED,
     ));
 

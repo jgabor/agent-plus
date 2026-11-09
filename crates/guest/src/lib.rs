@@ -1,6 +1,8 @@
 //! The guest's init: the work of PID 1 inside the microVM.
 
+pub mod agent;
 pub mod linux;
+pub mod protocol;
 
 use std::ffi::{CStr, c_ulong};
 use std::io;

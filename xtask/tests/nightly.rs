@@ -76,8 +76,10 @@ while [ "$1" != "--" ]; do
 done
 shift
 [ -n "$limit" ] || exec "$@"
-setsid "$@" <&0 &
+exec 3<&0
+setsid "$@" <&3 3<&- &
 job=$!
+exec 3<&-
 setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$limit" "$job" \
     </dev/null >/dev/null 2>&1 &
 watcher=$!

@@ -174,8 +174,9 @@ desktop in a native window.
 
 #### Diagnostics
 
-- `ap boot [--timeout N]`: boot a bare machine with no agent, print its kernel
-  release, and power off
+- `ap boot [--timeout N] [-- COMMAND...]`: boot a bare machine with no agent,
+  then print its kernel release and power off, or run the command and exit
+  with its status
 
 #### About
 

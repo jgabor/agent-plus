@@ -113,3 +113,24 @@ fn a_timeout_exits_124_and_nothing_else_does() {
     assert_eq!(boot::Error::DynamicallyLinked.exit_code(), 125);
     assert_eq!(boot::Error::Failed(String::new()).exit_code(), 125);
 }
+
+#[test]
+fn a_command_needs_something_after_the_separator() {
+    for args in [&["boot", "--"][..], &["boot", "--timeout", "1", "--"]] {
+        let output = ap(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn a_command_is_accepted_with_or_without_a_timeout() {
+    for args in [
+        &["boot", "--", "ap", "--version"][..],
+        &["boot", "--timeout", "30", "--", "ap", "--timeout"],
+    ] {
+        let output = ap(args);
+        assert_eq!(output.status.code(), Some(125), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("dynamically linked"), "{stderr}");
+    }
+}

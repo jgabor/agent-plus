@@ -83,7 +83,7 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | Planner | T3 Code scheduled task | Opus | Files issues from score gaps |
 | Worker | T3 Code thread, one per issue | Opus | Takes one issue from claim to merge |
 | Reviewer | Delegated agent, one per round | Another provider | Reviews a diff, and changes nothing |
-| Nightly job | T3 Code scheduled task | Haiku | Runs `cargo xtask nightly` on `main`, and files an issue on failure |
+| Nightly job | T3 Code scheduled task | Sonnet | Runs `cargo xtask nightly` on `main`, and files an issue on failure |
 
 | State | Stored in |
 |---|---|

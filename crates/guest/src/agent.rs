@@ -221,7 +221,7 @@ mod tests {
         let (reader, mut writer) = pipe().unwrap();
         // SAFETY: this call takes no pointers, and the descriptor is open.
         let size = unsafe { fcntl(writer.as_raw_fd(), F_SETPIPE_SZ, 2 * QUEUED as c_int) };
-        assert!(size as usize >= QUEUED, "the pipe could not be enlarged");
+        assert!(size >= QUEUED as c_int, "the pipe could not be enlarged");
         writer.write_all(&vec![b'o'; QUEUED]).unwrap();
 
         let (updates, received) = sync_channel(QUEUE);

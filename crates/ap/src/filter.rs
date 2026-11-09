@@ -22,6 +22,9 @@ const C1_DCS: u8 = 0x90;
 const C1_CSI: u8 = 0x9b;
 const C1_ST: u8 = 0x9c;
 const C1_OSC: u8 = 0x9d;
+const C1_SOS: u8 = 0x98;
+const C1_PM: u8 = 0x9e;
+const C1_APC: u8 = 0x9f;
 /// More than any real introducer needs. Longer sequences are removed, so a
 /// guest can't make the host hold an unbounded amount.
 const MAX_HELD: usize = 256;
@@ -119,7 +122,11 @@ impl Filter {
             C1_DCS => self.begin(State::Dcs, raw),
             C1_ST if removing => {}
             _ => {
-                self.string_open = false;
+                match control {
+                    C1_ST => self.string_open = false,
+                    C1_SOS | C1_PM | C1_APC => self.string_open = true,
+                    _ => {}
+                }
                 out.extend_from_slice(raw);
             }
         }
@@ -151,12 +158,7 @@ impl Filter {
             return;
         }
         match self.state {
-            State::Ground => {
-                if byte == BEL {
-                    self.string_open = false;
-                }
-                out.push(byte);
-            }
+            State::Ground => out.push(byte),
             State::Escape => self.escape(byte, out),
             State::Csi => self.csi(byte, out),
             State::Osc => self.osc(byte, out),
@@ -265,9 +267,12 @@ impl Filter {
     }
 
     fn pass(&mut self, out: &mut Vec<u8>) {
-        // Only ST ends a string on every terminal. An extra one does nothing.
-        if matches!(self.state, State::Osc | State::Dcs) {
-            self.string_open = self.held.last() != Some(&BEL);
+        // Only ST ends a string on every terminal. An extra one does nothing,
+        // so BEL, which ends some strings and not others, doesn't count.
+        if matches!(self.state, State::Osc | State::Dcs)
+            || matches!(self.held[..], [ESC, b'X' | b'^' | b'_'])
+        {
+            self.string_open = true;
         } else if self.held == [ESC, b'\\'] {
             self.string_open = false;
         }

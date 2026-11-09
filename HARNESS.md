@@ -635,6 +635,9 @@ passes. No scheduled work runs on GitHub.
   any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
+- Or run `just merge <pr>` on `main`, which runs `prepare` and squashes if it
+  passes. It stops at a PR with a comment saying what merging accepts, so the
+  owner reads that and uses a merge button.
 - Turn the scheduled tasks on.
 - Answer `needs-owner` issues.
 - Publish releases.

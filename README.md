@@ -31,8 +31,9 @@ as one binary for each supported host:
 
 | Host | Status |
 |---|---|
-| Linux x86_64 and arm64 | v0.1.0 (needs access to `/dev/kvm`) |
+| Linux x86_64 | v0.1.0 (needs access to `/dev/kvm`) |
 | macOS on Apple Silicon | v0.1.0 |
+| Linux arm64 | next |
 | Windows x86_64 | next |
 | macOS on Intel | not planned |
 

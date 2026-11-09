@@ -1732,8 +1732,9 @@ The first `ap build` of this Agentfile asks you to approve its grants.
 
 | Host | Status | Requirement |
 |---|---|---|
-| Linux x86_64 and arm64 | v0.1.0 | Read and write access to `/dev/kvm` |
+| Linux x86_64 | v0.1.0 | Read and write access to `/dev/kvm` |
 | macOS on Apple Silicon | v0.1.0 | Hypervisor.framework |
+| Linux arm64 | next | Read and write access to `/dev/kvm` |
 | Windows x86_64 | next | Windows Hypervisor Platform enabled |
 | macOS on Intel | not planned | |
 

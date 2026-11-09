@@ -42,8 +42,7 @@ clean machine:
 
 - Every promise within v0.1.0 has a passing check.
 - No sentence within v0.1.0 is marked *Proposed*.
-- Every journey step passes on Linux x86_64, Linux arm64, and macOS on Apple
-  Silicon.
+- Every journey step passes on Linux x86_64 and macOS on Apple Silicon.
 - Every budget is met.
 - Every floor holds, and none is pending.
 
@@ -678,7 +677,7 @@ The harness is built before product features.
 | Decision | Default until decided |
 |---|---|
 | Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
-| Hosts for macOS and Linux arm64, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
+| Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
 | Limit on model spend for workers and T3 | No unattended T3 runs |
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |

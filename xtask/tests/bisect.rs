@@ -34,9 +34,13 @@ case "$1 $2" in
   "issue pin") ;;
   "issue comment")
     if [ -e "$d/no-comments-on-$3" ]; then echo "comments are off" >&2; exit 1; fi
-    cat > "$d/comment-$3"
+    cat >> "$d/comment-$3"
     echo "https://github.com/o/r/issues/$3#issuecomment-5" ;;
   "pr create") echo "https://github.com/o/r/pull/90" ;;
+  "pr comment") cat >> "$d/pr-comment"; echo "https://github.com/o/r/pull/$3#issuecomment-6" ;;
+  "pr view")
+    if [ ! -e "$d/pr.json" ]; then echo "no such PR" >&2; exit 1; fi
+    cat "$d/pr.json" ;;
   "api -X") ;;
   "api repos/"*)
     sha="$(echo "$2" | cut -d/ -f5)"
@@ -320,6 +324,59 @@ fn a_planted_break_is_bisected_and_reverted() {
     assert_eq!(repo.leftovers(), Vec::<String>::new());
     assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
     assert_eq!(repo.git(&["status", "--porcelain"]), "");
+}
+
+#[test]
+fn the_revert_is_prepared_after_the_issue_hears_of_it() {
+    let repo = Repo::new("prepared", FAST);
+    let bad = repo.plant(2, 0);
+    let short = repo.git(&["rev-parse", "--short", &bad]);
+    let branch = format!("78-revert-{short}");
+    fs::write(
+        repo.bin.join("pr.json"),
+        format!(
+            "{{\"number\":90,\"state\":\"OPEN\",\"url\":\"https://github.com/o/r/pull/90\",\"isCrossRepository\":false,\"headRefName\":\"{branch}\",\"baseRefName\":\"main\",\"body\":\"Hill: none, this is a revert.\\n\\nCloses #78.\\n\",\"labels\":[],\"closingIssuesReferences\":[{{\"number\":78,\"url\":\"https://github.com/o/r/issues/78\"}}],\"reviews\":[]}}\n"
+        ),
+    )
+    .unwrap();
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let tip = repo.origin_git(&["rev-parse", &format!("refs/heads/{branch}")]);
+    assert_eq!(
+        repo.origin_git(&["diff-tree", "--no-commit-id", "--name-only", "-r", &tip]),
+        "harness/ledger/78.toml"
+    );
+    let calls = repo.calls();
+    let told = calls.find("issue comment 78").expect("the issue was told");
+    let read = calls.find("pr view 90").expect("the PR was read");
+    assert!(told < read, "{calls}");
+    let status = format!("statuses/{tip} -f state=success -f context=xtask/gate");
+    assert!(calls.contains(&status), "{calls}");
+    assert!(!calls.contains("pr merge"), "{calls}");
+    assert_eq!(repo.comment(78).matches("Couldn't").count(), 0);
+    let accepted = fs::read_to_string(repo.bin.join("pr-comment")).unwrap();
+    assert!(accepted.contains("exact revert"), "{accepted}");
+}
+
+#[test]
+fn a_failed_prepare_leaves_the_response_and_says_how_to_run_it() {
+    let repo = Repo::new("prepare-fails", FAST);
+    let bad = repo.plant(1, 0);
+    let output = repo.nightly();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).ends_with("nightly: fail\n"),
+        "{}",
+        stdout(&output)
+    );
+    let comment = repo.comment(78);
+    assert!(
+        comment.starts_with("<!-- nightly response -->\n"),
+        "{comment}"
+    );
+    assert!(comment.contains(&format!("`{bad}`")), "{comment}");
+    assert!(comment.contains("cargo xtask prepare 90"), "{comment}");
+    assert_eq!(repo.calls().matches("issue comment 78").count(), 2);
 }
 
 #[test]

@@ -151,6 +151,12 @@ impl Gh {
         Ok(())
     }
 
+    pub fn comment_on_pr(&self, number: u64, body: &str) -> Result<(), Problem> {
+        let number = number.to_string();
+        self.text(&["pr", "comment", &number, "--body-file", "-"], Some(body))?;
+        Ok(())
+    }
+
     pub fn open_issues(&self) -> Result<Vec<OpenIssue>, Problem> {
         self.listed("open", "number,title,labels,isPinned")?
             .iter()

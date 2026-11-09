@@ -29,7 +29,7 @@ enum Decision {
 }
 
 /// Whether this PR may merge, from what GitHub says now. It writes nothing.
-fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
+fn decide(gh: &Gh, number: u64, prepare: bool) -> Result<Decision, Problem> {
     let pr = gh.pull_request(number)?;
     match pr.state.as_str() {
         "MERGED" => return Ok(Decision::Merged),
@@ -62,16 +62,16 @@ fn decide(gh: &Gh, number: u64, owner: bool) -> Result<Decision, Problem> {
             "a review of PR {number} requested changes. Address it, or dismiss it on GitHub"
         ));
     }
-    if !owner {
+    if !prepare {
         if pr.labels.iter().any(|label| label == base::SPEC_CHANGE) {
             return refused(format!(
-                "PR {number} is labeled `{}`, so only the owner merges it, with `--owner`",
+                "PR {number} is labeled `{}`, so the owner merges it. Run `cargo xtask prepare {number}` instead",
                 base::SPEC_CHANGE
             ));
         }
         if !gh.issue(issue)?.labels.iter().any(|l| l == AUTO_MERGE) {
             return refused(format!(
-                "issue {issue} has no `{AUTO_MERGE}` label, so only the owner merges PR {number}, with `--owner`"
+                "issue {issue} has no `{AUTO_MERGE}` label, so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
             ));
         }
     }
@@ -83,23 +83,35 @@ fn refuse(why: &str) -> Result<Verdict, Problem> {
     Ok(Verdict::Fail)
 }
 
-pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
+/// The whole sequence, under the rules for an agent.
+pub fn run(pr: &str) -> Result<Verdict, Problem> {
+    sequence(pr, false)
+}
+
+/// The sequence up to the squash, which is the owner's. It also takes what
+/// only the owner can accept, and says so on the PR.
+pub fn prepare(pr: &str) -> Result<Verdict, Problem> {
+    sequence(pr, true)
+}
+
+fn sequence(pr: &str, prepare: bool) -> Result<Verdict, Problem> {
+    let command = if prepare { "prepare" } else { "merge" };
     let number: u64 = pr
         .parse()
-        .map_err(|_| Problem(format!("`merge` takes a PR number, but got `{pr}`")))?;
+        .map_err(|_| Problem(format!("`{command}` takes a PR number, but got `{pr}`")))?;
     let root = workspace::root()?;
     if !root.join(".git").exists() {
-        return Err(Problem(
-            "`merge` works on a repository, so run it at the top of a git checkout".to_string(),
-        ));
+        return Err(Problem(format!(
+            "`{command}` works on a repository, so run it at the top of a git checkout"
+        )));
     }
     let gh = Gh::new(&root);
-    if let Decision::Refused(why) = decide(&gh, number, owner)? {
+    if let Decision::Refused(why) = decide(&gh, number, prepare)? {
         return refuse(&why);
     }
     let slot = lock::merge_slot(&root)?;
     start_timeout();
-    let (pr, issue) = match decide(&gh, number, owner)? {
+    let (pr, issue) = match decide(&gh, number, prepare)? {
         Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
             println!("merge: PR {number} is already merged");
@@ -111,19 +123,27 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
 
     let fetched = fetch(&root, &pr.head_ref)?;
     let tree = Tree::create(&root, number, &fetched.branch)?;
+    // Nothing was pushed, so this is the head that an earlier green would be on.
+    let unproven = || {
+        if prepare {
+            post_failure(&gh, &fetched.branch);
+        }
+    };
     drop_earlier_record(&tree.path, issue)?;
     if !rebase(&tree.path, &fetched.main)? {
+        unproven();
         return refuse("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
     }
     let gated = head(&tree.path)?;
     let scoring = Scoring {
         number,
         issue,
-        owner,
+        prepare,
         pr: &pr,
         gated: &gated,
     };
-    let Some(record) = prove(&tree.path, &scoring)? else {
+    let Some(Proof { record, accepted }) = prove(&tree.path, &scoring)? else {
+        unproven();
         return Ok(Verdict::Fail);
     };
 
@@ -149,10 +169,33 @@ pub fn run(pr: &str, owner: bool) -> Result<Verdict, Problem> {
             changed.trim_end()
         )));
     }
+    // The comment comes first, so that a green PR always has it.
+    if !accepted.is_empty() {
+        gh.comment_on_pr(number, &acceptance(&recorded, &accepted))?;
+    }
     gh.post_status(&recorded, "xtask/gate", "success")?;
+    if prepare {
+        println!("prepare: PR {number} is ready to merge at {recorded}");
+        return Ok(Verdict::Pass);
+    }
     gh.merge_pr(number, &recorded, &slot)?;
     println!("merge: PR {number} merged at {recorded}");
     Ok(Verdict::Pass)
+}
+
+/// A status that can't be posted leaves the verdict as it is.
+fn post_failure(gh: &Gh, commit: &str) {
+    if let Err(Problem(message)) = gh.post_status(commit, "xtask/gate", "failure") {
+        eprintln!("merge: couldn't post `xtask/gate` on {commit}: {message}");
+    }
+}
+
+fn acceptance(head: &str, accepted: &[String]) -> String {
+    let lines: Vec<String> = accepted.iter().map(|item| format!("- {item}")).collect();
+    format!(
+        "Merging this PR at `{head}` accepts:\n\n{}\n",
+        lines.join("\n")
+    )
 }
 
 /// Stops a stuck merge, because it would hold the slot for every other merge.
@@ -209,7 +252,7 @@ fn changed_during_proof(
     main: &str,
 ) -> Result<Option<String>, Problem> {
     let number = scoring.number;
-    match decide(gh, number, scoring.owner)? {
+    match decide(gh, number, scoring.prepare)? {
         Decision::Refused(why) => return Ok(Some(why)),
         Decision::Merged => {
             return Ok(Some(format!(
@@ -318,20 +361,26 @@ fn rebase(tree: &Path, main: &str) -> Result<bool, Problem> {
 struct Scoring<'a> {
     number: u64,
     issue: u64,
-    owner: bool,
+    prepare: bool,
     pr: &'a PullRequest,
     gated: &'a str,
+}
+
+/// What the proof earned, and what merging it accepts.
+struct Proof {
+    record: Record,
+    accepted: Vec<String>,
 }
 
 /// Runs the gate, the journey, and any bench on the rebased head, and returns
 /// the record they earn. `None` means the merge must stop, and the reasons
 /// have been printed.
-fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Record>, Problem> {
-    let Scoring { owner, pr, .. } = *scoring;
+fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
+    let Scoring { prepare, pr, .. } = *scoring;
     let hold = lock::shared(tree)?;
     let merging = Merging {
         labels: &pr.labels,
-        owner,
+        prepare,
     };
     let (verdict, score) = gate::check(tree, &hold, Some(&merging))?;
     if verdict == Verdict::Fail {
@@ -344,7 +393,7 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Record>, Problem> {
         .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
     // The base of a revert may be what doesn't build, and a revert puts back a
     // tree that was already measured.
-    let revert = owner && base::is_exact_revert(tree, &commit)?;
+    let revert = prepare && base::is_exact_revert(tree, &commit)?;
     if !revert
         && budget_can_change(tree, &commit)?
         && bench::compare(tree, Some(&pr.body))? == Verdict::Fail
@@ -362,19 +411,28 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Record>, Problem> {
         scoring.issue as usize,
         scoring.number as usize,
         scoring.gated,
+        Some(&commit),
         scores,
     )?;
-    Ok(compare_counts(tree, &commit, &record, scoring)?.then_some(record))
+    let Some(mut accepted) = compare_counts(tree, &commit, &record, scoring)? else {
+        return Ok(None);
+    };
+    if revert {
+        accepted
+            .push("an exact revert, so it can remove checks, and the bench didn't run".to_string());
+    }
+    Ok(Some(Proof { record, accepted }))
 }
 
 /// The spec count is compared by the gate. This compares the two that need the
-/// journey and the bench, and then asks whether anything rose.
+/// journey and the bench, and then asks whether anything rose. Returns the
+/// counts that fell and are allowed to, or `None` if the PR fails here.
 fn compare_counts(
     tree: &Path,
     commit: &str,
     record: &Record,
     scoring: &Scoring,
-) -> Result<bool, Problem> {
+) -> Result<Option<Vec<String>>, Problem> {
     let budgets = bench::read_budgets(tree)?;
     let before = ledger::newest(tree, commit)?;
     let (proven, passing, budgets_met) = before.map_or((0, 0, 0), |base| {
@@ -384,6 +442,10 @@ fn compare_counts(
     let met_now = bench::met(&budgets, &record.budgets).0;
 
     let mut verdict = Verdict::Pass;
+    let mut accepted = Vec::new();
+    if record.proven < proven {
+        accepted.push(format!("spec fell from {proven} to {}", record.proven));
+    }
     for (name, before, after) in [
         ("journey", passing, record.passing),
         ("budgets", budgets_met, met_now),
@@ -392,8 +454,9 @@ fn compare_counts(
             eprintln!(
                 "{name}: the count fell from {before} to {after}. Restore it, or hand the PR to the owner"
             );
+            accepted.push(format!("{name} fell from {before} to {after}"));
         }
-        gate::record(name, after >= before || scoring.owner, &mut verdict);
+        gate::record(name, after >= before || scoring.prepare, &mut verdict);
     }
     let rose = record.proven > proven || record.passing > passing || met_now > budgets_met;
     if !rose && !declares_no_hill(&scoring.pr.body) {
@@ -402,7 +465,7 @@ fn compare_counts(
         );
         gate::record("hill-line", false, &mut verdict);
     }
-    Ok(verdict == Verdict::Pass)
+    Ok((verdict == Verdict::Pass).then_some(accepted))
 }
 
 fn declares_no_hill(body: &str) -> bool {

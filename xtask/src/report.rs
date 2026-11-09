@@ -130,6 +130,11 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
             report.unrecorded.push(Unrecorded { commit, subject });
             continue;
         };
+        if ledger::merged_after_main_moved(root, full, &record)? {
+            let subject = format!("{subject}, merged after `main` moved");
+            report.unrecorded.push(Unrecorded { commit, subject });
+            continue;
+        }
         for what in regressions(root, full, &record)? {
             report.regressed.push(Regression {
                 commit: commit.clone(),

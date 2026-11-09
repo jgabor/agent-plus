@@ -1,6 +1,5 @@
 //! `cargo xtask gate`: the checks a change must pass.
 
-use crate::forge::Gh;
 use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
 use crate::{Problem, Verdict, base, floors, ledger, lock, score, testrun};
@@ -35,54 +34,15 @@ const CHECKS: &[Check] = &[
 /// What a merge already knows, which changes two of the checks.
 pub struct Merging<'a> {
     pub labels: &'a [String],
-    pub owner: bool,
+    /// `prepare` leaves these to the owner, who decides by merging.
+    pub prepare: bool,
 }
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::shared(&root)?;
-    let before = pushed_clean_head(&root);
     let (verdict, _) = check(&root, &hold, None)?;
-    if let Err(Problem(message)) = post_result(&root, before, verdict) {
-        eprintln!("gate: couldn't post `xtask/gate`, so the result is only here: {message}");
-    }
     Ok(verdict)
-}
-
-/// HEAD, if the tree is what HEAD holds and a remote has that commit. Only then
-/// does a result say something about a commit others can see.
-fn pushed_clean_head(root: &Path) -> Result<Option<String>, Problem> {
-    if !root.join(".git").exists()
-        || !base::commit_exists(root, "HEAD")?
-        || !ledger::changes(root)?.is_empty()
-    {
-        return Ok(None);
-    }
-    let remotes = base::git_text(root, &["branch", "-r", "--contains", "HEAD"])?;
-    if remotes.trim().is_empty() {
-        return Ok(None);
-    }
-    let head = base::git_text(root, &["rev-parse", "HEAD"])?;
-    Ok(Some(head.trim().to_string()))
-}
-
-/// Posts the result, if the head that was checked is still the head.
-fn post_result(
-    root: &Path,
-    before: Result<Option<String>, Problem>,
-    verdict: Verdict,
-) -> Result<(), Problem> {
-    let Some(head) = before? else {
-        return Ok(());
-    };
-    if pushed_clean_head(root)?.as_ref() != Some(&head) {
-        return Ok(());
-    }
-    let state = match verdict {
-        Verdict::Pass => "success",
-        Verdict::Fail => "failure",
-    };
-    Gh::new(root).post_status(&head, "xtask/gate", state)
 }
 
 /// Runs every check, and returns the verdict and the spec score it earned.
@@ -127,7 +87,7 @@ fn compare_with_base(
         eprintln!("base: no origin/main in this repository, so nothing was compared");
         return Ok(());
     };
-    let allowed = merging.is_some_and(|merging| merging.owner);
+    let allowed = merging.is_some_and(|merging| merging.prepare);
     let findings = if allowed && base::is_exact_revert(root, &commit)? {
         Vec::new()
     } else {

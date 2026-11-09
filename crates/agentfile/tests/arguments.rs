@@ -82,7 +82,18 @@ fn inside_quotes_a_backslash_escapes_a_quote_or_a_backslash() {
 }
 
 #[test]
+fn outside_quotes_a_backslash_is_a_backslash() {
+    assert_eq!(arguments_of(r"SHARE a\\b"), [r"a\\b"]);
+}
+
+#[test]
 fn an_unterminated_quote_is_an_error() {
     let error = parse("SHARE \"./out\n").unwrap_err();
     assert_eq!(error.line, 1);
+}
+
+#[test]
+fn an_error_prints_its_line_and_message() {
+    let error = parse("\nSHARE \"./out\n").unwrap_err();
+    assert_eq!(error.to_string(), "line 2: a quote is never closed");
 }

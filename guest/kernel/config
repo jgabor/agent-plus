@@ -1,0 +1,46 @@
+# What the guest kernel needs for boot and exec. build.sh applies this over
+# allnoconfig, then fails if Kconfig dropped any line.
+
+CONFIG_64BIT=y
+CONFIG_LOCALVERSION="-ap.1"
+# CONFIG_LOCALVERSION_AUTO is not set
+# CONFIG_MODULES is not set
+# CONFIG_ACPI is not set
+# CONFIG_PCI is not set
+
+# PVH entry on KVM.
+CONFIG_HYPERVISOR_GUEST=y
+CONFIG_PARAVIRT=y
+CONFIG_KVM_GUEST=y
+CONFIG_PVH=y
+
+# An uncompressed initramfs, and the ELF binaries in it.
+CONFIG_BLK_DEV_INITRD=y
+# CONFIG_RD_GZIP is not set
+# CONFIG_RD_BZIP2 is not set
+# CONFIG_RD_LZMA is not set
+# CONFIG_RD_XZ is not set
+# CONFIG_RD_LZO is not set
+# CONFIG_RD_LZ4 is not set
+# CONFIG_RD_ZSTD is not set
+CONFIG_BINFMT_ELF=y
+
+# Filesystems the init mounts.
+CONFIG_DEVTMPFS=y
+CONFIG_TMPFS=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+
+# Devices declared on the command line, and the channel to the host.
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO_MMIO=y
+CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_NET=y
+CONFIG_VSOCKETS=y
+CONFIG_VIRTIO_VSOCKETS=y
+
+# The diagnostic log.
+CONFIG_TTY=y
+CONFIG_PRINTK=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y

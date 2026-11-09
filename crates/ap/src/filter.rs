@@ -2,15 +2,16 @@
 //!
 //! The guest chooses every byte, so this reads them the way a terminal does:
 //! in UTF-8, with 7-bit and 8-bit introducers, and with control characters
-//! allowed inside a sequence. It removes clipboard access (OSC 52), the title
-//! reports (CSI 20 t and CSI 21 t), and DECRQSS, whose replies can echo what
-//! the guest sent.
+//! allowed inside a sequence. It removes clipboard access (OSC 52 and 5522),
+//! the title reports (CSI 20 t and CSI 21 t), and DECRQSS, whose replies can
+//! echo what the guest sent.
 //!
 //! A sequence is held back until it can be judged, and nothing unfinished is
 //! written, so neither the other stream nor the next prompt can complete it.
 //! Once a string sequence passes, its body is read as ordinary output. A
 //! terminal ignores that body, and anything that can end the string can start
-//! a new sequence, which is judged here the same way.
+//! a new sequence, which is judged here the same way. Removing that sequence
+//! also removes what would have ended the string, so the filter ends it.
 
 const BEL: u8 = 0x07;
 const CAN: u8 = 0x18;
@@ -45,6 +46,8 @@ pub struct Filter {
     state: State,
     held: Vec<u8>,
     overflowed: bool,
+    /// The terminal is inside a string that passed and hasn't ended.
+    string_open: bool,
     /// UTF-8 continuation bytes still expected.
     continuation: u8,
     /// Saw `0xc2`, which either starts a character or encodes a C1 control.
@@ -57,6 +60,7 @@ impl Default for Filter {
             state: State::Ground,
             held: Vec::new(),
             overflowed: false,
+            string_open: false,
             continuation: 0,
             after_c2: false,
         }
@@ -114,7 +118,10 @@ impl Filter {
             C1_OSC => self.begin(State::Osc, raw),
             C1_DCS => self.begin(State::Dcs, raw),
             C1_ST if removing => {}
-            _ => out.extend_from_slice(raw),
+            _ => {
+                self.string_open = false;
+                out.extend_from_slice(raw);
+            }
         }
     }
 
@@ -138,12 +145,18 @@ impl Filter {
         if byte == CAN || byte == SUB {
             if self.state != State::Removing {
                 out.push(byte);
+                self.string_open = false;
             }
             self.discard();
             return;
         }
         match self.state {
-            State::Ground => out.push(byte),
+            State::Ground => {
+                if byte == BEL {
+                    self.string_open = false;
+                }
+                out.push(byte);
+            }
             State::Escape => self.escape(byte, out),
             State::Csi => self.csi(byte, out),
             State::Osc => self.osc(byte, out),
@@ -178,6 +191,7 @@ impl Filter {
             0x40..=0x7e => {
                 self.held.push(byte);
                 if self.overflowed || is_title_report(&self.held) {
+                    self.close_string(out);
                     self.discard();
                 } else {
                     self.pass(out);
@@ -199,7 +213,7 @@ impl Filter {
     fn osc(&mut self, byte: u8, out: &mut Vec<u8>) {
         if byte != BEL && (is_ignored_inside(byte) || byte.is_ascii_digit()) {
             if !self.hold(byte) {
-                self.remove();
+                self.remove(out);
             }
             return;
         }
@@ -207,9 +221,10 @@ impl Filter {
             self.held.push(byte);
             self.pass(out);
         } else if byte == BEL {
+            self.close_string(out);
             self.discard();
         } else {
-            self.remove();
+            self.remove(out);
         }
     }
 
@@ -217,7 +232,7 @@ impl Filter {
         match byte {
             0x40..=0x7e => {
                 if byte == b'q' && intermediates(&self.held) == b"$" {
-                    self.remove();
+                    self.remove(out);
                 } else {
                     self.held.push(byte);
                     self.pass(out);
@@ -229,7 +244,7 @@ impl Filter {
             }
             _ => {
                 if !self.hold(byte) {
-                    self.remove();
+                    self.remove(out);
                 }
             }
         }
@@ -250,6 +265,8 @@ impl Filter {
     }
 
     fn pass(&mut self, out: &mut Vec<u8>) {
+        self.string_open =
+            matches!(self.state, State::Osc | State::Dcs) && self.held.last() != Some(&BEL);
         out.append(&mut self.held);
         self.state = State::Ground;
     }
@@ -260,7 +277,15 @@ impl Filter {
         self.state = State::Ground;
     }
 
-    fn remove(&mut self) {
+    fn close_string(&mut self, out: &mut Vec<u8>) {
+        if self.string_open {
+            self.string_open = false;
+            out.extend_from_slice(&[ESC, b'\\']);
+        }
+    }
+
+    fn remove(&mut self, out: &mut Vec<u8>) {
+        self.close_string(out);
         self.discard();
         self.state = State::Removing;
     }
@@ -272,9 +297,11 @@ fn is_ignored_inside(byte: u8) -> bool {
     byte < 0x20 || byte == DEL
 }
 
+/// Real codes have no leading zeros. Terminals disagree on how to read them,
+/// some taking a fixed number of digits, so any such code is removed.
 fn is_clipboard(held: &[u8]) -> bool {
     let digits: Vec<u8> = held.iter().copied().filter(u8::is_ascii_digit).collect();
-    trim_zeros(&digits) == b"52"
+    digits == b"52" || digits == b"5522" || (digits.len() > 1 && digits[0] == b'0')
 }
 
 fn is_title_report(held: &[u8]) -> bool {

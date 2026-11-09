@@ -122,7 +122,31 @@ fn other_sequences_pass() {
 
 #[test]
 fn a_removed_sequence_inside_a_passed_string_is_still_removed() {
-    assert_filters(b"\x1b]0;a\x1b]52;c;aGk=\x07b", b"\x1b]0;ab");
+    assert_filters(b"\x1b]0;a\x1b]52;c;aGk=\x07b", b"\x1b]0;a\x1b\\b");
+}
+
+#[test]
+fn removing_a_sequence_closes_a_string_it_would_have_ended() {
+    assert_filters(b"\x1b]0;a\x1b[21tb", b"\x1b]0;a\x1b\\b");
+    assert_filters(b"\x1bP1|a\x1bP$qm\x1b\\b", b"\x1bP1|a\x1b\\b");
+}
+
+#[test]
+fn a_string_already_ended_is_not_closed_again() {
+    assert_filters(b"\x1b]0;a\x07\x1b[21tb", b"\x1b]0;a\x07b");
+    assert_filters(b"\x1b]0;a\x1b\\\x1b[21tb", b"\x1b]0;a\x1b\\b");
+    assert_filters(b"\x1b]0;a\x18\x1b[21tb", b"\x1b]0;a\x18b");
+}
+
+#[test]
+fn a_clipboard_code_padded_with_zeros_is_removed() {
+    // Some terminals read a fixed number of digits, and take the rest as data.
+    assert_filters(b"a\x1b]000520c;?\x07b", b"ab");
+}
+
+#[test]
+fn kittys_clipboard_protocol_is_removed() {
+    assert_filters(b"a\x1b]5522;type=read\x07b", b"ab");
 }
 
 #[test]

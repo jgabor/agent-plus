@@ -197,7 +197,7 @@ directory, and only `HOME` and `PATH` in its environment.
 
 | Budget | Target | Band |
 |---|---|---|
-| Boot to guest init | under 150 ms | to be set |
+| Boot to guest init | under 150 ms | 10% or 5 ms, whichever is larger |
 | `ap run` to a ready harness, with layers cached | under 1 s | to be set |
 | Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
 | `ap build` with nothing changed | under 100 ms | to be set |
@@ -213,6 +213,11 @@ runs. A change that worsens a budget by more than its band fails, unless its
 ledger record has a reason, taken from a `Budget reason: <text>` line in the
 PR body. The reviewer confirms the reason. The nightly report lists every
 reason given that day.
+
+Boot time runs from spawning `ap boot` until its ready line appears, by the
+host's clock. Each build gets one warm-up run first, and all runs share one
+`HOME`, so no download is timed. A base with no `ap boot` is reported as no
+comparison, and the candidate's value is still recorded.
 
 ## Floors
 
@@ -260,8 +265,9 @@ each journey step above can't pass until its check exists.
 | Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
-change can affect a budget when its diff touches `crates/`, `Cargo.toml`, or
-`Cargo.lock`.
+change can affect a budget when its diff touches `crates/`, `.cargo/`,
+`guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+`harness/budgets.toml`, or `xtask/src/bench.rs`.
 
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
@@ -676,6 +682,6 @@ The harness is built before product features.
 | Limit on model spend for workers and T3 | No unattended T3 runs |
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
-| Bands for every budget except `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
+| Bands for every budget except boot and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

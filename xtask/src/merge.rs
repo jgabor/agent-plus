@@ -575,13 +575,21 @@ fn declares_no_hill(body: &str) -> bool {
 }
 
 /// Whether the change can move a budget: the product's code, what it is built
-/// from, or how it is built.
+/// from, how it is built, what it boots, or how a budget is measured.
 fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
     let args = ["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"];
     let changed = base::git_text(tree, &args)?;
     Ok(changed.split('\0').any(|path| {
         path.starts_with("crates/")
             || path.starts_with(".cargo/")
-            || ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"].contains(&path)
+            || path.starts_with("guest/kernel/")
+            || [
+                "Cargo.toml",
+                "Cargo.lock",
+                "rust-toolchain.toml",
+                "harness/budgets.toml",
+                "xtask/src/bench.rs",
+            ]
+            .contains(&path)
     }))
 }

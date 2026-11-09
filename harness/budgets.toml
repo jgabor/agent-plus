@@ -5,6 +5,8 @@
 key = "boot_ms"
 name = "Boot to guest init"
 target = 150.0
+band_pct = 10.0
+band_abs = 5.0
 
 [[budget]]
 key = "run_ms"

@@ -9,7 +9,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\n";
+const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"run_ms\"\nname = \"run\"\ntarget = 150.0\n";
+const BOOT_BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\nband_pct = 10.0\nband_abs = 25.0\n";
+const BOOTS: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
+const SLOW_BOOT: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        std::thread::sleep(std::time::Duration::from_millis(150));\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
+const SLOW_EXIT: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        println!(\"7.3.3-ap.1\");\n        std::thread::sleep(std::time::Duration::from_millis(150));\n    }\n}\n";
+const COUNTS_RUNS: &str = "use std::io::Write;\nfn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        let home = std::env::var(\"HOME\").unwrap();\n        let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{home}/runs\")).unwrap();\n        writeln!(runs, \"run\").unwrap();\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
+const NO_BOOT: &str = "fn main() -> std::process::ExitCode {\n    if std::env::args().nth(1).as_deref() == Some(\"--version\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    eprintln!(\"usage: ap --version\");\n    std::process::ExitCode::from(2)\n}\n";
+const BOOT_FAILS: &str = "fn main() -> std::process::ExitCode {\n    if std::env::args().nth(1).as_deref() == Some(\"--version\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    eprintln!(\"ap: no kvm\");\n    std::process::ExitCode::from(1)\n}\n";
 const FAST: &str = "fn main() {}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
@@ -199,7 +206,108 @@ fn level_builds_pass() {
     let out = stdout(&output);
     assert!(out.contains("pass version_ms "), "{out}");
     assert!(out.contains("recorded binary_bytes "), "{out}");
-    assert!(out.contains("skip boot_ms\n"), "{out}");
+    assert!(out.contains("skip run_ms\n"), "{out}");
+}
+
+#[test]
+fn boot_is_measured_for_the_base_and_the_candidate() {
+    let repo = Repo::with("boot", BOOT_BUDGETS, BOOTS, &[]);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass boot_ms base "), "{out}");
+    assert!(out.contains(" candidate "), "{out}");
+    assert!(repo.record().contains("boot_ms = "));
+}
+
+#[test]
+fn a_planted_boot_slowdown_fails() {
+    let repo = Repo::with("boot-slow", BOOT_BUDGETS, BOOTS, &[]);
+    repo.set_gh("echo '[]'\n");
+    repo.plant(SLOW_BOOT);
+    let output = repo.bench();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("fail boot_ms "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn boot_is_timed_to_the_ready_line_and_not_to_the_exit() {
+    let repo = Repo::with("boot-exit", BOOT_BUDGETS, BOOTS, &[]);
+    repo.plant(SLOW_EXIT);
+    assert_passes(&repo.bench());
+}
+
+#[test]
+fn each_build_gets_one_warm_up_and_all_runs_share_a_home() {
+    let repo = Repo::with("boot-warm", BOOT_BUDGETS, COUNTS_RUNS, &[]);
+    assert_passes(&repo.bench());
+    let runs = fs::read_to_string(repo.root.join("target/bench/home/runs")).unwrap();
+    assert_eq!(runs.lines().count(), 2 * (1 + 15));
+}
+
+#[test]
+fn a_base_with_no_boot_command_is_no_comparison() {
+    let repo = Repo::with("boot-none", BOOT_BUDGETS, NO_BOOT, &[]);
+    repo.plant(BOOTS);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("no-comparison boot_ms candidate "), "{out}");
+    assert!(repo.record().contains("boot_ms = "));
+}
+
+/// Old builds can't change, so the exit status decides, and not the wording.
+#[test]
+fn a_base_that_exits_with_the_usage_status_is_no_comparison_whatever_it_says() {
+    let reworded = NO_BOOT.replace("usage: ap --version", "try `ap --version`");
+    let repo = Repo::with("boot-reworded", BOOT_BUDGETS, &reworded, &[]);
+    repo.plant(BOOTS);
+    let output = repo.bench();
+    assert_passes(&output);
+    assert!(
+        stdout(&output).contains("no-comparison boot_ms candidate "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_failed_boot_that_prints_usage_text_is_a_problem() {
+    let confused = BOOT_FAILS
+        .replace("ap: no kvm", "usage: no kvm")
+        .replace("ExitCode::from(1)", "ExitCode::from(125)");
+    let repo = Repo::with("boot-confused", BOOT_BUDGETS, &confused, &[]);
+    repo.plant(BOOTS);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
+#[test]
+fn a_candidate_with_no_boot_command_is_a_problem() {
+    let repo = Repo::with("boot-lost", BOOT_BUDGETS, BOOTS, &[]);
+    repo.plant(NO_BOOT);
+    assert_problem(&repo.bench(), "boot");
+}
+
+#[test]
+fn a_boot_that_writes_more_errors_than_a_pipe_holds_is_a_problem() {
+    let loud = BOOT_FAILS.replace(
+        "eprintln!(\"ap: no kvm\");",
+        "eprintln!(\"ap: no kvm {}\", \"x\".repeat(1 << 17));",
+    );
+    let repo = Repo::with("boot-loud", BOOT_BUDGETS, &loud, &[]);
+    repo.plant(BOOTS);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
+#[test]
+fn a_base_whose_boot_fails_is_a_problem() {
+    let repo = Repo::with("boot-broken", BOOT_BUDGETS, BOOT_FAILS, &[]);
+    repo.plant(BOOTS);
+    assert_problem(&repo.bench(), "no kvm");
 }
 
 #[test]
@@ -434,7 +542,7 @@ fn bench_takes_no_arguments() {
 
 #[test]
 fn record_takes_the_measured_values_and_carries_the_rest() {
-    let previous = record_text("boot_ms = 141.2\nversion_ms = 99999\n");
+    let previous = record_text("run_ms = 141.2\nversion_ms = 99999\n");
     let repo = Repo::with(
         "takes",
         BUDGETS,
@@ -443,7 +551,7 @@ fn record_takes_the_measured_values_and_carries_the_rest() {
     );
     assert_passes(&repo.bench());
     let text = repo.record();
-    assert!(text.contains("boot_ms = 141.2\n"), "{text}");
+    assert!(text.contains("run_ms = 141.2\n"), "{text}");
     assert!(text.contains("binary_bytes = "), "{text}");
     assert!(text.contains("version_ms = "), "{text}");
     assert!(!text.contains("version_ms = 99999\n"), "{text}");
@@ -489,7 +597,7 @@ fn a_failed_bench_removes_an_earlier_result() {
 #[test]
 fn score_counts_the_budgets_met() {
     for (name, value, met) in [("met", "100", 1), ("missed", "200", 0), ("equal", "150", 0)] {
-        let previous = record_text(&format!("boot_ms = {value}\n"));
+        let previous = record_text(&format!("run_ms = {value}\n"));
         let repo = Repo::with(
             &format!("score-{name}"),
             BUDGETS,

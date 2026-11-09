@@ -18,6 +18,8 @@ const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
 const JOURNEY: &str =
     "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+const BUDGETS_EDITED: &str =
+    "# edited\n[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
 const BUDGETS: &str =
     "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
 const BRANCH: &str = "7-x";
@@ -865,6 +867,7 @@ fn the_bench_runs_only_when_a_budget_can_be_affected() {
     let affecting = [
         ("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n"),
         (".cargo/config.toml", "[build]\n"),
+        ("guest/kernel/pin.toml", "version = \"1\"\n"),
     ];
     for (index, (path, content)) in affecting.into_iter().enumerate() {
         let base = record(0, 1, "");
@@ -882,6 +885,36 @@ fn the_bench_runs_only_when_a_budget_can_be_affected() {
         );
         let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
         assert!(record.contains("version_ms = "), "{path}: {record}");
+    }
+}
+
+/// These paths are protected, so only `prepare` can take them.
+#[test]
+fn a_change_to_how_budgets_are_measured_runs_the_bench() {
+    for (index, (path, content)) in [
+        ("harness/budgets.toml", BUDGETS_EDITED),
+        ("xtask/src/bench.rs", "// the boot measurer\n"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let base = record(0, 1, "");
+        let repo = Repo::with(
+            &format!("bench-protected-{index}"),
+            &[("harness/ledger/3.toml", base.as_str())],
+            &[(path, content)],
+        );
+        repo.set_pr(&Pr {
+            labels: &["spec-change"],
+            ..Pr::default()
+        });
+        let output = repo.prepare();
+        assert_prepared(&repo, &output);
+        assert!(
+            stdout(&output).contains("bench: pass"),
+            "{path}: {}",
+            stdout(&output)
+        );
     }
 }
 

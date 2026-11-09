@@ -18,7 +18,9 @@ use std::time::{Duration, Instant};
 
 /// For the whole job. A process that takes it over the limit is killed, and the
 /// others go on, so a mutant's test fails and the mutant counts as caught.
-const MEMORY: &str = "MemoryMax=8G";
+const MEMORY: &str = "8G";
+/// Replaces `MEMORY`, so that a test needn't allocate that much.
+const MEMORY_OVERRIDE: &str = "XTASK_MEMORY_MAX";
 /// What a job gets to wind down, once the time limit has asked it to stop.
 const STOP_SECONDS: u64 = 30;
 
@@ -38,6 +40,45 @@ pub fn seconds(variable: &str, default: u64) -> Result<u64, Problem> {
         .ok_or_else(|| Problem(format!("{variable} must be a whole number of seconds")))
 }
 
+/// A command that runs `program` as a contained job, with a limit on its memory
+/// and, if `limit` is given, on its seconds. The job replaces `systemd-run`, so
+/// the command's exit status is the job's. Without a systemd user session
+/// `systemd-run` fails and the job doesn't start.
+pub fn scope(
+    program: impl AsRef<OsStr>,
+    arguments: &[impl AsRef<OsStr>],
+    limit: Option<u64>,
+) -> Result<Command, Problem> {
+    let mut command = Command::new("systemd-run");
+    command
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg("--expand-environment=no")
+        .arg("-p")
+        .arg(format!("MemoryMax={}", memory()?))
+        .args(["-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue"]);
+    if let Some(limit) = limit {
+        command
+            .arg("-p")
+            .arg(format!("RuntimeMaxSec={limit}"))
+            .arg("-p")
+            .arg(format!("TimeoutStopSec={STOP_SECONDS}"));
+    }
+    command.arg("--").arg(program).args(arguments);
+    Ok(command)
+}
+
+/// An empty `MemoryMax=` would mean no limit at all, so it's refused.
+fn memory() -> Result<String, Problem> {
+    let Some(value) = env::var_os(MEMORY_OVERRIDE) else {
+        return Ok(MEMORY.to_string());
+    };
+    value
+        .to_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Problem(format!("{MEMORY_OVERRIDE} must be a size, such as 64M")))
+}
+
 /// Runs `program` in `root`, sending its output to stderr. If `xtask` dies, the
 /// job's limits still hold, and so does the activity lock until the job ends.
 pub fn run(
@@ -49,24 +90,7 @@ pub fn run(
     limit: u64,
 ) -> Result<Finished, Problem> {
     let started = Instant::now();
-    let status = Command::new("systemd-run")
-        .args(["--user", "--scope", "--quiet", "--collect"])
-        .arg("--expand-environment=no")
-        .args([
-            "-p",
-            MEMORY,
-            "-p",
-            "MemorySwapMax=0",
-            "-p",
-            "OOMPolicy=continue",
-        ])
-        .arg("-p")
-        .arg(format!("RuntimeMaxSec={limit}"))
-        .arg("-p")
-        .arg(format!("TimeoutStopSec={STOP_SECONDS}"))
-        .arg("--")
-        .arg(program)
-        .args(arguments)
+    let status = scope(program, arguments, Some(limit))?
         .envs(variables.iter().copied())
         .current_dir(root)
         .stdin(hold.as_stdin()?)

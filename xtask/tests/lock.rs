@@ -138,6 +138,80 @@ fn a_command_that_cannot_start_is_a_problem() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("no-such-program-here"));
 }
 
+/// Allocates about 256 MiB and stops, so that without a limit it says so and
+/// exits 0 instead of taking the machine with it.
+const ALLOCATE: &str =
+    "x=aaaaaaaa; i=0; while [ $i -lt 25 ]; do x=$x$x; i=$((i+1)); done; echo survived";
+
+#[test]
+fn a_command_over_the_memory_limit_is_killed_and_xtask_fails() {
+    let root = workspace("memory");
+    let output = xtask(&root, &["run", "sh", "-c", ALLOCATE])
+        .env("XTASK_MEMORY_MAX", "64M")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_command_under_the_memory_limit_is_left_alone() {
+    let root = workspace("memory-roomy");
+    let output = xtask(&root, &["run", "sh", "-c", ALLOCATE])
+        .env("XTASK_MEMORY_MAX", "2G")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "survived\n");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn an_empty_memory_limit_is_a_problem() {
+    let root = workspace("memory-empty");
+    let output = xtask(&root, &["run", "sh", "-c", "echo ran"])
+        .env("XTASK_MEMORY_MAX", "")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("XTASK_MEMORY_MAX"));
+}
+
+#[test]
+fn without_a_user_session_nothing_runs() {
+    let root = workspace("no-session");
+    let output = xtask(&root, &["run", "sh", "-c", "echo ran"])
+        .env("XDG_RUNTIME_DIR", root.join("no-such-directory"))
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_program_that_is_not_executable_is_a_problem() {
+    let root = workspace("not-executable");
+    fs::write(root.join("plain"), "").unwrap();
+    let output = run(&root, &["./plain"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("./plain"));
+}
+
+#[test]
+fn run_passes_stdin_through() {
+    let root = workspace("stdin");
+    let mut child = xtask(&root, &["run", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
+    assert_eq!(output.status.code(), Some(0));
+}
+
 #[test]
 fn a_holder_shares_the_lock() {
     let root = workspace("shared");

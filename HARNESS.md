@@ -419,7 +419,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id as JSON, and exits 1 if another claim wins |
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
 | `cargo xtask merge <pr> [--owner]` | Runs the [merge sequence](#merge-sequence) |
-| `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock |
+| `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 
@@ -588,7 +588,7 @@ passes. No scheduled work runs on GitHub.
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
 | Fuzzing and mutation limit | 1 hour each |
-| Fuzzing and mutation memory | 8 GiB per job |
+| Memory for fuzzing, mutation, and `cargo xtask run` | 8 GiB per job |
 | Lease length | 12 hours |
 | Merge timeout | 30 minutes |
 | Attempts on one failing check | 3 |

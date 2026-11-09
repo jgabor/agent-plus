@@ -565,8 +565,17 @@ moved before the owner merged, the record is skipped as a floor, and the
 nightly report lists that commit under "Not in the ledger". Records from before
 `base` existed have none, and are trusted.
 
-`xtask/gate` is the only check. `xtask merge` enforces the sequence, not
-GitHub. The nightly job reports any commit on `main` with no ledger record.
+`xtask/gate` is the only check. Since 2026-11-09, a ruleset on `main` makes
+GitHub enforce it too:
+
+- `xtask/gate` must be green, on a branch that is up to date with `main`.
+- Only squash merges are allowed.
+- Nobody can bypass it, the owner included.
+- Auto-merge is allowed.
+
+So GitHub refuses a merge that has no current `xtask/gate`, whatever button is
+pressed. The nightly job still reports any commit on `main` with no ledger
+record.
 
 ### Refresh
 
@@ -672,9 +681,18 @@ passes. No scheduled work runs on GitHub.
   `harness/`, with any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
-- Or run `cargo xtask land <pr>`, which proves the PR and squashes it. It stops
-  at a PR with a comment saying what merging accepts, so the owner reads that
-  and uses a merge button.
+- If the PR is behind `main`, wait for the [refresh](#refresh) to prove it
+  again. A Merge click on a PR that is behind can arm auto-merge instead. The
+  request survives the refresh's force-push, and the PR merges once its new
+  `xtask/gate` is green.
+- Don't use Update branch. It adds a commit with no ledger record at the tip
+  and no `xtask/gate` status, so the ruleset blocks the PR, and the next
+  refresh turns it red.
+- Or run `cargo xtask land <pr>`, which proves the PR and squashes it. It is
+  the right tool when no refresh will prove the PR, because its issue isn't
+  `land-needed` or its refresh failed, or when a budget needs a new bench. It
+  stops at a PR with a comment saying what merging accepts, so the owner reads
+  that and uses a merge button.
 - Turn the scheduled tasks on.
 - Answer `answer-needed` issues. The owner can set or clear `land-needed` and
   `answer-needed` on the issue or on the open PR that closes it. A workflow

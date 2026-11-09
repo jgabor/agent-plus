@@ -242,7 +242,7 @@ pub fn load(memory: &GuestMemory, file: &[u8], command_line: &str) -> Result<Ent
 
     let mut entry = None;
     let mut loaded = Vec::new();
-    for header in table.chunks_exact(PROGRAM_HEADER_SIZE as usize) {
+    for header in table.as_chunks::<{ PROGRAM_HEADER_SIZE as usize }>().0 {
         match u32_at(header, 0) {
             PT_LOAD => loaded.push(load_segment(memory, file, header)?),
             PT_NOTE if entry.is_none() => {

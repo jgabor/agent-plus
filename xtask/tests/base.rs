@@ -365,7 +365,8 @@ fn the_ledger_and_journey_scripts_need_no_label() {
         "harness/ledger/1.toml",
         "harness/journey/step.sh",
         "harnessed.txt",
-        "crates/xtask/lib.txt",
+        "docs/xtask/notes.txt",
+        "SPEC.md.orig",
     ]
     .iter()
     .enumerate()
@@ -376,7 +377,7 @@ fn the_ledger_and_journey_scripts_need_no_label() {
         repo.commit();
         let output = repo.gate();
         assert!(
-            !stdout(&output).contains("fail labels"),
+            stdout(&output).contains("pass labels"),
             "{path}: {}",
             stdout(&output)
         );

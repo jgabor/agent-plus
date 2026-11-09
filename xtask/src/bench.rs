@@ -7,9 +7,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Instant;
 
 pub const BUDGETS_FILE: &str = "harness/budgets.toml";
@@ -443,6 +444,13 @@ fn boot_once(binary: &Path, home: &Path) -> Result<Option<f64>, Problem> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(problem)?;
+    // Drained apart from stdout, so that a failing boot with a lot to say can't
+    // block on a full pipe while this waits for its ready line.
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let draining = thread::spawn(move || {
+        let mut errors = Vec::new();
+        stderr.read_to_end(&mut errors).map(|_| errors)
+    });
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
     let mut ready = String::new();
     let read = stdout.read_line(&mut ready);
@@ -450,7 +458,9 @@ fn boot_once(binary: &Path, home: &Path) -> Result<Option<f64>, Problem> {
     child.stdout = Some(stdout.into_inner());
     let output = child.wait_with_output().map_err(problem)?;
     read.map_err(problem)?;
-    let errors = String::from_utf8_lossy(&output.stderr);
+    let errors = draining.join().expect("draining stderr can't panic");
+    let errors = errors.map_err(problem)?;
+    let errors = String::from_utf8_lossy(&errors);
     if !output.status.success() {
         if errors.starts_with("usage:") {
             return Ok(None);

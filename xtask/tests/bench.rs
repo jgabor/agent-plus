@@ -268,6 +268,17 @@ fn a_candidate_with_no_boot_command_is_a_problem() {
 }
 
 #[test]
+fn a_boot_that_writes_more_errors_than_a_pipe_holds_is_a_problem() {
+    let loud = BOOT_FAILS.replace(
+        "eprintln!(\"ap: no kvm\");",
+        "eprintln!(\"ap: no kvm {}\", \"x\".repeat(1 << 17));",
+    );
+    let repo = Repo::with("boot-loud", BOOT_BUDGETS, &loud, &[]);
+    repo.plant(BOOTS);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
+#[test]
 fn a_base_whose_boot_fails_is_a_problem() {
     let repo = Repo::with("boot-broken", BOOT_BUDGETS, BOOT_FAILS, &[]);
     repo.plant(BOOTS);

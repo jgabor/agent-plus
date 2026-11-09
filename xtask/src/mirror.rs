@@ -1,8 +1,9 @@
 //! `cargo xtask mirror`: keeps a parking label the same on an issue and on the
 //! open PR that closes it.
 //!
-//! It copies what the side that changed says now, not what the event said, so
-//! a run that starts late still ends on the newest state, and a rerun is safe.
+//! It finds the newest change a person made to the label on either side, and
+//! applies it to both. Runs can start late, out of order, or again, and each
+//! one still ends on the newest change.
 
 use crate::forge::Gh;
 use crate::work::PARKED;
@@ -17,8 +18,7 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
         return Ok(Verdict::Pass);
     }
     let gh = Gh::new(&workspace::root()?);
-    let changed = gh.labeled(number)?;
-    let others = if changed.is_pr {
+    let others = if gh.is_pr(number)? {
         let pr = gh.pull_request(number)?;
         if pr.state == "OPEN" {
             pr.closing_issues
@@ -28,17 +28,33 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
     } else {
         gh.open_prs_closing(number)?
     };
-    let present = changed.labels.iter().any(|name| name == label);
-    for other in &others {
+    if others.is_empty() {
+        println!("mirror: {number} has no other side for `{label}`");
+        return Ok(Verdict::Pass);
+    }
+    let items: Vec<u64> = std::iter::once(number).chain(others).collect();
+    let mut newest: Option<(u64, bool)> = None;
+    for item in &items {
+        for change in gh.label_changes(*item, label)? {
+            if newest.is_none_or(|(id, _)| change.0 > id) {
+                newest = Some(change);
+            }
+        }
+    }
+    let Some((_, present)) = newest else {
+        println!("mirror: no person has changed `{label}` on {items:?}");
+        return Ok(Verdict::Pass);
+    };
+    for item in &items {
         if present {
-            gh.apply_label(*other, label)?;
+            gh.apply_label(*item, label)?;
         } else {
-            gh.remove_label(*other, label)?;
+            gh.remove_label(*item, label)?;
         }
     }
     println!(
-        "mirror: {number} {} `{label}`, copied to {others:?}",
-        if present { "has" } else { "lacks" }
+        "mirror: {} `{label}` on {items:?}",
+        if present { "applied" } else { "removed" }
     );
     Ok(Verdict::Pass)
 }

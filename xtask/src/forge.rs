@@ -63,12 +63,6 @@ pub struct OpenPr {
     pub closing_issues: Vec<u64>,
 }
 
-/// An issue or a PR, which GitHub numbers from one sequence.
-pub struct Labeled {
-    pub is_pr: bool,
-    pub labels: Vec<String>,
-}
-
 pub trait Forge {
     /// The login of the repository's owner.
     fn owner(&self) -> Result<String, Problem>;
@@ -156,13 +150,31 @@ impl Gh {
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
 
-    pub fn labeled(&self, number: u64) -> Result<Labeled, Problem> {
+    /// Issues and PRs share one sequence of numbers.
+    pub fn is_pr(&self, number: u64) -> Result<bool, Problem> {
         let value = self.json(&["api", &format!("{ISSUES}/{number}")])?;
-        let labels = read_labels(&value).ok_or_else(|| unexpected("gh api"))?;
-        Ok(Labeled {
-            is_pr: value.get("pull_request").is_some(),
-            labels,
-        })
+        Ok(value.get("pull_request").is_some())
+    }
+
+    /// The changes people made to `label` on an issue or PR, as event ids and
+    /// whether each one added it. Event ids grow over time across the whole
+    /// repository. Bots' events, such as `mirror`'s own writes, are left out.
+    pub fn label_changes(&self, number: u64, label: &str) -> Result<Vec<(u64, bool)>, Problem> {
+        let path = format!("{ISSUES}/{number}/events");
+        let filter = format!(
+            r#".[] | select(.event == "labeled" or .event == "unlabeled") | select(.label.name == "{label}" and .actor.type != "Bot") | "\(.id) \(.event)""#
+        );
+        let text = self.text(&["api", &path, "--paginate", "--jq", &filter], None)?;
+        text.lines()
+            .map(|line| {
+                match line.split_once(' ') {
+                    Some((id, "labeled")) => id.parse().ok().map(|id| (id, true)),
+                    Some((id, "unlabeled")) => id.parse().ok().map(|id| (id, false)),
+                    _ => None,
+                }
+                .ok_or_else(|| unexpected("gh api"))
+            })
+            .collect()
     }
 
     /// The open PRs that GitHub will close this issue with, from any closing

@@ -169,7 +169,7 @@ Fence rules:
 - The block ends at the first line that starts in the first column and
   holds only backticks, at least as many as the opening fence, optionally
   followed by whitespace. To put a code block inside the text, open with
-  four backticks:
+  four backticks.
 
   `````
   SYSTEM

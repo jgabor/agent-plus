@@ -2,8 +2,8 @@
 //!
 //! The guest chooses every byte, so this reads them the way a terminal does:
 //! in UTF-8, with 7-bit and 8-bit introducers, and with control characters
-//! allowed inside a sequence. It removes clipboard access (OSC 52 and 5522),
-//! the title reports (CSI 20 t and CSI 21 t), and DECRQSS, whose replies can
+//! allowed inside a sequence. It removes clipboard access (OSC 52 and 5522,
+//! and the clipboard keys of iTerm2's OSC 1337), the title reports (CSI 20 t and CSI 21 t), and DECRQSS, whose replies can
 //! echo what the guest sent.
 //!
 //! A sequence is held back until it can be judged, and nothing unfinished is
@@ -35,6 +35,8 @@ enum State {
     Escape,
     Csi,
     Osc,
+    /// In an OSC 1337 or its alias 50, reading the key that says what it does.
+    OscKey,
     Dcs,
     /// Inside a removed string, until whatever ends it.
     Removing,
@@ -162,6 +164,7 @@ impl Filter {
             State::Escape => self.escape(byte, out),
             State::Csi => self.csi(byte, out),
             State::Osc => self.osc(byte, out),
+            State::OscKey => self.osc_key(byte, out),
             State::Dcs => self.dcs(byte, out),
             State::Removing => {
                 if byte == BEL {
@@ -219,7 +222,10 @@ impl Filter {
             }
             return;
         }
-        if !is_clipboard(&self.held) {
+        if byte == b';' && matches!(&code(&self.held)[..], b"1337" | b"50") {
+            self.held.push(byte);
+            self.state = State::OscKey;
+        } else if !is_clipboard(&self.held) {
             self.held.push(byte);
             self.pass(out);
         } else if byte == BEL {
@@ -227,6 +233,24 @@ impl Filter {
             self.discard();
         } else {
             self.remove(out);
+        }
+    }
+
+    /// Passes the sequence as soon as its key can't be a clipboard key, so
+    /// only a few bytes of a long one are ever held.
+    fn osc_key(&mut self, byte: u8, out: &mut Vec<u8>) {
+        if !self.hold(byte) {
+            self.remove(out);
+            return;
+        }
+        if byte != BEL && is_ignored_inside(byte) {
+            return;
+        }
+        let key = iterm2_key(&self.held);
+        if ITERM2_CLIPBOARD_KEYS.contains(&&key[..]) {
+            self.remove(out);
+        } else if !ITERM2_CLIPBOARD_KEYS.iter().any(|k| k.starts_with(&key)) {
+            self.pass(out);
         }
     }
 
@@ -269,7 +293,7 @@ impl Filter {
     fn pass(&mut self, out: &mut Vec<u8>) {
         // Only ST ends a string on every terminal. An extra one does nothing,
         // so BEL, which ends some strings and not others, doesn't count.
-        if matches!(self.state, State::Osc | State::Dcs)
+        if matches!(self.state, State::Osc | State::OscKey | State::Dcs)
             || matches!(self.held[..], [ESC, b'X' | b'^' | b'_'])
         {
             self.string_open = true;
@@ -306,11 +330,29 @@ fn is_ignored_inside(byte: u8) -> bool {
     byte < 0x20 || byte == DEL
 }
 
+/// iTerm2 writes the clipboard for `Copy`, `CopyToClipboard`, and `EndCopy`,
+/// and has no other key that starts with these.
+const ITERM2_CLIPBOARD_KEYS: [&[u8]; 2] = [b"Copy", b"EndCopy"];
+
 /// Real codes have no leading zeros. Terminals disagree on how to read them,
 /// some taking a fixed number of digits, so any such code is removed.
 fn is_clipboard(held: &[u8]) -> bool {
-    let digits: Vec<u8> = held.iter().copied().filter(u8::is_ascii_digit).collect();
+    let digits = code(held);
     digits == b"52" || digits == b"5522" || (digits.len() > 1 && digits[0] == b'0')
+}
+
+fn code(held: &[u8]) -> Vec<u8> {
+    held.iter().copied().filter(u8::is_ascii_digit).collect()
+}
+
+/// What follows the first `;`, without the controls a terminal skips.
+fn iterm2_key(held: &[u8]) -> Vec<u8> {
+    held.iter()
+        .skip_while(|byte| **byte != b';')
+        .skip(1)
+        .copied()
+        .filter(|byte| !is_ignored_inside(*byte) || *byte == BEL)
+        .collect()
 }
 
 fn is_title_report(held: &[u8]) -> bool {

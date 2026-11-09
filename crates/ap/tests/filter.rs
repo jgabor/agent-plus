@@ -154,6 +154,42 @@ fn kittys_clipboard_protocol_is_removed() {
 }
 
 #[test]
+fn iterm2s_clipboard_sequences_are_removed() {
+    assert_filters(b"a\x1b]1337;Copy=:aGk=\x07b", b"ab");
+    assert_filters(b"a\x1b]1337;Copy=:aGk=\x1b\\b", b"ab");
+    assert_filters(b"a\x9d1337;Copy=:aGk=\x9cb", b"ab");
+    assert_filters(b"a\xc2\x9d1337;Copy=:aGk=\xc2\x9cb", b"ab");
+    assert_filters(b"a\x1b]01337;Copy=:aGk=\x07b", b"ab");
+    assert_filters(b"a\x1b]1337;CopyToClipboard=\x07b", b"ab");
+    assert_filters(b"a\x1b]1337;EndCopy\x07b", b"ab");
+    assert_filters(b"a\x1b]1337;EndCopy\x1b\\b", b"ab");
+    // iTerm2 reads OSC 50 as an alias for OSC 1337.
+    assert_filters(b"a\x1b]50;Copy=:aGk=\x07b", b"ab");
+}
+
+#[test]
+fn a_control_inside_iterm2s_key_does_not_hide_it() {
+    assert_filters(b"a\x1b]13\n37;Co\npy=:aGk=\x07b", b"ab");
+}
+
+#[test]
+fn other_iterm2_sequences_pass() {
+    assert_passes(b"\x1b]1337;SetMark\x07");
+    assert_passes(b"\x1b]50;monospace\x07");
+    assert_passes(b"\x1b]1337;CurrentDir=/tmp\x1b\\");
+    assert_passes(b"\x1b]1337;File=name=Copy=;inline=1:aGk=\x07");
+    assert_passes(b"\x1b]1337;copy=:aGk=\x07");
+    assert_passes(b"\x1b]1337;Cop\x07");
+    assert_passes(b"\x1b]1337;\x07");
+    assert_passes(b"\x1b]1338;Copy=:aGk=\x07");
+}
+
+#[test]
+fn an_unfinished_iterm2_clipboard_sequence_is_not_written() {
+    assert_eq!(filtered(b"\x1b]1337;Cop"), b"");
+}
+
+#[test]
 fn an_unfinished_sequence_is_never_written() {
     // Whatever is printed next, a shell prompt or the other stream, must not
     // complete what the guest started.

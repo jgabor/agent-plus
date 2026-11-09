@@ -2,3 +2,4 @@
 /target
 /.home
 /.claude/worktrees
+/mutants.out*

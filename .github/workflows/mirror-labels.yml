@@ -35,7 +35,8 @@ jobs:
           else
             number=$(gh pr view "$PR" --repo "$REPOSITORY" \
               --json closingIssuesReferences \
-              --jq '.closingIssuesReferences[0].number // empty')
+              --jq '[.closingIssuesReferences[]
+                | select(.url | startswith("https://github.com/\(env.REPOSITORY)/issues/"))][0].number // empty')
             echo "number=$number" >> "$GITHUB_OUTPUT"
           fi
 

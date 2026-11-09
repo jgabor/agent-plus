@@ -129,3 +129,32 @@ fn a_blocked_kick_signal_does_not_defeat_the_timeout() {
     });
     assert_eq!(receiver.recv_timeout(TIMEOUT).unwrap(), Stop::TimedOut);
 }
+
+#[test]
+fn a_panic_in_the_port_callback_unwinds_at_once_and_restores_the_signal_mask() {
+    const SIG_BLOCK: i32 = 0;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut blocked = [0_u64; 16];
+        blocked[0] = 1 << 39;
+        // SAFETY: as in the test above.
+        assert_eq!(
+            unsafe { pthread_sigmask(SIG_BLOCK, &blocked, std::ptr::null_mut()) },
+            0
+        );
+        let (_vm, mut vcpu) = guest(&OUT_AND_HALT);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            vcpu.run(Duration::from_secs(3600), |_, _| panic!("callback"))
+        }));
+        assert!(result.is_err());
+        let mut current = [0_u64; 16];
+        let nothing = [0_u64; 16];
+        // SAFETY: as above. Blocking nothing only reads the current mask.
+        assert_eq!(
+            unsafe { pthread_sigmask(SIG_BLOCK, &nothing, &mut current) },
+            0
+        );
+        sender.send(current[0] & (1 << 39) != 0).unwrap();
+    });
+    assert!(receiver.recv_timeout(TIMEOUT).unwrap());
+}

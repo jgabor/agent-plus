@@ -8,12 +8,13 @@ use crate::sys::{self, Mapping};
 use std::ffi::{c_int, c_ulong, c_void};
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::marker::PhantomData;
 use std::mem::{offset_of, size_of};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::thread;
+use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 
 const KVM_API_VERSION: c_int = 12;
@@ -340,7 +341,7 @@ impl Vcpu {
             return Err(io::Error::last_os_error());
         }
 
-        let mask = unblock_kick_signal()?;
+        let _mask = unblock_kick_signal()?;
         let this = &*self;
         let kick = this.immediate_exit();
         kick.store(0, Ordering::SeqCst);
@@ -350,15 +351,14 @@ impl Vcpu {
         // joins the watchdog before this function returns.
         let vcpu_thread = unsafe { sys::pthread_self() };
 
-        let result = thread::scope(|scope| {
+        thread::scope(|scope| {
             let watchdog = scope.spawn(|| watch(timeout, &done, kick, vcpu_thread));
-            let result = this.run_until_stop(kick, &mut out);
-            done.store(true, Ordering::SeqCst);
-            watchdog.thread().unpark();
-            result
-        });
-        restore_signal_mask(&mask)?;
-        result
+            let _cancel = CancelWatchdog {
+                done: &done,
+                watchdog: watchdog.thread(),
+            };
+            this.run_until_stop(kick, &mut out)
+        })
     }
 
     fn run_until_stop(
@@ -423,27 +423,50 @@ impl Vcpu {
     }
 }
 
-/// Lets the kick signal reach this thread, and returns the mask to restore.
-/// A blocked signal couldn't interrupt a running guest.
-fn unblock_kick_signal() -> io::Result<sys::SignalSet> {
-    let mut set = sys::EMPTY_SIGNAL_SET;
-    set[0] = 1 << (KICK_SIGNAL - 1);
-    let mut old = sys::EMPTY_SIGNAL_SET;
-    // SAFETY: both pointers refer to sets of the size the C library reads.
-    let error = unsafe { sys::pthread_sigmask(sys::SIG_UNBLOCK, &raw const set, &raw mut old) };
-    if error != 0 {
-        return Err(io::Error::from_raw_os_error(error));
-    }
-    Ok(old)
+/// Ends the watchdog on drop, so that a panic in the port callback doesn't
+/// wait out the timeout.
+struct CancelWatchdog<'a> {
+    done: &'a AtomicBool,
+    watchdog: &'a Thread,
 }
 
-fn restore_signal_mask(mask: &sys::SignalSet) -> io::Result<()> {
-    // SAFETY: `mask` is a full set, and a null old set is allowed.
-    let error = unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, mask, ptr::null_mut()) };
+impl Drop for CancelWatchdog<'_> {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::SeqCst);
+        self.watchdog.unpark();
+    }
+}
+
+/// Puts this thread's signal mask back on drop. It isn't `Send`, because a
+/// signal mask belongs to one thread.
+struct RestoreSignalMask {
+    mask: sys::SignalSet,
+    _thread_bound: PhantomData<*const ()>,
+}
+
+impl Drop for RestoreSignalMask {
+    fn drop(&mut self) {
+        // SAFETY: `mask` is a full set, and a null old set is allowed. With a
+        // valid `how`, this call can't fail.
+        unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, &raw const self.mask, ptr::null_mut()) };
+    }
+}
+
+/// Lets the kick signal reach this thread until the guard drops. A blocked
+/// signal couldn't interrupt a running guest.
+fn unblock_kick_signal() -> io::Result<RestoreSignalMask> {
+    let mut set = sys::EMPTY_SIGNAL_SET;
+    set[0] = 1 << (KICK_SIGNAL - 1);
+    let mut mask = sys::EMPTY_SIGNAL_SET;
+    // SAFETY: both pointers refer to sets of the size the C library reads.
+    let error = unsafe { sys::pthread_sigmask(sys::SIG_UNBLOCK, &raw const set, &raw mut mask) };
     if error != 0 {
         return Err(io::Error::from_raw_os_error(error));
     }
-    Ok(())
+    Ok(RestoreSignalMask {
+        mask,
+        _thread_bound: PhantomData,
+    })
 }
 
 /// Waits for `timeout`, and then stops the vCPU unless it is `done`.

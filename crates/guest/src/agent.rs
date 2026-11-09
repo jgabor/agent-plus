@@ -176,7 +176,8 @@ mod tests {
     #[test]
     fn a_delayed_forwarder_still_delivers_a_finished_programs_output() {
         let (reader, mut writer) = pipe().unwrap();
-        let written = vec![b'o'; 3 * MAX_OUTPUT / 2];
+        // One page fits in any pipe, so this write can't block.
+        let written = vec![b'o'; 4096];
         writer.write_all(&written).unwrap();
         drop(writer);
 

@@ -1428,3 +1428,25 @@ fn a_hold_inherited_from_a_parent_still_runs_the_job() {
     assert!(run.contains("MemoryMax=8G"), "{run}");
     assert!(!run.contains("RuntimeMaxSec"), "{run}");
 }
+
+#[test]
+fn a_record_merged_after_main_moved_is_listed_as_not_in_the_ledger() {
+    let repo = Repo::new("stale-record");
+    repo.merge("First (#9)", 3, &CLEAN);
+    let text = fs::read_to_string(repo.root.join("harness/ledger/5.toml"))
+        .unwrap()
+        .replace("proven = 1", "proven = 6")
+        .replace("date =", &format!("base = \"{}\"\ndate =", "0".repeat(40)));
+    repo.write("harness/ledger/6.toml", &text);
+    repo.commit("Late (#10)", 2);
+    let head = repo.short("HEAD");
+    let report = repo.report();
+    assert!(report.starts_with(&format!("# Nightly report for `{head}`\n\nspec 1 of 7")));
+    assert!(
+        report.contains(&format!(
+            "## Not in the ledger\n\n- `{head}` Late (#10), merged after `main` moved\n"
+        )),
+        "{report}"
+    );
+    assert!(!report.contains("issue #5\n- `"), "{report}");
+}

@@ -60,7 +60,7 @@ work starts from this label, so treat it as the owner's written permission.
 | Label | You may |
 |---|---|
 | none | Nothing, unless the owner asks in your thread |
-| `auto:pr` | Work it to a PR that passes the merge gate. The owner merges with `cargo xtask merge <pr> --owner` |
+| `auto:pr` | Work it to a PR that passes the merge gate, and run `cargo xtask prepare <pr>`. The owner merges with any merge button |
 | `auto:merge` | Work it through to merged, once the merge gate passes |
 
 - Only the owner adds these labels. The one exception: a child issue you file
@@ -256,17 +256,20 @@ read-only. In T3 Code, use `delegate_task` with a review role.
 All of these must be true on the latest commit:
 
 - Your proof covers every change in the diff.
-- `cargo xtask gate` passes, and the `xtask/gate` status is green.
-- No hill went down unless the owner is merging, no floor broke, and any budget
-  regression has a reason in the ledger.
+- `cargo xtask merge` or `cargo xtask prepare` passes, which is what turns the
+  `xtask/gate` status green.
+- No hill went down unless the owner accepts it by merging, no floor broke, and
+  any budget regression has a reason in the ledger.
 - Reviews have finished, and each finding is fixed or declined in writing.
 - No human review still requests changes.
 - The branch is up to date with `main`, and you hold the merge slot.
 - The PR isn't labeled `spec-change`, unless the owner has approved it.
 
 Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass.
-Then close the loop: remove `in-progress`, remove your worktree, and make sure
-the issue closed.
+On any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
+everything but the squash, which is the owner's. After a merge, close the
+loop: remove `in-progress`, remove your worktree, and make sure the issue
+closed.
 
 ### Untrusted input
 

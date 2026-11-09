@@ -320,7 +320,8 @@ doesn't have the label. That includes a typo, because a program can't tell a
 typo from a change of meaning. A `spec-change` PR may also edit the `// spec(`
 lines and waivers that quote the changed text. A branch with no open PR yet
 prints `skip labels`, because `cargo xtask merge` gates it again with the PR
-open. `cargo xtask merge` refuses a `spec-change` PR without `--owner`.
+open. `cargo xtask merge` refuses a `spec-change` PR, and `cargo xtask prepare`
+readies it for the owner.
 
 Once H5 is complete, `xtask/` and `harness/` need `spec-change` too, apart from
 `harness/ledger/` and `harness/journey/`, so a PR can't weaken its own gate.
@@ -366,6 +367,7 @@ Each merge adds `harness/ledger/<issue>.toml`. Git history orders the records.
 issue = 123
 pr = 130
 commit = "abc1234"
+base = "def5678"
 date = "2026-11-20"
 host = "linux-x86_64"
 spec = { proven = 417, promises = 812 }
@@ -410,7 +412,7 @@ is a failure, and 2 is bad usage or an environment error.
 
 | Command | Behavior |
 |---|---|
-| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and posts `xtask/gate` as a commit status on a clean, pushed head. Otherwise it only prints the result |
+| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and prints the result. It posts no status |
 | `cargo xtask score` | Prints the three scores |
 | `cargo xtask gaps` | Lists failing steps in journey order, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
@@ -418,7 +420,8 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask next` | Prints claimable issues as JSON |
 | `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id as JSON, and exits 1 if another claim wins |
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
-| `cargo xtask merge <pr> [--owner]` | Runs the [merge sequence](#merge-sequence) |
+| `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
+| `cargo xtask prepare <pr>` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
@@ -511,22 +514,27 @@ Only one merge runs at a time, under an exclusive lock on a file in the shared
 git directory. The kernel releases the lock when the process exits, so a killed
 merge can't keep the slot.
 
-1. Refuse the PR unless its issue has `auto:merge` or `--owner` is given.
-   Refuse a `spec-change` PR without `--owner`. With or without it, refuse a
-   PR that comes from a fork, doesn't close exactly one issue, doesn't target
-   `main`, or has changes requested.
+`cargo xtask merge` runs every step. `cargo xtask prepare` stops before the
+squash, and leaves the owner a complete PR to merge with any button. Only
+these two commands post `xtask/gate`, so green means complete.
+
+1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
+   `spec-change` PR. Both commands refuse a PR that comes from a fork, doesn't
+   close exactly one issue, doesn't target `main`, or has changes requested.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Run the gate on the rebased head, the journey without `spend` steps, and the
-   bench if a budget can be affected. A lowered count fails without `--owner`.
-   An exact revert merged with `--owner` skips the bench, because its base may
-   be what doesn't build.
+   bench if a budget can be affected. A lowered count fails `merge`, and passes
+   `prepare`. An exact revert under `prepare` skips the bench, because its base
+   may be what doesn't build. If the rebase or this proof fails, `prepare`
+   posts `failure` on the branch's current head and pushes nothing.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
-   Commit the ledger record, whose `commit` is the gated head, and push with
-   `--force-with-lease`.
-6. Verify that the new head differs from the gated head only by that record,
-   and post `xtask/gate` on it.
+   Commit the ledger record, whose `commit` is the gated head and whose `base`
+   is the `main` it was tested on, and push with `--force-with-lease`.
+6. Verify that the new head differs from the gated head only by that record.
+   If a count fell or the PR is an exact revert, comment on the PR naming what
+   merging accepts. Post `xtask/gate` on the new head. `prepare` stops here.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
@@ -534,6 +542,11 @@ A merge past the merge timeout stops and releases the slot. Running it again
 starts over from the fetch, and so does running it after a kill at any step.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
+
+A record is trusted only if its `base` is its squash commit's parent. If `main`
+moved before the owner merged, the record is skipped as a floor, and the
+nightly report lists that commit under "Not in the ledger". Records from before
+`base` existed have none, and are trusted.
 
 `xtask/gate` is the only check. Branch protection isn't available on this
 repository's plan, so `xtask merge` enforces the sequence, not GitHub. The
@@ -552,8 +565,10 @@ does the following on `main`:
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad
    commit. The revert is an exact inverse, apart from keeping the reverted
-   ledger record, and is exempt from the removed-check floor when merged with
-   `--owner`. A later night leaves an issue that says how it ended alone.
+   ledger record, and is exempt from the removed-check floor under `prepare`.
+   After commenting on the issue, the job runs `prepare` on the PR, and if that
+   fails, comments how to run it. A later night leaves an issue that says how
+   it ended alone.
 
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.
@@ -618,8 +633,9 @@ passes. No scheduled work runs on GitHub.
 
 - Add `auto:*` labels to top-level issues.
 - Merge `spec-change` PRs, which cover SPEC.md, budgets, waivers, and journey
-  steps, with `cargo xtask merge <pr> --owner`.
+  steps, with any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
+  A PR comment says what merging a lowered count or a revert accepts.
 - Turn the scheduled tasks on.
 - Answer `needs-owner` issues.
 - Publish releases.

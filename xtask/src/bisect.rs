@@ -6,7 +6,10 @@ use crate::gate;
 use crate::lock::{self, Hold};
 use crate::merge::Tree;
 use crate::{Problem, Verdict, base};
+use std::env;
+use std::io;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 const ISSUE_TITLE: &str = "`main` fails the gate";
 const LEDGER: &str = "harness/ledger";
@@ -21,7 +24,7 @@ const TREE: u64 = 0;
 /// earlier night ended stops this, until the owner closes it. One with no such
 /// comment is from a run that died, so this picks it up.
 pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
-    let _slot = lock::response_slot(root)?;
+    let slot = lock::response_slot(root)?;
     let gh = Gh::new(root);
     let open = gh
         .open_issues()?
@@ -50,10 +53,41 @@ pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
     };
     let hold = lock::shared(root)?;
     let tree = Tree::create(root, TREE, head)?;
-    let outcome = bisect_and_revert(root, &gh, &tree, &hold, head, status, issue)
-        .unwrap_or_else(|Problem(message)| format!("Couldn't bisect or revert: {message}"));
+    let (outcome, revert) = bisect_and_revert(root, &gh, &tree, &hold, head, status, issue)
+        .unwrap_or_else(|Problem(message)| (format!("Couldn't bisect or revert: {message}"), None));
     gh.post_comment(issue, &format!("{RESPONDED}\n{outcome}"))?;
+    // The response is over. Preparing takes the activity lock in its own right,
+    // and waiting for it under this hold can deadlock against a pending bench.
+    drop((tree, hold, slot));
+    if let Some(pr) = revert
+        && !prepared(root, pr)
+    {
+        let told = format!(
+            "Couldn't prepare #{pr}, so it isn't ready to merge. Run `cargo xtask prepare {pr}`."
+        );
+        gh.post_comment(issue, &told)?;
+    }
     Ok(())
+}
+
+/// Whether `cargo xtask prepare` passed on this PR. Its results go to stderr,
+/// because stdout carries the nightly job's own.
+fn prepared(root: &Path, pr: u64) -> bool {
+    let status = env::current_exe().and_then(|program| {
+        Command::new(program)
+            .args(["prepare", &pr.to_string()])
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(io::stderr()))
+            .status()
+    });
+    match status {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("nightly: couldn't run `prepare`: {e}");
+            false
+        }
+    }
 }
 
 fn issue_body(head: &str) -> String {
@@ -62,7 +96,8 @@ fn issue_body(head: &str) -> String {
     )
 }
 
-/// What to tell the issue, when nothing went wrong with the bisect itself.
+/// What to tell the issue, when nothing went wrong with the bisect itself, and
+/// any revert PR it opened.
 fn bisect_and_revert(
     root: &Path,
     gh: &Gh,
@@ -71,20 +106,21 @@ fn bisect_and_revert(
     head: &str,
     status: &str,
     issue: u64,
-) -> Result<String, Problem> {
+) -> Result<(String, Option<u64>), Problem> {
     let Some(good) = newest_passing(root, gh, head, status)? else {
-        return Ok(format!(
+        let outcome = format!(
             "Found no passing `{status}` in the {REACH} commits before `{head}`, so nothing was bisected."
-        ));
+        );
+        return Ok((outcome, None));
     };
     let range = format!("{good}..{head}");
     let listing = base::git_text(root, &["rev-list", "--first-parent", "--reverse", &range])?;
     let commits: Vec<&str> = listing.lines().collect();
     let bad = first_bad(tree, hold, &commits)?;
     let pr = open_revert(root, gh, tree, head, bad, &good, issue)?;
-    Ok(format!(
-        "Bisected from `{good}`. The first bad commit is `{bad}`, and #{pr} reverts it."
-    ))
+    let outcome =
+        format!("Bisected from `{good}`. The first bad commit is `{bad}`, and #{pr} reverts it.");
+    Ok((outcome, Some(pr)))
 }
 
 fn newest_passing(
@@ -168,7 +204,7 @@ fn open_revert(
     base::git_text(path, &["push", "-q", "--force", "origin", &target])?;
     let label = (!base::protected_changes(path, head)?.is_empty()).then_some(base::SPEC_CHANGE);
     let body = format!(
-        "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and took `{head}` as bad from its own run. If the bisect blames only the newest commit, that run may have hit a flaky check.\n\n## Decisions\nThe owner merges this with `cargo xtask merge <pr> --owner`.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
+        "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and took `{head}` as bad from its own run. If the bisect blames only the newest commit, that run may have hit a flaky check.\n\n## Decisions\nThe owner merges this. Once `xtask/gate` is green, a comment on this PR says what merging accepts.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
     );
     gh.create_pr(&branch, &title, &body, label)
 }

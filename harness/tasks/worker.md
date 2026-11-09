@@ -39,10 +39,11 @@ can't continue alone, park the issue as AGENTS.md says.
    is the only check, and no bot reviews this repository, so don't wait for
    either.
 7. If the issue has `auto:merge` and the PR doesn't have `spec-change`, run
-   `cargo xtask merge <pr>`. Never pass `--owner`. Otherwise run `cargo xtask
-   gate` on the clean, pushed head, so that it posts `xtask/gate`, and confirm
-   with `gh pr checks <pr>` that the status passed. Then park the issue and say
-   that the PR is ready to merge.
+   `cargo xtask merge <pr>`. If it prints `fail hills`, `fail journey`, or
+   `fail budgets` because a count fell, run `cargo xtask prepare <pr>` and go
+   on as below. On any other PR, run `cargo xtask prepare <pr>`. If `prepare`
+   exits 0, park the issue and say that the PR is ready to merge. Never squash
+   it yourself.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
 9. Remove your worktree last, because nothing can run in it afterwards:

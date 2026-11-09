@@ -15,6 +15,8 @@ pub struct Record {
     pub issue: usize,
     pub pr: usize,
     commit: String,
+    /// The `main` commit this was measured on. Older records have none.
+    base: Option<String>,
     date: String,
     host: String,
     pub proven: usize,
@@ -27,8 +29,11 @@ pub struct Record {
 
 impl Record {
     fn render(&self) -> String {
+        let base = self.base.as_deref().map_or(String::new(), |base| {
+            format!("base = {}\n", toml::quoted(base))
+        });
         let mut text = format!(
-            "issue = {}\npr = {}\ncommit = {}\ndate = {}\nhost = {}\nspec = {{ proven = {}, promises = {} }}\njourney = {{ passing = {}, steps = {} }}\nreason = {}\n\n[budgets]\n",
+            "issue = {}\npr = {}\ncommit = {}\n{base}date = {}\nhost = {}\nspec = {{ proven = {}, promises = {} }}\njourney = {{ passing = {}, steps = {} }}\nreason = {}\n\n[budgets]\n",
             self.issue,
             self.pr,
             toml::quoted(&self.commit),
@@ -52,6 +57,10 @@ impl Record {
             issue: count(&table, "issue")?,
             pr: count(&table, "pr")?,
             commit: string(&table, "commit")?,
+            base: match table.get("base") {
+                Some(_) => Some(string(&table, "base")?),
+                None => None,
+            },
             date: string(&table, "date")?,
             host: string(&table, "host")?,
             proven: count(spec, "proven")?,
@@ -189,7 +198,15 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
         passing,
         steps,
     };
-    let record = compose(&root, issue, pr, commit.trim(), scores)?;
+    let measured_on = base::find(&root)?;
+    let record = compose(
+        &root,
+        issue,
+        pr,
+        commit.trim(),
+        measured_on.as_deref(),
+        scores,
+    )?;
     println!("{}", store(&root, &record)?);
     Ok(Verdict::Pass)
 }
@@ -209,6 +226,7 @@ pub fn compose(
     issue: usize,
     pr: usize,
     commit: &str,
+    base: Option<&str>,
     scores: Scores,
 ) -> Result<Record, Problem> {
     let date = base::git_text(root, &["show", "-s", "--format=%cs", commit])?;
@@ -222,6 +240,7 @@ pub fn compose(
         issue,
         pr,
         commit: commit.to_string(),
+        base: base.map(str::to_string),
         date: date.trim().to_string(),
         host: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         proven: scores.proven,
@@ -295,9 +314,34 @@ pub fn newest(root: &Path, commit: &str) -> Result<Option<Record>, Problem> {
         {
             continue;
         }
-        return read_at(root, commit, path).map(Some);
+        let record = read_at(root, commit, path)?;
+        let args = ["log", "-1", "--format=%H", commit, "--", path];
+        let written = base::git_text(root, &args)?;
+        if !merged_after_main_moved(root, written.trim(), &record)? {
+            return Ok(Some(record));
+        }
     }
     Ok(None)
+}
+
+/// Whether a record was measured on another `main` than the one `commit`, its
+/// squash, landed on. What it says then isn't what that `main` plus the PR
+/// scores, so it can't be anyone's floor. A record not yet squashed sits right
+/// on the head it measured, and is what its own branch should read.
+pub fn merged_after_main_moved(
+    root: &Path,
+    commit: &str,
+    record: &Record,
+) -> Result<bool, Problem> {
+    let Some(measured) = &record.base else {
+        return Ok(false);
+    };
+    let parent = format!("{commit}~1");
+    if !base::commit_exists(root, &parent)? {
+        return Ok(true);
+    }
+    let parent = base::git_text(root, &["rev-parse", &parent])?;
+    Ok(parent.trim() != measured && parent.trim() != record.commit)
 }
 
 /// The record this commit wrote, if it wrote one.
@@ -339,6 +383,7 @@ mod tests {
             issue: 123,
             pr: 130,
             commit: "abc1234".to_string(),
+            base: None,
             date: "2026-11-20".to_string(),
             host: "linux-x86_64".to_string(),
             proven: 417,
@@ -358,6 +403,18 @@ mod tests {
     fn a_record_round_trips() {
         let record = sample("");
         assert_eq!(Record::parse(&record.render()).unwrap(), record);
+    }
+
+    #[test]
+    fn a_base_round_trips_after_the_commit() {
+        let mut record = sample("");
+        record.base = Some("def5678".to_string());
+        let text = record.render();
+        assert!(
+            text.contains("commit = \"abc1234\"\nbase = \"def5678\"\ndate ="),
+            "{text}"
+        );
+        assert_eq!(Record::parse(&text).unwrap(), record);
     }
 
     #[test]
@@ -381,6 +438,7 @@ mod tests {
         let good = sample("").render();
         for (from, to) in [
             ("issue = 123\n", ""),
+            ("date =", "base = 5\ndate ="),
             ("commit = \"abc1234\"\n", "commit = 5\n"),
             ("proven = 417", "proven = -1"),
             ("steps = 19", "steps = \"19\""),

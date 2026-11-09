@@ -243,6 +243,7 @@ maybe_kill before
   "repo view") echo '{{"nameWithOwner":"o/r"}}' ;;
   "pr view") if [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
   "pr list") echo '[]' ;;
+  "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi ;;
@@ -391,10 +392,17 @@ exit $code
             .unwrap()
     }
 
-    fn merge(&self, extra: &[&str]) -> Output {
-        let mut args = vec!["merge", "9"];
-        args.extend(extra);
-        self.xtask(&args)
+    fn merge(&self) -> Output {
+        self.xtask(&["merge", "9"])
+    }
+
+    fn prepare(&self) -> Output {
+        self.xtask(&["prepare", "9"])
+    }
+
+    /// The comments `prepare` posted on the PR, each ending in a blank line.
+    fn pr_comments(&self) -> String {
+        fs::read_to_string(self.bin.join("pr-comments")).unwrap_or_default()
     }
 
     /// What merges have left in the temporary directory.
@@ -437,6 +445,32 @@ fn assert_merged(repo: &Repo, output: &Output) {
     assert!(repo.bin.join("merged").exists(), "gh pr merge never ran");
 }
 
+/// The record is pushed and green, and nothing was squashed.
+#[track_caller]
+fn assert_prepared(repo: &Repo, output: &Output) {
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(output),
+        stderr(output)
+    );
+    let head = repo.head();
+    assert_eq!(
+        repo.origin(&["diff-tree", "--no-commit-id", "--name-only", "-r", &head]),
+        "harness/ledger/7.toml"
+    );
+    let calls = repo.calls();
+    assert!(
+        calls.contains(&format!(
+            "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state=success -f context=xtask/gate"
+        )),
+        "{calls}"
+    );
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!repo.bin.join("merged").exists());
+}
+
 #[track_caller]
 fn assert_refused(repo: &Repo, output: &Output, message: &str) {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
@@ -448,7 +482,7 @@ fn assert_refused(repo: &Repo, output: &Output, message: &str) {
 #[test]
 fn a_merge_records_pushes_verifies_and_squashes() {
     let repo = Repo::new("happy");
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_merged(&repo, &output);
 
     let head = repo.head();
@@ -488,7 +522,7 @@ fn a_merge_records_pushes_verifies_and_squashes() {
 fn a_merge_leaves_the_callers_checkout_alone() {
     let repo = Repo::new("alone");
     let before = repo.git(&["rev-parse", "HEAD"]);
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     assert_eq!(repo.git(&["rev-parse", "HEAD"]), before);
     assert_eq!(repo.git(&["status", "--porcelain"]), "");
     assert!(repo.merge_trees().is_empty(), "{:?}", repo.merge_trees());
@@ -499,14 +533,14 @@ fn a_merge_leaves_the_callers_checkout_alone() {
 fn a_merge_works_from_a_checkout_of_main() {
     let repo = Repo::new("from-main");
     repo.git(&["checkout", "-q", "main"]);
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
 }
 
 #[test]
 fn a_merge_rebases_onto_the_newest_main() {
     let repo = Repo::new("rebase");
     repo.advance_main("other.txt", "y\n");
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     let main = repo.origin(&["rev-parse", "refs/heads/main"]);
     assert_eq!(repo.origin(&["merge-base", &main, &repo.head()]), main);
     assert_eq!(repo.commits_on_branch(), 2);
@@ -517,7 +551,7 @@ fn a_conflict_stops_the_merge_and_leaves_the_branch() {
     let repo = Repo::new("conflict");
     repo.advance_main("docs.txt", "from main\n");
     let before = repo.head();
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_refused(&repo, &output, "rebase");
     assert_eq!(repo.head(), before);
     assert!(repo.merge_trees().is_empty(), "{:?}", repo.merge_trees());
@@ -529,7 +563,7 @@ fn a_record_left_at_the_tip_is_replaced() {
     let repo = Repo::new("left-record");
     let old = record(0, 1, "");
     repo.change_branch("harness/ledger/7.toml", &old);
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     assert_eq!(repo.commits_on_branch(), 2);
     let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
     assert!(record.contains("pr = 9\n"), "{record}");
@@ -539,8 +573,8 @@ fn a_record_left_at_the_tip_is_replaced() {
 fn a_pr_without_auto_merge_needs_the_owner() {
     let repo = Repo::new("auto-pr");
     repo.set_issue(&["auto:pr"]);
-    assert_refused(&repo, &repo.merge(&[]), "--owner");
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_refused(&repo, &repo.merge(), "prepare");
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -550,8 +584,8 @@ fn a_spec_change_pr_needs_the_owner() {
         labels: &["spec-change"],
         ..Pr::default()
     });
-    assert_refused(&repo, &repo.merge(&[]), "--owner");
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_refused(&repo, &repo.merge(), "prepare");
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -559,7 +593,7 @@ fn a_protected_path_needs_the_label_even_for_the_owner() {
     let repo = Repo::new("protected");
     let changed = format!("{BUDGETS}\n# changed\n");
     repo.change_branch("harness/budgets.toml", &changed);
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail labels"),
@@ -572,7 +606,7 @@ fn a_protected_path_needs_the_label_even_for_the_owner() {
         labels: &["spec-change"],
         ..Pr::default()
     });
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -588,7 +622,7 @@ fn a_pr_must_close_exactly_one_issue_here() {
             elsewhere,
             ..Pr::default()
         });
-        assert_refused(&repo, &repo.merge(&[]), "Closes #");
+        assert_refused(&repo, &repo.merge(), "Closes #");
     }
 }
 
@@ -605,7 +639,7 @@ fn a_standing_change_request_is_refused() {
             reviews,
             ..Pr::default()
         });
-        assert_refused(&repo, &repo.merge(&["--owner"]), "changes");
+        assert_refused(&repo, &repo.prepare(), "changes");
     }
 }
 
@@ -623,7 +657,7 @@ fn a_change_request_that_was_answered_does_not_block() {
             reviews,
             ..Pr::default()
         });
-        assert_merged(&repo, &repo.merge(&[]));
+        assert_merged(&repo, &repo.merge());
     }
 }
 
@@ -634,7 +668,7 @@ fn a_pr_from_a_fork_is_refused() {
         fork: true,
         ..Pr::default()
     });
-    assert_refused(&repo, &repo.merge(&["--owner"]), "fork");
+    assert_refused(&repo, &repo.prepare(), "fork");
 }
 
 #[test]
@@ -644,7 +678,7 @@ fn a_pr_against_another_branch_is_refused() {
         base: "release",
         ..Pr::default()
     });
-    assert_refused(&repo, &repo.merge(&[]), "main");
+    assert_refused(&repo, &repo.merge(), "main");
 }
 
 #[test]
@@ -654,7 +688,7 @@ fn an_already_merged_pr_succeeds_without_merging_again() {
         state: "MERGED",
         ..Pr::default()
     });
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!repo.calls().contains("gh pr merge"));
 }
@@ -666,7 +700,7 @@ fn a_closed_pr_is_a_problem() {
         state: "CLOSED",
         ..Pr::default()
     });
-    assert_eq!(repo.merge(&[]).status.code(), Some(2));
+    assert_eq!(repo.merge().status.code(), Some(2));
 }
 
 #[test]
@@ -687,7 +721,7 @@ fn bad_usage_is_a_problem() {
 fn a_failing_gate_stops_the_merge() {
     let repo = Repo::new("gate-fails");
     repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail format"),
@@ -709,7 +743,7 @@ fn with_base(name: &str, proven: u32, passing: u32) -> Repo {
 #[test]
 fn a_lowered_spec_count_needs_the_owner() {
     let repo = with_base("lower-spec", 1, 1);
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail hills"),
@@ -717,14 +751,14 @@ fn a_lowered_spec_count_needs_the_owner() {
         stdout(&output)
     );
     assert!(!repo.calls().contains("git push"));
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
 fn a_lowered_journey_count_needs_the_owner() {
     let repo = with_base("lower-journey", 0, 2);
-    assert_refused(&repo, &repo.merge(&[]), "journey");
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_refused(&repo, &repo.merge(), "journey");
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -739,8 +773,8 @@ fn a_lowered_budget_count_needs_the_owner() {
         ],
         &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
     );
-    assert_refused(&repo, &repo.merge(&[]), "budgets");
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_refused(&repo, &repo.merge(), "budgets");
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -751,7 +785,7 @@ fn a_change_that_raises_nothing_needs_a_hill_none_line() {
             body,
             ..Pr::default()
         });
-        assert_refused(&repo, &repo.merge(&[]), "Hill: none");
+        assert_refused(&repo, &repo.merge(), "Hill: none");
     }
 }
 
@@ -767,7 +801,7 @@ fn a_change_that_raises_a_count_needs_no_hill_none_line() {
         body: "Closes #7.\n",
         ..Pr::default()
     });
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
     assert!(
         record.contains("spec = { proven = 1, promises = 2 }"),
@@ -778,7 +812,7 @@ fn a_change_that_raises_a_count_needs_no_hill_none_line() {
 #[test]
 fn the_bench_runs_only_when_a_budget_can_be_affected() {
     let repo = Repo::new("no-bench");
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_merged(&repo, &output);
     assert!(!stdout(&output).contains("bench:"), "{}", stdout(&output));
 
@@ -793,7 +827,7 @@ fn the_bench_runs_only_when_a_budget_can_be_affected() {
             &[("harness/ledger/3.toml", base.as_str())],
             &[(path, content)],
         );
-        let output = repo.merge(&[]);
+        let output = repo.merge();
         assert_merged(&repo, &output);
         assert!(
             stdout(&output).contains("bench: pass"),
@@ -813,7 +847,7 @@ fn a_slowdown_needs_a_reason_in_the_pr_body() {
         &[("harness/ledger/3.toml", base.as_str())],
         &[("crates/ap/src/main.rs", SLOW)],
     );
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("bench: fail"),
@@ -826,7 +860,7 @@ fn a_slowdown_needs_a_reason_in_the_pr_body() {
         body: "Closes #7.\n\nHill: none, tooling.\n\nBudget reason: worth it\n",
         ..Pr::default()
     });
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
     assert!(record.contains("reason = \"worth it\"\n"), "{record}");
 }
@@ -855,7 +889,7 @@ fn a_kill_at_each_step_resumes() {
                 assert_eq!(killed.status.code(), None, "{name} wasn't killed");
                 assert!(repo.bin.join("killed").exists(), "{name}");
 
-                let output = repo.merge(&[]);
+                let output = repo.merge();
                 assert_merged(&repo, &output);
                 assert_eq!(repo.commits_merged(), 2, "{name}");
                 assert_eq!(
@@ -883,7 +917,7 @@ fn a_worktree_locked_by_a_killed_attempt_is_cleared() {
         .expect("the killed merge left its worktree")
         .to_string();
     repo.git(&["worktree", "lock", &path]);
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
     assert_eq!(repo.git(&["worktree", "list"]).lines().count(), 1);
 }
 
@@ -934,7 +968,7 @@ fn the_pr_is_read_again_after_the_slot() {
     });
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
-    assert_refused(&repo, &output, "--owner");
+    assert_refused(&repo, &output, "prepare");
 }
 
 #[test]
@@ -968,7 +1002,7 @@ fn a_pr_that_changed_during_the_proof_is_refused() {
                 labels: &["spec-change"],
                 ..Pr::default()
             },
-            "--owner",
+            "prepare",
         ),
         (
             "label-changed",
@@ -1003,7 +1037,7 @@ fn the_callers_cargo_settings_do_not_reach_the_merge() {
         ".cargo/config.toml",
         "[build]\nrustc-wrapper = \"/bin/false\"\n",
     );
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
 }
 
 #[test]
@@ -1011,7 +1045,7 @@ fn a_killed_merge_keeps_the_slot_until_its_squash_finishes() {
     let repo = Repo::new("squash-outlives");
     let killed = repo.merge_running("gh pr merge", "kill -9 $PPID; sleep 2");
     assert_eq!(killed.status.code(), None);
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
         stdout(&output).contains("already merged"),
@@ -1054,7 +1088,7 @@ fn a_record_commit_that_changes_more_is_not_merged() {
     )
     .unwrap();
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(
         stderr(&output).contains("sneaky.txt"),
@@ -1078,7 +1112,7 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert!(!repo.bin.join("merged").exists());
-    assert_merged(&repo, &repo.merge(&[]));
+    assert_merged(&repo, &repo.merge());
 }
 
 fn status_call(repo: &Repo) -> Option<String> {
@@ -1089,68 +1123,193 @@ fn status_call(repo: &Repo) -> Option<String> {
 }
 
 #[test]
-fn the_gate_posts_its_status_on_a_clean_pushed_head() {
+fn the_gate_posts_no_status() {
     let repo = Repo::new("gate-status");
     let output = repo.xtask(&["gate"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    let head = repo.head();
-    assert_eq!(
-        status_call(&repo).unwrap(),
-        format!(
-            "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state=success -f context=xtask/gate"
-        )
+    assert_eq!(status_call(&repo), None);
+
+    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
+    assert_eq!(repo.xtask(&["gate"]).status.code(), Some(1));
+    assert_eq!(status_call(&repo), None);
+}
+
+#[test]
+fn prepare_records_pushes_posts_and_never_squashes() {
+    let repo = Repo::new("prepare");
+    repo.advance_main("other.txt", "y\n");
+    let output = repo.prepare();
+    assert_prepared(&repo, &output);
+    assert_eq!(repo.commits_on_branch(), 2);
+    assert!(stdout(&output).contains("ready"), "{}", stdout(&output));
+    assert_eq!(repo.pr_comments(), "");
+}
+
+#[test]
+fn prepare_needs_no_auto_merge_and_takes_a_spec_change_pr() {
+    let repo = Repo::new("prepare-labels");
+    repo.set_issue(&[]);
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    assert_prepared(&repo, &repo.prepare());
+}
+
+#[test]
+fn merge_has_no_owner_flag_and_prepare_takes_one_pr() {
+    let repo = Repo::new("no-owner-flag");
+    let output = repo.xtask(&["merge", "9", "--owner"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("`merge` takes"));
+    assert!(!repo.calls().contains("gh "), "{}", repo.calls());
+    for args in [&["prepare"][..], &["prepare", "x"], &["prepare", "9", "x"]] {
+        let output = repo.xtask(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&output).contains("`prepare` takes"), "{args:?}");
+    }
+}
+
+#[test]
+fn a_prepare_can_run_again() {
+    let repo = Repo::new("prepare-again");
+    assert_prepared(&repo, &repo.prepare());
+    repo.advance_main("other.txt", "y\n");
+    assert_prepared(&repo, &repo.prepare());
+    assert_eq!(repo.commits_on_branch(), 2);
+}
+
+#[test]
+fn a_killed_prepare_is_not_green_and_resumes() {
+    let repo = Repo::new("prepare-killed");
+    let killed = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["prepare", "9"])
+        .env("KILL_ON", "gh api -X POST")
+        .env("KILL_WHEN", "before")
+        .output()
+        .unwrap();
+    assert_eq!(killed.status.code(), None);
+    repo.forget_calls();
+    assert_prepared(&repo, &repo.prepare());
+    assert_eq!(repo.commits_on_branch(), 2);
+}
+
+#[test]
+fn a_lowered_count_is_accepted_in_one_comment_and_merge_refuses_it() {
+    let repo = with_base("accept-spec", 1, 1);
+    assert_prepared(&repo, &repo.prepare());
+    let comments = repo.pr_comments();
+    assert!(comments.contains("spec fell from 1 to 0"), "{comments}");
+    assert!(comments.contains(&repo.head()), "{comments}");
+    assert_eq!(repo.calls().matches("gh pr comment").count(), 1);
+
+    let repo = with_base("accept-journey", 0, 2);
+    assert_prepared(&repo, &repo.prepare());
+    let comments = repo.pr_comments();
+    assert!(comments.contains("journey fell from 2 to 1"), "{comments}");
+}
+
+#[test]
+fn a_prepared_branch_reads_its_own_record() {
+    let repo = with_base("own-record", 0, 2);
+    assert_prepared(&repo, &repo.prepare());
+    repo.git(&["fetch", "-q", "origin", BRANCH]);
+    repo.git(&["checkout", "-q", "--detach", "FETCH_HEAD"]);
+    let output = repo.xtask(&["score"]);
+    assert!(
+        stdout(&output).contains("journey 1 of 1"),
+        "{}",
+        stdout(&output)
     );
 }
 
+#[track_caller]
+fn assert_failure_posted(repo: &Repo, output: &Output, head: &str) {
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
+    assert_eq!(
+        status_call(repo).unwrap(),
+        format!(
+            "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state=failure -f context=xtask/gate"
+        )
+    );
+    assert_eq!(repo.head(), head);
+    assert!(!repo.calls().contains("git push"), "{}", repo.calls());
+    assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+}
+
 #[test]
-fn the_gate_posts_a_failure_too() {
-    let repo = Repo::new("gate-status-fail");
+fn a_failed_proof_posts_failure_on_the_current_head() {
+    let repo = Repo::new("prepare-fails");
+    repo.advance_main("other.txt", "y\n");
     repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
-    assert_eq!(repo.xtask(&["gate"]).status.code(), Some(1));
-    assert!(status_call(&repo).unwrap().contains("state=failure"));
+    let head = repo.head();
+    assert_failure_posted(&repo, &repo.prepare(), &head);
 }
 
 #[test]
-fn the_gate_posts_nothing_for_a_dirty_tree() {
-    let repo = Repo::new("gate-dirty");
-    repo.write("notes.txt", "uncommitted\n");
-    assert_eq!(repo.xtask(&["gate"]).status.code(), Some(0));
-    assert_eq!(status_call(&repo), None);
+fn a_branch_that_does_not_rebase_posts_failure() {
+    let repo = Repo::new("prepare-conflict");
+    repo.advance_main("docs.txt", "from main\n");
+    let head = repo.head();
+    assert_failure_posted(&repo, &repo.prepare(), &head);
 }
 
 #[test]
-fn the_gate_posts_nothing_for_an_unpushed_head() {
-    let repo = Repo::new("gate-unpushed");
-    repo.write("notes.txt", "committed only\n");
-    repo.commit();
-    assert_eq!(repo.xtask(&["gate"]).status.code(), Some(0));
-    assert_eq!(status_call(&repo), None);
-}
-
-#[test]
-fn the_gate_posts_nothing_when_the_head_moved_while_it_ran() {
-    let repo = Repo::new("gate-moved");
-    let git = real("git");
-    let commit = format!("'{git}' commit -q --allow-empty -m x && '{git}' push -q origin HEAD");
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .arg("gate")
-        .env("RUN_ON", "cargo fmt")
-        .env("RUN_COMMAND", commit)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(repo.bin.join("ran").exists());
-    assert_eq!(status_call(&repo), None);
-}
-
-#[test]
-fn a_status_that_can_not_be_posted_does_not_change_the_verdict() {
-    let repo = Repo::new("gate-no-post");
+fn a_failure_that_can_not_be_posted_is_still_a_failure() {
+    let repo = Repo::new("prepare-no-post");
+    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
     fs::write(repo.bin.join("status-fails"), "").unwrap();
-    let output = repo.xtask(&["gate"]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let output = repo.prepare();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stderr(&output).contains("no status"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_failed_merge_posts_no_status() {
+    let repo = Repo::new("merge-no-failure");
+    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
+    assert_eq!(repo.merge().status.code(), Some(1));
+    assert_eq!(status_call(&repo), None);
+}
+
+fn based(proven: u32, base: &str) -> String {
+    record(proven, 1, "").replace("date =", &format!("base = \"{base}\"\ndate ="))
+}
+
+fn main_commit(repo: &Repo) -> String {
+    repo.origin(&["rev-parse", "refs/heads/main"])
+}
+
+#[test]
+fn a_record_names_the_main_it_was_measured_on() {
+    let repo = Repo::new("record-base");
+    repo.advance_main("other.txt", "y\n");
+    let main = main_commit(&repo);
+    assert_prepared(&repo, &repo.prepare());
+    let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
+    assert!(record.contains(&format!("base = \"{main}\"\n")), "{record}");
+}
+
+#[test]
+fn a_record_measured_on_an_older_main_is_not_the_floor() {
+    let repo = Repo::new("stale-record");
+    repo.advance_main("harness/ledger/8.toml", &based(1, &"0".repeat(40)));
+    assert_merged(&repo, &repo.merge());
+}
+
+#[test]
+fn a_record_measured_on_its_parent_is_the_floor() {
+    let repo = Repo::new("fresh-record");
+    let parent = main_commit(&repo);
+    repo.advance_main("harness/ledger/8.toml", &based(1, &parent));
+    let output = repo.merge();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("fail hills"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 /// `main` gains a commit that changes `path` from `before` to `after`, and adds
@@ -1208,19 +1367,22 @@ fn assert_floor_held(repo: &Repo, output: &Output) {
 #[test]
 fn the_owner_can_merge_an_exact_revert_that_removes_a_check() {
     let (repo, _) = revert_of_a_check("exact-revert", None);
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert!(
         stdout(&output).contains("pass checks-kept"),
         "{}",
         stdout(&output)
     );
-    assert_merged(&repo, &output);
+    assert_prepared(&repo, &output);
+    let comments = repo.pr_comments();
+    assert!(comments.contains("exact revert"), "{comments}");
+    assert_eq!(repo.calls().matches("gh pr comment").count(), 1);
 }
 
 #[test]
 fn an_exact_revert_still_needs_the_owner() {
     let (repo, _) = revert_of_a_check("revert-no-owner", None);
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail checks-kept"),
@@ -1233,7 +1395,7 @@ fn an_exact_revert_still_needs_the_owner() {
 fn a_revert_with_anything_else_in_it_keeps_the_floor() {
     let (repo, _) = revert_of_a_check("revert-plus", None);
     repo.change_branch("docs.txt", "and something else\n");
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail checks-kept"),
@@ -1260,7 +1422,7 @@ fn a_revert_of_a_commit_outside_the_history_keeps_the_floor() {
         &format!("Undo it\n\nThis reverts commit {twin}."),
     ]);
     repo.git(&["push", "-q", "-f", "origin", BRANCH]);
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail checks-kept"),
@@ -1272,7 +1434,7 @@ fn a_revert_of_a_commit_outside_the_history_keeps_the_floor() {
 #[test]
 fn a_message_that_names_no_commit_keeps_the_floor() {
     let (repo, _) = revert_of_a_check("revert-unnamed", Some(&"0".repeat(40)));
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(
         stdout(&output).contains("fail checks-kept"),
@@ -1285,14 +1447,14 @@ fn a_message_that_names_no_commit_keeps_the_floor() {
 fn undoing_the_same_lines_somewhere_else_keeps_the_floor() {
     let (repo, _) = revert_of_a_check("revert-elsewhere-in-file", None);
     repo.change_branch("order.txt", "b\na\n");
-    assert_floor_held(&repo, &repo.merge(&["--owner"]));
+    assert_floor_held(&repo, &repo.prepare());
 }
 
 #[test]
 fn a_revert_that_edits_the_ledger_keeps_the_floor() {
     let (repo, _) = revert_of_a_check("revert-ledger", None);
     repo.change_branch("harness/ledger/3.toml", &record(0, 1, "version_ms = 1\n"));
-    assert_floor_held(&repo, &repo.merge(&["--owner"]));
+    assert_floor_held(&repo, &repo.prepare());
 }
 
 #[test]
@@ -1303,7 +1465,7 @@ fn the_owner_can_merge_a_revert_of_a_commit_that_broke_the_build() {
         ("crates/ap/src/main.rs", FAST, broken),
         None,
     );
-    assert_merged(&repo, &repo.merge(&["--owner"]));
+    assert_prepared(&repo, &repo.prepare());
 }
 
 #[test]
@@ -1315,9 +1477,11 @@ fn a_change_that_only_looks_like_a_revert_is_benched() {
         None,
     );
     repo.change_branch("docs.txt", "and something else\n");
-    let output = repo.merge(&["--owner"]);
+    let output = repo.prepare();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
+    assert!(status_call(&repo).unwrap().contains("state=failure"));
+    assert!(!repo.calls().contains("git push"), "{}", repo.calls());
 }
 
 #[test]
@@ -1328,7 +1492,7 @@ fn a_revert_without_the_owner_is_benched() {
         ("crates/ap/src/main.rs", FAST, broken),
         None,
     );
-    let output = repo.merge(&[]);
+    let output = repo.merge();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
 }

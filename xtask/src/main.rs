@@ -43,8 +43,8 @@ commands:
                    claim an issue for the current branch
   record --issue <n> --pr <n>
                    write the ledger record for the current head
-  merge <pr> [--owner]
-                   rebase, gate, record, and squash-merge a PR
+  merge <pr>       rebase, gate, record, and squash-merge a PR
+  prepare <pr>     rebase, gate, and record a PR, for the owner to merge
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -85,11 +85,10 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["record", ..] => Err(Problem(format!(
             "`record` takes `--issue <n> --pr <n>`\n\n{USAGE}"
         ))),
-        ["merge", pr] => merge::run(pr, false),
-        ["merge", pr, "--owner"] => merge::run(pr, true),
-        ["merge", ..] => Err(Problem(format!(
-            "`merge` takes `<pr> [--owner]`\n\n{USAGE}"
-        ))),
+        ["merge", pr] => merge::run(pr),
+        ["merge", ..] => Err(Problem(format!("`merge` takes `<pr>`\n\n{USAGE}"))),
+        ["prepare", pr] => merge::prepare(pr),
+        ["prepare", ..] => Err(Problem(format!("`prepare` takes `<pr>`\n\n{USAGE}"))),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

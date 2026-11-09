@@ -23,9 +23,10 @@ use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use t1::{guest_binary, kernel};
 use vmm::initramfs::Entry;
 
@@ -37,6 +38,8 @@ const CANARY_VARIABLE: &str = "AP_FLOOR_CANARY";
 const OWNER_TEST: &str = "vm_owner_process";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const SHORT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Past any guest's own timeout.
+const OWNER_LIMIT: Duration = Duration::from_secs(60);
 const SIGSYS: i32 = 31;
 
 const TAG_RUN: u8 = 1;
@@ -269,6 +272,7 @@ fn channel_cases(tripwire: &Path) -> Vec<Case> {
     let spaced = spaced.as_bytes();
     let printable = format!("$(touch${{IFS}}{path});touch${{IFS}}{path}");
     let not_ready = "didn't report ready";
+    let run = format!("/bin/sh\0-c\0touch {path}\0").into_bytes();
 
     let mut cases = vec![
         before_ready(
@@ -279,7 +283,7 @@ fn channel_cases(tripwire: &Path) -> Vec<Case> {
         before_ready("stdout", stdout(spaced), not_ready),
         before_ready("stderr", stderr(spaced), not_ready),
         before_ready("exited", exited(), not_ready),
-        before_ready("run", frame(TAG_RUN, spaced), not_ready),
+        before_ready("run", frame(TAG_RUN, &run), not_ready),
         before_ready("empty-body", 0_u32.to_le_bytes().to_vec(), not_ready),
         before_ready(
             "oversized",
@@ -318,11 +322,7 @@ fn channel_cases(tripwire: &Path) -> Vec<Case> {
             REFUSED_FRAME,
         ),
         while_running("exited-empty", frame(TAG_EXITED, b""), REFUSED_FRAME),
-        while_running(
-            "run-sent-to-the-host",
-            frame(TAG_RUN, spaced),
-            REFUSED_FRAME,
-        ),
+        while_running("run-sent-to-the-host", frame(TAG_RUN, &run), REFUSED_FRAME),
         while_running("empty-body", 0_u32.to_le_bytes().to_vec(), REFUSED_FRAME),
         while_running(
             "oversized",
@@ -481,6 +481,17 @@ impl Code {
         std::mem::take(&mut self.0)
     }
 
+    /// Stops the guest unless the device put exactly one chain on the used
+    /// ring, in which case it spins until the timeout. The guest reads the
+    /// ring itself, so the outcome says whether its chain was taken.
+    fn stop_unless_consumed(&mut self) -> Vec<u8> {
+        self.bytes(&[0x81, 0x3d]);
+        self.bytes(&USED.to_le_bytes());
+        self.bytes(&(1_u32 << 16).to_le_bytes());
+        self.bytes(&[0x75, 0x02, 0xeb, 0xfe]);
+        self.stop()
+    }
+
     /// Spins forever, so that only the timeout ends the guest.
     fn spin(&mut self) -> Vec<u8> {
         self.bytes(&[0xeb, 0xfe]);
@@ -591,7 +602,11 @@ fn device_cases() -> Vec<Case> {
         let mut code = Code::default();
         code.start_device(u64::from(DESCRIPTORS));
         build(&mut code);
-        kernel_case(&format!("queue/{name}"), code.stop(), STOPPED)
+        kernel_case(
+            &format!("queue/{name}"),
+            code.stop_unless_consumed(),
+            STOPPED,
+        )
     };
     let mut cases = vec![
         descriptor("buffer-outside-ram", &|code| {
@@ -624,7 +639,25 @@ fn device_cases() -> Vec<Case> {
     ];
     let mut code = Code::default();
     code.start_device(far).publish(0, 1);
-    cases.push(kernel_case("queue/table-outside-ram", code.stop(), STOPPED));
+    cases.push(kernel_case(
+        "queue/table-outside-ram",
+        code.stop_unless_consumed(),
+        STOPPED,
+    ));
+
+    // The same steps with a good chain. The device takes it, so the guest
+    // spins. Without this, a queue that never ran would pass every case above.
+    let mut code = Code::default();
+    code.start_device(u64::from(DESCRIPTORS))
+        .descriptor(0, 0x31_0000, 44, 0, 0)
+        .publish(0, 1);
+    let mut consumed = kernel_case(
+        "queue/control-good-chain",
+        code.stop_unless_consumed(),
+        "didn't finish",
+    );
+    consumed.short_timeout = true;
+    cases.push(consumed);
 
     let mut code = Code::default();
     code.every_port(OUT).every_port(IN);
@@ -648,6 +681,18 @@ fn device_cases() -> Vec<Case> {
     // `vmcall`, which KVM answers without leaving the guest stopped.
     code.bytes(&[0x0f, 0x01, 0xc1]);
     cases.push(kernel_case("hypercall", code.stop(), STOPPED));
+
+    // Runs code from memory with nothing behind it, which KVM can't emulate.
+    // `mov eax, address; jmp eax`
+    let mut code = Code::default();
+    code.bytes(&[0xb8])
+        .bytes(&HIGH_HOLE.to_le_bytes())
+        .bytes(&[0xff, 0xe0]);
+    cases.push(kernel_case(
+        "unknown-exit",
+        code.stop(),
+        "stopped unexpectedly",
+    ));
 
     // Every kind of instruction above, ending in a spin. A fault would end
     // this guest early, as a power-off, instead of at the timeout.
@@ -680,6 +725,59 @@ fn cases(tripwire: &Path) -> Vec<Case> {
     });
     cases.extend(device_cases());
     cases
+}
+
+/// Every attack the floor promises, written apart from the code that builds
+/// them, so that dropping one fails the check.
+const REQUIRED_CASES: [&str; 43] = [
+    "before-ready/ready-with-a-command",
+    "before-ready/stdout",
+    "before-ready/stderr",
+    "before-ready/exited",
+    "before-ready/run",
+    "before-ready/empty-body",
+    "before-ready/oversized",
+    "before-ready/printable-ready",
+    "before-ready/unknown-tag-0",
+    "before-ready/unknown-tag-6",
+    "before-ready/unknown-tag-255",
+    "while-running/stdout",
+    "while-running/stderr",
+    "while-running/second-ready",
+    "while-running/exited-with-a-command",
+    "while-running/exited-empty",
+    "while-running/run-sent-to-the-host",
+    "while-running/empty-body",
+    "while-running/oversized",
+    "while-running/largest-length",
+    "while-running/truncated",
+    "while-running/largest-output",
+    "while-running/unknown-tag-0",
+    "while-running/unknown-tag-6",
+    "while-running/unknown-tag-255",
+    "output/controls",
+    "scan/host-state",
+    "kernel/queue/buffer-outside-ram",
+    "kernel/queue/length-that-wraps",
+    "kernel/queue/chain-that-loops",
+    "kernel/queue/longer-loop",
+    "kernel/queue/next-outside-the-table",
+    "kernel/queue/head-outside-the-table",
+    "kernel/queue/index-more-than-a-ring-ahead",
+    "kernel/queue/indirect-descriptor",
+    "kernel/queue/table-outside-ram",
+    "kernel/queue/control-good-chain",
+    "kernel/every-port",
+    "kernel/every-device-register",
+    "kernel/unclaimed-mmio",
+    "kernel/hypercall",
+    "kernel/unknown-exit",
+    "kernel/control",
+];
+
+/// The first required attack that `names` doesn't hold.
+fn missing_case<'a>(names: &[&str], required: &[&'a str]) -> Option<&'a str> {
+    required.iter().copied().find(|name| !names.contains(name))
 }
 
 fn probe_path() -> &'static Path {
@@ -730,7 +828,7 @@ fn write_case_files(directory: &Path, case: &Case) {
 /// Runs one case in its own process, and reads what it left.
 fn observe(directory: &Path, case: &Case, vmm: Vmm, canary: &str, tripwire: &Path) -> Observation {
     write_case_files(directory, case);
-    let exit = Command::new(env::current_exe().unwrap())
+    let owner = Command::new(env::current_exe().unwrap())
         .args([OWNER_TEST, "--exact", "--test-threads=1"])
         .current_dir(directory)
         .env(OWNER_DIRECTORY, directory)
@@ -740,14 +838,31 @@ fn observe(directory: &Path, case: &Case, vmm: Vmm, canary: &str, tripwire: &Pat
         .env(CANARY_VARIABLE, canary)
         .stdout(File::create(directory.join("owner.out")).unwrap())
         .stderr(File::create(directory.join("owner.err")).unwrap())
-        .status()
+        .spawn()
         .unwrap();
+    let exit = wait_or_kill(owner);
     Observation {
         outcome: fs::read_to_string(directory.join("outcome")).ok(),
         stdout: fs::read(directory.join("stdout")).unwrap_or_default(),
         stderr: fs::read(directory.join("stderr")).unwrap_or_default(),
         exit,
         tripwire_exists: tripwire.exists(),
+    }
+}
+
+/// Waits for the owner. The watchdog in the VMM can only interrupt the vCPU,
+/// so a device stuck in a loop of its own has to be stopped from here.
+fn wait_or_kill(mut owner: Child) -> ExitStatus {
+    let deadline = Instant::now() + OWNER_LIMIT;
+    loop {
+        if let Some(status) = owner.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            owner.kill().unwrap();
+            return owner.wait().unwrap();
+        }
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -771,26 +886,28 @@ fn check(label: &str, vmm: Vmm) -> Result<(), String> {
         host_strings.push(home.as_encoded_bytes().to_vec());
     }
 
-    let result = cases(&tripwire)
-        .iter()
-        .enumerate()
-        .try_for_each(|(index, case)| {
-            let directory = root.join(format!("case-{index}"));
-            let seen = observe(&directory, case, vmm, &canary, &tripwire);
-            println!(
-                "{}: {}",
-                case.name,
-                seen.outcome.as_deref().unwrap_or("no result")
-            );
-            // Paths are only secret from the scan. The others were handed the
-            // tripwire's path to attack with.
-            let searched: &[Vec<u8>] = match case.attack {
-                Attack::Scan => &host_strings,
-                _ => &[],
-            };
-            judge(case, &seen, canary.as_bytes(), searched)?;
-            check_allowed_controls(case, &seen)
-        });
+    let all = cases(&tripwire);
+    let names: Vec<&str> = all.iter().map(|case| case.name.as_str()).collect();
+    if let Some(name) = missing_case(&names, &REQUIRED_CASES) {
+        return Err(format!("{name}: the case is missing"));
+    }
+    let result = all.iter().enumerate().try_for_each(|(index, case)| {
+        let directory = root.join(format!("case-{index}"));
+        let seen = observe(&directory, case, vmm, &canary, &tripwire);
+        println!(
+            "{}: {}",
+            case.name,
+            seen.outcome.as_deref().unwrap_or("no result")
+        );
+        // Paths are only secret from the scan. The others were handed the
+        // tripwire's path to attack with.
+        let searched: &[Vec<u8>] = match case.attack {
+            Attack::Scan => &host_strings,
+            _ => &[],
+        };
+        judge(case, &seen, canary.as_bytes(), searched)?;
+        check_allowed_controls(case, &seen)
+    });
     if result.is_ok() {
         let _ = fs::remove_dir_all(&root);
     }
@@ -1052,6 +1169,12 @@ fn a_clean_case_passes_the_judge() {
         judge(&sample(), &clean(), b"CANARY", &[b"/host".to_vec()]),
         Ok(())
     );
+}
+
+#[test]
+fn a_dropped_case_is_found() {
+    assert_eq!(missing_case(&["a", "b"], &["a", "b"]), None);
+    assert_eq!(missing_case(&["a"], &["a", "b"]), Some("b"));
 }
 
 #[test]

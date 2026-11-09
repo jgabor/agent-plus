@@ -2,7 +2,8 @@
 //!
 //! [`serve`] waits for each program before it reads the next request. The
 //! init must call it from its own loop, and not reap while it runs, because
-//! `waitpid(-1)` would take the status this module is waiting for.
+//! `waitpid(-1)` would take the status this module is waiting for. Orphans
+//! wait until it returns.
 
 use crate::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::ffi::OsStr;
@@ -10,9 +11,9 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
@@ -21,9 +22,11 @@ const SIGNALED: u8 = 128;
 /// Output waiting to be sent. The bound stops a program from filling the
 /// guest's memory faster than the host reads.
 const QUEUE: usize = 4;
-/// How long after the program ends the pipes may stay quiet. A background job
-/// can hold them open for as long as it runs.
-const QUIET: Duration = Duration::from_millis(100);
+/// How long to wait for output in total once the program has ended.
+const PATIENCE: Duration = Duration::from_millis(100);
+/// The most output sent once the program has ended: its two full pipes, what
+/// is queued, and what the forwarding threads hold.
+const ALLOWANCE: usize = 2 * 64 * 1024 + (QUEUE + 2) * MAX_OUTPUT;
 
 /// Serves requests until the host hangs up.
 ///
@@ -63,20 +66,35 @@ fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> 
     }
     wait(child, updates);
 
-    let mut ended = None;
-    loop {
-        let update = match ended {
-            None => received.recv().map_err(RecvTimeoutError::from),
-            Some(_) => received.recv_timeout(QUIET),
-        };
-        match update {
+    let status = loop {
+        match received.recv() {
             Ok(Update::Output(output)) => output.write(channel)?,
-            Ok(Update::Ended(status)) => ended = Some(status?),
-            Err(_) => break,
+            Ok(Update::Ended(status)) => break status?,
+            Err(_) => return Err(io::Error::other("the program's waiter stopped").into()),
         }
-    }
-    let status = ended.ok_or_else(|| io::Error::other("the program's waiter stopped"))?;
+    };
+    drain(&received, channel)?;
     ToHost::Exited(status_of_exit(status)).write(channel)
+}
+
+/// Sends what the program left behind, until its pipes close or a background
+/// job holding them has had its allowance. Time spent writing doesn't count,
+/// so a slow host loses nothing.
+fn drain(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), ProtocolError> {
+    let mut patience = PATIENCE;
+    let mut allowance = ALLOWANCE;
+    while allowance > 0 {
+        let started = Instant::now();
+        let Ok(Update::Output(output)) = received.recv_timeout(patience) else {
+            break;
+        };
+        patience = patience.saturating_sub(started.elapsed());
+        if let ToHost::Stdout(bytes) | ToHost::Stderr(bytes) = &output {
+            allowance = allowance.saturating_sub(bytes.len());
+        }
+        output.write(channel)?;
+    }
+    Ok(())
 }
 
 /// Sends a pipe's output until it closes. The thread outlives the program if

@@ -8,6 +8,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Fails the test instead of the machine when a program floods the channel.
+const MAX_RECORDED: usize = 16 * 1024 * 1024;
+
 /// The host's end: what it sent, and what the guest said back.
 struct FakeChannel {
     from_host: Cursor<Vec<u8>>,
@@ -48,6 +51,9 @@ impl Read for FakeChannel {
 
 impl Write for FakeChannel {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.to_host.len() + bytes.len() > MAX_RECORDED {
+            return Err(io::ErrorKind::OutOfMemory.into());
+        }
         self.to_host.write(bytes)
     }
 
@@ -197,6 +203,51 @@ fn a_background_job_does_not_hold_back_the_status() {
     assert!(started.elapsed() < Duration::from_secs(15));
     assert_eq!(stdout(&reports), b"out");
     assert_eq!(status(&reports), 3);
+}
+
+/// Neither a flood nor a trickle from a background job may delay the status.
+#[test]
+fn a_background_job_that_keeps_writing_does_not_hold_back_the_status() {
+    for script in [
+        "yes &\nexit 7",
+        "while echo x; do sleep 0.01; done &\nexit 7",
+    ] {
+        let started = Instant::now();
+        let reports = shell(script);
+        assert!(started.elapsed() < Duration::from_secs(15), "{script}");
+        assert_eq!(status(&reports), 7, "{script}");
+    }
+}
+
+/// A host that reads slowly must not cost a finished program its output.
+#[test]
+fn a_slow_host_still_gets_all_of_a_finished_programs_output() {
+    struct SlowHost(FakeChannel);
+
+    impl Read for SlowHost {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.0.read(buffer)
+        }
+    }
+
+    impl Write for SlowHost {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(30));
+            self.0.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let script = "head -c 60000 /dev/zero; head -c 60000 /dev/zero >&2";
+    let mut channel = SlowHost(FakeChannel::sending(&[request(&["sh", "-c", script])]));
+    serve(&mut channel).unwrap();
+    let reports = channel.0.reports();
+    assert_eq!(stdout(&reports).len(), 60_000);
+    assert_eq!(stderr(&reports).len(), 60_000);
+    assert_eq!(status(&reports), 0);
 }
 
 #[test]

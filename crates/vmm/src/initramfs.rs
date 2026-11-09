@@ -97,7 +97,9 @@ fn check_path(path: &str) -> Result<(), Error> {
     let plain = path
         .split('/')
         .all(|part| !matches!(part, "" | "." | "..") && !part.contains('\0'));
-    if plain && path.len() < PATH_MAX {
+    // The kernel stops unpacking at a record with the trailer's name.
+    let top = path.split('/').next();
+    if plain && top != Some(TRAILER) && path.len() < PATH_MAX {
         Ok(())
     } else {
         Err(Error::BadPath(path.to_string()))
@@ -329,6 +331,17 @@ mod tests {
                 "{path:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_trailer_name_is_refused_even_as_a_parent() {
+        for path in [TRAILER, "TRAILER!!!/a"] {
+            assert_eq!(
+                build(&[file(path, b"")]),
+                Err(Error::BadPath(path.to_string())),
+            );
+        }
+        assert!(build(&[file("a/TRAILER!!!", b"")]).is_ok());
     }
 
     #[test]

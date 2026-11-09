@@ -10,7 +10,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::marker::PhantomData;
 use std::mem::{offset_of, size_of};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -33,6 +33,8 @@ const KVM_CREATE_VCPU: c_ulong = 0xAE41;
 const KVM_SET_TSS_ADDR: c_ulong = 0xAE47;
 // _IO(0xAE, 0x60)
 const KVM_CREATE_IRQCHIP: c_ulong = 0xAE60;
+// _IOW(0xAE, 0x61, struct kvm_irq_level)
+const KVM_IRQ_LINE: c_ulong = 0x4008_AE61;
 // _IOW(0xAE, 0x77, struct kvm_pit_config)
 const KVM_CREATE_PIT2: c_ulong = 0x4040_AE77;
 // _IOW(0xAE, 0x90, struct kvm_cpuid2)
@@ -78,6 +80,13 @@ struct MemoryRegion {
     guest_phys_addr: u64,
     memory_size: u64,
     userspace_addr: u64,
+}
+
+/// `struct kvm_irq_level`.
+#[repr(C)]
+struct IrqLevel {
+    irq: u32,
+    level: u32,
 }
 
 /// `struct kvm_pit_config`.
@@ -197,6 +206,23 @@ struct IoExit {
     data_offset: u64,
 }
 
+/// The `mmio` arm of the exit union in `struct kvm_run`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MmioExit {
+    phys_addr: u64,
+    data: [u8; 8],
+    len: u32,
+    is_write: u8,
+}
+
+/// The arms of the exit union in `struct kvm_run` that the VMM reads.
+#[repr(C)]
+union Exit {
+    io: IoExit,
+    mmio: MmioExit,
+}
+
 /// The start of `struct kvm_run`, up to the part of the union the VMM reads.
 #[repr(C)]
 struct KvmRun {
@@ -209,7 +235,7 @@ struct KvmRun {
     flags: u16,
     cr8: u64,
     apic_base: u64,
-    io: IoExit,
+    exit: Exit,
 }
 
 const _: () = {
@@ -234,7 +260,11 @@ const _: () = {
     assert!(offset_of!(IoExit, data_offset) == 8);
     assert!(offset_of!(KvmRun, immediate_exit) == 1);
     assert!(offset_of!(KvmRun, exit_reason) == 8);
-    assert!(offset_of!(KvmRun, io) == 32);
+    assert!(size_of::<IrqLevel>() == 8);
+    assert!(offset_of!(MmioExit, data) == 8);
+    assert!(offset_of!(MmioExit, len) == 16);
+    assert!(offset_of!(MmioExit, is_write) == 20);
+    assert!(offset_of!(KvmRun, exit) == 32);
 };
 
 /// Why a vCPU stopped running.
@@ -259,6 +289,15 @@ pub trait Ports {
     /// The guest reads `data` from `port`. Returns false if nothing answers,
     /// which stops the vCPU with [`Stop::Unhandled`].
     fn read(&mut self, port: u16, data: &mut [u8]) -> bool;
+    /// The guest wrote `data` to a physical address outside its RAM. With no
+    /// device there, the write goes nowhere.
+    fn mmio_write(&mut self, _address: u64, _data: &[u8]) {}
+    /// The guest reads `data` from a physical address outside its RAM. An
+    /// empty bus reads as all ones, like a port with no device, and Linux
+    /// probes such addresses.
+    fn mmio_read(&mut self, _address: u64, data: &mut [u8]) {
+        data.fill(0xff);
+    }
 }
 
 /// Port writes go to a callback, and reads have no answer.
@@ -373,6 +412,14 @@ impl Vm {
         Ok(())
     }
 
+    /// A handle that raises interrupt `line` on the interrupt controllers.
+    pub fn interrupt(&self, line: u32) -> Interrupt<'_> {
+        Interrupt {
+            fd: self.fd.as_fd(),
+            line,
+        }
+    }
+
     /// Shows `vcpu` every CPU feature that KVM supports on this host. A vCPU
     /// starts with none, and a kernel refuses to run on that.
     pub fn expose_cpu_features(&self, vcpu: &Vcpu) -> io::Result<()> {
@@ -403,6 +450,31 @@ impl Vm {
             run,
             _memory: Rc::clone(&self.memory),
         })
+    }
+}
+
+/// One interrupt line of a VM.
+pub struct Interrupt<'vm> {
+    fd: BorrowedFd<'vm>,
+    line: u32,
+}
+
+impl Interrupt<'_> {
+    /// Raises and lowers the line. The controller latches the rising edge, so
+    /// a guest that is busy still sees it, and no device has to track when
+    /// the guest acknowledges.
+    pub fn pulse(&self) -> io::Result<()> {
+        self.set(1)?;
+        self.set(0)
+    }
+
+    fn set(&self, level: u32) -> io::Result<()> {
+        let mut level = IrqLevel {
+            irq: self.line,
+            level,
+        };
+        // SAFETY: `level` is the struct this request reads.
+        unsafe { ioctl_pointer(self.fd.as_raw_fd(), KVM_IRQ_LINE, &raw mut level) }
     }
 }
 
@@ -502,7 +574,7 @@ impl Vcpu {
                 KVM_EXIT_SHUTDOWN => return Ok(Stop::Shutdown),
                 KVM_EXIT_IO => {
                     // SAFETY: as above, and KVM_EXIT_IO selects this arm.
-                    let io = unsafe { ptr::read_volatile(&raw const (*run).io) };
+                    let io = unsafe { ptr::read_volatile(&raw const (*run).exit.io) };
                     let data = self.io_data(&io)?;
                     let handled = match io.direction {
                         KVM_EXIT_IO_OUT => {
@@ -517,16 +589,17 @@ impl Vcpu {
                     }
                 }
                 KVM_EXIT_MMIO => {
-                    // No device is mapped yet, so a read finds an empty bus:
-                    // all ones, like a port with no device. Linux probes such
-                    // addresses, and a write has nowhere to go.
-                    // SAFETY: as above, and KVM_EXIT_MMIO selects the union's
-                    // `mmio` arm, which starts where `io` does and holds its
-                    // eight data bytes after an 8-byte address. KVM reads them
-                    // when the vCPU re-enters.
-                    unsafe {
-                        let data = (&raw mut (*run).io).cast::<[u8; 8]>().add(1);
-                        ptr::write_volatile(data, [0xff; 8]);
+                    // SAFETY: as above, and KVM_EXIT_MMIO selects this arm.
+                    let mmio = unsafe { ptr::read_volatile(&raw const (*run).exit.mmio) };
+                    let mut data = mmio.data;
+                    let len = (mmio.len as usize).min(data.len());
+                    if mmio.is_write != 0 {
+                        ports.mmio_write(mmio.phys_addr, &data[..len]);
+                    } else {
+                        ports.mmio_read(mmio.phys_addr, &mut data[..len]);
+                        // SAFETY: as above. KVM reads these bytes when the
+                        // vCPU re-enters the guest.
+                        unsafe { ptr::write_volatile(&raw mut (*run).exit.mmio.data, data) };
                     }
                 }
                 other => return Ok(Stop::Unhandled(other)),

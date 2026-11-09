@@ -1,10 +1,10 @@
 //! The real system calls.
 
 use crate::{Mount, System};
-use std::ffi::{CStr, OsStr, c_char, c_int, c_ulong, c_void};
+use std::ffi::{CStr, OsStr, c_char, c_int, c_short, c_ulong, c_void};
 use std::fs::File;
 use std::mem::size_of;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::{fs, io, ptr};
@@ -17,6 +17,9 @@ const RB_AUTOBOOT: c_int = 0x0123_4567;
 const AF_VSOCK: c_int = 40;
 const SOCK_STREAM: c_int = 1;
 const HOST_CID: u32 = 2;
+const POLLIN: c_short = 1;
+const FIONREAD: c_ulong = 0x541B;
+const FOREVER: c_int = -1;
 
 /// `struct sockaddr_vm`.
 #[repr(C)]
@@ -29,7 +32,17 @@ struct VsockAddress {
     zero: [u8; 3],
 }
 
+/// `struct pollfd`.
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+}
+
 unsafe extern "C" {
+    fn poll(fds: *mut PollFd, count: c_ulong, timeout: c_int) -> c_int;
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -94,6 +107,46 @@ impl System for Linux {
             reboot(RB_AUTOBOOT);
         }
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Waits until `pipe` can be read without blocking, which includes having
+/// closed, or until `ended` closes. Returns whether `ended` has closed.
+pub fn program_has_ended(pipe: BorrowedFd, ended: BorrowedFd) -> io::Result<bool> {
+    let mut fds = [waiting_on(pipe), waiting_on(ended)];
+    poll_retrying(&mut fds)?;
+    Ok(fds[1].revents != 0)
+}
+
+/// How many bytes `pipe` holds, which can be more than its nominal size.
+pub fn bytes_waiting(pipe: BorrowedFd) -> io::Result<usize> {
+    let mut count: c_int = 0;
+    // SAFETY: `FIONREAD` writes one `int` through this pointer, which is valid
+    // for the whole call.
+    if unsafe { ioctl(pipe.as_raw_fd(), FIONREAD, &mut count as *mut c_int) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(count as usize)
+}
+
+fn waiting_on(fd: BorrowedFd) -> PollFd {
+    PollFd {
+        fd: fd.as_raw_fd(),
+        events: POLLIN,
+        revents: 0,
+    }
+}
+
+fn poll_retrying(fds: &mut [PollFd]) -> io::Result<()> {
+    loop {
+        // SAFETY: the pointer and count describe `fds`, which outlives the call.
+        if unsafe { poll(fds.as_mut_ptr(), fds.len() as c_ulong, FOREVER) } >= 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
 }
 

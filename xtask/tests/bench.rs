@@ -260,6 +260,31 @@ fn a_base_with_no_boot_command_is_no_comparison() {
     assert!(repo.record().contains("boot_ms = "));
 }
 
+/// Old builds can't change, so the exit status decides, and not the wording.
+#[test]
+fn a_base_that_exits_with_the_usage_status_is_no_comparison_whatever_it_says() {
+    let reworded = NO_BOOT.replace("usage: ap --version", "try `ap --version`");
+    let repo = Repo::with("boot-reworded", BOOT_BUDGETS, &reworded, &[]);
+    repo.plant(BOOTS);
+    let output = repo.bench();
+    assert_passes(&output);
+    assert!(
+        stdout(&output).contains("no-comparison boot_ms candidate "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_failed_boot_that_prints_usage_text_is_a_problem() {
+    let confused = BOOT_FAILS
+        .replace("ap: no kvm", "usage: no kvm")
+        .replace("ExitCode::from(1)", "ExitCode::from(125)");
+    let repo = Repo::with("boot-confused", BOOT_BUDGETS, &confused, &[]);
+    repo.plant(BOOTS);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
 #[test]
 fn a_candidate_with_no_boot_command_is_a_problem() {
     let repo = Repo::with("boot-lost", BOOT_BUDGETS, BOOTS, &[]);

@@ -16,6 +16,9 @@ use std::time::Instant;
 pub const BUDGETS_FILE: &str = "harness/budgets.toml";
 const PAIRS: usize = 15;
 const BOOT_TIMEOUT_SECONDS: &str = "30";
+/// What every build of `ap` exits with when it doesn't know its arguments. A
+/// boot that fails exits with 124 or 125.
+const USAGE_STATUS: i32 = 2;
 const FIELDS: &[&str] = &["key", "name", "target", "band_pct", "band_abs"];
 
 pub struct Budget {
@@ -429,7 +432,7 @@ fn no_boot(binary: &Path) -> Problem {
 }
 
 /// Milliseconds from spawning `ap boot` until its ready line appears, or
-/// `None` if this build answers with its usage, because it has no such
+/// `None` if this build exits with its usage status, because it has no such
 /// command. `ap` itself stops the VM at the timeout.
 fn boot_once(binary: &Path, home: &Path) -> Result<Option<f64>, Problem> {
     let shown = binary.display();
@@ -461,10 +464,10 @@ fn boot_once(binary: &Path, home: &Path) -> Result<Option<f64>, Problem> {
     let errors = draining.join().expect("draining stderr can't panic");
     let errors = errors.map_err(problem)?;
     let errors = String::from_utf8_lossy(&errors);
+    if output.status.code() == Some(USAGE_STATUS) {
+        return Ok(None);
+    }
     if !output.status.success() {
-        if errors.starts_with("usage:") {
-            return Ok(None);
-        }
         return Err(Problem(format!(
             "`{shown} boot` failed: {}: {}",
             output.status,

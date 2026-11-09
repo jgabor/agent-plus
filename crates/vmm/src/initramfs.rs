@@ -6,7 +6,6 @@ use std::fmt;
 
 const MAGIC: &str = "070701";
 const TRAILER: &str = "TRAILER!!!";
-const HEADER_SIZE: usize = 110;
 const ALIGNMENT: usize = 4;
 /// `PATH_MAX`, which counts the final NUL. The kernel refuses longer names.
 const PATH_MAX: usize = 4096;
@@ -160,6 +159,8 @@ pub fn build(entries: &[Entry]) -> Result<Vec<u8>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HEADER_SIZE: usize = 110;
 
     #[derive(Debug, PartialEq, Eq)]
     struct Record {

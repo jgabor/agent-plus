@@ -67,10 +67,10 @@ const CLEAN: Recorded = Recorded {
 /// A scope kills every process in the job. A process group is the simplest
 /// stand-in that covers these fake jobs, though a process that left the group
 /// would escape it. `timeout` can't be trusted with the group: on
-/// `ubuntu-latest` it leaves the job's descendants running. The group goes
-/// first: a kill of the pid alone wakes the `wait` below, which cancels the
-/// watcher before it can reach the group. The pid is for a job that hasn't
-/// reached `setsid` yet and so has no group.
+/// `ubuntu-latest` it leaves the job's descendants running. The job starts its
+/// own timer once it has a group, so the group always exists at the limit, and
+/// one kill reaches every process at once. Two kills could be split by the
+/// `wait` below waking between them.
 const SYSTEMD_RUN: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/systemd-calls"
@@ -82,15 +82,14 @@ done
 shift
 [ -n "$limit" ] || exec "$@"
 exec 3<&0
-setsid "$@" <&3 3<&- &
+setsid sh -c 'limit="$1"; shift
+(sleep "$limit"; kill -KILL 0) </dev/null >/dev/null 2>&1 &
+exec "$@"' sh "$limit" "$@" <&3 3<&- &
 job=$!
 exec 3<&-
-setsid sh -c 'sleep "$1"; kill -KILL "-$2" "$2"' sh "$limit" "$job" \
-    </dev/null >/dev/null 2>&1 &
-watcher=$!
 wait "$job"
 status=$?
-kill -KILL "$watcher" "-$watcher" 2>/dev/null
+kill -KILL "-$job" 2>/dev/null
 exit "$status"
 "#;
 

@@ -71,7 +71,7 @@ impl GuestMemory {
     }
 
     /// Returns the mapping offset of an access that fits, without wrapping.
-    fn check(&self, address: u64, len: usize) -> Result<usize, OutOfBounds> {
+    pub(crate) fn check(&self, address: u64, len: usize) -> Result<usize, OutOfBounds> {
         let fits = address
             .checked_add(len as u64)
             .is_some_and(|end| end <= self.size() as u64);

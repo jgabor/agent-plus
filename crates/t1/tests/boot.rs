@@ -7,7 +7,9 @@ use vmm::{GuestMemory, Vm, boot};
 
 const MEMORY: usize = 256 << 20;
 const TIMEOUT: Duration = Duration::from_secs(30);
-const COMMAND_LINE: &str = "console=ttyS0";
+/// With no init to run the kernel panics, and `panic=-1` ends the VM at once
+/// instead of leaving it to the timeout.
+const COMMAND_LINE: &str = "console=ttyS0 panic=-1 reboot=t";
 const BANNER: &str = "Linux version 7.3.3-ap.1";
 
 #[test]

@@ -38,6 +38,7 @@ name = "t1"
 version = "0.0.0"
 dependencies = [
  "ap",
+ "guest",
  "vmm",
 ]
 

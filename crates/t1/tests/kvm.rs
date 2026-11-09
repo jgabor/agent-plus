@@ -91,6 +91,34 @@ fn a_port_read_is_reported_as_unhandled() {
 }
 
 #[test]
+fn a_triple_fault_is_a_shutdown() {
+    let (_vm, mut vcpu) = guest(&[
+        0x0f, 0x01, 0x1e, 0x00, 0x20, // lidt [0x2000], which is all zeroes
+        0xcc, // int3, which now has nowhere to go
+    ]);
+    assert_eq!(vcpu.run(TIMEOUT, |_, _| {}).unwrap(), Stop::Shutdown);
+}
+
+#[test]
+fn memory_with_no_device_ignores_writes_and_reads_as_all_ones() {
+    // Past the 16 KiB of RAM.
+    let (_vm, mut vcpu) = guest(&[
+        0xb0, 0x00, // mov al, 0
+        0xa2, 0x00, 0x80, // mov [0x8000], al
+        0xa0, 0x00, 0x80, // mov al, [0x8000]
+        0xba, 0x10, 0x00, // mov dx, 0x10
+        0xee, // out dx, al
+        HLT,
+    ]);
+    let mut writes = Vec::new();
+    let stop = vcpu
+        .run(TIMEOUT, |port, bytes| writes.push((port, bytes.to_vec())))
+        .unwrap();
+    assert_eq!(stop, Stop::Halted);
+    assert_eq!(writes, [(PORT, vec![0xff])]);
+}
+
+#[test]
 fn a_vcpu_keeps_guest_memory_alive_after_its_vm_is_dropped() {
     let (vm, mut vcpu) = guest(&OUT_AND_HALT);
     drop(vm);

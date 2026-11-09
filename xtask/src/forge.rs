@@ -13,6 +13,8 @@ const ISSUE_LIMIT: usize = 2000;
 /// `gh issue list` gives at most this many comments per issue.
 pub const LISTED_COMMENTS: usize = 100;
 const PR_LIMIT: usize = 1000;
+/// GitHub gives at most this many items in one GraphQL page.
+const LINKED_LIMIT: usize = 100;
 const ISSUES: &str = "repos/{owner}/{repo}/issues";
 
 #[derive(Clone, Debug)]
@@ -206,6 +208,48 @@ impl Gh {
             }
         }
         Ok(closing)
+    }
+
+    /// The PRs in this repository that GitHub links to an issue as closing
+    /// it, open, closed, or merged. A closed PR keeps the link.
+    pub fn prs_linked(&self, issue: u64) -> Result<Vec<u64>, Problem> {
+        let query = format!(
+            "query($owner: String!, $repo: String!, $issue: Int!) {{ repository(owner: $owner, name: $repo) {{ url issue(number: $issue) {{ closedByPullRequestsReferences(first: {LINKED_LIMIT}, includeClosedPrs: true) {{ totalCount nodes {{ number url }} }} }} }} }}"
+        );
+        let value = self.json(&[
+            "api",
+            "graphql",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-F",
+            &format!("issue={issue}"),
+            "-f",
+            &format!("query={query}"),
+        ])?;
+        let read = || {
+            let repository = value.get("data")?.get("repository")?;
+            let here = format!("{}/pull/", repository.get("url")?.as_str()?);
+            let linked = repository
+                .get("issue")?
+                .get("closedByPullRequestsReferences")?;
+            let count = linked.get("totalCount")?.as_u64()?;
+            let mut prs = Vec::new();
+            for pr in linked.get("nodes")?.as_arr()? {
+                if pr.get("url")?.as_str()?.starts_with(&here) {
+                    prs.push(pr.get("number")?.as_u64()?);
+                }
+            }
+            Some((count, prs))
+        };
+        let (count, prs) = read().ok_or_else(|| unexpected("gh api graphql"))?;
+        if count > LINKED_LIMIT as u64 {
+            return Err(Problem(format!(
+                "issue {issue} has {count} linked PRs, more than the {LINKED_LIMIT} `gh` reads at once"
+            )));
+        }
+        Ok(prs)
     }
 
     pub fn open_prs(&self) -> Result<Vec<OpenPr>, Problem> {

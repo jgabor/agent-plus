@@ -319,3 +319,46 @@ fn a_comment_is_not_a_floor_check() {
     );
     assert_journey(&root, "fail step 1\njourney 0 of 1\n");
 }
+
+/// Whether `elf`, a 64-bit little-endian ELF file, asks for a dynamic loader.
+fn has_interpreter(elf: &[u8]) -> bool {
+    assert_eq!(&elf[..4], b"\x7fELF");
+    let word = |at: usize, size: usize| {
+        let mut bytes = [0; 8];
+        bytes[..size].copy_from_slice(&elf[at..at + size]);
+        u64::from_le_bytes(bytes) as usize
+    };
+    const PT_INTERP: usize = 3;
+    let (table, entry_size, entries) = (word(32, 8), word(54, 2), word(56, 2));
+    (0..entries).any(|i| word(table + i * entry_size, 4) == PT_INTERP)
+}
+
+#[test]
+fn the_installed_binary_is_statically_linked() {
+    let root = workspace(
+        "static",
+        &step(1, "", "harness/journey/one.sh"),
+        &[("harness/journey/one.sh", PASS)],
+    );
+    assert_journey(&root, "pass step 1\njourney 1 of 1\n");
+    assert!(
+        root.join("target/x86_64-unknown-linux-musl/release/ap")
+            .exists()
+    );
+    let installed = fs::read(root.join("target/journey/bin/ap")).unwrap();
+    assert!(!has_interpreter(&installed));
+}
+
+#[test]
+fn the_binary_is_built_without_a_c_compiler() {
+    let script = "fn main() {\n    for name in [\"CC\", \"CXX\"] {\n        assert_eq!(std::env::var(name).as_deref(), Ok(\"false\"));\n    }\n}\n";
+    let root = workspace(
+        "no-compiler",
+        &step(1, "", "harness/journey/one.sh"),
+        &[
+            ("harness/journey/one.sh", PASS),
+            ("crates/ap/build.rs", script),
+        ],
+    );
+    assert_journey(&root, "pass step 1\njourney 1 of 1\n");
+}

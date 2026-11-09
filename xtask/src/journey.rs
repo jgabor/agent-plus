@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 const JOURNEY_FILE: &str = "harness/journey.toml";
+const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
 
 struct Step {
     id: i64,
@@ -141,10 +142,12 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
     Ok(steps.into_values().collect())
 }
 
-/// Builds `ap` for release from `root`, and returns where the binary is.
+/// Builds a statically linked `ap` for release from `root`, so the same file
+/// can run as the guest's `/init`, and returns where the binary is.
 pub fn build_ap(root: &Path, target: &Path) -> Result<PathBuf, Problem> {
     let status = Command::new("cargo")
         .args(["build", "--release", "--locked", "--package", "ap"])
+        .args(["--target", STATIC_TARGET])
         .arg("--target-dir")
         .arg(target)
         .current_dir(root)
@@ -156,7 +159,7 @@ pub fn build_ap(root: &Path, target: &Path) -> Result<PathBuf, Problem> {
     if !status.success() {
         return Err(Problem("`cargo build --release` failed".to_string()));
     }
-    Ok(target.join("release/ap"))
+    Ok(target.join(STATIC_TARGET).join("release/ap"))
 }
 
 /// Builds `ap` for release, and copies it where the steps will find it.

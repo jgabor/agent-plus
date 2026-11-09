@@ -1,4 +1,4 @@
-//! The floors that `cargo metadata` can check: no C anywhere in the tree, and
+//! The floors that Cargo's own view of the tree can check: no C anywhere in the tree, and
 //! no build script that hasn't been audited.
 
 use crate::Problem;
@@ -30,34 +30,84 @@ const AUDIT_FILE: &str = "harness/build-scripts.txt";
 /// hold.
 pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
     let audited = read_audit_list(root)?;
+    let metadata = TARGETS
+        .iter()
+        .map(|target| read_metadata(root, target))
+        .collect::<Result<Vec<_>, _>>()?;
+    let built = packages_cargo_builds(root)?;
     let mut findings = BTreeSet::new();
-    for target in TARGETS {
-        let output = Command::new("cargo")
-            .args([
-                "metadata",
-                "--format-version",
-                "1",
-                "--locked",
-                "--all-features",
-                "--filter-platform",
-                target,
-            ])
-            .current_dir(root)
-            .output()
-            .map_err(|e| Problem(format!("couldn't run `cargo metadata`: {e}")))?;
-        if !output.status.success() {
-            return Err(Problem(format!(
-                "`cargo metadata` failed for {target}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let metadata = json::parse(&text)
-            .map_err(|e| Problem(format!("couldn't read `cargo metadata` output: {e}")))?;
-        inspect(&metadata, &audited, &mut findings)
+    for metadata in &metadata {
+        inspect(metadata, &audited, &built, &mut findings)
             .map_err(|e| Problem(format!("unexpected `cargo metadata` output: {e}")))?;
     }
     Ok(findings.into_iter().collect())
+}
+
+fn read_metadata(root: &Path, target: &str) -> Result<Json, Problem> {
+    let output = Command::new("cargo")
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--locked",
+            "--all-features",
+            "--filter-platform",
+            target,
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|e| Problem(format!("couldn't run `cargo metadata`: {e}")))?;
+    if !output.status.success() {
+        return Err(Problem(format!(
+            "`cargo metadata` failed for {target}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    json::parse(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|e| Problem(format!("couldn't read `cargo metadata` output: {e}")))
+}
+
+/// Returns `name version` for every package Cargo builds on any platform.
+/// `resolve.nodes` also lists packages reachable only through a weak feature,
+/// like `dep?/x`, and nothing builds those. `cargo tree --target <triple>`
+/// can't replace the walk over `resolve.nodes`, because it matches build
+/// dependencies against this machine instead of the target.
+fn packages_cargo_builds(root: &Path) -> Result<HashSet<String>, Problem> {
+    let output = Command::new("cargo")
+        .args([
+            "tree",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--edges",
+            "normal,build,dev",
+            "--target",
+            "all",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .current_dir(root)
+        .output()
+        .map_err(|e| Problem(format!("couldn't run `cargo tree`: {e}")))?;
+    if !output.status.success() {
+        return Err(Problem(format!(
+            "`cargo tree` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let mut words = line.split_whitespace();
+            match (words.next(), words.next().and_then(|v| v.strip_prefix('v'))) {
+                (Some(name), Some(version)) => Ok(format!("{name} {version}")),
+                _ => Err(Problem(format!("unexpected `cargo tree` line: `{line}`"))),
+            }
+        })
+        .collect()
 }
 
 /// Reads `<name> <version> <reason>` lines into `name version` keys.
@@ -109,6 +159,7 @@ fn list<'a>(value: &'a Json, key: &str) -> Result<&'a [Json], String> {
 fn inspect(
     metadata: &Json,
     audited: &HashSet<String>,
+    built: &HashSet<String>,
     findings: &mut BTreeSet<String>,
 ) -> Result<(), String> {
     let mut packages = HashMap::new();
@@ -134,12 +185,16 @@ fn inspect(
         if !seen.insert(id) {
             continue;
         }
-        if let Some(deps) = edges.get(id) {
-            stack.extend(deps.iter().copied());
-        }
         let package = packages
             .get(id)
             .ok_or_else(|| format!("no package for `{id}`"))?;
+        let label = format!("{} {}", text(package, "name")?, text(package, "version")?);
+        if !built.contains(&label) {
+            continue;
+        }
+        if let Some(deps) = edges.get(id) {
+            stack.extend(deps.iter().copied());
+        }
         inspect_package(package, members.contains(id), audited, findings)?;
     }
     Ok(())

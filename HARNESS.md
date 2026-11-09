@@ -220,7 +220,7 @@ A failing floor blocks a merge regardless of scores.
 
 | Floor | Verified by |
 |---|---|
-| No C in the dependency tree, and no build scripts in our crates | `cargo metadata` |
+| No C in the dependency tree, and no build scripts in our crates | `cargo metadata` and `cargo tree` |
 | A hidden secret can't be read from the guest | `floor_hidden_secret`, needed by step 11 |
 | A closed network stays closed | `floor_closed_network`, needed by step 10 |
 | A share can't reach outside its root | `floor_share_root`, needed by step 9 |
@@ -229,9 +229,12 @@ A failing floor blocks a merge regardless of scores.
 | `main` builds and passes the gate | Nightly job |
 
 **C floor.** On Linux x86_64 with glibc and with musl, Linux arm64, and macOS
-arm64, the resolved dependency graph has no package with a `links` key, no
-dependency on `cc`, `cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly
-source files, and no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
+arm64, with all features on and counting dev and build dependencies, the
+packages Cargo builds include none with a `links` key, none named `cc`,
+`cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly source files, and
+no prebuilt library. A package reachable only through a weak feature, like
+`dep?/x`, isn't built, so it doesn't count. Assembly inside Rust source, as in
+graviola, is allowed. A
 build script is allowed only in a dependency listed in
 `harness/build-scripts.txt`, and never in our own crates. T0 also builds with
 `CC` and `CXX` pointing at a program that fails.

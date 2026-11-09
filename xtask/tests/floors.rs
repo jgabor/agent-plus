@@ -262,6 +262,74 @@ fn a_dependency_only_on_musl_still_fails() {
 }
 
 #[test]
+fn a_build_dependency_only_on_macos_still_fails() {
+    // Cargo matches a build dependency against the machine it runs on, so
+    // this package is invisible to `cargo tree --target` on Linux.
+    let root = workspace(
+        "macos-build-only",
+        "\n[target.'cfg(target_os = \"macos\")'.build-dependencies]\ncc = { path = \"../../vendor/cc\" }\n",
+        &[
+            ("vendor/cc/Cargo.toml", &package("cc", "")),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_dev_dependency_that_builds_c_fails() {
+    let root = workspace(
+        "dev-only",
+        "\n[dev-dependencies]\ncc = { path = \"../../vendor/cc\" }\n",
+        &[
+            ("vendor/cc/Cargo.toml", &package("cc", "")),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+/// `demo` enables `features` on `mid`, whose `alloc` feature only refines the
+/// optional package `cc`, through the weak syntax `cc?/x`.
+fn weak_feature_workspace(name: &str, features: &str) -> PathBuf {
+    let extra = format!(
+        "\n[dependencies]\nmid = {{ path = \"../../vendor/mid\", features = [{features}] }}\n"
+    );
+    let mid = package(
+        "mid",
+        "\n[dependencies]\ncc = { path = \"../cc\", optional = true }\n\n[features]\nalloc = [\"cc?/x\"]\n",
+    );
+    let cc = package("cc", "\n[features]\nx = []\n");
+    workspace(
+        name,
+        &extra,
+        &[
+            ("vendor/mid/Cargo.toml", &mid),
+            ("vendor/mid/src/lib.rs", LIB),
+            ("vendor/cc/Cargo.toml", &cc),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    )
+}
+
+#[test]
+fn a_package_reachable_only_through_a_weak_feature_passes() {
+    let output = gate(&weak_feature_workspace("weak", "\"alloc\""));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("pass floors"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_weak_feature_on_a_package_something_enables_fails() {
+    let root = weak_feature_workspace("weak-enabled", "\"alloc\", \"cc\"");
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
 fn building_with_a_c_compiler_fails() {
     // The build script succeeds unless the gate has pointed CC at a program
     // that fails. The script also fails the floors, so this checks `tests`.

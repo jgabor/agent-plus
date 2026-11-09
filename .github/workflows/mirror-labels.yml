@@ -44,10 +44,9 @@ jobs:
     needs: issue
     if: needs.issue.outputs.number != ''
     runs-on: ubuntu-latest
-    # Runs in a group go one at a time, and each applies its event to both
-    # sides, so the last one wins. A newer run replaces one that is still
-    # queued. That loses nothing, because the group is one label on one issue
-    # and the newest change is the one to keep.
+    # A newer run replaces one that is still queued in its group. That loses
+    # nothing, because the group is one label on one issue and the newest
+    # change is the one to keep.
     concurrency:
       group: mirror-labels-${{ needs.issue.outputs.number }}-${{ github.event.label.name }}
       cancel-in-progress: false
@@ -64,5 +63,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           LABEL: ${{ github.event.label.name }}
-          ACTION: ${{ github.event.action }}
-        run: cargo xtask mirror "$NUMBER" "$LABEL" "$ACTION"
+        run: cargo xtask mirror "$NUMBER" "$LABEL"

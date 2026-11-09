@@ -20,14 +20,6 @@ fn listed(number: u64, closes: &str) -> String {
     )
 }
 
-fn labels_json(labels: &[&str]) -> String {
-    let names: Vec<String> = labels
-        .iter()
-        .map(|label| format!("{{\"name\":\"{label}\"}}"))
-        .collect();
-    format!("[{}]", names.join(","))
-}
-
 struct Repo {
     root: PathBuf,
     bin: PathBuf,
@@ -57,6 +49,8 @@ impl Repo {
             listed(8, &closing("o/r", 3)),
             listed(9, &closing("o/r", 7)),
         ]);
+        repo.set_issue();
+        repo.set_pr("OPEN");
         repo.write_gh();
         repo
     }
@@ -65,32 +59,34 @@ impl Repo {
         fs::write(self.bin.join("prs.json"), format!("[{}]\n", prs.join(","))).unwrap();
     }
 
-    fn set_issue(&self, labels: &[&str]) {
+    fn set_issue(&self) {
         fs::write(
             self.bin.join("item-7.json"),
-            format!("{{\"number\":7,\"labels\":{}}}\n", labels_json(labels)),
+            "{\"number\":7,\"labels\":[]}\n",
         )
         .unwrap();
     }
 
-    fn set_pr(&self, state: &str, labels: &[&str]) {
+    fn set_pr(&self, state: &str) {
         fs::write(
             self.bin.join("item-9.json"),
-            format!(
-                "{{\"number\":9,\"labels\":{},\"pull_request\":{{\"url\":\"u\"}}}}\n",
-                labels_json(labels)
-            ),
+            "{\"number\":9,\"labels\":[],\"pull_request\":{\"url\":\"u\"}}\n",
         )
         .unwrap();
         fs::write(
             self.bin.join("pr.json"),
             format!(
-                "{{\"number\":9,\"state\":\"{state}\",\"url\":\"https://github.com/o/r/pull/9\",\"isCrossRepository\":false,\"headRefName\":\"7-x\",\"baseRefName\":\"main\",\"body\":\"Closes #7.\",\"labels\":{},\"closingIssuesReferences\":[{}],\"reviews\":[]}}\n",
-                labels_json(labels),
+                "{{\"number\":9,\"state\":\"{state}\",\"url\":\"https://github.com/o/r/pull/9\",\"isCrossRepository\":false,\"headRefName\":\"7-x\",\"baseRefName\":\"main\",\"body\":\"Closes #7.\",\"labels\":[],\"closingIssuesReferences\":[{}],\"reviews\":[]}}\n",
                 closing("o/r", 7)
             ),
         )
         .unwrap();
+    }
+
+    /// The lines `gh api` prints for an item's events after its `--jq` filter,
+    /// such as `100 labeled`.
+    fn set_changes(&self, number: u64, changes: &str) {
+        fs::write(self.bin.join(format!("events-{number}")), changes).unwrap();
     }
 
     /// Answers a delete with `delete-error`, if that file exists.
@@ -103,6 +99,8 @@ case "$*" in
   "api -X DELETE "*)
     if [ -f '{bin}/delete-error' ]; then cat '{bin}/delete-error' >&2; exit 1; fi ;;
   "api -X POST "*) ;;
+  "api {ISSUE}/"*"/events --paginate --jq "*)
+    n=${{2%/events}}; cat "{bin}/events-${{n##*/}}" 2>/dev/null || true ;;
   "api {ISSUE}/"*) cat "{bin}/item-${{2##*/}}.json" ;;
   "pr view "*) cat '{bin}/pr.json' ;;
   "pr list "*) cat '{bin}/prs.json' ;;
@@ -161,8 +159,8 @@ fn remove(number: u64, label: &str) -> String {
 fn a_label_added_to_an_issue_reaches_only_the_pr_that_closes_it() {
     for label in ["land-needed", "answer-needed"] {
         let repo = Repo::new(&format!("issue-add-{label}"));
-        repo.set_issue(&[label]);
-        assert_status(&repo.mirror(&["7", label, "labeled"]), 0);
+        repo.set_changes(7, "100 labeled\n");
+        assert_status(&repo.mirror(&["7", label]), 0);
         assert_eq!(repo.writes(), [add(7, label), add(9, label)]);
     }
 }
@@ -170,8 +168,9 @@ fn a_label_added_to_an_issue_reaches_only_the_pr_that_closes_it() {
 #[test]
 fn a_label_removed_from_an_issue_leaves_its_pr() {
     let repo = Repo::new("issue-remove");
-    repo.set_issue(&[]);
-    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 0);
+    repo.set_changes(7, "100 labeled\n300 unlabeled\n");
+    repo.set_changes(9, "200 labeled\n");
+    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
     assert_eq!(
         repo.writes(),
         [remove(7, "land-needed"), remove(9, "land-needed")]
@@ -181,8 +180,8 @@ fn a_label_removed_from_an_issue_leaves_its_pr() {
 #[test]
 fn a_label_added_to_a_pr_reaches_its_issue() {
     let repo = Repo::new("pr-add");
-    repo.set_pr("OPEN", &["land-needed"]);
-    assert_status(&repo.mirror(&["9", "land-needed", "labeled"]), 0);
+    repo.set_changes(9, "100 labeled\n");
+    assert_status(&repo.mirror(&["9", "land-needed"]), 0);
     assert_eq!(
         repo.writes(),
         [add(9, "land-needed"), add(7, "land-needed")]
@@ -192,38 +191,50 @@ fn a_label_added_to_a_pr_reaches_its_issue() {
 #[test]
 fn clearing_answer_needed_on_a_pr_clears_its_issue() {
     let repo = Repo::new("pr-remove");
-    repo.set_pr("OPEN", &[]);
-    assert_status(&repo.mirror(&["9", "answer-needed", "unlabeled"]), 0);
+    repo.set_changes(7, "100 labeled\n");
+    repo.set_changes(9, "200 unlabeled\n");
+    assert_status(&repo.mirror(&["9", "answer-needed"]), 0);
     assert_eq!(
         repo.writes(),
         [remove(9, "answer-needed"), remove(7, "answer-needed")]
     );
 }
 
-/// The issue was labeled, and the owner cleared the PR before that run
-/// started. The issue's run still sees the label on the issue and puts it back
-/// on the PR. The PR's run comes next, and has to clear both sides.
+/// The issue was labeled, then the owner cleared the PR. The issue's run can
+/// start before the PR's, after it, or again later, and each one clears both
+/// sides.
 #[test]
 fn a_label_cleared_while_an_older_run_waits_stays_cleared() {
     let repo = Repo::new("race");
-    repo.set_issue(&["land-needed"]);
-    repo.set_pr("OPEN", &[]);
-    assert_status(&repo.mirror(&["7", "land-needed", "labeled"]), 0);
-    repo.set_pr("OPEN", &["land-needed"]);
-    fs::remove_file(repo.bin.join("calls")).unwrap();
-    assert_status(&repo.mirror(&["9", "land-needed", "unlabeled"]), 0);
-    assert_eq!(
-        repo.writes(),
-        [remove(9, "land-needed"), remove(7, "land-needed")]
-    );
+    repo.set_changes(7, "100 labeled\n");
+    repo.set_changes(9, "200 unlabeled\n");
+    for number in ["7", "9", "7"] {
+        fs::write(repo.bin.join("calls"), "").unwrap();
+        assert_status(&repo.mirror(&[number, "land-needed"]), 0);
+        let (first, second) = if number == "7" { (7, 9) } else { (9, 7) };
+        assert_eq!(
+            repo.writes(),
+            [remove(first, "land-needed"), remove(second, "land-needed")],
+            "run for {number}"
+        );
+    }
+}
+
+/// Only `mirror` itself has changed the label, and the bots' events are
+/// filtered out.
+#[test]
+fn a_label_no_person_changed_is_left_alone() {
+    let repo = Repo::new("no-changes");
+    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
+    assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
 #[test]
 fn an_issue_with_no_open_pr_keeps_the_label_alone() {
     let repo = Repo::new("no-pr");
-    repo.set_issue(&["answer-needed"]);
+    repo.set_changes(7, "100 labeled\n");
     repo.set_open_prs(&[]);
-    assert_status(&repo.mirror(&["7", "answer-needed", "labeled"]), 0);
+    assert_status(&repo.mirror(&["7", "answer-needed"]), 0);
     assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
@@ -231,8 +242,9 @@ fn an_issue_with_no_open_pr_keeps_the_label_alone() {
 fn a_closed_pr_changes_nothing() {
     for state in ["CLOSED", "MERGED"] {
         let repo = Repo::new(&format!("closed-{state}"));
-        repo.set_pr(state, &[]);
-        assert_status(&repo.mirror(&["9", "land-needed", "unlabeled"]), 0);
+        repo.set_pr(state);
+        repo.set_changes(9, "100 unlabeled\n");
+        assert_status(&repo.mirror(&["9", "land-needed"]), 0);
         assert!(repo.writes().is_empty(), "{}", repo.calls());
     }
 }
@@ -241,7 +253,7 @@ fn a_closed_pr_changes_nothing() {
 fn no_other_label_is_copied() {
     for label in ["spec-change", "in-progress", "auto:merge", "land-needed2"] {
         let repo = Repo::new(&format!("other-{}", label.replace(':', "-")));
-        assert_status(&repo.mirror(&["7", label, "labeled"]), 0);
+        assert_status(&repo.mirror(&["7", label]), 0);
         assert_eq!(repo.calls(), "");
     }
 }
@@ -250,33 +262,39 @@ fn no_other_label_is_copied() {
 #[test]
 fn removing_a_label_that_is_already_gone_passes() {
     let repo = Repo::new("already-gone");
-    repo.set_issue(&[]);
+    repo.set_changes(7, "100 unlabeled\n");
     fs::write(
         repo.bin.join("delete-error"),
         "gh: Label does not exist (HTTP 404)\n",
     )
     .unwrap();
-    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 0);
+    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
 }
 
 #[test]
 fn a_failed_write_is_an_error() {
     let repo = Repo::new("write-fails");
-    repo.set_issue(&[]);
+    repo.set_changes(7, "100 unlabeled\n");
     fs::write(
         repo.bin.join("delete-error"),
         "gh: Resource not accessible (HTTP 403)\n",
     )
     .unwrap();
-    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 2);
+    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
+}
+
+#[test]
+fn unreadable_events_are_an_error_and_write_nothing() {
+    let repo = Repo::new("bad-events");
+    repo.set_changes(7, "100 transferred\n");
+    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
+    assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
 #[test]
 fn bad_arguments_are_errors_and_call_nothing() {
     let repo = Repo::new("bad-args");
-    assert_status(&repo.mirror(&["seven", "land-needed", "labeled"]), 2);
-    assert_status(&repo.mirror(&["7", "land-needed", "edited"]), 2);
-    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
+    assert_status(&repo.mirror(&["seven", "land-needed"]), 2);
     assert_status(&repo.mirror(&["7"]), 2);
     assert_eq!(repo.calls(), "");
 }

@@ -156,6 +156,27 @@ impl Gh {
         Ok(value.get("pull_request").is_some())
     }
 
+    /// The changes people made to `label` on an issue or PR, as event ids and
+    /// whether each one added it. Event ids grow over time across the whole
+    /// repository. Bots' events, such as `mirror`'s own writes, are left out.
+    pub fn label_changes(&self, number: u64, label: &str) -> Result<Vec<(u64, bool)>, Problem> {
+        let path = format!("{ISSUES}/{number}/events");
+        let filter = format!(
+            r#".[] | select(.event == "labeled" or .event == "unlabeled") | select(.label.name == "{label}" and .actor.type != "Bot") | "\(.id) \(.event)""#
+        );
+        let text = self.text(&["api", &path, "--paginate", "--jq", &filter], None)?;
+        text.lines()
+            .map(|line| {
+                match line.split_once(' ') {
+                    Some((id, "labeled")) => id.parse().ok().map(|id| (id, true)),
+                    Some((id, "unlabeled")) => id.parse().ok().map(|id| (id, false)),
+                    _ => None,
+                }
+                .ok_or_else(|| unexpected("gh api"))
+            })
+            .collect()
+    }
+
     /// The open PRs that GitHub will close this issue with, from any closing
     /// word.
     pub fn open_prs_closing(&self, issue: u64) -> Result<Vec<u64>, Problem> {

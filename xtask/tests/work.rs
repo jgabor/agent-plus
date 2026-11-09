@@ -556,7 +556,7 @@ fn next_takes_no_arguments() {
 #[test]
 fn a_failing_gh_is_a_problem() {
     let repo = Repo::new("gh-fails", &[]);
-    fs::write(repo.bin.join("gh"), "#!/bin/sh\necho nope >&2\nexit 1\n").unwrap();
+    common::write_tool(&repo.bin.join("gh"), "#!/bin/sh\necho nope >&2\nexit 1\n");
     let output = repo.xtask(&["next"]);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("nope"), "{}", stderr(&output));

@@ -1234,27 +1234,33 @@ fn mutation_stops_at_its_limit_and_keeps_what_it_found() {
     );
 }
 
-/// What the escaped process runs, so that a reused pid can't pass for it.
-const ESCAPED: &[u8] = b"sleep\x003607\x00";
-
-/// The process, group, and session of a process, as the fake recorded them.
-fn ids(repo: &Repo, name: &str) -> Vec<u32> {
+/// The ids of a process, as the fake recorded them: its pid, group, session,
+/// and start time.
+fn ids(repo: &Repo, name: &str) -> Vec<u64> {
     repo.read_bin(name)
         .split_whitespace()
         .map(|id| id.parse().unwrap())
         .collect()
 }
 
-fn is_escaped_alive(pid: u32) -> bool {
-    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| line == ESCAPED)
+/// The state and start time from `/proc/<pid>/stat`, which `exec` keeps.
+fn stat(pid: u64) -> Option<(String, u64)> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields: Vec<&str> = text.rsplit_once(')')?.1.split_whitespace().collect();
+    Some((fields[0].to_string(), fields[19].parse().ok()?))
+}
+
+/// The start time tells the process from a later one given the same pid.
+fn is_alive(pid: u64, start: u64) -> bool {
+    stat(pid).is_some_and(|(state, started)| started == start && state != "Z")
 }
 
 /// Kills the escaped process if the test ends with it still alive.
-struct Reap(u32);
+struct Reap(u64, u64);
 
 impl Drop for Reap {
     fn drop(&mut self) {
-        if is_escaped_alive(self.0) {
+        if is_alive(self.0, self.1) {
             let _ = Command::new("kill")
                 .args(["-KILL", &self.0.to_string()])
                 .status();
@@ -1270,7 +1276,7 @@ fn a_real_scope_stops_a_process_that_left_the_job_group() {
     let repo = Repo::new("real-scope");
     fs::remove_file(repo.bin.join("systemd-run")).unwrap();
     repo.set_mutants(
-        r#"setsid sh -c 'echo $$ $(ps -o pgid=,sid= -p $$) > "$1/escaped.new"
+        r#"setsid sh -c 'echo $$ $(ps -o pgid=,sid= -p $$) $(cut -d")" -f2 /proc/$$/stat | cut -d" " -f21) > "$1/escaped.new"
 mv "$1/escaped.new" "$1/escaped"
 exec sleep 3607' sh "$d" </dev/null >/dev/null 2>&1 &
 while [ ! -e "$d/escaped" ]; do sleep 0.1; done
@@ -1287,7 +1293,7 @@ sleep 30
         .output()
         .unwrap();
     let escaped = ids(&repo, "escaped");
-    let _reap = Reap(escaped[0]);
+    let _reap = Reap(escaped[0], escaped[3]);
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "{:?}",
@@ -1298,11 +1304,11 @@ sleep 30
     assert_ne!(escaped[1], job[1], "it left the job's group");
     assert_ne!(escaped[2], job[2], "it left the job's session");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while is_escaped_alive(escaped[0]) && Instant::now() < deadline {
+    while is_alive(escaped[0], escaped[3]) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
-        !is_escaped_alive(escaped[0]),
+        !is_alive(escaped[0], escaped[3]),
         "process {} outlived the job's limit",
         escaped[0]
     );

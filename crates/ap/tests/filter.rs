@@ -130,11 +130,14 @@ fn removing_a_sequence_closes_a_string_it_would_have_ended() {
     assert_filters(b"\x1b]0;a\x1b[21tb", b"\x1b]0;a\x1b\\b");
     assert_filters(b"\x1bP1|a\x1bP$qm\x1b\\b", b"\x1bP1|a\x1b\\b");
     assert_filters(b"\x1b]0;a\x1b[1m\x1b[21tb", b"\x1b]0;a\x1b[1m\x1b\\b");
+    // BEL ends an OSC but not a DCS, so it never counts as an end.
+    assert_filters(b"\x1bP1|a\x07\x1b[21tb", b"\x1bP1|a\x07\x1b\\b");
+    assert_filters(b"\x1b_a\x1b[21tb", b"\x1b_a\x1b\\b");
+    assert_filters(b"\x98a\x1b[21tb", b"\x98a\x1b\\b");
 }
 
 #[test]
 fn a_string_already_ended_is_not_closed_again() {
-    assert_filters(b"\x1b]0;a\x07\x1b[21tb", b"\x1b]0;a\x07b");
     assert_filters(b"\x1b]0;a\x1b\\\x1b[21tb", b"\x1b]0;a\x1b\\b");
     assert_filters(b"\x1b]0;a\x18\x1b[21tb", b"\x1b]0;a\x18b");
 }

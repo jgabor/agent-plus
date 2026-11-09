@@ -112,22 +112,23 @@ impl Mode {
 
 /// The whole sequence, under the rules for an agent.
 pub fn run(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Merge)
+    sequence(pr, Mode::Merge, false)
 }
 
 /// The sequence up to the squash, which is the owner's. It also takes what
-/// only the owner can accept, and says so on the PR.
-pub fn prepare(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Prepare)
+/// only the owner can accept, and says so on the PR. With `keep_budgets` it
+/// runs no bench, and the new record keeps what the branch's record measured.
+pub fn prepare(pr: &str, keep_budgets: bool) -> Result<Verdict, Problem> {
+    sequence(pr, Mode::Prepare, keep_budgets)
 }
 
 /// `prepare`, then the squash, in one hold of the merge slot. It stops short
 /// of the squash if merging would accept something, so the owner reads it.
 pub fn land(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Land)
+    sequence(pr, Mode::Land, false)
 }
 
-fn sequence(pr: &str, mode: Mode) -> Result<Verdict, Problem> {
+fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem> {
     let command = mode.command();
     let prepare = mode != Mode::Merge;
     let number: u64 = pr
@@ -171,6 +172,17 @@ fn sequence(pr: &str, mode: Mode) -> Result<Verdict, Problem> {
             post_failure(&gh, &fetched.branch);
         }
     };
+    let kept = if keep_budgets {
+        if !record_at_tip(&tree.path, issue)? {
+            unproven();
+            return refuse(&format!(
+                "the tip of PR {number} has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare {number}`"
+            ));
+        }
+        Some(ledger::read(&tree.path, issue as usize).inspect_err(|_| unproven())?)
+    } else {
+        None
+    };
     drop_earlier_record(&tree.path, issue)?;
     if !rebase(&tree.path, &fetched.main)? {
         unproven();
@@ -183,6 +195,7 @@ fn sequence(pr: &str, mode: Mode) -> Result<Verdict, Problem> {
         prepare,
         pr: &pr,
         gated: &gated,
+        kept: kept.as_ref(),
     };
     let proof = prove(&tree.path, &scoring).inspect_err(|_| unproven())?;
     let Some(Proof { record, accepted }) = proof else {
@@ -276,7 +289,7 @@ fn use_the_newest_checks(root: &Path, number: u64) -> Result<Option<Verdict>, Pr
 
 /// For the git commands that answer yes or no by exiting 0 or 1. Anything else
 /// is git failing, which isn't a no.
-fn exit_code(root: &Path, args: &[&str]) -> Result<i32, Problem> {
+pub fn exit_code(root: &Path, args: &[&str]) -> Result<i32, Problem> {
     let output = base::git(root, args)?;
     match output.status.code() {
         Some(code @ (0 | 1)) => Ok(code),
@@ -289,7 +302,7 @@ fn exit_code(root: &Path, args: &[&str]) -> Result<i32, Problem> {
 }
 
 /// A status that can't be posted leaves the verdict as it is.
-fn post_failure(gh: &Gh, commit: &str) {
+pub fn post_failure(gh: &Gh, commit: &str) {
     if let Err(Problem(message)) = gh.post_status(commit, "xtask/gate", "failure") {
         eprintln!("merge: couldn't post `xtask/gate` on {commit}: {message}");
     }
@@ -318,14 +331,14 @@ fn start_timeout() {
 }
 
 /// The commits the merge started from.
-struct Fetched {
-    main: String,
-    branch: String,
+pub struct Fetched {
+    pub main: String,
+    pub branch: String,
 }
 
 /// Updates the two remote-tracking branches, and says where they are now.
 /// Other worktrees can fetch too, so the merge doesn't read these refs again.
-fn fetch(root: &Path, branch: &str) -> Result<Fetched, Problem> {
+pub fn fetch(root: &Path, branch: &str) -> Result<Fetched, Problem> {
     let remote = format!("refs/remotes/origin/{branch}");
     let main = format!("+refs/heads/main:{MAIN}");
     let spec = format!("+refs/heads/{branch}:{remote}");
@@ -342,7 +355,7 @@ fn fetch(root: &Path, branch: &str) -> Result<Fetched, Problem> {
 }
 
 /// Where a ref is on GitHub now, or `None` if it isn't there.
-fn remote_commit(root: &Path, name: &str) -> Result<Option<String>, Problem> {
+pub fn remote_commit(root: &Path, name: &str) -> Result<Option<String>, Problem> {
     let listing = base::git_text(root, &["ls-remote", "origin", name])?;
     Ok(listing.split_whitespace().next().map(str::to_string))
 }
@@ -445,12 +458,17 @@ fn head(tree: &Path) -> Result<String, Problem> {
 /// A record at the tip came from an earlier attempt. It describes a head that
 /// is about to change, and the merge writes a new one.
 fn drop_earlier_record(tree: &Path, issue: u64) -> Result<(), Problem> {
-    let args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"];
-    let touched = base::git_text(tree, &args)?;
-    if touched.trim() == ledger::path(issue as usize) {
+    if record_at_tip(tree, issue)? {
         base::git_text(tree, &["reset", "-q", "--hard", "HEAD~1"])?;
     }
     Ok(())
+}
+
+/// Whether the newest commit does nothing but write this issue's record.
+fn record_at_tip(tree: &Path, issue: u64) -> Result<bool, Problem> {
+    let args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"];
+    let touched = base::git_text(tree, &args)?;
+    Ok(touched.trim() == ledger::path(issue as usize))
 }
 
 /// Whether the rebase worked. A failed one is left for the worktree's removal
@@ -469,6 +487,8 @@ struct Scoring<'a> {
     prepare: bool,
     pr: &'a PullRequest,
     gated: &'a str,
+    /// The record whose budgets stand in for a bench.
+    kept: Option<&'a Record>,
 }
 
 /// What the proof earned, and what merging it accepts.
@@ -500,6 +520,7 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
     if !revert
+        && scoring.kept.is_none()
         && budget_can_change(tree, &commit)?
         && bench::compare(tree, Some(&pr.body))? == Verdict::Fail
     {
@@ -511,7 +532,7 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
         passing,
         steps,
     };
-    let record = ledger::compose(
+    let mut record = ledger::compose(
         tree,
         scoring.issue as usize,
         scoring.number as usize,
@@ -519,6 +540,10 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
         Some(&commit),
         scores,
     )?;
+    if let Some(kept) = scoring.kept {
+        record.budgets.extend(kept.budgets.clone());
+        record.reason = kept.reason.clone();
+    }
     let Some(mut accepted) = compare_counts(tree, &commit, &record, scoring)? else {
         return Ok(None);
     };

@@ -265,6 +265,14 @@ pub fn store(root: &Path, record: &Record) -> Result<String, Problem> {
     Ok(path)
 }
 
+/// The record for this issue that the tree holds.
+pub fn read(root: &Path, issue: usize) -> Result<Record, Problem> {
+    let path = path(issue);
+    let text = fs::read_to_string(root.join(&path))
+        .map_err(|e| Problem(format!("couldn't read {path}: {e}")))?;
+    Record::parse(&text).map_err(|e| Problem(format!("{path}: {e}")))
+}
+
 /// How the tree differs from HEAD, leaving out the ledger, where an earlier
 /// attempt at a record may be. Empty means it doesn't.
 pub fn changes(root: &Path) -> Result<String, Problem> {

@@ -322,7 +322,7 @@ Files outside any single lane follow these rules:
 | `harness/ledger/` | One new file per merge |
 | `harness/waived.txt` | Changed only by `spec-change` PRs, with union merge through `.gitattributes` |
 | `harness/journey/` | Step scripts, which any PR may change |
-| `xtask/`, and the rest of `harness/` | Changed only by `spec-change` PRs, so a PR can't weaken its own gate |
+| `xtask/`, `.github/`, and the rest of `harness/` | Changed only by `spec-change` PRs, so a PR can't weaken its own gate |
 | `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
 
 The gate fails when a diff touches one of these `spec-change` paths and its PR
@@ -428,7 +428,8 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id as JSON, and exits 1 if another claim wins |
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
 | `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
-| `cargo xtask prepare <pr>` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
+| `cargo xtask prepare <pr> [--keep-budgets]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
+| `cargo xtask refresh` | Runs the [refresh](#refresh) of `land-needed` PRs that are behind `main` |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
@@ -525,7 +526,7 @@ merge can't keep the slot.
 `cargo xtask merge` runs every step. `cargo xtask prepare` stops before the
 squash, and leaves the owner a complete PR to merge with any button. `cargo
 xtask land` follows `prepare`'s rules, and goes on through the squash. Only
-these three commands post `xtask/gate`, so green means complete.
+these three commands post a green `xtask/gate`, so green means complete.
 
 `land` takes the merge slot first, and then makes sure the newest checks run,
 because xtask compiles from the checkout. If `main` is behind `origin/main`, it
@@ -564,9 +565,27 @@ moved before the owner merged, the record is skipped as a floor, and the
 nightly report lists that commit under "Not in the ledger". Records from before
 `base` existed have none, and are trusted.
 
-`xtask/gate` is the only check. Branch protection isn't available on this
-repository's plan, so `xtask merge` enforces the sequence, not GitHub. The
-nightly job reports any commit on `main` with no ledger record.
+`xtask/gate` is the only check. `xtask merge` enforces the sequence, not
+GitHub. The nightly job reports any commit on `main` with no ledger record.
+
+### Refresh
+
+A workflow runs `cargo xtask refresh` on every push to `main`, one run at a
+time, with `xtask` built from `main`. GitHub-hosted x86_64 runners can run the
+VMM, once a udev rule opens KVM and a systemd user session is started.
+
+1. Find each open PR whose issue has `land-needed` and that is behind `main`,
+   oldest first. A PR that isn't behind is left alone.
+2. Post `pending` as `xtask/gate` on each.
+3. Run `cargo xtask prepare <pr> --keep-budgets` for each as its own process.
+   It runs no bench, because a shared runner can't measure a budget. The new
+   record keeps the budget values and reason of the record at the tip of the
+   branch, and `prepare` fails if the tip has none.
+4. Try every PR. A PR that fails gets `failure` and stays `land-needed`, and
+   the command exits 1.
+
+If `main` moves during a proof, that PR goes red until the run the new push
+started proves it again.
 
 ### Nightly job
 
@@ -648,8 +667,8 @@ passes. No scheduled work runs on GitHub.
 ## Owner actions
 
 - Add `auto:*` labels to top-level issues.
-- Merge `spec-change` PRs, which cover SPEC.md, `xtask/`, and `harness/`, with
-  any merge button once `xtask/gate` is green.
+- Merge `spec-change` PRs, which cover SPEC.md, `xtask/`, `.github/`, and
+  `harness/`, with any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
 - Or run `cargo xtask land <pr>`, which proves the PR and squashes it. It stops

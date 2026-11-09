@@ -243,8 +243,9 @@ maybe_kill before
         let gh = format!(
             r#"{prelude}case "$1 $2" in
   "repo view") echo '{{"nameWithOwner":"o/r"}}' ;;
-  "pr view") if [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
-  "pr list") echo '[]' ;;
+  "pr view") if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
+  "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
+  "issue list") cat '{bin}/issues.json' ;;
   "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
   "issue view") cat '{bin}/issue.json' ;;
@@ -1861,4 +1862,290 @@ fn land_takes_one_pr() {
         assert!(stderr(&output).contains("`land` takes"), "{args:?}");
     }
     assert!(!repo.calls().contains("gh "), "{}", repo.calls());
+}
+
+/// One row of `gh pr list`.
+fn listed(number: u64, branch: &str, head: &str, closes: u64, fork: bool) -> String {
+    format!(
+        "{{\"number\":{number},\"url\":\"https://github.com/o/r/pull/{number}\",\"isCrossRepository\":{fork},\"headRefName\":{},\"headRefOid\":{},\"closingIssuesReferences\":[{{\"number\":{closes},\"url\":\"https://github.com/o/r/issues/{closes}\"}}]}}",
+        quoted(branch),
+        quoted(head)
+    )
+}
+
+const KEPT: &str = "version_ms = 12.5\n";
+
+fn status(head: &str, state: &str) -> String {
+    format!(
+        "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state={state} -f context=xtask/gate"
+    )
+}
+
+impl Repo {
+    fn set_open_prs(&self, rows: &[String]) {
+        fs::write(self.bin.join("prs.json"), format!("[{}]\n", rows.join(","))).unwrap();
+    }
+
+    /// Which open issues have `land-needed`. Issue 2 has another label.
+    fn set_land_needed(&self, issues: &[u64]) {
+        let mut rows = vec![
+            "{\"number\":2,\"title\":\"t\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}"
+                .to_string(),
+        ];
+        rows.extend(issues.iter().map(|number| {
+            format!("{{\"number\":{number},\"title\":\"t\",\"labels\":[{{\"name\":\"land-needed\"}}],\"isPinned\":false}}")
+        }));
+        fs::write(
+            self.bin.join("issues.json"),
+            format!("[{}]\n", rows.join(",")),
+        )
+        .unwrap();
+    }
+
+    /// A branch for another PR, cut from `main`. `pr` is what `gh pr view` says.
+    fn other_pr(&self, number: u64, branch: &str, pr: &Pr) {
+        self.git(&["checkout", "-q", "main"]);
+        self.git(&["checkout", "-q", "-b", branch]);
+        self.write(&format!("{branch}.txt"), "x\n");
+        self.commit();
+        self.git(&["push", "-q", "origin", branch]);
+        self.git(&["checkout", "-q", BRANCH]);
+        let json = pr_json(pr, pr.state).replace(BRANCH, branch);
+        fs::write(self.bin.join(format!("pr-{number}.json")), json).unwrap();
+    }
+
+    /// Adds the record that an earlier `prepare` leaves at the tip of a branch.
+    fn prepared(&self, branch: &str, issue: u64, reason: &str) {
+        self.git(&["checkout", "-q", branch]);
+        let record =
+            record(0, 1, KEPT).replace("reason = \"\"", &format!("reason = {}", quoted(reason)));
+        self.write(&format!("harness/ledger/{issue}.toml"), &record);
+        self.commit();
+        self.git(&["push", "-q", "origin", branch]);
+        self.git(&["checkout", "-q", BRANCH]);
+    }
+
+    fn head_of(&self, branch: &str) -> String {
+        self.origin(&["rev-parse", &format!("refs/heads/{branch}")])
+    }
+
+    fn refresh(&self) -> Output {
+        self.xtask(&["refresh"])
+    }
+}
+
+#[test]
+fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
+    let repo = Repo::new("refresh");
+    repo.other_pr(
+        5,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            ..Pr::default()
+        },
+    );
+    repo.other_pr(
+        6,
+        "2-z",
+        &Pr {
+            closes: &[2],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    repo.prepared("8-y", 8, "");
+    repo.advance_main("later.txt", "x\n");
+    // Cut from the new `main`, so it isn't behind.
+    repo.other_pr(
+        4,
+        "6-up",
+        &Pr {
+            closes: &[6],
+            ..Pr::default()
+        },
+    );
+    repo.prepared("6-up", 6, "");
+    let before: Vec<String> = [BRANCH, "8-y", "2-z", "6-up"]
+        .iter()
+        .map(|branch| repo.head_of(branch))
+        .collect();
+    repo.set_open_prs(&[
+        listed(9, BRANCH, &before[0], 7, false),
+        listed(4, "6-up", &before[3], 6, false),
+        listed(6, "2-z", &before[2], 2, false),
+        listed(5, "8-y", &before[1], 8, false),
+    ]);
+    repo.set_land_needed(&[6, 7, 8]);
+    repo.forget_calls();
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    let at = |text: &str| {
+        calls
+            .find(text)
+            .unwrap_or_else(|| panic!("no `{text}` in:\n{calls}"))
+    };
+    let green_five = at(&status(&repo.head_of("8-y"), "success"));
+    let green_nine = at(&status(&repo.head_of(BRANCH), "success"));
+    assert!(at(&status(&before[1], "pending")) < at(&status(&before[0], "pending")));
+    assert!(at(&status(&before[0], "pending")) < green_five, "{calls}");
+    assert!(green_five < green_nine, "{calls}");
+    for (branch, head) in [("2-z", &before[2]), ("6-up", &before[3])] {
+        assert_eq!(&repo.head_of(branch), head);
+        assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
+    }
+}
+
+#[test]
+fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
+    let repo = Repo::new("refresh-fails");
+    repo.other_pr(
+        5,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            reviews: &[("a", "CHANGES_REQUESTED")],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    repo.prepared("8-y", 8, "");
+    repo.advance_main("later.txt", "x\n");
+    let (nine, five) = (repo.head_of(BRANCH), repo.head_of("8-y"));
+    repo.set_open_prs(&[
+        listed(5, "8-y", &five, 8, false),
+        listed(9, BRANCH, &nine, 7, false),
+    ]);
+    repo.set_land_needed(&[7, 8]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&status(&five, "failure")), "{calls}");
+    assert_eq!(repo.head_of("8-y"), five);
+    assert!(
+        calls.contains(&status(&repo.head_of(BRANCH), "success")),
+        "{calls}"
+    );
+}
+
+/// A fork's branch isn't in this repository, and `prepare` refuses it.
+#[test]
+fn a_refresh_runs_nothing_from_a_fork() {
+    let repo = Repo::new("refresh-fork");
+    repo.set_pr(&Pr {
+        fork: true,
+        ..Pr::default()
+    });
+    let head = "a".repeat(40);
+    repo.set_open_prs(&[listed(9, "patch", &head, 7, true)]);
+    repo.set_land_needed(&[7]);
+    repo.forget_calls();
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&status(&head, "pending")), "{calls}");
+    assert!(calls.contains(&status(&head, "failure")), "{calls}");
+    assert!(!calls.contains("worktree add"), "{calls}");
+}
+
+#[test]
+fn a_refresh_keeps_the_branchs_budgets_and_runs_no_bench() {
+    let base = record(0, 1, "version_ms = 99\n");
+    let repo = Repo::with(
+        "refresh-budgets",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("crates/ap/src/main.rs", SLOW)],
+    );
+    repo.prepared(BRANCH, 7, "worth it");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(!stdout(&output).contains("bench:"), "{}", stdout(&output));
+    let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
+    assert!(record.contains(KEPT.trim_end()), "{record}");
+    assert!(record.contains("reason = \"worth it\"\n"), "{record}");
+    let main = repo.origin(&["rev-parse", "refs/heads/main"]);
+    assert!(record.contains(&format!("base = \"{main}\"\n")), "{record}");
+}
+
+/// Commits after the record mean that it doesn't describe this branch.
+#[test]
+fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
+    let repo = Repo::new("refresh-no-record");
+    repo.prepared(BRANCH, 7, "");
+    repo.change_branch("more.txt", "x\n");
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("no ledger record"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(repo.head(), head);
+    assert!(
+        repo.calls().contains(&status(&head, "failure")),
+        "{}",
+        repo.calls()
+    );
+}
+
+#[test]
+fn a_change_to_github_workflows_needs_the_label() {
+    let repo = Repo::new("protected-github");
+    repo.change_branch(".github/workflows/x.yml", "name: x\n");
+    let output = repo.prepare();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("fail labels"),
+        "{}",
+        stdout(&output)
+    );
+
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    assert_prepared(&repo, &repo.prepare());
 }

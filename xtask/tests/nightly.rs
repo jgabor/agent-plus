@@ -1234,6 +1234,80 @@ fn mutation_stops_at_its_limit_and_keeps_what_it_found() {
     );
 }
 
+/// What the escaped process runs, so that a reused pid can't pass for it.
+const ESCAPED: &[u8] = b"sleep\x003607\x00";
+
+/// The process, group, and session of a process, as the fake recorded them.
+fn ids(repo: &Repo, name: &str) -> Vec<u32> {
+    repo.read_bin(name)
+        .split_whitespace()
+        .map(|id| id.parse().unwrap())
+        .collect()
+}
+
+fn is_escaped_alive(pid: u32) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|line| line == ESCAPED)
+}
+
+/// Kills the escaped process if the test ends with it still alive.
+struct Reap(u32);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        if is_escaped_alive(self.0) {
+            let _ = Command::new("kill")
+                .args(["-KILL", &self.0.to_string()])
+                .status();
+        }
+    }
+}
+
+/// The fake `systemd-run` kills a process group, which a process can leave.
+/// `cargo mutants` starts its workers in groups of their own, so only a real
+/// scope contains them. This job starts one in a new session and group.
+#[test]
+fn a_real_scope_stops_a_process_that_left_the_job_group() {
+    let repo = Repo::new("real-scope");
+    fs::remove_file(repo.bin.join("systemd-run")).unwrap();
+    repo.set_mutants(
+        r#"setsid sh -c 'echo $$ $(ps -o pgid=,sid= -p $$) > "$1/escaped.new"
+mv "$1/escaped.new" "$1/escaped"
+exec sleep 3607' sh "$d" </dev/null >/dev/null 2>&1 &
+while [ ! -e "$d/escaped" ]; do sleep 0.1; done
+echo $$ $(ps -o pgid=,sid= -p $$) > "$d/job"
+sleep 30
+"#,
+    );
+    repo.touch(&["ap"]);
+    let started = Instant::now();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .env("XTASK_MUTATION_SECONDS", "1")
+        .output()
+        .unwrap();
+    let escaped = ids(&repo, "escaped");
+    let _reap = Reap(escaped[0]);
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let job = ids(&repo, "job");
+    assert_ne!(escaped[1], job[1], "it left the job's group");
+    assert_ne!(escaped[2], job[2], "it left the job's session");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_escaped_alive(escaped[0]) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !is_escaped_alive(escaped[0]),
+        "process {} outlived the job's limit",
+        escaped[0]
+    );
+}
+
 #[test]
 fn mutation_that_cant_test_the_baseline_fails() {
     let repo = Repo::new("baseline");

@@ -5,6 +5,8 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use guest::linux::{self, Linux};
@@ -152,14 +154,26 @@ pub fn boot_bare(timeout: Duration) -> Result<(), Error> {
         files: &files,
         timeout,
     };
-    boot(&guest, |release| {
-        // A closed stdout shouldn't take the VM down with a panic.
-        let _ = writeln!(io::stdout(), "{release}");
-    })
+    // Printing has its own thread, so that a stdout nobody reads can't hold
+    // the VM past its timeout.
+    let (sender, receiver) = mpsc::channel::<String>();
+    let printer = thread::spawn(move || {
+        if let Ok(release) = receiver.recv() {
+            let _ = writeln!(io::stdout(), "{release}");
+        }
+    });
+    let result = boot(&guest, move |release| {
+        let _ = sender.send(release.to_owned());
+    });
+    if result.is_ok() {
+        let _ = printer.join();
+    }
+    result
 }
 
 /// Boots `guest`, calls `on_ready` with the kernel release its init reports,
-/// and returns once the machine has powered off.
+/// and returns once the machine has powered off. `on_ready` runs on the vCPU
+/// thread, so it must not block, or the timeout can't stop the guest.
 ///
 /// The VM lives inside this call, on this thread. When it returns, for any
 /// reason, the VM is gone.

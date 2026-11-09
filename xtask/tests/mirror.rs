@@ -162,8 +162,8 @@ fn a_label_added_to_an_issue_reaches_only_the_pr_that_closes_it() {
     for label in ["land-needed", "answer-needed"] {
         let repo = Repo::new(&format!("issue-add-{label}"));
         repo.set_issue(&[label]);
-        assert_status(&repo.mirror(&["7", label]), 0);
-        assert_eq!(repo.writes(), [add(9, label)]);
+        assert_status(&repo.mirror(&["7", label, "labeled"]), 0);
+        assert_eq!(repo.writes(), [add(7, label), add(9, label)]);
     }
 }
 
@@ -171,24 +171,51 @@ fn a_label_added_to_an_issue_reaches_only_the_pr_that_closes_it() {
 fn a_label_removed_from_an_issue_leaves_its_pr() {
     let repo = Repo::new("issue-remove");
     repo.set_issue(&[]);
-    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
-    assert_eq!(repo.writes(), [remove(9, "land-needed")]);
+    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [remove(7, "land-needed"), remove(9, "land-needed")]
+    );
 }
 
 #[test]
 fn a_label_added_to_a_pr_reaches_its_issue() {
     let repo = Repo::new("pr-add");
     repo.set_pr("OPEN", &["land-needed"]);
-    assert_status(&repo.mirror(&["9", "land-needed"]), 0);
-    assert_eq!(repo.writes(), [add(7, "land-needed")]);
+    assert_status(&repo.mirror(&["9", "land-needed", "labeled"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [add(9, "land-needed"), add(7, "land-needed")]
+    );
 }
 
 #[test]
 fn clearing_answer_needed_on_a_pr_clears_its_issue() {
     let repo = Repo::new("pr-remove");
     repo.set_pr("OPEN", &[]);
-    assert_status(&repo.mirror(&["9", "answer-needed"]), 0);
-    assert_eq!(repo.writes(), [remove(7, "answer-needed")]);
+    assert_status(&repo.mirror(&["9", "answer-needed", "unlabeled"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [remove(9, "answer-needed"), remove(7, "answer-needed")]
+    );
+}
+
+/// The issue was labeled, and the owner cleared the PR before that run
+/// started. The issue's run still sees the label on the issue and puts it back
+/// on the PR. The PR's run comes next, and has to clear both sides.
+#[test]
+fn a_label_cleared_while_an_older_run_waits_stays_cleared() {
+    let repo = Repo::new("race");
+    repo.set_issue(&["land-needed"]);
+    repo.set_pr("OPEN", &[]);
+    assert_status(&repo.mirror(&["7", "land-needed", "labeled"]), 0);
+    repo.set_pr("OPEN", &["land-needed"]);
+    fs::remove_file(repo.bin.join("calls")).unwrap();
+    assert_status(&repo.mirror(&["9", "land-needed", "unlabeled"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [remove(9, "land-needed"), remove(7, "land-needed")]
+    );
 }
 
 #[test]
@@ -196,7 +223,7 @@ fn an_issue_with_no_open_pr_keeps_the_label_alone() {
     let repo = Repo::new("no-pr");
     repo.set_issue(&["answer-needed"]);
     repo.set_open_prs(&[]);
-    assert_status(&repo.mirror(&["7", "answer-needed"]), 0);
+    assert_status(&repo.mirror(&["7", "answer-needed", "labeled"]), 0);
     assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
@@ -205,7 +232,7 @@ fn a_closed_pr_changes_nothing() {
     for state in ["CLOSED", "MERGED"] {
         let repo = Repo::new(&format!("closed-{state}"));
         repo.set_pr(state, &[]);
-        assert_status(&repo.mirror(&["9", "land-needed"]), 0);
+        assert_status(&repo.mirror(&["9", "land-needed", "unlabeled"]), 0);
         assert!(repo.writes().is_empty(), "{}", repo.calls());
     }
 }
@@ -214,7 +241,7 @@ fn a_closed_pr_changes_nothing() {
 fn no_other_label_is_copied() {
     for label in ["spec-change", "in-progress", "auto:merge", "land-needed2"] {
         let repo = Repo::new(&format!("other-{}", label.replace(':', "-")));
-        assert_status(&repo.mirror(&["7", label]), 0);
+        assert_status(&repo.mirror(&["7", label, "labeled"]), 0);
         assert_eq!(repo.calls(), "");
     }
 }
@@ -229,7 +256,7 @@ fn removing_a_label_that_is_already_gone_passes() {
         "gh: Label does not exist (HTTP 404)\n",
     )
     .unwrap();
-    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
+    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 0);
 }
 
 #[test]
@@ -241,13 +268,15 @@ fn a_failed_write_is_an_error() {
         "gh: Resource not accessible (HTTP 403)\n",
     )
     .unwrap();
-    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
+    assert_status(&repo.mirror(&["7", "land-needed", "unlabeled"]), 2);
 }
 
 #[test]
 fn bad_arguments_are_errors_and_call_nothing() {
     let repo = Repo::new("bad-args");
-    assert_status(&repo.mirror(&["seven", "land-needed"]), 2);
+    assert_status(&repo.mirror(&["seven", "land-needed", "labeled"]), 2);
+    assert_status(&repo.mirror(&["7", "land-needed", "edited"]), 2);
+    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
     assert_status(&repo.mirror(&["7"]), 2);
     assert_eq!(repo.calls(), "");
 }

@@ -1,24 +1,33 @@
 //! `cargo xtask mirror`: keeps a parking label the same on an issue and on the
 //! open PR that closes it.
 //!
-//! It copies what the side that changed says now, not what the event said, so
-//! a run that starts late still ends on the newest state, and a rerun is safe.
+//! It applies the event's change to both sides, not just the other one. Runs
+//! for one label on one issue go one at a time, so the last run carries the
+//! newest change, and it overwrites whatever an older run copied.
 
 use crate::forge::Gh;
 use crate::work::PARKED;
 use crate::{Problem, Verdict, workspace};
 
-pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
+pub fn run(number: &str, label: &str, action: &str) -> Result<Verdict, Problem> {
     let number: u64 = number
         .parse()
         .map_err(|_| Problem(format!("`mirror` takes a number, but got `{number}`")))?;
+    let present = match action {
+        "labeled" => true,
+        "unlabeled" => false,
+        _ => {
+            return Err(Problem(format!(
+                "`mirror` takes `labeled` or `unlabeled`, but got `{action}`"
+            )));
+        }
+    };
     if !PARKED.contains(&label) {
         println!("mirror: `{label}` isn't mirrored");
         return Ok(Verdict::Pass);
     }
     let gh = Gh::new(&workspace::root()?);
-    let changed = gh.labeled(number)?;
-    let others = if changed.is_pr {
+    let others = if gh.is_pr(number)? {
         let pr = gh.pull_request(number)?;
         if pr.state == "OPEN" {
             pr.closing_issues
@@ -28,17 +37,20 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
     } else {
         gh.open_prs_closing(number)?
     };
-    let present = changed.labels.iter().any(|name| name == label);
-    for other in &others {
+    if others.is_empty() {
+        println!("mirror: {number} has no other side for `{label}`");
+        return Ok(Verdict::Pass);
+    }
+    for item in std::iter::once(number).chain(others.iter().copied()) {
         if present {
-            gh.apply_label(*other, label)?;
+            gh.apply_label(item, label)?;
         } else {
-            gh.remove_label(*other, label)?;
+            gh.remove_label(item, label)?;
         }
     }
     println!(
-        "mirror: {number} {} `{label}`, copied to {others:?}",
-        if present { "has" } else { "lacks" }
+        "mirror: {} `{label}` on {number} and {others:?}",
+        if present { "applied" } else { "removed" }
     );
     Ok(Verdict::Pass)
 }

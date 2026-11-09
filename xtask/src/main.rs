@@ -50,8 +50,8 @@ commands:
                    rebase, gate, and record a PR, for the owner to merge
   refresh          prove each land-needed PR again that is behind main
   land <pr>        run prepare, then squash-merge the PR, for the owner
-  mirror <number> <label>
-                   copy a parking label from an issue or PR to its other side
+  mirror <number> <label> <labeled|unlabeled>
+                   apply a parking label's change to an issue and its PR
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -102,9 +102,9 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["refresh"] => refresh::run(),
         ["land", pr] => merge::land(pr),
         ["land", ..] => Err(Problem(format!("`land` takes `<pr>`\n\n{USAGE}"))),
-        ["mirror", number, label] => mirror::run(number, label),
+        ["mirror", number, label, action] => mirror::run(number, label, action),
         ["mirror", ..] => Err(Problem(format!(
-            "`mirror` takes `<number> <label>`\n\n{USAGE}"
+            "`mirror` takes `<number> <label> <labeled|unlabeled>`\n\n{USAGE}"
         ))),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");

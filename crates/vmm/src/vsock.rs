@@ -7,6 +7,7 @@
 use crate::memory::{GuestMemory, OutOfBounds};
 use crate::virtio::{Chain, Transport};
 use std::collections::{BTreeMap, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 
 const DEVICE_ID: u32 = 19;
 const QUEUE_SIZE: u16 = 256;
@@ -44,10 +45,13 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_CONTROL: usize = 256;
 
 /// One open connection, as the host names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Connection {
     guest_port: u32,
     host_port: u32,
+    /// Which device reset this belongs after, so that a handle kept across a
+    /// reset can't reach a new connection on the same ports.
+    generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -105,6 +109,8 @@ struct State {
     accepted: bool,
     owes_response: bool,
     owes_credit: bool,
+    /// The host asked for credit, and the guest hasn't given any since.
+    asked_for_credit: bool,
     inbound: VecDeque<u8>,
     outbound: VecDeque<u8>,
     /// What the guest last said it can hold, and has consumed.
@@ -135,7 +141,7 @@ impl State {
             && (self.owes_response
                 || self.owes_credit
                 || (self.outbound.is_empty() && self.host_closed && !self.shutdown_sent)
-                || (!self.outbound.is_empty() && self.credit() > 0))
+                || (!self.outbound.is_empty() && (self.credit() > 0 || !self.asked_for_credit)))
     }
 
     /// The next packet for the guest, with room for `room` payload bytes.
@@ -151,6 +157,10 @@ impl State {
         if len > 0 {
             self.tx_cnt = self.tx_cnt.wrapping_add(len as u32);
             return Some((OP_RW, 0, self.outbound.drain(..len).collect()));
+        }
+        if !self.outbound.is_empty() && self.credit() == 0 && !self.asked_for_credit {
+            self.asked_for_credit = true;
+            return Some((OP_CREDIT_REQUEST, 0, Vec::new()));
         }
         if self.outbound.is_empty() && self.host_closed && !self.shutdown_sent {
             self.shutdown_sent = true;
@@ -174,6 +184,9 @@ pub struct Vsock {
     listening: Vec<u32>,
     connections: BTreeMap<Connection, State>,
     control: VecDeque<Header>,
+    generation: u64,
+    /// The connection served last, so that sharing is fair across calls.
+    last_served: Connection,
 }
 
 impl Vsock {
@@ -192,6 +205,8 @@ impl Vsock {
             listening: listening.to_vec(),
             connections: BTreeMap::new(),
             control: VecDeque::new(),
+            generation: 0,
+            last_served: Connection::default(),
         }
     }
 
@@ -207,6 +222,7 @@ impl Vsock {
         if offset == STATUS && self.status() == 0 {
             self.connections.clear();
             self.control.clear();
+            self.generation += 1;
         }
         notified && self.service(memory)
     }
@@ -340,6 +356,7 @@ impl Vsock {
         let connection = Connection {
             guest_port: header.src_port,
             host_port: header.dst_port,
+            generation: self.generation,
         };
         if header.op == OP_REQUEST {
             self.open(connection, &header);
@@ -355,6 +372,9 @@ impl Vsock {
         };
         state.peer_buf_alloc = header.buf_alloc;
         state.peer_fwd_cnt = header.fwd_cnt;
+        if state.credit() > 0 {
+            state.asked_for_credit = false;
+        }
         match header.op {
             OP_RW => {
                 if !take_payload(memory, chain, state, &header, readable) {
@@ -383,8 +403,12 @@ impl Vsock {
     }
 
     fn open(&mut self, connection: Connection, header: &Header) {
+        // The guest thinks a reset ends the connection, so it has to.
+        if self.connections.contains_key(&connection) {
+            self.abort(connection, header);
+            return;
+        }
         if !self.listening.contains(&connection.host_port)
-            || self.connections.contains_key(&connection)
             || self.connections.len() >= MAX_CONNECTIONS
         {
             self.refuse(header);
@@ -433,6 +457,7 @@ impl Vsock {
             guest_cid,
             connections,
             control,
+            last_served,
             ..
         } = self;
         let Some(queue) = transport.queue(RX) else {
@@ -457,7 +482,15 @@ impl Vsock {
                 used = true;
                 progress = true;
             }
-            for (connection, state) in connections.iter_mut() {
+            let order: Vec<Connection> = connections
+                .range((Excluded(*last_served), Unbounded))
+                .chain(connections.range(..=*last_served))
+                .map(|(connection, _)| *connection)
+                .collect();
+            for connection in order {
+                let Some(state) = connections.get_mut(&connection) else {
+                    continue;
+                };
                 if !state.has_packet() {
                     continue;
                 }
@@ -488,6 +521,7 @@ impl Vsock {
                 if queue.add_used(memory, chain.head, len).is_err() {
                     return used;
                 }
+                *last_served = connection;
                 used = true;
                 progress = true;
             }
@@ -643,16 +677,21 @@ mod tests {
                 rx_seen: 0,
                 interrupted: false,
             };
-            for queue in 0..QUEUES {
-                driver.set(QUEUE_SELECT, queue as u32);
-                driver.set(QUEUE_NUM, u32::from(SIZE));
-                driver.set(QUEUE_DESC, table(queue) as u32);
-                driver.set(QUEUE_DRIVER, available(queue) as u32);
-                driver.set(QUEUE_DEVICE, used(queue) as u32);
-                driver.set(QUEUE_READY, 1);
-            }
-            driver.set(STATUS, DRIVER_OK);
+            driver.restart();
             driver
+        }
+
+        /// Sets the rings up on this driver's device.
+        fn restart(&mut self) {
+            for queue in 0..QUEUES {
+                self.set(QUEUE_SELECT, queue as u32);
+                self.set(QUEUE_NUM, u32::from(SIZE));
+                self.set(QUEUE_DESC, table(queue) as u32);
+                self.set(QUEUE_DRIVER, available(queue) as u32);
+                self.set(QUEUE_DEVICE, used(queue) as u32);
+                self.set(QUEUE_READY, 1);
+            }
+            self.set(STATUS, DRIVER_OK);
         }
 
         fn set(&mut self, offset: u64, value: u32) {
@@ -838,6 +877,32 @@ mod tests {
     }
 
     #[test]
+    fn a_second_request_ends_the_connection_it_collides_with() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        driver.send(packet(OP_REQUEST), &[]);
+        assert_eq!(driver.device.send(connection, b"x"), 0);
+        assert!(driver.device.guest_finished(connection));
+    }
+
+    #[test]
+    fn a_handle_kept_across_a_reset_cant_reach_a_new_connection() {
+        let mut driver = Driver::new();
+        let old = driver.connected();
+        driver.set(STATUS, 0);
+        let mut driver = Driver {
+            device: driver.device,
+            ..Driver::new()
+        };
+        driver.restart();
+        let new = driver.connected();
+        assert_ne!(old, new);
+        assert_eq!(driver.device.send(old, b"x"), 0);
+        driver.device.close(old);
+        assert_eq!(driver.device.send(new, b"x"), 1);
+    }
+
+    #[test]
     fn data_reaches_the_host_in_order_across_descriptors() {
         let mut driver = Driver::new();
         let connection = driver.connected();
@@ -931,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn a_guest_reporting_impossible_credit_gets_none_and_nothing_breaks() {
+    fn a_guest_reporting_impossible_credit_gets_no_data_and_nothing_breaks() {
         let mut driver = Driver::new();
         let connection = driver.connected();
         driver.send(
@@ -944,7 +1009,58 @@ mod tests {
         );
         driver.device.send(connection, &[1; 20]);
         driver.service();
-        assert!(driver.received().is_empty());
+        assert_eq!(driver.ops(), [OP_CREDIT_REQUEST]);
+    }
+
+    #[test]
+    fn a_blocked_host_asks_for_credit_once_and_resumes_when_it_comes() {
+        let mut driver = Driver::new();
+        driver.post_rx(4);
+        driver.send(
+            Header {
+                buf_alloc: 4,
+                ..packet(OP_REQUEST)
+            },
+            &[],
+        );
+        let connection = driver.device.accept().unwrap();
+        driver.device.send(connection, &[7; 8]);
+        driver.service();
+        assert_eq!(driver.ops(), [OP_RESPONSE, OP_RW, OP_CREDIT_REQUEST]);
+        driver.post_rx(4);
+        driver.service();
+        assert!(driver.ops().is_empty(), "asking once is enough");
+        driver.send(
+            Header {
+                buf_alloc: 4,
+                fwd_cnt: 4,
+                ..packet(OP_CREDIT_UPDATE)
+            },
+            &[],
+        );
+        assert_eq!(driver.received().concat_payloads(), [7; 4]);
+    }
+
+    #[test]
+    fn a_busy_connection_cant_starve_another_across_calls() {
+        let mut driver = Driver::new();
+        let first = driver.connected();
+        driver.send(
+            Header {
+                src_port: GUEST_PORT + 1,
+                ..packet(OP_REQUEST)
+            },
+            &[],
+        );
+        assert_eq!(driver.ops(), [OP_RESPONSE]);
+        let second = driver.device.accept().unwrap();
+        driver.device.send(first, &vec![1; 40_000]);
+        driver.service();
+        assert_eq!(driver.ops(), [OP_RW, OP_RW], "the spare buffers are gone");
+        driver.device.send(second, &[2; 8]);
+        driver.post_rx(1);
+        let packets = driver.received();
+        assert_eq!(packets[0].0.dst_port, GUEST_PORT + 1);
     }
 
     #[test]
@@ -1034,7 +1150,7 @@ mod tests {
         driver.send(shutdown(SHUTDOWN_RECEIVE), &[]);
         assert_eq!(driver.device.send(connection, b"x"), 0);
         driver.service();
-        assert!(driver.received().is_empty());
+        assert!(!driver.ops().contains(&OP_RW));
     }
 
     #[test]
@@ -1363,6 +1479,7 @@ mod tests {
         let connection = Connection {
             guest_port: 1,
             host_port: 2,
+            generation: 0,
         };
         assert_eq!(driver.device.send(connection, b"x"), 0);
         assert_eq!(driver.device.recv(connection, &mut [0; 1]), 0);

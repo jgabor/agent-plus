@@ -18,6 +18,7 @@ const AF_VSOCK: c_int = 40;
 const SOCK_STREAM: c_int = 1;
 const HOST_CID: u32 = 2;
 const POLLIN: c_short = 1;
+const FIONREAD: c_ulong = 0x541B;
 const FOREVER: c_int = -1;
 
 /// `struct sockaddr_vm`.
@@ -41,6 +42,7 @@ struct PollFd {
 
 unsafe extern "C" {
     fn poll(fds: *mut PollFd, count: c_ulong, timeout: c_int) -> c_int;
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     fn mount(
         source: *const c_char,
         target: *const c_char,
@@ -109,16 +111,22 @@ impl System for Linux {
 }
 
 /// Waits until `pipe` can be read without blocking, which includes having
-/// closed. Returns false if `ended` closes while `pipe` has nothing to read.
-pub fn wait_for_output(pipe: BorrowedFd, ended: BorrowedFd) -> io::Result<bool> {
+/// closed, or until `ended` closes. Returns whether `ended` has closed.
+pub fn program_has_ended(pipe: BorrowedFd, ended: BorrowedFd) -> io::Result<bool> {
     let mut fds = [waiting_on(pipe), waiting_on(ended)];
-    poll_retrying(&mut fds, FOREVER)?;
-    if fds[0].revents != 0 {
-        return Ok(true);
+    poll_retrying(&mut fds)?;
+    Ok(fds[1].revents != 0)
+}
+
+/// How many bytes `pipe` holds, which can be more than its nominal size.
+pub fn bytes_waiting(pipe: BorrowedFd) -> io::Result<usize> {
+    let mut count: c_int = 0;
+    // SAFETY: `FIONREAD` writes one `int` through this pointer, which is valid
+    // for the whole call.
+    if unsafe { ioctl(pipe.as_raw_fd(), FIONREAD, &mut count as *mut c_int) } < 0 {
+        return Err(io::Error::last_os_error());
     }
-    // `pipe` may have been checked before `ended` closed, so check it again.
-    poll_retrying(&mut fds[..1], 0)?;
-    Ok(fds[0].revents != 0)
+    Ok(count as usize)
 }
 
 fn waiting_on(fd: BorrowedFd) -> PollFd {
@@ -129,10 +137,10 @@ fn waiting_on(fd: BorrowedFd) -> PollFd {
     }
 }
 
-fn poll_retrying(fds: &mut [PollFd], timeout: c_int) -> io::Result<()> {
+fn poll_retrying(fds: &mut [PollFd]) -> io::Result<()> {
     loop {
         // SAFETY: the pointer and count describe `fds`, which outlives the call.
-        if unsafe { poll(fds.as_mut_ptr(), fds.len() as c_ulong, timeout) } >= 0 {
+        if unsafe { poll(fds.as_mut_ptr(), fds.len() as c_ulong, FOREVER) } >= 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();

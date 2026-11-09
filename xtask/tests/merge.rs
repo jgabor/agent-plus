@@ -4,11 +4,12 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod common;
 
 const SPEC: &str = "# A\n\nOne. Two.\n";
 const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
@@ -237,8 +238,7 @@ maybe_kill before
             let script =
                 format!("{prelude}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n");
             let file = self.bin.join(tool);
-            fs::write(&file, script).unwrap();
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+            common::write_tool(&file, &script);
         }
         let gh = format!(
             r#"{prelude}case "$1 $2" in
@@ -258,8 +258,7 @@ exit $code
 "#
         );
         let file = self.bin.join("gh");
-        fs::write(&file, gh).unwrap();
-        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&file, &gh);
     }
 
     fn set_pr(&self, pr: &Pr) {
@@ -995,6 +994,28 @@ fn a_kill_at_each_step_resumes() {
 }
 
 #[test]
+fn a_tool_just_written_can_run_while_other_threads_start_processes() {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("merge/fresh-tool");
+    if directory.exists() {
+        fs::remove_dir_all(&directory).unwrap();
+    }
+    fs::create_dir_all(&directory).unwrap();
+    thread::scope(|scope| {
+        for worker in 0..16 {
+            let directory = &directory;
+            scope.spawn(move || {
+                for round in 0..200 {
+                    let tool = directory.join(format!("tool-{worker}-{round}"));
+                    common::write_tool(&tool, "#!/bin/sh\nexit 0\n");
+                    let status = Command::new(&tool).status().unwrap();
+                    assert!(status.success());
+                }
+            });
+        }
+    });
+}
+
+#[test]
 fn a_worktree_locked_by_a_killed_attempt_is_cleared() {
     let repo = Repo::new("locked-worktree");
     assert_eq!(repo.merge_killed("cargo fmt", "before").status.code(), None);
@@ -1190,12 +1211,10 @@ fn a_record_commit_that_changes_more_is_not_merged() {
     let repo = Repo::new("sneaky");
     let hook = repo.root.join(".git/hooks/pre-commit");
     fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    fs::write(
+    common::write_tool(
         &hook,
         "#!/bin/sh\necho x > sneaky.txt\ngit add sneaky.txt\n",
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let output = repo.merge();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(

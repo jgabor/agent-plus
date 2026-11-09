@@ -3,9 +3,10 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const FAST: &str = "fn main() {}\n";
 const BROKEN: &str = "fn main() {}\n\n#[test]\nfn broken() {\n    panic!();\n}\n";
@@ -86,18 +87,14 @@ impl Repo {
         fs::create_dir_all(&repo.bin).unwrap();
         fs::create_dir_all(&repo.temp).unwrap();
         let gh = repo.bin.join("gh");
-        fs::write(&gh, format!("#!/bin/sh\n{GH}")).unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&gh, &format!("#!/bin/sh\n{GH}"));
         let mutants = repo.bin.join("cargo-mutants");
-        fs::write(&mutants, "#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&mutants, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&mutants, "#!/bin/sh\nexit 0\n");
         let systemd = repo.bin.join("systemd-run");
-        fs::write(
+        common::write_tool(
             &systemd,
             "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&systemd, fs::Permissions::from_mode(0o755)).unwrap();
+        );
         fs::write(repo.bin.join("next"), "77\n").unwrap();
         fs::write(repo.bin.join("passing"), "").unwrap();
         repo.set_issues(NO_ISSUES);

@@ -3,9 +3,10 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const LIVE: &str = "2099-01-01T00:00Z";
 const EXPIRED: &str = "2001-01-01T00:00Z";
@@ -136,8 +137,7 @@ esac
 "#
         );
         let path = self.bin.join("gh");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &script);
     }
 
     fn set_branch(&self, name: &str, date: &str) {

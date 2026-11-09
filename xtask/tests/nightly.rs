@@ -3,10 +3,11 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+mod common;
 
 const BUDGETS: &str = "[[budget]]\nkey = \"run_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const JOURNEY: &str = "[[step]]\nid = 1\nname = \"first\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
@@ -115,11 +116,9 @@ impl Repo {
         };
         fs::create_dir_all(&repo.bin).unwrap();
         let gh = repo.bin.join("gh");
-        fs::write(&gh, format!("#!/bin/sh\n{GH}")).unwrap();
-        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&gh, &format!("#!/bin/sh\n{GH}"));
         let systemd = repo.bin.join("systemd-run");
-        fs::write(&systemd, SYSTEMD_RUN).unwrap();
-        fs::set_permissions(&systemd, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&systemd, SYSTEMD_RUN);
         repo.set_issues(NO_ISSUES);
         repo.set_report_comments(&[]);
         let files = [
@@ -286,8 +285,7 @@ impl Repo {
         let script = format!(
             "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
         );
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &script);
     }
 
     /// A fake `cargo-mutants` that reports these survivors.
@@ -1010,15 +1008,13 @@ fn a_commit_with_no_budget_file_compares_no_budgets() {
 fn a_missing_tool_stops_nightly_before_any_check() {
     let repo = Repo::new("no-clippy");
     let shim = repo.bin.join("cargo");
-    fs::write(
+    common::write_tool(
         &shim,
-        format!(
+        &format!(
             "#!/bin/sh\nif [ \"$1 $2\" = \"clippy --version\" ]; then echo \"no clippy here\" >&2; exit 1; fi\nexec \"{}\" \"$@\"\n",
             env::var("CARGO").expect("cargo sets CARGO for tests")
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(

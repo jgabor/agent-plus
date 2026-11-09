@@ -10,12 +10,9 @@ use std::process::{Command, Output};
 pub const MAIN: &str = "refs/remotes/origin/main";
 pub const SPEC_CHANGE: &str = "spec-change";
 const LEDGER: &str = "harness/ledger";
-const PROTECTED: &[&str] = &[
-    "SPEC.md",
-    "harness/waived.txt",
-    "harness/journey.toml",
-    "harness/budgets.toml",
-];
+/// A path that ends in `/` covers everything under it.
+const PROTECTED: [&str; 3] = ["SPEC.md", "xtask/", "harness/"];
+const NOT_PROTECTED: [&str; 2] = ["harness/ledger/", "harness/journey/"];
 
 /// The commit where this branch left `origin/main`, or `None` if there is no
 /// `origin/main` to compare with. The workspace must be the top of its own
@@ -160,9 +157,20 @@ pub fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem
     let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
     Ok(changed
         .split('\0')
-        .filter(|path| PROTECTED.contains(path))
+        .filter(|path| is_protected(path))
         .map(str::to_string)
         .collect())
+}
+
+fn is_protected(path: &str) -> bool {
+    let covered = |entry: &&str| {
+        if entry.ends_with('/') {
+            path.starts_with(*entry)
+        } else {
+            path == *entry
+        }
+    };
+    PROTECTED.iter().any(covered) && !NOT_PROTECTED.iter().any(covered)
 }
 
 fn label_findings(touched: &[String]) -> Vec<String> {

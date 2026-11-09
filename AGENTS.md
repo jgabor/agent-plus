@@ -3,7 +3,7 @@
 Agent+ runs coding agents in isolated, disposable microVMs. One `Agentfile`
 declares the agent, and one pure-Rust binary, `ap`, builds and runs it.
 
-**Status: design.** The harness is being built, and the product has no code
+**Status: design.** The harness is built, and the product has almost no code
 yet. [SPEC.md](SPEC.md) is the contract, [README.md](README.md) describes the
 product, and [HARNESS.md](HARNESS.md) is how we get to v0.1.0.
 
@@ -101,7 +101,7 @@ and keep going. Don't fix it in this PR.
 |---|---|
 | `in-progress` | An agent holds the issue |
 | `needs-owner` | The issue is waiting for an owner decision |
-| `spec-change` | The PR touches SPEC.md, budgets, waivers, or journey steps |
+| `spec-change` | The PR touches SPEC.md, `xtask/`, or `harness/` outside its ledger and journey scripts |
 
 ### Claiming work
 

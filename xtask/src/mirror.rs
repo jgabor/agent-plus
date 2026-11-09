@@ -21,7 +21,8 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
         return Ok(Verdict::Pass);
     }
     let gh = Gh::new(&workspace::root()?);
-    let others = if gh.is_pr(number)? {
+    let is_pr = gh.is_pr(number)?;
+    let others = if is_pr {
         let pr = gh.pull_request(number)?;
         if pr.state == "MERGED" && label == LAND_NEEDED {
             let items: Vec<u64> = std::iter::once(number).chain(pr.closing_issues).collect();
@@ -67,5 +68,19 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
         "mirror: {} `{label}` on {items:?}",
         if present { "applied" } else { "removed" }
     );
+    // The PR can merge after it was read, and its merge run can finish before
+    // the writes above. Reading it again after them closes that window.
+    if present && label == LAND_NEEDED {
+        let prs = if is_pr { &items[..1] } else { &items[1..] };
+        for pr in prs {
+            if gh.pull_request(*pr)?.state == "MERGED" {
+                for item in &items {
+                    gh.remove_label(*item, label)?;
+                }
+                println!("mirror: {pr} merged meanwhile, so removed `{label}` from {items:?}");
+                break;
+            }
+        }
+    }
     Ok(Verdict::Pass)
 }

@@ -89,7 +89,8 @@ impl Repo {
         fs::write(self.bin.join(format!("events-{number}")), changes).unwrap();
     }
 
-    /// Answers a delete with `delete-error`, if that file exists.
+    /// Answers a delete with `delete-error`, if that file exists. After one
+    /// `pr view`, `pr-next.json` replaces `pr.json`, if it exists.
     fn write_gh(&self) {
         let bin = self.bin.display();
         let script = format!(
@@ -102,7 +103,9 @@ case "$*" in
   "api {ISSUE}/"*"/events --paginate --jq "*)
     n=${{2%/events}}; cat "{bin}/events-${{n##*/}}" 2>/dev/null || true ;;
   "api {ISSUE}/"*) cat "{bin}/item-${{2##*/}}.json" ;;
-  "pr view "*) cat '{bin}/pr.json' ;;
+  "pr view "*)
+    cat '{bin}/pr.json'
+    if [ -f '{bin}/pr-next.json' ]; then mv '{bin}/pr-next.json' '{bin}/pr.json'; fi ;;
   "pr list "*) cat '{bin}/prs.json' ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
@@ -333,4 +336,39 @@ fn a_merged_pr_that_closes_no_issue_still_loses_land_needed() {
     fs::write(&path, pr.replace(&closing("o/r", 7), "")).unwrap();
     assert_status(&repo.mirror(&["9", "land-needed"]), 0);
     assert_eq!(repo.writes(), [remove(9, "land-needed")]);
+}
+
+/// A run that saw the PR open can write after the merge's own run has
+/// finished. It looks again, so the label doesn't come back.
+#[test]
+fn a_pr_that_merges_while_the_label_is_copied_loses_it() {
+    let repo = Repo::new("merge-race-issue");
+    repo.set_changes(7, "100 labeled\n");
+    repo.set_pr("MERGED");
+    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [
+            add(7, "land-needed"),
+            add(9, "land-needed"),
+            remove(7, "land-needed"),
+            remove(9, "land-needed")
+        ]
+    );
+
+    let repo = Repo::new("merge-race-pr");
+    repo.set_changes(9, "100 labeled\n");
+    repo.set_pr("MERGED");
+    fs::rename(repo.bin.join("pr.json"), repo.bin.join("pr-next.json")).unwrap();
+    repo.set_pr("OPEN");
+    assert_status(&repo.mirror(&["9", "land-needed"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [
+            add(9, "land-needed"),
+            add(7, "land-needed"),
+            remove(9, "land-needed"),
+            remove(7, "land-needed")
+        ]
+    );
 }

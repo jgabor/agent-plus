@@ -1254,16 +1254,20 @@ fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
         repo.comment()
     );
     let calls = repo.read_bin("systemd-calls");
-    let lines: Vec<&str> = calls.lines().collect();
+    assert!(
+        calls.lines().all(|line| line.contains("MemoryMax=8G")),
+        "{calls}"
+    );
+    // The gate step runs each package's tests under a limit of its own.
+    let lines: Vec<&str> = calls
+        .lines()
+        .filter(|line| !line.contains("-- cargo test "))
+        .collect();
     assert_eq!(lines.len(), 2, "{calls}");
     assert!(lines[0].contains("RuntimeMaxSec=300 "), "{calls}");
     assert!(lines[0].contains("-- cargo build --release"), "{calls}");
     assert!(lines[1].contains("RuntimeMaxSec=3600 "), "{calls}");
     assert!(lines[1].ends_with("/release/fuzz 3300"), "{calls}");
-    assert!(
-        lines.iter().all(|line| line.contains("MemoryMax=8G")),
-        "{calls}"
-    );
 }
 
 #[test]

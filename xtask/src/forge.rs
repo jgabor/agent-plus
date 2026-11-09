@@ -4,7 +4,7 @@ use crate::Problem;
 use crate::json::{self, Json};
 use crate::lock::Hold;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -98,7 +98,12 @@ impl Gh {
             .map_err(couldnt)?;
         if let Some(input) = input {
             let mut stdin = child.stdin.take().expect("stdin is piped");
-            stdin.write_all(input.as_bytes()).map_err(couldnt)?;
+            // `gh` can exit before reading its input. Its exit status and its
+            // error message say what happened.
+            match stdin.write_all(input.as_bytes()) {
+                Err(e) if e.kind() != ErrorKind::BrokenPipe => return Err(couldnt(e)),
+                _ => {}
+            }
         }
         child.wait_with_output().map_err(couldnt)
     }

@@ -122,7 +122,9 @@ case "$1 $2" in
   "issue list") cat '{bin}/issues.json' ;;
   "issue view") cat '{bin}/view.json' ;;
   "issue edit") ;;
-  "issue comment") echo 'https://github.com/o/r/issues/1#issuecomment-500' ;;
+  "issue comment")
+    if [ -f '{bin}/comment-refused' ]; then echo 'gh: comment refused' >&2; exit 1; fi
+    echo 'https://github.com/o/r/issues/1#issuecomment-500' ;;
   "api -X") ;;
   api*)
     name="${{2##*/}}"
@@ -616,6 +618,50 @@ fn claim_writes_through_gh_and_loses_when_its_comment_is_gone() {
         "{calls}"
     );
     assert!(calls.contains("issue comment 7 --body-file -"), "{calls}");
+}
+
+/// A repository where a claim loses to a live status comment.
+fn repo_where_a_claim_loses(name: &str) -> Repo {
+    let repo = Repo::new(name, &[open(7, &["auto:merge"], T)]);
+    repo.git(&["checkout", "-q", "-b", "7-x"]);
+    fs::write(
+        repo.bin.join("view.json"),
+        issue(
+            7,
+            "OPEN",
+            &["auto:merge", "in-progress"],
+            &body(T, ""),
+            &[status(100, OWNER, "working", "7-y", LIVE)],
+        ),
+    )
+    .unwrap();
+    repo
+}
+
+/// Bigger than a pipe's buffer, so writing it blocks until the fake `gh`,
+/// which never reads its input, exits. The write then always breaks.
+fn unread_thread() -> String {
+    "x".repeat(100_000)
+}
+
+#[test]
+fn a_gh_that_exits_without_reading_its_input_still_succeeds() {
+    let repo = repo_where_a_claim_loses("gh-unread");
+    let output = repo.xtask(&["claim", "7", "--thread", &unread_thread()]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+#[test]
+fn a_gh_that_fails_without_reading_its_input_reports_its_own_error() {
+    let repo = repo_where_a_claim_loses("gh-unread-fails");
+    fs::write(repo.bin.join("comment-refused"), "").unwrap();
+    let output = repo.xtask(&["claim", "7", "--thread", &unread_thread()]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("gh: comment refused"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

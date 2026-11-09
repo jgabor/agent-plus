@@ -1,0 +1,32 @@
+name: mirror-proof
+on: push
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: cargo build -q -p xtask
+      - name: exercise
+        run: |
+          set -x
+          I=$(cat .proof-issue); P=$(cat .proof-pr)
+          has() { gh api repos/$GITHUB_REPOSITORY/issues/$1 --jq '.labels[].name' | grep -qx "$2"; }
+          gh api -X POST repos/$GITHUB_REPOSITORY/issues/$I/labels -f 'labels[]=land-needed' >/dev/null
+          cargo xtask mirror "$I" land-needed; has "$P" land-needed
+          gh api -X DELETE repos/$GITHUB_REPOSITORY/issues/$I/labels/land-needed >/dev/null
+          cargo xtask mirror "$I" land-needed; ! has "$P" land-needed
+          gh api -X POST repos/$GITHUB_REPOSITORY/issues/$P/labels -f 'labels[]=answer-needed' >/dev/null
+          cargo xtask mirror "$P" answer-needed; has "$I" answer-needed
+          gh api -X DELETE repos/$GITHUB_REPOSITORY/issues/$P/labels/answer-needed >/dev/null
+          cargo xtask mirror "$P" answer-needed; ! has "$I" answer-needed
+          cargo xtask mirror "$P" answer-needed
+          gh pr view "$P" --repo "$GITHUB_REPOSITORY" --json closingIssuesReferences --jq '.closingIssuesReferences[0].number // empty'
+          echo PROOF-OK

@@ -10,14 +10,15 @@
 //! A job started inside a job keeps its own limit, and doesn't count against
 //! the enclosing one. Each scope is a new unit under the user manager, so the
 //! two are siblings, and a scope can't hold another unit. Only a slice can, so
-//! a shared limit would need a slice for every job, with its limit set by
-//! `systemctl set-property`. That leaves files in the manager's runtime
-//! directory, and an `xtask` that dies wouldn't remove them. It would also
-//! change what a job over its limit does, because the kernel then picks from
-//! every job in the slice, so an innocent job can die for a nested one.
+//! a shared limit would need a slice for every job, set up and cleaned up
+//! apart from `systemd-run`, in a way that holds if `xtask` dies. It would also
+//! change what going over the limit does: the kernel picks from every job in
+//! the slice, so a job that stayed small can die for a nested one.
 //!
-//! So the total is at most `MEMORY` for each job alive at once. Jobs nest only
-//! when a test of `xtask` runs `xtask`, and those fixtures are small.
+//! That cost buys little. A runaway still dies at its own job's limit, and
+//! only the total can pass one limit: it can reach one for each job alive at
+//! once. Jobs nest when a test of `xtask` runs `xtask`, which is small, or
+//! when someone wraps a step, as in `cargo xtask run cargo xtask gate`.
 
 use crate::Problem;
 use crate::lock::Hold;

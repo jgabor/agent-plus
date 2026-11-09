@@ -1,2 +1,5 @@
 # Dependencies whose build scripts have been read and found to be pure Rust.
 # One package per line: <name> <version> <reason>
+getrandom 0.4.3 Reads CARGO_CFG_SANITIZE and sets one cfg for memory sanitizer builds. Compiles and runs nothing.
+libc 0.2.191 Sets cfgs from the target and the rustc version. Runs only rustc, and freebsd-version or emcc on those targets. Compiles nothing.
+rustls 0.23.46 An empty main, unless the nightly-only read_buf feature sets one cfg. ap doesn't enable it.

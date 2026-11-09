@@ -13,7 +13,8 @@ const JOURNEY: &str = "[[step]]\nid = 1\nname = \"first\"\nneeds = []\nscript = 
 const NO_ISSUES: &str = "[]";
 const REPORT_ISSUE: &str =
     "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
-const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"needs-owner\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
+const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
+const WAITING_FOR_EITHER: &str = "[{\"number\":30,\"title\":\"Ready\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":32,\"title\":\"Stuck\",\"labels\":[{\"name\":\"answer-needed\"}],\"isPinned\":false}]";
 const CHECKS_PASSED: &str = "## Checks\n\n- pass bench\n- pass gate\n- skip t2\n- skip t3\n- pass journey\n- skip fuzz\n- skip mutation\n";
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
@@ -486,6 +487,17 @@ fn the_report_as_json() {
             "{{\"commit\":\"{head}\",\"scores\":{{\"spec\":{{\"proven\":1,\"promises\":7}},\"journey\":{{\"passing\":1,\"steps\":4}},\"budgets\":{{\"met\":1,\"targets\":1}}}},\"left_out\":2,\"merged\":[{{\"commit\":\"{merged}\",\"subject\":\"The \\\"new\\\" one (#9)\",\"issue\":5,\"pr\":9}}],\"regressed\":[{{\"commit\":\"{merged}\",\"issue\":5,\"pr\":9,\"what\":\"spec fell from 2 to 1\"}}],\"unrecorded\":[{{\"commit\":\"{head}\",\"subject\":\"By hand\"}}],\"waiting\":[{{\"issue\":30,\"title\":\"Promises that end in a colon\"}}]}}\n"
         )
     );
+}
+
+#[test]
+fn the_report_lists_an_issue_waiting_for_a_landing_or_an_answer() {
+    let repo = Repo::new("waiting-for-either");
+    repo.set_issues(WAITING_FOR_EITHER);
+    let output = repo.xtask(&["report"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report = stdout(&output);
+    assert!(report.contains("#30 Ready"), "{report}");
+    assert!(report.contains("#32 Stuck"), "{report}");
 }
 
 #[test]

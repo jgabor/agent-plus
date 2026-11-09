@@ -5,6 +5,7 @@ use crate::bench;
 use crate::forge::{Forge, Gh, OpenIssue};
 use crate::json::quoted;
 use crate::ledger::{self, Record};
+use crate::work::PARKED;
 use crate::{Problem, Verdict, base, journey, workspace};
 use std::path::Path;
 
@@ -13,7 +14,6 @@ pub const ISSUE_TITLE: &str = "Nightly report";
 const HEADING: &str = "# Nightly report for `";
 /// How far back to look when no earlier report can say where to start.
 const WINDOW: &str = "--since=24.hours";
-const WAITING_LABEL: &str = "needs-owner";
 const MUTATION_FAILED: &str = "\n- fail mutation\n";
 
 struct Scores {
@@ -152,7 +152,12 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
     }
     report.waiting = issues
         .into_iter()
-        .filter(|issue| issue.labels.iter().any(|label| label == WAITING_LABEL))
+        .filter(|issue| {
+            issue
+                .labels
+                .iter()
+                .any(|label| PARKED.contains(&label.as_str()))
+        })
         .map(|issue| Waiting {
             issue: issue.number,
             title: issue.title,

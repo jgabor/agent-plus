@@ -100,7 +100,8 @@ and keep going. Don't fix it in this PR.
 | Other labels | Meaning |
 |---|---|
 | `in-progress` | An agent holds the issue |
-| `needs-owner` | The issue is waiting for an owner decision |
+| `land-needed` | The issue's PR is ready for a person to merge |
+| `answer-needed` | The issue is waiting for an answer |
 | `spec-change` | The PR touches SPEC.md, `xtask/`, or `harness/` outside its ledger and journey scripts |
 
 ### Claiming work
@@ -108,8 +109,8 @@ and keep going. Don't fix it in this PR.
 You can claim an issue when all of these are true:
 
 - it has an `auto:*` label, or the owner told you to take it
-- it has no `needs-owner` label, and no `in-progress` label unless its lease
-  has expired and its branch has had no commits since
+- it has no `land-needed` or `answer-needed` label, and no `in-progress` label
+  unless its lease has expired and its branch has had no commits since
 - nothing in its `Blocked by` line is still open
 - its `Touches` doesn't overlap an issue that is in progress
 
@@ -178,13 +179,13 @@ use the harness's question tool. Otherwise, park:
 
 1. Post the question on the issue: what blocks you, your options, and your
    recommendation first.
-2. Remove `in-progress`, add `needs-owner`, set the state to parked, and stop
-   watching any PR.
+2. Remove `in-progress`, add `answer-needed`, set the state to parked, and
+   stop watching any PR.
 3. End your turn. Don't wait.
 
-The owner removes `needs-owner` after answering, and the issue can be claimed
-again. Under `auto:pr`, park the same way when the merge gate passes, and say
-that the PR is ready to merge.
+The owner removes `answer-needed` after answering, and the issue can be claimed
+again. Under `auto:pr`, park the same way when the merge gate passes, but add
+`land-needed` instead, and say that the PR is ready to merge.
 
 Park only when you can't continue alone: you can't prove the change, the merge
 gate can't pass, the goal is ambiguous in a way that changes the result, or

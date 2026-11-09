@@ -45,6 +45,7 @@ commands:
                    write the ledger record for the current head
   merge <pr>       rebase, gate, record, and squash-merge a PR
   prepare <pr>     rebase, gate, and record a PR, for the owner to merge
+  land <pr>        run prepare, then squash-merge the PR, for the owner
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -89,6 +90,8 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["merge", ..] => Err(Problem(format!("`merge` takes `<pr>`\n\n{USAGE}"))),
         ["prepare", pr] => merge::prepare(pr),
         ["prepare", ..] => Err(Problem(format!("`prepare` takes `<pr>`\n\n{USAGE}"))),
+        ["land", pr] => merge::land(pr),
+        ["land", ..] => Err(Problem(format!("`land` takes `<pr>`\n\n{USAGE}"))),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

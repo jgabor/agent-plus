@@ -24,6 +24,8 @@ const FOREIGN_EXTENSIONS: &[&str] = &[
     "s", "sx", "asm", "a", "o", "obj", "so", "dylib", "lib", "dll",
 ];
 
+const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
 const AUDIT_FILE: &str = "harness/build-scripts.txt";
 
 /// Returns one message for each broken rule. An empty list means the floors
@@ -34,13 +36,44 @@ pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
         .iter()
         .map(|target| read_metadata(root, target))
         .collect::<Result<Vec<_>, _>>()?;
-    let built = packages_cargo_builds(root)?;
-    let mut findings = BTreeSet::new();
+    let unexpected = |e: String| Problem(format!("unexpected `cargo metadata` output: {e}"));
+    let mut known = HashSet::new();
     for metadata in &metadata {
-        inspect(metadata, &audited, &built, &mut findings)
-            .map_err(|e| Problem(format!("unexpected `cargo metadata` output: {e}")))?;
+        for package in list(metadata, "packages").map_err(unexpected)? {
+            known.insert(package_key(package).map_err(unexpected)?);
+        }
+    }
+    let host_side = packages_cargo_builds(root, "all")?;
+    let mut findings = BTreeSet::new();
+    for (target, metadata) in TARGETS.iter().zip(&metadata) {
+        let target_side = packages_cargo_builds(root, target)?;
+        // A line no package matches means Cargo's format moved, and a package
+        // that fails to match would escape the floor.
+        if let Some(key) = target_side.iter().find(|key| !known.contains(*key)) {
+            return Err(Problem(format!(
+                "`cargo tree` names a package `cargo metadata` doesn't: `{key}`"
+            )));
+        }
+        let built = Built {
+            target_side: &target_side,
+            host_side: &host_side,
+        };
+        inspect(metadata, &audited, built, &mut findings).map_err(unexpected)?;
     }
     Ok(findings.into_iter().collect())
+}
+
+/// What Cargo builds. `resolve.nodes` also lists packages reachable only
+/// through a weak feature, like `dep?/x`, and nothing builds those.
+///
+/// `cargo tree --target <triple>` settles features for that platform, but it
+/// matches build scripts, proc macros, and their dependencies against this
+/// machine instead of the target. So the host side falls back on `--target
+/// all`, which keeps every platform and can only reject too much.
+#[derive(Clone, Copy)]
+struct Built<'a> {
+    target_side: &'a HashSet<String>,
+    host_side: &'a HashSet<String>,
 }
 
 fn read_metadata(root: &Path, target: &str) -> Result<Json, Problem> {
@@ -67,12 +100,9 @@ fn read_metadata(root: &Path, target: &str) -> Result<Json, Problem> {
         .map_err(|e| Problem(format!("couldn't read `cargo metadata` output: {e}")))
 }
 
-/// Returns `name version` for every package Cargo builds on any platform.
-/// `resolve.nodes` also lists packages reachable only through a weak feature,
-/// like `dep?/x`, and nothing builds those. `cargo tree --target <triple>`
-/// can't replace the walk over `resolve.nodes`, because it matches build
-/// dependencies against this machine instead of the target.
-fn packages_cargo_builds(root: &Path) -> Result<HashSet<String>, Problem> {
+/// Returns the key of every package Cargo builds for `target`, which is a
+/// triple or `all`.
+fn packages_cargo_builds(root: &Path, target: &str) -> Result<HashSet<String>, Problem> {
     let output = Command::new("cargo")
         .args([
             "tree",
@@ -82,7 +112,7 @@ fn packages_cargo_builds(root: &Path) -> Result<HashSet<String>, Problem> {
             "--edges",
             "normal,build,dev",
             "--target",
-            "all",
+            target,
             "--prefix",
             "none",
             "--format",
@@ -100,14 +130,46 @@ fn packages_cargo_builds(root: &Path) -> Result<HashSet<String>, Problem> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            let mut words = line.split_whitespace();
-            match (words.next(), words.next().and_then(|v| v.strip_prefix('v'))) {
-                (Some(name), Some(version)) => Ok(format!("{name} {version}")),
-                _ => Err(Problem(format!("unexpected `cargo tree` line: `{line}`"))),
-            }
-        })
+        .map(tree_line_key)
         .collect()
+}
+
+/// Turns `name v1.0.0 (proc-macro) (source) (*)` into the key `package_key`
+/// makes for the same package.
+fn tree_line_key(line: &str) -> Result<String, Problem> {
+    let unexpected = || Problem(format!("unexpected `cargo tree` line: `{line}`"));
+    let line = line.strip_suffix(" (*)").unwrap_or(line);
+    let (name, rest) = line.split_once(" v").ok_or_else(unexpected)?;
+    let rest = rest.replacen(" (proc-macro)", "", 1);
+    if name.is_empty() || rest.is_empty() {
+        return Err(unexpected());
+    }
+    Ok(format!("{name} {rest}"))
+}
+
+/// Identifies a package by source as well as name and version, because one
+/// tree can hold the same name and version from two sources. It follows how
+/// `cargo tree` prints a source.
+fn package_key(package: &Json) -> Result<String, String> {
+    let label = format!("{} {}", text(package, "name")?, text(package, "version")?);
+    let source = field(package, "source")?.as_str();
+    Ok(match source {
+        None => {
+            let manifest = Path::new(text(package, "manifest_path")?);
+            let directory = manifest.parent().ok_or("a manifest has no parent")?;
+            format!("{label} ({})", directory.display())
+        }
+        Some(CRATES_IO) => label,
+        Some(other) => {
+            let url = other.strip_prefix("git+").unwrap_or(other);
+            match url.rsplit_once('#') {
+                Some((base, commit)) => {
+                    format!("{label} ({base}#{})", commit.get(..8).unwrap_or(commit))
+                }
+                None => format!("{label} ({url})"),
+            }
+        }
+    })
 }
 
 /// Reads `<name> <version> <reason>` lines into `name version` keys.
@@ -159,7 +221,7 @@ fn list<'a>(value: &'a Json, key: &str) -> Result<&'a [Json], String> {
 fn inspect(
     metadata: &Json,
     audited: &HashSet<String>,
-    built: &HashSet<String>,
+    built: Built<'_>,
     findings: &mut BTreeSet<String>,
 ) -> Result<(), String> {
     let mut packages = HashMap::new();
@@ -170,34 +232,57 @@ fn inspect(
     for member in list(metadata, "workspace_members")? {
         members.insert(member.as_str().ok_or("a member isn't a string")?);
     }
-    let mut edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut edges: HashMap<&str, Vec<(&str, bool)>> = HashMap::new();
     for node in list(field(metadata, "resolve")?, "nodes")? {
         let mut deps = Vec::new();
         for dep in list(node, "deps")? {
-            deps.push(text(dep, "pkg")?);
+            let pkg = text(dep, "pkg")?;
+            let kinds = list(dep, "dep_kinds")?;
+            if kinds.is_empty() {
+                return Err(format!("`{pkg}` has no `dep_kinds`"));
+            }
+            for kind in kinds {
+                deps.push((pkg, field(kind, "kind")?.as_str() == Some("build")));
+            }
         }
         edges.insert(text(node, "id")?, deps);
     }
 
     let mut seen = HashSet::new();
-    let mut stack: Vec<&str> = members.iter().copied().collect();
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
+    let mut stack: Vec<(&str, bool)> = members.iter().map(|id| (*id, false)).collect();
+    while let Some((id, on_host)) = stack.pop() {
+        if !seen.insert((id, on_host)) {
             continue;
         }
         let package = packages
             .get(id)
             .ok_or_else(|| format!("no package for `{id}`"))?;
-        let label = format!("{} {}", text(package, "name")?, text(package, "version")?);
-        if !built.contains(&label) {
+        let on_host = on_host || has_target_kind(package, "proc-macro")?;
+        let side = if on_host {
+            built.host_side
+        } else {
+            built.target_side
+        };
+        if !side.contains(&package_key(package)?) {
             continue;
         }
         if let Some(deps) = edges.get(id) {
-            stack.extend(deps.iter().copied());
+            stack.extend(deps.iter().map(|(dep, build)| (*dep, on_host || *build)));
         }
         inspect_package(package, members.contains(id), audited, findings)?;
     }
     Ok(())
+}
+
+fn has_target_kind(package: &Json, wanted: &str) -> Result<bool, String> {
+    for target in list(package, "targets")? {
+        for kind in list(target, "kind")? {
+            if kind.as_str() == Some(wanted) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn inspect_package(
@@ -221,12 +306,7 @@ fn inspect_package(
         ));
     }
 
-    let mut has_build_script = false;
-    for target in list(package, "targets")? {
-        for kind in list(target, "kind")? {
-            has_build_script |= kind.as_str() == Some("custom-build");
-        }
-    }
+    let has_build_script = has_target_kind(package, "custom-build")?;
     if has_build_script && is_ours {
         findings.insert(format!(
             "{label}: our own crates can't have a build script. Remove it"

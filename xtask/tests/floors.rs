@@ -36,6 +36,7 @@ fn workspace(name: &str, extra: &str, files: &[(&str, &str)]) -> PathBuf {
     let output = Command::new("cargo")
         .arg("generate-lockfile")
         .current_dir(&root)
+        .env("CARGO_HOME", cargo_home())
         .output()
         .unwrap();
     assert!(
@@ -44,6 +45,11 @@ fn workspace(name: &str, extra: &str, files: &[(&str, &str)]) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     root
+}
+
+/// Keeps the git checkouts these fixtures make out of the owner's `~/.cargo`.
+fn cargo_home() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("floors-cargo-home")
 }
 
 /// A crate outside the workspace, which is how a third-party package looks.
@@ -57,6 +63,7 @@ fn gate(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("gate")
         .current_dir(root)
+        .env("CARGO_HOME", cargo_home())
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CC")
         .env_remove("CXX")
@@ -327,6 +334,180 @@ fn a_package_reachable_only_through_a_weak_feature_passes() {
 fn a_weak_feature_on_a_package_something_enables_fails() {
     let root = weak_feature_workspace("weak-enabled", "\"alloc\", \"cc\"");
     assert_floor_fails(&gate(&root), "cc");
+}
+
+/// `demo` depends on `mid`, and `gate` is the platform condition on a package
+/// `win` that turns on the feature of `mid` that pulls in `cc`.
+fn feature_from_platform_workspace(name: &str, gate: &str) -> PathBuf {
+    let extra = format!(
+        "\n[dependencies]\nmid = {{ path = \"../../vendor/mid\" }}\n\n[target.'{gate}'.dependencies]\nwin = {{ path = \"../../vendor/win\" }}\n"
+    );
+    let mid = package(
+        "mid",
+        "\n[dependencies]\ncc = { path = \"../cc\", optional = true }\n\n[features]\nnative = [\"dep:cc\"]\n",
+    );
+    let win = package(
+        "win",
+        "\n[dependencies]\nmid = { path = \"../mid\", features = [\"native\"] }\n",
+    );
+    workspace(
+        name,
+        &extra,
+        &[
+            ("vendor/mid/Cargo.toml", &mid),
+            ("vendor/mid/src/lib.rs", LIB),
+            ("vendor/win/Cargo.toml", &win),
+            ("vendor/win/src/lib.rs", LIB),
+            ("vendor/cc/Cargo.toml", &package("cc", "")),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    )
+}
+
+#[test]
+fn a_feature_enabled_only_on_an_unsupported_platform_passes() {
+    let output = gate(&feature_from_platform_workspace(
+        "feature-windows",
+        "cfg(windows)",
+    ));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("pass floors"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_feature_enabled_only_on_macos_still_fails() {
+    let root = feature_from_platform_workspace("feature-macos", "cfg(target_os = \"macos\")");
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+/// `demo` reaches `tool` through `edge`, and `tool` depends on `cc` only on
+/// macOS. Cargo resolves `tool` for the machine it runs on, so on Linux `cc`
+/// is invisible to `cargo tree --target`.
+fn host_side_workspace(name: &str, edge: &str, tool_extra: &str) -> PathBuf {
+    let extra = format!("\n[{edge}]\ntool = {{ path = \"../../vendor/tool\" }}\n");
+    let tool = package(
+        "tool",
+        &format!(
+            "{tool_extra}\n[target.'cfg(target_os = \"macos\")'.dependencies]\ncc = {{ path = \"../cc\" }}\n"
+        ),
+    );
+    workspace(
+        name,
+        &extra,
+        &[
+            ("vendor/tool/Cargo.toml", &tool),
+            ("vendor/tool/src/lib.rs", ""),
+            ("vendor/cc/Cargo.toml", &package("cc", "")),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    )
+}
+
+#[test]
+fn a_macos_only_dependency_of_a_build_dependency_still_fails() {
+    let root = host_side_workspace("host-build", "build-dependencies", "");
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_macos_only_dependency_of_a_proc_macro_still_fails() {
+    let root = host_side_workspace(
+        "host-proc-macro",
+        "dependencies",
+        "\n[lib]\nproc-macro = true\n",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+/// A git repository holding `dep 0.1.0` with a C file in it, under the same
+/// name and version as the clean `dep` in `vendor/`.
+fn dep_with_c_in_git(name: &str) -> PathBuf {
+    let repo = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("floors-git")
+        .join(name);
+    if repo.exists() {
+        fs::remove_dir_all(&repo).unwrap();
+    }
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        package("dep", "\n[features]\nx = []\n"),
+    )
+    .unwrap();
+    fs::write(repo.join("src/lib.rs"), LIB).unwrap();
+    fs::write(repo.join("src/ffi.c"), "planted\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "--quiet", "--initial-branch", "main"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "--message", "fixture"]);
+    repo
+}
+
+/// `demo` builds the clean `dep`. It also enables `features` on `mid`, whose
+/// `alloc` feature only refines the git `dep` through weak syntax, and whose
+/// `real` feature builds it.
+fn same_name_workspace(name: &str, features: &str) -> PathBuf {
+    let repo = dep_with_c_in_git(name);
+    let extra = format!(
+        "\n[dependencies]\ndep = {{ path = \"../../vendor/dep\" }}\nmid = {{ path = \"../../vendor/mid\", features = [{features}] }}\n"
+    );
+    let mid = package(
+        "mid",
+        &format!(
+            "\n[dependencies]\nother = {{ package = \"dep\", git = \"file://{}\", branch = \"main\", optional = true }}\n\n[features]\nalloc = [\"other?/x\"]\nreal = [\"dep:other\"]\n",
+            repo.display()
+        ),
+    );
+    workspace(
+        name,
+        &extra,
+        &[
+            ("vendor/dep/Cargo.toml", &package("dep", "")),
+            ("vendor/dep/src/lib.rs", LIB),
+            ("vendor/mid/Cargo.toml", &mid),
+            ("vendor/mid/src/lib.rs", LIB),
+        ],
+    )
+}
+
+#[test]
+fn an_inactive_package_sharing_a_built_name_and_version_passes() {
+    let output = gate(&same_name_workspace("same-name", "\"alloc\""));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("pass floors"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_built_package_sharing_a_name_and_version_still_fails() {
+    let root = same_name_workspace("same-name-built", "\"alloc\", \"real\"");
+    assert_floor_fails(&gate(&root), "ffi.c");
 }
 
 #[test]

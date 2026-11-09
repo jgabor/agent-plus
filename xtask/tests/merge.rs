@@ -445,6 +445,15 @@ exit $code
             .unwrap()
     }
 
+    fn prepare_running(&self, on: &str, command: &str) -> Output {
+        self.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["prepare", "9"])
+            .env("RUN_ON", on)
+            .env("RUN_COMMAND", command)
+            .output()
+            .unwrap()
+    }
+
     fn merge_killed(&self, on: &str, when: &str) -> Output {
         self.command(env!("CARGO_BIN_EXE_xtask"))
             .args(["merge", "9"])
@@ -1084,14 +1093,6 @@ fn a_pr_that_changed_during_the_proof_is_refused() {
             "prepare",
         ),
         (
-            "label-changed",
-            Pr {
-                labels: &["other"],
-                ..Pr::default()
-            },
-            "changed",
-        ),
-        (
             "body-changed",
             Pr {
                 body: "Closes #7.\n\nHill: none, something else.\n",
@@ -1107,6 +1108,33 @@ fn a_pr_that_changed_during_the_proof_is_refused() {
         let output = repo.merge_running("cargo build --release", &swap);
         assert_refused(&repo, &output, message);
     }
+}
+
+/// The checks read only `spec-change`, and a person can park or unpark the
+/// issue at any moment.
+#[test]
+fn a_label_the_checks_do_not_read_can_change_during_the_proof() {
+    for label in ["land-needed", "answer-needed", "other"] {
+        let repo = Repo::new(&format!("unread-{label}"));
+        repo.set_next_pr(&Pr {
+            labels: &[label],
+            ..Pr::default()
+        });
+        let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
+        assert_merged(&repo, &repo.merge_running("cargo build --release", &swap));
+    }
+}
+
+#[test]
+fn spec_change_appearing_during_a_prepare_is_refused() {
+    let repo = Repo::new("prepare-gains-spec-change");
+    repo.set_next_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
+    let output = repo.prepare_running("cargo build --release", &swap);
+    assert_refused(&repo, &output, "changed");
 }
 
 #[test]

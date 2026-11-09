@@ -29,6 +29,11 @@ enum Decision {
     Ready { pr: PullRequest, issue: u64 },
 }
 
+/// The one PR label that the checks read.
+fn has_spec_change(pr: &PullRequest) -> bool {
+    pr.labels.iter().any(|label| label == base::SPEC_CHANGE)
+}
+
 /// Whether this PR may merge, from what GitHub says now. It writes nothing.
 fn decide(gh: &Gh, number: u64, prepare: bool) -> Result<Decision, Problem> {
     let pr = gh.pull_request(number)?;
@@ -64,7 +69,7 @@ fn decide(gh: &Gh, number: u64, prepare: bool) -> Result<Decision, Problem> {
         ));
     }
     if !prepare {
-        if pr.labels.iter().any(|label| label == base::SPEC_CHANGE) {
+        if has_spec_change(&pr) {
             return refused(format!(
                 "PR {number} is labeled `{}`, so the owner merges it. Run `cargo xtask prepare {number}` instead",
                 base::SPEC_CHANGE
@@ -364,7 +369,7 @@ fn changed_during_proof(
             if issue != scoring.issue
                 || pr.head_ref != was.head_ref
                 || pr.body != was.body
-                || pr.labels != was.labels
+                || has_spec_change(&pr) != has_spec_change(was)
             {
                 return Ok(Some(format!(
                     "PR {number} changed during the merge, and the checks read what it said before. Run it again"

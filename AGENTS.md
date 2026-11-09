@@ -184,7 +184,9 @@ use the harness's question tool. Otherwise, park:
 3. End your turn. Don't wait.
 
 The owner removes `answer-needed` after answering, and the issue can be claimed
-again. Under `auto:pr`, park the same way when the merge gate passes, but add
+again. `land-needed` and `answer-needed` mirror between an issue and the open
+PR that closes it, so the owner can set or clear either one on either side.
+Under `auto:pr`, park the same way when the merge gate passes, but add
 `land-needed` instead, and say that the PR is ready to merge.
 
 Park only when you can't continue alone: you can't prove the change, the merge

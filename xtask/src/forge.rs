@@ -12,6 +12,8 @@ const FIELDS: &str = "number,state,body,labels,comments";
 const ISSUE_LIMIT: usize = 2000;
 /// `gh issue list` gives at most this many comments per issue.
 pub const LISTED_COMMENTS: usize = 100;
+const PR_LIMIT: usize = 1000;
+const ISSUES: &str = "repos/{owner}/{repo}/issues";
 
 #[derive(Clone, Debug)]
 pub struct Comment {
@@ -50,6 +52,12 @@ pub struct PullRequest {
     /// from any closing word.
     pub closing_issues: Vec<u64>,
     pub changes_requested: bool,
+}
+
+/// An issue or a PR, which GitHub numbers from one sequence.
+pub struct Labeled {
+    pub is_pr: bool,
+    pub labels: Vec<String>,
 }
 
 pub trait Forge {
@@ -137,6 +145,67 @@ impl Gh {
             "url,isCrossRepository,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
         ])?;
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
+    }
+
+    pub fn labeled(&self, number: u64) -> Result<Labeled, Problem> {
+        let value = self.json(&["api", &format!("{ISSUES}/{number}")])?;
+        let labels = read_labels(&value).ok_or_else(|| unexpected("gh api"))?;
+        Ok(Labeled {
+            is_pr: value.get("pull_request").is_some(),
+            labels,
+        })
+    }
+
+    /// The open PRs that GitHub will close this issue with, from any closing
+    /// word.
+    pub fn open_prs_closing(&self, issue: u64) -> Result<Vec<u64>, Problem> {
+        let limit = PR_LIMIT.to_string();
+        let args = [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,url,closingIssuesReferences",
+        ];
+        let value = self.json(&args)?;
+        let prs = value.as_arr().ok_or_else(|| unexpected("gh pr list"))?;
+        if prs.len() >= PR_LIMIT {
+            return Err(Problem(format!(
+                "this repository has {PR_LIMIT} open PRs or more, so the one that closes issue {issue} could be missing. Raise `PR_LIMIT`"
+            )));
+        }
+        let mut closing = Vec::new();
+        for pr in prs {
+            let (number, closes) = read_closing(pr).ok_or_else(|| unexpected("gh pr list"))?;
+            if closes.contains(&issue) {
+                closing.push(number);
+            }
+        }
+        Ok(closing)
+    }
+
+    /// Works on an issue or a PR, and on one that already has the label.
+    pub fn apply_label(&self, number: u64, label: &str) -> Result<(), Problem> {
+        let path = format!("{ISSUES}/{number}/labels");
+        let field = format!("labels[]={label}");
+        self.text(&["api", "-X", "POST", &path, "-f", &field], None)?;
+        Ok(())
+    }
+
+    /// Works on an issue or a PR, and on one that doesn't have the label.
+    pub fn remove_label(&self, number: u64, label: &str) -> Result<(), Problem> {
+        let path = format!("{ISSUES}/{number}/labels/{label}");
+        let args = ["api", "-X", "DELETE", &path];
+        let output = self.output(&args, None)?;
+        if !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("HTTP 404")
+        {
+            return Ok(());
+        }
+        self.checked(&args, output)?;
+        Ok(())
     }
 
     /// Sets a status on a commit.
@@ -365,14 +434,30 @@ fn read_issue(value: &Json) -> Option<Issue> {
     })
 }
 
-fn read_pull_request(value: &Json) -> Option<PullRequest> {
-    let text = |key: &str| Some(value.get(key)?.as_str()?.to_string());
-    let url = text("url")?;
+/// The issues in this repository that a PR closes. GitHub also lists issues
+/// in other repositories, whose numbers mean nothing here.
+fn closing_here(value: &Json) -> Option<Vec<u64>> {
+    let url = value.get("url")?.as_str()?;
     let here = format!("{}/issues/", url.rsplit_once("/pull/")?.0);
     let is_here = |issue: &&Json| {
         let url = issue.get("url").and_then(Json::as_str);
         url.is_some_and(|url| url.starts_with(&here))
     };
+    value
+        .get("closingIssuesReferences")?
+        .as_arr()?
+        .iter()
+        .filter(is_here)
+        .map(|issue| issue.get("number")?.as_u64())
+        .collect()
+}
+
+fn read_closing(value: &Json) -> Option<(u64, Vec<u64>)> {
+    Some((value.get("number")?.as_u64()?, closing_here(value)?))
+}
+
+fn read_pull_request(value: &Json) -> Option<PullRequest> {
+    let text = |key: &str| Some(value.get(key)?.as_str()?.to_string());
     Some(PullRequest {
         state: text("state")?,
         from_fork: value.get("isCrossRepository")?.as_bool()?,
@@ -380,13 +465,7 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
         base_ref: text("baseRefName")?,
         body: text("body")?,
         labels: read_labels(value)?,
-        closing_issues: value
-            .get("closingIssuesReferences")?
-            .as_arr()?
-            .iter()
-            .filter(is_here)
-            .map(|issue| issue.get("number")?.as_u64())
-            .collect::<Option<_>>()?,
+        closing_issues: closing_here(value)?,
         changes_requested: has_standing_request(value.get("reviews")?.as_arr()?)?,
     })
 }

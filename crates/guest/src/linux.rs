@@ -2,6 +2,9 @@
 
 use crate::{Mount, System};
 use std::ffi::{CStr, OsStr, c_char, c_int, c_ulong, c_void};
+use std::fs::File;
+use std::mem::size_of;
+use std::os::fd::FromRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::{fs, io, ptr};
@@ -11,6 +14,20 @@ const ECHILD: i32 = 10;
 /// A restart, which ends the VM. `RB_POWER_OFF` would only halt the CPU,
 /// because the kernel has no ACPI, and the host would never find out.
 const RB_AUTOBOOT: c_int = 0x0123_4567;
+const AF_VSOCK: c_int = 40;
+const SOCK_STREAM: c_int = 1;
+const HOST_CID: u32 = 2;
+
+/// `struct sockaddr_vm`.
+#[repr(C)]
+struct VsockAddress {
+    family: u16,
+    reserved: u16,
+    port: u32,
+    cid: u32,
+    flags: u8,
+    zero: [u8; 3],
+}
 
 unsafe extern "C" {
     fn mount(
@@ -23,6 +40,8 @@ unsafe extern "C" {
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn sync();
     fn reboot(command: c_int) -> c_int;
+    fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
+    fn connect(fd: c_int, address: *const VsockAddress, len: u32) -> c_int;
 }
 
 /// The running Linux kernel.
@@ -76,6 +95,31 @@ impl System for Linux {
         }
         Err(io::Error::last_os_error())
     }
+}
+
+/// Connects to `port` on the host over vsock.
+pub fn connect_to_host(port: u32) -> io::Result<File> {
+    // SAFETY: this call takes no pointers.
+    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `socket` returned a new descriptor that nothing else owns.
+    let stream = unsafe { File::from_raw_fd(fd) };
+    let address = VsockAddress {
+        family: AF_VSOCK as u16,
+        reserved: 0,
+        port,
+        cid: HOST_CID,
+        flags: 0,
+        zero: [0; 3],
+    };
+    let length = size_of::<VsockAddress>() as u32;
+    // SAFETY: `address` outlives the call, and `length` is its size.
+    if unsafe { connect(fd, &address, length) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(stream)
 }
 
 fn path(target: &CStr) -> &Path {

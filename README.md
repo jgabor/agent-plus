@@ -172,6 +172,11 @@ desktop in a native window.
 - `ap build --exe`: export a standalone executable
 - `ap push` and `ap pull`: share agents through a registry (after v0.1.0)
 
+#### Diagnostics
+
+- `ap boot [--timeout N]`: boot a bare machine with no agent, print its kernel
+  release, and power off
+
 #### About
 
 - `ap --version`: print the version

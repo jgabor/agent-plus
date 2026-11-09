@@ -11,11 +11,14 @@ use std::io::{self, Read, Write};
 pub const MAX_BODY: usize = 64 * 1024;
 /// The most output one frame carries.
 pub const MAX_OUTPUT: usize = 32 * 1024;
+/// The vsock port the init connects to on the host.
+pub const PORT: u32 = 1024;
 
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;
 const STDERR: u8 = 3;
 const EXITED: u8 = 4;
+const READY: u8 = 5;
 
 /// Why a frame was refused. The stream can't be trusted after any of these.
 #[derive(Debug)]
@@ -48,6 +51,8 @@ pub enum ToHost {
     /// The program ended with this status: its exit code, 126 if it couldn't
     /// be executed, 127 if it wasn't found, or 128+n for signal n.
     Exited(u8),
+    /// The init is up, on a kernel with this release.
+    Ready(Vec<u8>),
 }
 
 impl ToGuest {
@@ -94,6 +99,7 @@ impl ToHost {
             (STDERR, output) => Ok(Some(ToHost::Stderr(output.to_vec()))),
             (EXITED, [status]) => Ok(Some(ToHost::Exited(*status))),
             (EXITED, _) => Err(ProtocolError::Malformed),
+            (READY, release) => Ok(Some(ToHost::Ready(release.to_vec()))),
             (tag, _) => Err(ProtocolError::UnknownTag(tag)),
         }
     }
@@ -103,6 +109,7 @@ impl ToHost {
             ToHost::Stdout(output) => write_frame(writer, STDOUT, output),
             ToHost::Stderr(output) => write_frame(writer, STDERR, output),
             ToHost::Exited(status) => write_frame(writer, EXITED, &[*status]),
+            ToHost::Ready(release) => write_frame(writer, READY, release),
         }
     }
 }

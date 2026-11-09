@@ -679,7 +679,8 @@ passes. No scheduled work runs on GitHub.
 - Answer `answer-needed` issues. The owner can set or clear `land-needed` and
   `answer-needed` on the issue or on the open PR that closes it. A workflow
   runs `cargo xtask mirror` to copy the change to the other side, and only the
-  issue's label decides whether it can be claimed.
+  issue's label decides whether it can be claimed. When the PR merges, the
+  same workflow removes `land-needed` from both.
 - Publish releases.
 
 ## Build stages

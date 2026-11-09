@@ -1,5 +1,6 @@
 # Keeps land-needed and answer-needed the same on an issue and on the open PR
-# that closes it. `cargo xtask mirror` holds the logic.
+# that closes it, and removes land-needed from both when the PR merges.
+# `cargo xtask mirror` holds the logic.
 #
 # `pull_request_target` runs this file from the default branch, with a token
 # that can write. Nothing here may check out or run a PR's code.
@@ -9,7 +10,7 @@ on:
   issues:
     types: [labeled, unlabeled]
   pull_request_target:
-    types: [labeled, unlabeled]
+    types: [labeled, unlabeled, closed]
 
 permissions: {}
 
@@ -64,3 +65,22 @@ jobs:
           NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
           LABEL: ${{ github.event.label.name }}
         run: cargo xtask mirror "$NUMBER" "$LABEL"
+
+  # Removing is safe to run at any time, so this job doesn't queue with the
+  # ones above. A newer run there could replace it while it waits.
+  merged:
+    if: github.event.action == 'closed' && github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: cargo xtask mirror "$NUMBER" land-needed

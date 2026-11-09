@@ -4,9 +4,12 @@
 //! It finds the newest change a person made to the label on either side, and
 //! applies it to both. Runs can start late, out of order, or again, and each
 //! one still ends on the newest change.
+//!
+//! A merged PR waits on nobody, so a run for one removes `land-needed` from
+//! it and from the issues it closed, whoever changed the label last.
 
 use crate::forge::Gh;
-use crate::work::PARKED;
+use crate::work::{LAND_NEEDED, PARKED};
 use crate::{Problem, Verdict, workspace};
 
 pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
@@ -18,8 +21,17 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
         return Ok(Verdict::Pass);
     }
     let gh = Gh::new(&workspace::root()?);
-    let others = if gh.is_pr(number)? {
+    let is_pr = gh.is_pr(number)?;
+    let others = if is_pr {
         let pr = gh.pull_request(number)?;
+        if pr.state == "MERGED" && label == LAND_NEEDED {
+            let items: Vec<u64> = std::iter::once(number).chain(pr.closing_issues).collect();
+            for item in &items {
+                gh.remove_label(*item, label)?;
+            }
+            println!("mirror: {number} merged, so removed `{label}` from {items:?}");
+            return Ok(Verdict::Pass);
+        }
         if pr.state == "OPEN" {
             pr.closing_issues
         } else {
@@ -56,5 +68,19 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
         "mirror: {} `{label}` on {items:?}",
         if present { "applied" } else { "removed" }
     );
+    // The PR can merge after it was read, and its merge run can finish before
+    // the writes above. Reading it again after them closes that window.
+    if present && label == LAND_NEEDED {
+        let prs = if is_pr { &items[..1] } else { &items[1..] };
+        for pr in prs {
+            if gh.pull_request(*pr)?.state == "MERGED" {
+                for item in &items {
+                    gh.remove_label(*item, label)?;
+                }
+                println!("mirror: {pr} merged meanwhile, so removed `{label}` from {items:?}");
+                break;
+            }
+        }
+    }
     Ok(Verdict::Pass)
 }

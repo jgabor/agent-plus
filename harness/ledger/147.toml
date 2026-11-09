@@ -1,0 +1,14 @@
+issue = 147
+pr = 151
+commit = "42b95b6d3a89600b8e7e2c5f78285ffe109798c6"
+base = "08d1aac30e25d3bb884acab9370c87956349a557"
+date = "2026-11-10"
+host = "linux-x86_64"
+spec = { proven = 1, promises = 742 }
+journey = { passing = 3, steps = 19 }
+reason = ""
+
+[budgets]
+binary_bytes = 3679016
+boot_ms = 87.25
+version_ms = 0.07

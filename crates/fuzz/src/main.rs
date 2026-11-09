@@ -51,7 +51,7 @@ const TARGETS: [Target; 2] = [
             // A queue with one chain of two descriptors.
             concat!(
                 "set 0x38 8 4\nset 0x80 0x1000 4\nset 0x90 0x2000 4\nset 0xa0 0x3000 4\n",
-                "set 0x44 1 4\n",
+                "set 0x44 1 4\nset 0x70 4 4\n",
                 "mem 0x1000 0x4000\nmem 0x1008 0x1000100000010\n",
                 "mem 0x1010 0x5000\nmem 0x1018 0x200000040\n",
                 "mem 0x2000 0x10000\nrun\n",
@@ -59,7 +59,7 @@ const TARGETS: [Target; 2] = [
             // A descriptor that names itself.
             concat!(
                 "set 0x38 8 4\nset 0x80 0x1000 4\nset 0x90 0x2000 4\nset 0xa0 0x3000 4\n",
-                "set 0x44 1 4\nmem 0x1000 0x4000\nmem 0x1008 0x100000010\n",
+                "set 0x44 1 4\nset 0x70 4 4\nmem 0x1000 0x4000\nmem 0x1008 0x100000010\n",
                 "mem 0x2000 0x10000\nrun\n",
             ),
             "get 0 4\nget 0x100 1\nset 0x70 0 4\nset 0x50 0 4\nset 0x64 1 4\nget 0x34 4\n",
@@ -142,7 +142,9 @@ fn device_input(input: &str) -> usize {
 fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
     let mut accepted = 0;
     for index in 0..DEVICE_QUEUES {
-        let queue = device.queue(index).expect("the queue exists");
+        let Some(queue) = device.queue(index) else {
+            continue;
+        };
         while let Ok(Some(chain)) = queue.pop(memory) {
             assert!(chain.buffers.len() <= usize::from(DEVICE_QUEUE_SIZE));
             let mut total = 0;

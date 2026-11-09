@@ -95,6 +95,13 @@ impl Queue {
         *self = Self::new(self.max_size);
     }
 
+    /// Makes a queue ready, at the start of its rings.
+    pub(super) fn start(&mut self) {
+        self.next_available = 0;
+        self.next_used = 0;
+        self.ready = true;
+    }
+
     /// Whether the guest's size may be used.
     pub(super) fn size_is_valid(&self) -> bool {
         self.size.is_power_of_two() && self.size <= self.max_size

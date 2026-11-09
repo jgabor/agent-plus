@@ -6,6 +6,7 @@ use super::queue::Queue;
 const MAGIC: u32 = 0x7472_6976;
 const VERSION: u32 = 2;
 const VERSION_1: u64 = 1 << 32;
+const DRIVER_OK: u32 = 4;
 const FEATURES_OK: u32 = 8;
 const USED_INTERRUPT: u32 = 1;
 const CONFIG: u64 = 0x100;
@@ -48,14 +49,20 @@ impl Transport {
         }
     }
 
-    /// A queue, for the device to work on.
+    /// A queue, for the device to work on, once the driver has finished
+    /// setting up. Virtio forbids consuming buffers any earlier.
     pub fn queue(&mut self, index: usize) -> Option<&mut Queue> {
+        if self.status & DRIVER_OK == 0 {
+            return None;
+        }
         self.queues.get_mut(index)
     }
 
     /// Records that the device put something on a used ring.
     pub fn signal_used(&mut self) {
-        self.interrupt_status |= USED_INTERRUPT;
+        if self.status & DRIVER_OK != 0 {
+            self.interrupt_status |= USED_INTERRUPT;
+        }
     }
 
     /// Handles a guest read. `data` is zero unless the access means something.
@@ -125,7 +132,11 @@ impl Transport {
 
     fn write_queue_ready(&mut self, value: u32) {
         if let Some(queue) = self.queues.get_mut(self.queue_select as usize) {
-            queue.ready = value != 0 && queue.size_is_valid();
+            if value == 0 {
+                queue.ready = false;
+            } else if !queue.ready && queue.size_is_valid() {
+                queue.start();
+            }
         }
     }
 
@@ -178,7 +189,7 @@ impl Transport {
 
 /// `offset`, if it is a whole 32-bit register access.
 fn register(offset: u64, width: usize) -> Option<u64> {
-    (offset < CONFIG && width == 4 && offset % 4 == 0).then_some(offset)
+    (offset < CONFIG && width == 4 && offset.is_multiple_of(4)).then_some(offset)
 }
 
 /// Half of a 64-bit feature set, or zero for a select with no half.
@@ -201,6 +212,7 @@ fn set_high(target: &mut u64, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::GuestMemory;
 
     const MAGIC: u64 = 0x000;
     const VERSION: u64 = 0x004;
@@ -223,6 +235,7 @@ mod tests {
     const QUEUE_DEVICE_LOW: u64 = 0x0a0;
     const CONFIG: u64 = 0x100;
     const FEATURES_OK: u32 = 8;
+    const DRIVER_OK: u32 = 4;
     const FEATURE: u64 = 1 << 3;
     const VERSION_1_HIGH: u32 = 1;
 
@@ -334,7 +347,7 @@ mod tests {
         set(&mut device, QUEUE_DRIVER_LOW, 0x3000);
         set(&mut device, QUEUE_DEVICE_LOW, 0x4000);
         set(&mut device, QUEUE_DESC_LOW, 0x5000);
-        let queue = device.queue(0).unwrap();
+        let queue = &device.queues[0];
         assert_eq!(queue.descriptors, 0x2_0000_5000);
         assert_eq!(queue.available, 0x3000);
         assert_eq!(queue.used, 0x4000);
@@ -347,7 +360,7 @@ mod tests {
         ready(&mut device);
         set(&mut device, QUEUE_DESC_LOW, 0x2000);
         set(&mut device, QUEUE_NUM, 2);
-        let queue = device.queue(0).unwrap();
+        let queue = &device.queues[0];
         assert_eq!(queue.descriptors, 0x1000);
         assert_eq!(queue.size, 8);
     }
@@ -371,6 +384,7 @@ mod tests {
     #[test]
     fn an_interrupt_stays_until_it_is_acknowledged() {
         let mut device = device();
+        set(&mut device, STATUS, DRIVER_OK);
         device.signal_used();
         assert_eq!(get(&device, INTERRUPT_STATUS), 1);
         set(&mut device, INTERRUPT_ACK, 2);
@@ -384,6 +398,7 @@ mod tests {
         let mut device = device();
         set(&mut device, QUEUE_DESC_LOW, 0x1000);
         ready(&mut device);
+        set(&mut device, STATUS, DRIVER_OK);
         device.signal_used();
         set(&mut device, DEVICE_FEATURES_SELECT, 1);
         set(&mut device, DRIVER_FEATURES, 1 << 4);
@@ -394,9 +409,57 @@ mod tests {
         assert_eq!(get(&device, INTERRUPT_STATUS), 0);
         assert_eq!(get(&device, QUEUE_READY), 0);
         assert_eq!(get(&device, DEVICE_FEATURES), FEATURE as u32);
-        assert_eq!(device.queue(0).unwrap().descriptors, 0);
+        assert_eq!(device.queues[0].descriptors, 0);
         set(&mut device, STATUS, FEATURES_OK);
         assert_eq!(get(&device, STATUS), FEATURES_OK);
+    }
+
+    #[test]
+    fn nothing_is_consumed_or_signalled_before_driver_ok() {
+        let mut device = device();
+        ready(&mut device);
+        assert!(device.queue(0).is_none());
+        device.signal_used();
+        assert_eq!(get(&device, INTERRUPT_STATUS), 0);
+        set(&mut device, STATUS, DRIVER_OK);
+        assert!(device.queue(0).is_some());
+        assert!(device.queue(2).is_none());
+    }
+
+    #[test]
+    fn a_fresh_setup_starts_at_the_start_of_the_rings() {
+        let memory = GuestMemory::new(1 << 16).unwrap();
+        let mut device = device();
+        set(&mut device, QUEUE_DESC_LOW, 0x1000);
+        set(&mut device, QUEUE_DRIVER_LOW, 0x2000);
+        set(&mut device, QUEUE_DEVICE_LOW, 0x3000);
+        ready(&mut device);
+        set(&mut device, STATUS, DRIVER_OK);
+        memory.write(0x1000, &0x4000u64.to_le_bytes()).unwrap();
+        memory.write(0x2002, &1u16.to_le_bytes()).unwrap();
+        let queue = device.queue(0).unwrap();
+        assert!(queue.pop(&memory).unwrap().is_some());
+        // The guest stops the queue, and starts it again on new rings.
+        set(&mut device, QUEUE_READY, 0);
+        set(&mut device, QUEUE_DRIVER_LOW, 0x5000);
+        memory.write(0x5002, &1u16.to_le_bytes()).unwrap();
+        set(&mut device, QUEUE_READY, 1);
+        assert!(device.queue(0).unwrap().pop(&memory).unwrap().is_some());
+    }
+
+    #[test]
+    fn writing_ready_again_doesnt_rewind_a_running_queue() {
+        let memory = GuestMemory::new(1 << 16).unwrap();
+        let mut device = device();
+        set(&mut device, QUEUE_DESC_LOW, 0x1000);
+        set(&mut device, QUEUE_DRIVER_LOW, 0x2000);
+        ready(&mut device);
+        set(&mut device, STATUS, DRIVER_OK);
+        memory.write(0x1000, &0x4000u64.to_le_bytes()).unwrap();
+        memory.write(0x2002, &1u16.to_le_bytes()).unwrap();
+        assert!(device.queue(0).unwrap().pop(&memory).unwrap().is_some());
+        set(&mut device, QUEUE_READY, 1);
+        assert_eq!(device.queue(0).unwrap().pop(&memory), Ok(None));
     }
 
     #[test]

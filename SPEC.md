@@ -94,7 +94,7 @@ SHARE "./My Notes"
 An Agentfile has no flags. An unquoted argument that starts with `--` is an
 error, which keeps flags available to later versions.
 
-A few instructions end in an optional word that sets a mode:
+A few instructions end in an optional word that sets a mode.
 
 ```
 SHARE ./out rw
@@ -144,7 +144,7 @@ them. `ap` removes those quotes.
 SYSTEM ./"My Prompts"/system.md
 ```
 
-**Fenced block.** For multi-line text, use a CommonMark-style code fence:
+**Fenced block.** For multi-line text, use a CommonMark-style code fence.
 
 ````
 SYSTEM
@@ -212,7 +212,7 @@ under `/home/agent`, the agent's home directory. Guest paths are normalized
 before any check.
 
 When `ADD` or `SHARE` has no destination, the guest path follows one
-**mirror rule**:
+**mirror rule**.
 
 | Host path | Guest path |
 |---|---|
@@ -228,8 +228,8 @@ Destination rules:
 - Two destinations where one equals or contains the other are an error,
   whichever instructions they come from. For example, `ADD ./git`
   collides with `REPO`'s `~/git/<name>`.
-- These guest paths are reserved, and a destination that equals, contains,
-  or is inside one of them is an error:
+- These guest paths are reserved. A destination that equals, contains, or
+  is inside one of them is an error.
   - System directories: `/bin`, `/boot`, `/dev`, `/etc`, `/lib*`, `/proc`,
     `/run`, `/sbin`, `/sys`, `/usr`
   - Harness configuration directories, such as `~/.claude` and `~/.codex`.
@@ -300,7 +300,7 @@ How approval works:
 - A later build that **widens** a grant asks again and shows what changed.
   It doesn't matter who edited the Agentfile, so a wider grant that arrives
   through `git pull` or `ap apply` is caught at your next build. These
-  changes widen:
+  changes widen a grant.
   - a host path outside the build context that you haven't approved,
     including an approved path whose canonical location changed
   - write access (`rw`) to a path that didn't have it
@@ -418,7 +418,7 @@ directory) and writes an image into the local store.
 - **Exit status.** If `ap` fails before the harness starts, for example on
   a missing secret or a refused approval, it exits with status 125.
 - **Working directory.** The harness starts in the first of these that
-  applies:
+  applies.
   1. the share from `ap run --share`
   2. the [`WORKDIR`](#workdir)
   3. the Agentfile's only directory `SHARE` or `REPO`
@@ -492,7 +492,7 @@ headless mode, it won't take `PROMPT`. ChatGPT Desktop's Linux app is in
 preview, without computer use. `ap` doesn't support it yet, and it comes
 after Claude Desktop.
 
-Each harness has an adapter. The adapter defines:
+Each harness has an adapter. The adapter defines the following.
 
 - where configuration goes
 - which files `AUTH login` and each `PERSIST` name map to
@@ -506,7 +506,7 @@ Each harness has an adapter. The adapter defines:
 
 **Redistribution.** Claude Code is proprietary. `ap` downloads it from
 Anthropic on your machine during the build, verifies it against the
-lockfile, and never redistributes it:
+lockfile, and never redistributes it.
 
 - **Planned.** `ap push` replaces proprietary harness layers with references.
   The receiving machine downloads them from the vendor, pinned by digest.
@@ -573,7 +573,7 @@ goes through virtual keyboard and pointer devices, so capture and input
 happen outside the guest.
 
 The compositor knows more than pixels, so it adds tools that replace the
-usual loop of screenshot, guess, click, and sleep:
+usual loop of screenshot, guess, click, and sleep.
 
 - **Settled results.** An action returns once the screen has stopped
   changing, which the compositor knows from its damage tracking. If it
@@ -604,7 +604,7 @@ SYSTEM
 followed by a fenced block.
 
 `SYSTEM` sets the harness's global instructions, the equivalent of a global
-`AGENTS.md`. The adapter writes it to the harness's own location:
+`AGENTS.md`. The adapter writes it to the harness's own location.
 
 | Harness | File |
 |---|---|
@@ -641,7 +641,7 @@ the harness, streams the output, and exits with the harness's status.
 PROMPT Review the diff on the current branch and list risks.
 ```
 
-`-p` replaces `PROMPT` for that run:
+`-p` replaces `PROMPT` for that run.
 
 ```
 ap run reviewer -p "Review only the tests."
@@ -650,7 +650,7 @@ ap run reviewer -p "Review only the tests."
 An empty prompt clears `PROMPT` for that run. `ap run reviewer -p ""` opens
 the interactive interface with nothing submitted.
 
-A prompt that starts with `/` must be quoted, or it is read as a path:
+A prompt that starts with `/` must be quoted, or it is read as a path.
 
 ```
 PROMPT "/review"
@@ -999,7 +999,7 @@ makes the run fail, and the error names the secret.
 
 **Hidden (the default).** Inside the guest, the environment variable
 `<name>` holds a placeholder. The egress proxy replaces the placeholder with
-the real value, and only:
+the real value only under both of these conditions.
 
 - on TLS connections to the secret's bound hosts
 - in request headers on the adapter's allowlist (for example,
@@ -1025,7 +1025,7 @@ Bound hosts:
 - Bound hosts come from the `@<host>` list. A bound host matches that exact
   host only, not its subdomains. An `@<host>` list replaces the adapter's
   defaults.
-- Well-known names have adapter defaults, so `@<host>` is optional for them:
+- Well-known names have adapter defaults, so `@<host>` is optional for them.
 
   | Name | Default bound hosts |
   |---|---|
@@ -1205,7 +1205,7 @@ How it works:
   than a branch. Share the main working tree if the agent needs git.
 - File locks pass through to the host.
 
-In `rw` shares, the files your host acts on are read-only to the agent:
+In `rw` shares, the files your host acts on are read-only to the agent.
 
 - An entry named `Agentfile` or `Agentfile.lock` can't be created, changed,
   removed, or renamed, so an agent can't change what a later build does.
@@ -1235,7 +1235,7 @@ attributes, because those can run commands.
 
 - `ap diff <agent | run>` shows what changed, during a run or after it.
 - `ap discard <agent | run>` throws the changes away.
-- `ap apply <agent | run>` brings them back:
+- `ap apply <agent | run>` brings them back.
   - When the share's root on your host holds a `.git` directory, the agent's
     commits, and the files it wrote but didn't commit, land as a new branch,
     `ap/<agent>/<run>`, imported as git objects and checked with `git fsck`.
@@ -1548,7 +1548,7 @@ allow one.
   proxy resolves the name itself and connects only to the addresses it
   gets.
 - **Decryption.** The proxy decrypts TLS, with the per-run certificate
-  authority, only where it must:
+  authority, only where it must.
   - on hosts with URL rules, because the rules need the request path
   - under a broader rule of the opposite sign: with `+github.com` and
     `-gist.github.com`, on every TLS connection that `+github.com` allows,
@@ -1718,7 +1718,7 @@ connections to `api.githubcopilot.com`. The agent starts in
 `~/git/agent-plus`, because of `WORKDIR`. Without it, the agent would start
 in `/home/agent`, since `SHARE ./references` is a second directory.
 
-The first `ap build` of this Agentfile asks you to approve its grants:
+The first `ap build` of this Agentfile asks you to approve its grants.
 
 - `GITHUB_PERSONAL_ACCESS_TOKEN`, hidden, bound to `api.githubcopilot.com`
 - write access to `/var/log/output.log`, which is also outside the build
@@ -1740,7 +1740,7 @@ The first `ap build` of this Agentfile asks you to approve its grants:
 The guest's CPU architecture always matches the host's. Debian builds the
 same packages for both.
 
-The TLS backend, graviola, sets a CPU floor:
+The TLS backend, graviola, sets a CPU floor.
 
 - **x86_64:** AES-NI, SSSE3, AVX, AVX2, ADX, BMI2, and PCLMULQDQ. In
   practice, Intel Broadwell or AMD Zen and newer.

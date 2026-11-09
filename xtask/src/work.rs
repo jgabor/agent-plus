@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const WORKER_SLOTS: usize = 3;
 const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
-const NEEDS_OWNER: &str = "needs-owner";
+/// What parks an issue: a PR ready to merge, or a question waiting for an answer.
+pub const PARKED: [&str; 2] = ["land-needed", "answer-needed"];
 const STATUS_MARK: &str = "<!-- status -->";
 const DEFAULT_BRANCH: &str = "main";
 
@@ -225,6 +226,10 @@ fn has(issue: &Issue, label: &str) -> bool {
     issue.labels.iter().any(|have| have == label)
 }
 
+fn is_parked(issue: &Issue) -> bool {
+    PARKED.iter().any(|label| has(issue, label))
+}
+
 fn autonomy(issue: &Issue) -> Option<&'static str> {
     if has(issue, "auto:pr") {
         Some("auto:pr")
@@ -271,7 +276,7 @@ impl<'a> View<'a> {
         if !issue.open {
             return Ok(State::Closed);
         }
-        if has(issue, NEEDS_OWNER) {
+        if is_parked(issue) {
             return Ok(State::Parked);
         }
         let mut expired = None;
@@ -544,7 +549,7 @@ fn claim(
     let winner = statuses_by(&after, &view.owner)
         .into_iter()
         .find(|status| status.is_live(now));
-    let eligible = after.open && !has(&after, NEEDS_OWNER);
+    let eligible = after.open && !is_parked(&after);
     if intact && eligible && winner.is_some_and(|status| status.id == mine) {
         return Ok(Claim::Won { comment: mine });
     }
@@ -848,9 +853,17 @@ mod tests {
                 retired: false,
             },
             Case {
-                name: "parked while claiming",
+                name: "parked to land while claiming",
                 interfere: Some(Box::new(|issues| {
-                    issues[0].labels.push("needs-owner".to_string());
+                    issues[0].labels.push("land-needed".to_string());
+                })),
+                won: false,
+                retired: true,
+            },
+            Case {
+                name: "parked on a question while claiming",
+                interfere: Some(Box::new(|issues| {
+                    issues[0].labels.push("answer-needed".to_string());
                 })),
                 won: false,
                 retired: true,
@@ -922,7 +935,7 @@ mod tests {
     #[test]
     fn an_issue_that_can_not_be_claimed_gets_no_writes() {
         let mut parked = issue(vec![]);
-        parked.labels.push("needs-owner".to_string());
+        parked.labels.push("land-needed".to_string());
         let mut live = issue(vec![comment(40, OWNER, &status("working", NOW + 3600))]);
         live.labels.push("in-progress".to_string());
         let mut blocked = issue(vec![]);

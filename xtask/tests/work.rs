@@ -262,10 +262,13 @@ fn a_blocked_issue_waits_for_an_open_blocker() {
 
 #[test]
 fn a_parked_issue_waits_for_the_owner() {
-    assert_eq!(
-        listed("parked", &[open(7, &["auto:merge", "needs-owner"], T)]),
-        Vec::<u64>::new()
-    );
+    for label in ["land-needed", "answer-needed"] {
+        assert_eq!(
+            listed(label, &[open(7, &["auto:merge", label], T)]),
+            Vec::<u64>::new(),
+            "{label}"
+        );
+    }
 }
 
 #[test]

@@ -450,7 +450,7 @@ diagnostics go to stderr.
 | Available | Claimable under AGENTS.md | Claimed |
 | Claimed | `in-progress`, with a live lease | Parked, Abandoned, or Closed |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
-| Parked | `needs-owner` | Available, when the owner removes the label |
+| Parked | `land-needed` or `answer-needed` | Available, when the owner removes the label |
 | Closed | Its PR merged | |
 
 ## Processes
@@ -651,7 +651,7 @@ passes. No scheduled work runs on GitHub.
   at a PR with a comment saying what merging accepts, so the owner reads that
   and uses a merge button.
 - Turn the scheduled tasks on.
-- Answer `needs-owner` issues.
+- Answer `answer-needed` issues.
 - Publish releases.
 
 ## Build stages

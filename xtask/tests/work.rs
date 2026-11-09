@@ -638,8 +638,8 @@ fn repo_where_a_claim_loses(name: &str) -> Repo {
     repo
 }
 
-/// Bigger than a pipe's buffer, so writing it blocks until the fake `gh`,
-/// which never reads its input, exits. The write then always breaks.
+/// Bigger than Linux's usual 64 KiB pipe buffer, so writing it blocks until the
+/// fake `gh`, which never reads its input, exits. The write then breaks.
 fn unread_thread() -> String {
     "x".repeat(100_000)
 }

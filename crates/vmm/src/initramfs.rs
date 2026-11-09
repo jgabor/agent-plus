@@ -1,0 +1,1 @@
+//! The in-memory initramfs.

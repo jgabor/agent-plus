@@ -135,7 +135,7 @@ fn record_writes_the_scores_of_the_current_head() {
     assert_eq!(
         text,
         format!(
-            "issue = 123\npr = 130\ncommit = \"{}\"\ndate = \"{}\"\nhost = \"{host}\"\nspec = {{ proven = 1, promises = 2 }}\njourney = {{ passing = 1, steps = 1 }}\nreason = \"\"\n\n[budgets]\n",
+            "issue = 123\npr = 130\ncommit = \"{0}\"\nbase = \"{0}\"\ndate = \"{1}\"\nhost = \"{host}\"\nspec = {{ proven = 1, promises = 2 }}\njourney = {{ passing = 1, steps = 1 }}\nreason = \"\"\n\n[budgets]\n",
             head.trim(),
             date.trim(),
         )

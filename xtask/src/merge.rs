@@ -142,7 +142,8 @@ fn sequence(pr: &str, prepare: bool) -> Result<Verdict, Problem> {
         pr: &pr,
         gated: &gated,
     };
-    let Some(Proof { record, accepted }) = prove(&tree.path, &scoring)? else {
+    let proof = prove(&tree.path, &scoring).inspect_err(|_| unproven())?;
+    let Some(Proof { record, accepted }) = proof else {
         unproven();
         return Ok(Verdict::Fail);
     };

@@ -198,7 +198,15 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
         passing,
         steps,
     };
-    let record = compose(&root, issue, pr, commit.trim(), None, scores)?;
+    let measured_on = base::find(&root)?;
+    let record = compose(
+        &root,
+        issue,
+        pr,
+        commit.trim(),
+        measured_on.as_deref(),
+        scores,
+    )?;
     println!("{}", store(&root, &record)?);
     Ok(Verdict::Pass)
 }
@@ -318,7 +326,8 @@ pub fn newest(root: &Path, commit: &str) -> Result<Option<Record>, Problem> {
 
 /// Whether a record was measured on another `main` than the one `commit`, its
 /// squash, landed on. What it says then isn't what that `main` plus the PR
-/// scores, so it can't be anyone's floor.
+/// scores, so it can't be anyone's floor. A record not yet squashed sits right
+/// on the head it measured, and is what its own branch should read.
 pub fn merged_after_main_moved(
     root: &Path,
     commit: &str,
@@ -331,7 +340,8 @@ pub fn merged_after_main_moved(
     if !base::commit_exists(root, &parent)? {
         return Ok(true);
     }
-    Ok(base::git_text(root, &["rev-parse", &parent])?.trim() != measured)
+    let parent = base::git_text(root, &["rev-parse", &parent])?;
+    Ok(parent.trim() != measured && parent.trim() != record.commit)
 }
 
 /// The record this commit wrote, if it wrote one.

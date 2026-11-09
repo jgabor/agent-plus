@@ -1210,6 +1210,20 @@ fn a_lowered_count_is_accepted_in_one_comment_and_merge_refuses_it() {
     assert!(comments.contains("journey fell from 2 to 1"), "{comments}");
 }
 
+#[test]
+fn a_prepared_branch_reads_its_own_record() {
+    let repo = with_base("own-record", 0, 2);
+    assert_prepared(&repo, &repo.prepare());
+    repo.git(&["fetch", "-q", "origin", BRANCH]);
+    repo.git(&["checkout", "-q", "--detach", "FETCH_HEAD"]);
+    let output = repo.xtask(&["score"]);
+    assert!(
+        stdout(&output).contains("journey 1 of 1"),
+        "{}",
+        stdout(&output)
+    );
+}
+
 #[track_caller]
 fn assert_failure_posted(repo: &Repo, output: &Output, head: &str) {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
@@ -1466,6 +1480,8 @@ fn a_change_that_only_looks_like_a_revert_is_benched() {
     let output = repo.prepare();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
+    assert!(status_call(&repo).unwrap().contains("state=failure"));
+    assert!(!repo.calls().contains("git push"), "{}", repo.calls());
 }
 
 #[test]

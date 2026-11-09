@@ -63,7 +63,29 @@ const CLEAN: Recorded = Recorded {
 };
 
 /// Logs its arguments, and enforces the time limit as a real scope would.
-const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"${limit:-0}\" \"$@\"\n";
+/// Stands in for a scope, which kills every process in the job at its limit.
+/// A process group is the nearest thing, and `timeout` can't be trusted with it:
+/// on `ubuntu-latest` it leaves the job's descendants running.
+const SYSTEMD_RUN: &str = r#"#!/bin/sh
+d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/systemd-calls"
+limit=
+while [ "$1" != "--" ]; do
+    case "$1" in RuntimeMaxSec=*) limit="${1#RuntimeMaxSec=}";; esac
+    shift
+done
+shift
+[ -n "$limit" ] || exec "$@"
+setsid "$@" <&0 &
+job=$!
+setsid sh -c 'sleep "$1"; kill -KILL -- "-$2"' sh "$limit" "$job" \
+    </dev/null >/dev/null 2>&1 &
+watcher=$!
+wait "$job"
+status=$?
+kill -KILL -- "-$watcher" "$watcher" 2>/dev/null
+exit "$status"
+"#;
 
 struct Repo {
     root: PathBuf,

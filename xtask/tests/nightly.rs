@@ -63,9 +63,10 @@ const CLEAN: Recorded = Recorded {
 };
 
 /// Logs its arguments, and enforces the time limit as a real scope would.
-/// Stands in for a scope, which kills every process in the job at its limit.
-/// A process group is the nearest thing, and `timeout` can't be trusted with it:
-/// on `ubuntu-latest` it leaves the job's descendants running.
+/// A scope kills every process in the job. A process group is the nearest
+/// thing, and `timeout` can't be trusted with it: on `ubuntu-latest` it leaves
+/// the job's descendants running. The kills name the pid first, because a job
+/// that hasn't reached `setsid` yet has no group.
 const SYSTEMD_RUN: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/systemd-calls"
@@ -80,12 +81,12 @@ exec 3<&0
 setsid "$@" <&3 3<&- &
 job=$!
 exec 3<&-
-setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$limit" "$job" \
+setsid sh -c 'sleep "$1"; kill -KILL "$2" "-$2"' sh "$limit" "$job" \
     </dev/null >/dev/null 2>&1 &
 watcher=$!
 wait "$job"
 status=$?
-kill -KILL "-$watcher" "$watcher" 2>/dev/null
+kill -KILL "$watcher" "-$watcher" 2>/dev/null
 exit "$status"
 "#;
 

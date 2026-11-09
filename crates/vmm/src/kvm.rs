@@ -25,8 +25,18 @@ const KVM_GET_API_VERSION: c_ulong = 0xAE00;
 const KVM_CREATE_VM: c_ulong = 0xAE01;
 // _IO(0xAE, 0x04)
 const KVM_GET_VCPU_MMAP_SIZE: c_ulong = 0xAE04;
+// _IOWR(0xAE, 0x05, struct kvm_cpuid2)
+const KVM_GET_SUPPORTED_CPUID: c_ulong = 0xC008_AE05;
 // _IO(0xAE, 0x41)
 const KVM_CREATE_VCPU: c_ulong = 0xAE41;
+// _IO(0xAE, 0x47)
+const KVM_SET_TSS_ADDR: c_ulong = 0xAE47;
+// _IO(0xAE, 0x60)
+const KVM_CREATE_IRQCHIP: c_ulong = 0xAE60;
+// _IOW(0xAE, 0x77, struct kvm_pit_config)
+const KVM_CREATE_PIT2: c_ulong = 0x4040_AE77;
+// _IOW(0xAE, 0x90, struct kvm_cpuid2)
+const KVM_SET_CPUID2: c_ulong = 0x4008_AE90;
 // _IOW(0xAE, 0x46, struct kvm_userspace_memory_region)
 const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_AE46;
 // _IO(0xAE, 0x80)
@@ -42,7 +52,15 @@ const KVM_SET_SREGS: c_ulong = 0x4138_AE84;
 
 const KVM_EXIT_IO: u32 = 2;
 const KVM_EXIT_HLT: u32 = 5;
+const KVM_EXIT_IO_IN: u8 = 0;
 const KVM_EXIT_IO_OUT: u8 = 1;
+
+/// Three pages just below the top of the 32-bit space, which RAM never
+/// reaches. Intel hosts need somewhere to keep a real-mode TSS.
+const TSS_ADDRESS: c_ulong = 0xFFFB_D000;
+
+/// More CPUID entries than any current host reports.
+const MAX_CPUID_ENTRIES: usize = 256;
 
 const EINTR: i32 = 4;
 
@@ -58,6 +76,36 @@ struct MemoryRegion {
     guest_phys_addr: u64,
     memory_size: u64,
     userspace_addr: u64,
+}
+
+/// `struct kvm_pit_config`.
+#[repr(C)]
+#[derive(Default)]
+struct PitConfig {
+    flags: u32,
+    padding: [u32; 15],
+}
+
+/// `struct kvm_cpuid_entry2`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct CpuidEntry {
+    function: u32,
+    index: u32,
+    flags: u32,
+    eax: u32,
+    ebx: u32,
+    ecx: u32,
+    edx: u32,
+    padding: [u32; 3],
+}
+
+/// `struct kvm_cpuid2`, with room for its trailing entries.
+#[repr(C)]
+struct Cpuid {
+    nent: u32,
+    padding: u32,
+    entries: [CpuidEntry; MAX_CPUID_ENTRIES],
 }
 
 /// `struct kvm_regs`.
@@ -165,6 +213,9 @@ struct KvmRun {
 const _: () = {
     assert!(size_of::<MemoryRegion>() == 32);
     assert!(offset_of!(MemoryRegion, userspace_addr) == 24);
+    assert!(size_of::<PitConfig>() == 64);
+    assert!(size_of::<CpuidEntry>() == 40);
+    assert!(offset_of!(Cpuid, entries) == 8);
     assert!(size_of::<Regs>() == 144);
     assert!(offset_of!(Regs, rip) == 128);
     assert!(offset_of!(Regs, rflags) == 136);
@@ -193,6 +244,28 @@ pub enum Stop {
     TimedOut,
     /// KVM exited with a `KVM_EXIT_*` reason the VMM doesn't handle.
     Unhandled(u32),
+}
+
+/// The devices behind a vCPU's I/O ports.
+pub trait Ports {
+    /// The guest wrote `data` to `port`.
+    fn write(&mut self, port: u16, data: &[u8]);
+    /// The guest reads `data` from `port`. Returns false if nothing answers,
+    /// which stops the vCPU with [`Stop::Unhandled`].
+    fn read(&mut self, port: u16, data: &mut [u8]) -> bool;
+}
+
+/// Port writes go to a callback, and reads have no answer.
+struct WritesOnly<F>(F);
+
+impl<F: FnMut(u16, &[u8])> Ports for WritesOnly<F> {
+    fn write(&mut self, port: u16, data: &[u8]) {
+        (self.0)(port, data);
+    }
+
+    fn read(&mut self, _: u16, _: &mut [u8]) -> bool {
+        false
+    }
 }
 
 /// Calls an ioctl that takes a plain integer, and returns its result.
@@ -225,6 +298,7 @@ unsafe fn ioctl_pointer<T>(fd: RawFd, request: c_ulong, arg: *mut T) -> io::Resu
 
 /// A virtual machine with one region of RAM at guest address 0.
 pub struct Vm {
+    kvm: File,
     fd: OwnedFd,
     vcpu_mmap_size: usize,
     memory: Rc<GuestMemory>,
@@ -234,8 +308,8 @@ pub struct Vm {
 impl Vm {
     /// Creates a VM that runs on `memory`.
     pub fn new(memory: GuestMemory) -> io::Result<Self> {
-        let kvm: File = OpenOptions::new().read(true).write(true).open("/dev/kvm")?;
-        let kvm = kvm.as_raw_fd();
+        let file: File = OpenOptions::new().read(true).write(true).open("/dev/kvm")?;
+        let kvm = file.as_raw_fd();
         // SAFETY: neither request takes a pointer.
         let version = unsafe { ioctl_value(kvm, KVM_GET_API_VERSION, 0)? };
         if version != KVM_API_VERSION {
@@ -266,6 +340,7 @@ impl Vm {
         unsafe { ioctl_pointer(fd.as_raw_fd(), KVM_SET_USER_MEMORY_REGION, &raw mut region)? };
 
         Ok(Self {
+            kvm: file,
             fd,
             vcpu_mmap_size,
             memory: Rc::new(memory),
@@ -275,6 +350,38 @@ impl Vm {
 
     pub fn memory(&self) -> &GuestMemory {
         &self.memory
+    }
+
+    /// Adds the interrupt controllers and timer a kernel expects. Call it
+    /// before adding a vCPU. KVM then handles `hlt` itself, so a vCPU no longer
+    /// stops with [`Stop::Halted`].
+    pub fn add_interrupt_controllers(&self) -> io::Result<()> {
+        let fd = self.fd.as_raw_fd();
+        // SAFETY: this request takes a guest address, not a pointer.
+        unsafe { ioctl_value(fd, KVM_SET_TSS_ADDR, TSS_ADDRESS)? };
+        // SAFETY: this request takes no argument.
+        unsafe { ioctl_value(fd, KVM_CREATE_IRQCHIP, 0)? };
+        let mut pit = PitConfig::default();
+        // SAFETY: `pit` is the struct this request reads.
+        unsafe { ioctl_pointer(fd, KVM_CREATE_PIT2, &raw mut pit) }?;
+        Ok(())
+    }
+
+    /// Shows `vcpu` every CPU feature that KVM supports on this host. A vCPU
+    /// starts with none, and a kernel refuses to run on that.
+    pub fn expose_cpu_features(&self, vcpu: &Vcpu) -> io::Result<()> {
+        let mut cpuid = Box::new(Cpuid {
+            nent: MAX_CPUID_ENTRIES as u32,
+            padding: 0,
+            entries: [CpuidEntry::default(); MAX_CPUID_ENTRIES],
+        });
+        let cpuid = &raw mut *cpuid;
+        // SAFETY: `cpuid` has room for the `nent` entries it declares, which
+        // is as many as this request may write.
+        unsafe { ioctl_pointer(self.kvm.as_raw_fd(), KVM_GET_SUPPORTED_CPUID, cpuid) }?;
+        // SAFETY: the kernel wrote `nent` entries, within those that fit, and
+        // this request reads only those.
+        unsafe { ioctl_pointer(vcpu.fd.as_raw_fd(), KVM_SET_CPUID2, cpuid) }
     }
 
     /// Adds a vCPU. Use it from the thread that runs it.
@@ -333,7 +440,13 @@ impl Vcpu {
     /// Runs the guest on this thread until it halts, it does something the
     /// VMM doesn't handle, or `timeout` passes. `out` receives each port
     /// write as a port number and its bytes.
-    pub fn run(&mut self, timeout: Duration, mut out: impl FnMut(u16, &[u8])) -> io::Result<Stop> {
+    pub fn run(&mut self, timeout: Duration, out: impl FnMut(u16, &[u8])) -> io::Result<Stop> {
+        self.run_ports(timeout, &mut WritesOnly(out))
+    }
+
+    /// Runs the guest as [`Vcpu::run`] does, with `ports` answering port
+    /// reads as well as taking port writes.
+    pub fn run_ports(&mut self, timeout: Duration, ports: &mut impl Ports) -> io::Result<Stop> {
         extern "C" fn ignore(_: c_int) {}
         // SAFETY: `ignore` does nothing, so it is safe in a signal handler.
         // It only needs to exist: the default action would kill the process.
@@ -357,15 +470,11 @@ impl Vcpu {
                 done: &done,
                 watchdog: watchdog.thread(),
             };
-            this.run_until_stop(kick, &mut out)
+            this.run_until_stop(kick, ports)
         })
     }
 
-    fn run_until_stop(
-        &self,
-        kick: &AtomicU8,
-        out: &mut impl FnMut(u16, &[u8]),
-    ) -> io::Result<Stop> {
+    fn run_until_stop(&self, kick: &AtomicU8, ports: &mut impl Ports) -> io::Result<Stop> {
         loop {
             // SAFETY: KVM_RUN takes no argument. It writes only to the run
             // area, which this value owns, and to guest memory.
@@ -387,18 +496,27 @@ impl Vcpu {
                 KVM_EXIT_IO => {
                     // SAFETY: as above, and KVM_EXIT_IO selects this arm.
                     let io = unsafe { ptr::read_volatile(&raw const (*run).io) };
-                    if io.direction != KVM_EXIT_IO_OUT {
+                    let data = self.io_data(&io)?;
+                    let handled = match io.direction {
+                        KVM_EXIT_IO_OUT => {
+                            ports.write(io.port, data);
+                            true
+                        }
+                        KVM_EXIT_IO_IN => ports.read(io.port, data),
+                        _ => false,
+                    };
+                    if !handled {
                         return Ok(Stop::Unhandled(reason));
                     }
-                    out(io.port, self.io_data(&io)?);
                 }
                 other => return Ok(Stop::Unhandled(other)),
             }
         }
     }
 
-    /// The bytes of a port write, which KVM leaves inside the run area.
-    fn io_data(&self, io: &IoExit) -> io::Result<&[u8]> {
+    /// The bytes of a port access, which KVM keeps inside the run area.
+    #[allow(clippy::mut_from_ref)]
+    fn io_data(&self, io: &IoExit) -> io::Result<&mut [u8]> {
         let len = usize::from(io.size)
             .checked_mul(io.count as usize)
             .filter(|len| {
@@ -408,9 +526,10 @@ impl Vcpu {
             })
             .ok_or_else(|| io::Error::other("KVM reported port data outside its run area"))?;
         // SAFETY: the range was just checked to lie inside the mapping, and
-        // the vCPU isn't running, so nothing writes it during this borrow.
+        // the vCPU isn't running, so nothing else uses it during this borrow.
+        // `run_until_stop` drops the borrow before it enters the guest again.
         Ok(unsafe {
-            std::slice::from_raw_parts(self.run.start().add(io.data_offset as usize), len)
+            std::slice::from_raw_parts_mut(self.run.start().add(io.data_offset as usize), len)
         })
     }
 

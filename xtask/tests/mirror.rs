@@ -3,9 +3,10 @@
 //! another repository. No test reaches GitHub.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const ISSUE: &str = "repos/{owner}/{repo}/issues";
 
@@ -110,8 +111,7 @@ esac
 "#
         );
         let path = self.bin.join("gh");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &script);
     }
 
     fn mirror(&self, args: &[&str]) -> Output {

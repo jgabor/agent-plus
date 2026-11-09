@@ -5,9 +5,10 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"run_ms\"\nname = \"run\"\ntarget = 150.0\n";
 const BOOT_BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\nband_pct = 10.0\nband_abs = 25.0\n";
@@ -144,8 +145,7 @@ impl Repo {
 
     fn set_gh(&self, body: &str) {
         let path = self.bin.join("gh");
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &format!("#!/bin/sh\n{body}"));
     }
 
     /// Gives this branch one open PR with this text as its body.
@@ -453,16 +453,14 @@ fn a_commit_made_during_the_bench_gets_no_result() {
         .output()
         .unwrap();
     let real = stdout(&real);
-    fs::write(
-        repo.bin.join("cargo"),
-        format!(
+    common::write_tool(
+        &repo.bin.join("cargo"),
+        &format!(
             "#!/bin/sh\n'{}' \"$@\"\ncode=$?\nif [ \"$1\" = build ]; then\n  git -C '{}' -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m moved\nfi\nexit $code\n",
             real.trim(),
             repo.root.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(repo.bin.join("cargo"), fs::Permissions::from_mode(0o755)).unwrap();
+    );
     assert_passes(&repo.bench());
     assert!(!repo.result_exists());
 }

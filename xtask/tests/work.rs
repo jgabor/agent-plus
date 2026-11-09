@@ -3,9 +3,10 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const LIVE: &str = "2099-01-01T00:00Z";
 const EXPIRED: &str = "2001-01-01T00:00Z";
@@ -136,8 +137,7 @@ esac
 "#
         );
         let path = self.bin.join("gh");
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &script);
     }
 
     fn set_branch(&self, name: &str, date: &str) {
@@ -556,7 +556,7 @@ fn next_takes_no_arguments() {
 #[test]
 fn a_failing_gh_is_a_problem() {
     let repo = Repo::new("gh-fails", &[]);
-    fs::write(repo.bin.join("gh"), "#!/bin/sh\necho nope >&2\nexit 1\n").unwrap();
+    common::write_tool(&repo.bin.join("gh"), "#!/bin/sh\necho nope >&2\nexit 1\n");
     let output = repo.xtask(&["next"]);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("nope"), "{}", stderr(&output));

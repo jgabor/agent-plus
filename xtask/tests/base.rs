@@ -3,9 +3,10 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod common;
 
 const SPEC: &str = "# A\n\nOne. Two.\n\n## B\n\nThree.\n";
 const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
@@ -127,8 +128,7 @@ impl Repo {
 
     fn set_gh(&self, body: &str) {
         let path = self.bin.join("gh");
-        fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        common::write_tool(&path, &format!("#!/bin/sh\n{body}"));
     }
 
     /// Makes `gh pr list` print this JSON, and record its arguments.

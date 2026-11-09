@@ -63,7 +63,33 @@ const CLEAN: Recorded = Recorded {
 };
 
 /// Logs its arguments, and enforces the time limit as a real scope would.
-const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"${limit:-0}\" \"$@\"\n";
+/// A scope kills every process in the job. A process group is the simplest
+/// stand-in that covers these fake jobs, though a process that left the group
+/// would escape it. `timeout` can't be trusted with the group: on
+/// `ubuntu-latest` it leaves the job's descendants running. The kills name the
+/// pid first, because a job that hasn't reached `setsid` yet has no group.
+const SYSTEMD_RUN: &str = r#"#!/bin/sh
+d="$(dirname "$0")"
+printf '%s\n' "$*" >> "$d/systemd-calls"
+limit=
+while [ "$1" != "--" ]; do
+    case "$1" in RuntimeMaxSec=*) limit="${1#RuntimeMaxSec=}";; esac
+    shift
+done
+shift
+[ -n "$limit" ] || exec "$@"
+exec 3<&0
+setsid "$@" <&3 3<&- &
+job=$!
+exec 3<&-
+setsid sh -c 'sleep "$1"; kill -KILL "$2" "-$2"' sh "$limit" "$job" \
+    </dev/null >/dev/null 2>&1 &
+watcher=$!
+wait "$job"
+status=$?
+kill -KILL "$watcher" "-$watcher" 2>/dev/null
+exit "$status"
+"#;
 
 struct Repo {
     root: PathBuf,

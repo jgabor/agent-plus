@@ -1,0 +1,67 @@
+# Temporary probe for #123. Removed before the PR.
+name: Probe 123
+on:
+  push:
+    branches: [123-mutation-run-time-limit]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Start a user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - name: Report
+        run: |
+          systemctl --version | head -2
+          uname -r
+          grep -E 'SigIgn|SigBlk' /proc/self/status
+          sudo grep -E 'SigIgn|SigBlk' "/proc/$(systemctl show -p MainPID --value user@$(id -u).service)/status"
+      - name: Bare scope
+        if: ${{ !cancelled() }}
+        run: |
+          probe() {
+            name=$1; shift
+            s=$(date +%s.%N)
+            timeout -s KILL 40 systemd-run --user --scope --quiet --collect --unit="$name" \
+              --expand-environment=no -p MemoryMax=8G -p MemorySwapMax=0 -p OOMPolicy=continue \
+              -p RuntimeMaxSec=1 -p TimeoutStopSec=4 -- "$@" &
+            pid=$!
+            timeout 1 true
+            systemctl --user show "$name.scope" -p ActiveState,SubState,RuntimeMaxUSec,TimeoutStopUSec,KillMode,KillSignal,ControlGroup,Result || true
+            code=0; wait $pid || code=$?
+            echo "$name exit=$code elapsed=$(echo "$(date +%s.%N)-$s" | bc)"
+          }
+          probe p-plain sh -c 'grep SigIgn /proc/self/status; sleep 30'
+          (trap '' TERM; probe p-ignored sh -c 'grep SigIgn /proc/self/status; sleep 30')
+          journalctl --user --no-pager -n 40 || true
+      - name: Install toolchain
+        if: ${{ !cancelled() }}
+        run: rustup toolchain install
+      - name: Signals through xtask
+        if: ${{ !cancelled() }}
+        run: cargo xtask run sh -c 'grep SigIgn /proc/self/status'
+      - name: The test
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test -p xtask --test nightly --no-run
+          date +%T.%N
+          cargo test -p xtask --test nightly -- mutation_stops_at_its_limit_and_keeps_what_it_found --exact --nocapture > test.log 2>&1 &
+          t=$!
+          for at in 1 2 3 4 5 6; do
+            sleep 3
+            echo "=== snapshot $at $(date +%T.%N)"
+            ps -u "$USER" --forest -o pid,etimes,stat,wchan:18,ignored,args | grep -vE 'Runner|ps -u|sshd|\(sd-pam\)|grep -vE|cut -c|hosted-compute|tail ' | cut -c1-170 | tail -18
+            systemctl --user list-units --type=scope --all --no-pager --no-legend || true
+            for p in $(pgrep -x sleep || true); do echo "sleep $p:"; cat /proc/$p/cgroup; grep -E 'SigIgn|SigBlk' /proc/$p/status; done
+          done
+          wait $t || true
+          cut -c1-300 test.log | tail -8
+          sudo journalctl --no-pager -n 200 _UID=$(id -u) | grep -E 'systemd\[[0-9]+\]' | cut -c1-200 | tail -30 || true

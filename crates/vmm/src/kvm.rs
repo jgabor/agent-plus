@@ -11,6 +11,7 @@ use std::io;
 use std::mem::{offset_of, size_of};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -225,7 +226,7 @@ unsafe fn ioctl_pointer<T>(fd: RawFd, request: c_ulong, arg: *mut T) -> io::Resu
 pub struct Vm {
     fd: OwnedFd,
     vcpu_mmap_size: usize,
-    memory: GuestMemory,
+    memory: Rc<GuestMemory>,
     next_vcpu: c_ulong,
 }
 
@@ -258,14 +259,15 @@ impl Vm {
             memory_size: memory.size() as u64,
             userspace_addr: memory.start() as u64,
         };
-        // SAFETY: `region` is the struct this request reads. `Vm` owns
-        // `memory`, and drops it only after the VM's descriptor.
+        // SAFETY: `region` is the struct this request reads. The VM's
+        // descriptor closes before `memory` unmaps: `Vm` and every `Vcpu` hold
+        // both, and declare the descriptor first.
         unsafe { ioctl_pointer(fd.as_raw_fd(), KVM_SET_USER_MEMORY_REGION, &raw mut region)? };
 
         Ok(Self {
             fd,
             vcpu_mmap_size,
-            memory,
+            memory: Rc::new(memory),
             next_vcpu: 0,
         })
     }
@@ -282,7 +284,11 @@ impl Vm {
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let run = Mapping::shared(fd.as_fd(), self.vcpu_mmap_size)?;
         self.next_vcpu += 1;
-        Ok(Vcpu { fd, run })
+        Ok(Vcpu {
+            fd,
+            run,
+            _memory: Rc::clone(&self.memory),
+        })
     }
 }
 
@@ -290,6 +296,10 @@ impl Vm {
 pub struct Vcpu {
     fd: OwnedFd,
     run: Mapping,
+    /// A vCPU's descriptor keeps the kernel's VM alive, so guest RAM has to
+    /// stay mapped as long as the vCPU exists. Otherwise the guest could reach
+    /// whatever the host maps at that address next.
+    _memory: Rc<GuestMemory>,
 }
 
 impl Vcpu {
@@ -330,6 +340,7 @@ impl Vcpu {
             return Err(io::Error::last_os_error());
         }
 
+        let mask = unblock_kick_signal()?;
         let this = &*self;
         let kick = this.immediate_exit();
         kick.store(0, Ordering::SeqCst);
@@ -339,13 +350,15 @@ impl Vcpu {
         // joins the watchdog before this function returns.
         let vcpu_thread = unsafe { sys::pthread_self() };
 
-        thread::scope(|scope| {
+        let result = thread::scope(|scope| {
             let watchdog = scope.spawn(|| watch(timeout, &done, kick, vcpu_thread));
             let result = this.run_until_stop(kick, &mut out);
             done.store(true, Ordering::SeqCst);
             watchdog.thread().unpark();
             result
-        })
+        });
+        restore_signal_mask(&mask)?;
+        result
     }
 
     fn run_until_stop(
@@ -408,6 +421,29 @@ impl Vcpu {
         // the kernel reads it with READ_ONCE.
         unsafe { AtomicU8::from_ptr(&raw mut (*run).immediate_exit) }
     }
+}
+
+/// Lets the kick signal reach this thread, and returns the mask to restore.
+/// A blocked signal couldn't interrupt a running guest.
+fn unblock_kick_signal() -> io::Result<sys::SignalSet> {
+    let mut set = sys::EMPTY_SIGNAL_SET;
+    set[0] = 1 << (KICK_SIGNAL - 1);
+    let mut old = sys::EMPTY_SIGNAL_SET;
+    // SAFETY: both pointers refer to sets of the size the C library reads.
+    let error = unsafe { sys::pthread_sigmask(sys::SIG_UNBLOCK, &raw const set, &raw mut old) };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error));
+    }
+    Ok(old)
+}
+
+fn restore_signal_mask(mask: &sys::SignalSet) -> io::Result<()> {
+    // SAFETY: `mask` is a full set, and a null old set is allowed.
+    let error = unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, mask, ptr::null_mut()) };
+    if error != 0 {
+        return Err(io::Error::from_raw_os_error(error));
+    }
+    Ok(())
 }
 
 /// Waits for `timeout`, and then stops the vCPU unless it is `done`.

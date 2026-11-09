@@ -11,6 +11,12 @@ const MAP_SHARED: c_int = 1;
 const MAP_PRIVATE: c_int = 2;
 const MAP_ANONYMOUS: c_int = 0x20;
 
+/// `sigset_t`, which is 128 bytes on both glibc and musl.
+pub type SignalSet = [u64; 16];
+pub const EMPTY_SIGNAL_SET: SignalSet = [0; 16];
+pub const SIG_UNBLOCK: c_int = 1;
+pub const SIG_SETMASK: c_int = 2;
+
 /// The value of `SIG_ERR`.
 pub const SIGNAL_FAILED: usize = usize::MAX;
 
@@ -26,6 +32,7 @@ unsafe extern "C" {
     fn munmap(addr: *mut c_void, length: usize) -> c_int;
     pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     pub fn signal(signum: c_int, handler: extern "C" fn(c_int)) -> usize;
+    pub fn pthread_sigmask(how: c_int, set: *const SignalSet, old: *mut SignalSet) -> c_int;
     pub fn pthread_self() -> usize;
     pub fn pthread_kill(thread: usize, signum: c_int) -> c_int;
 }

@@ -18,8 +18,7 @@ const OUT_AND_HALT: [u8; 7] = [
 ];
 const HLT: u8 = 0xf4;
 
-/// Starts `code` in real mode at `ENTRY`. The returned `Vm` must outlive the
-/// `Vcpu`, because it owns the guest's memory.
+/// Starts `code` in real mode at `ENTRY`.
 fn guest(code: &[u8]) -> (Vm, Vcpu) {
     let mut vm = Vm::new(GuestMemory::new(4 * PAGE).unwrap()).unwrap();
     vm.memory().write(ENTRY, code).unwrap();
@@ -89,4 +88,44 @@ fn a_port_read_is_reported_as_unhandled() {
     let (_vm, mut vcpu) = guest(&[0xec, HLT]);
     let stop = vcpu.run(TIMEOUT, |_, _| {}).unwrap();
     assert_eq!(stop, Stop::Unhandled(2));
+}
+
+#[test]
+fn a_vcpu_keeps_guest_memory_alive_after_its_vm_is_dropped() {
+    let (vm, mut vcpu) = guest(&OUT_AND_HALT);
+    drop(vm);
+    let mut writes = Vec::new();
+    let stop = vcpu
+        .run(TIMEOUT, |port, bytes| writes.push((port, bytes.to_vec())))
+        .unwrap();
+    assert_eq!(stop, Stop::Halted);
+    assert_eq!(writes, [(PORT, vec![0x42])]);
+}
+
+unsafe extern "C" {
+    fn pthread_sigmask(how: i32, set: *const [u64; 16], old: *mut [u64; 16]) -> i32;
+}
+
+/// Runs on its own thread, so that a hang fails here instead of stalling the
+/// test binary, and so that the changed signal mask dies with the thread.
+#[test]
+fn a_blocked_kick_signal_does_not_defeat_the_timeout() {
+    const SIG_BLOCK: i32 = 0;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut blocked = [0_u64; 16];
+        // Signal numbers count from 1, so signal 40 is bit 39.
+        blocked[0] = 1 << 39;
+        // SAFETY: both sets are as large as sigset_t on glibc and musl, and
+        // a null old set is allowed.
+        assert_eq!(
+            unsafe { pthread_sigmask(SIG_BLOCK, &blocked, std::ptr::null_mut()) },
+            0
+        );
+        let (_vm, mut vcpu) = guest(&[0xeb, 0xfe]);
+        sender
+            .send(vcpu.run(SHORT_TIMEOUT, |_, _| {}).unwrap())
+            .unwrap();
+    });
+    assert_eq!(receiver.recv_timeout(TIMEOUT).unwrap(), Stop::TimedOut);
 }

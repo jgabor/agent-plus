@@ -8,3 +8,4 @@ publish.workspace = true
 [dependencies]
 ap = { path = "../ap" }
 vmm = { path = "../vmm" }
+guest = { path = "../guest" }

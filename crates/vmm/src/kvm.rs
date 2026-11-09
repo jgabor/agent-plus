@@ -52,6 +52,8 @@ const KVM_SET_SREGS: c_ulong = 0x4138_AE84;
 
 const KVM_EXIT_IO: u32 = 2;
 const KVM_EXIT_HLT: u32 = 5;
+const KVM_EXIT_MMIO: u32 = 6;
+const KVM_EXIT_SHUTDOWN: u32 = 8;
 const KVM_EXIT_IO_IN: u8 = 0;
 const KVM_EXIT_IO_OUT: u8 = 1;
 
@@ -240,6 +242,10 @@ const _: () = {
 pub enum Stop {
     /// The guest ran `hlt`.
     Halted,
+    /// The guest triple-faulted. The kernel has no ACPI to power off with, so
+    /// this is how it ends a VM: it restarts, and `reboot=t` on its command
+    /// line makes that a triple fault at once.
+    Shutdown,
     /// The timeout passed first.
     TimedOut,
     /// KVM exited with a `KVM_EXIT_*` reason the VMM doesn't handle.
@@ -493,6 +499,7 @@ impl Vcpu {
             let reason = unsafe { ptr::read_volatile(&raw const (*run).exit_reason) };
             match reason {
                 KVM_EXIT_HLT => return Ok(Stop::Halted),
+                KVM_EXIT_SHUTDOWN => return Ok(Stop::Shutdown),
                 KVM_EXIT_IO => {
                     // SAFETY: as above, and KVM_EXIT_IO selects this arm.
                     let io = unsafe { ptr::read_volatile(&raw const (*run).io) };
@@ -507,6 +514,19 @@ impl Vcpu {
                     };
                     if !handled {
                         return Ok(Stop::Unhandled(reason));
+                    }
+                }
+                KVM_EXIT_MMIO => {
+                    // No device is mapped yet, so a read finds an empty bus:
+                    // all ones, like a port with no device. Linux probes such
+                    // addresses, and a write has nowhere to go.
+                    // SAFETY: as above, and KVM_EXIT_MMIO selects the union's
+                    // `mmio` arm, which starts where `io` does and holds its
+                    // eight data bytes after an 8-byte address. KVM reads them
+                    // when the vCPU re-enters.
+                    unsafe {
+                        let data = (&raw mut (*run).io).cast::<[u8; 8]>().add(1);
+                        ptr::write_volatile(data, [0xff; 8]);
                     }
                 }
                 other => return Ok(Stop::Unhandled(other)),

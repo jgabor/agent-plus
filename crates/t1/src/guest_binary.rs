@@ -1,0 +1,23 @@
+//! Builds programs that run inside a guest, which are static musl binaries.
+//! The gate's `cargo test` builds for the GNU target, so tests ask for them.
+
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const TARGET: &str = "x86_64-unknown-linux-musl";
+
+/// Builds the binary `name` of this package, and returns its path.
+pub fn build(name: &str) -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target_directory = root.join("target/t1-guest");
+    let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .current_dir(&root)
+        .args(["build", "--quiet", "--package", "t1", "--bin", name])
+        .args(["--target", TARGET, "--target-dir"])
+        .arg(&target_directory)
+        .status()
+        .expect("cargo should run");
+    assert!(status.success(), "cargo couldn't build {name} for {TARGET}");
+    target_directory.join(TARGET).join("debug").join(name)
+}

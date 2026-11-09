@@ -8,7 +8,9 @@ use std::{fs, io, ptr};
 
 const WNOHANG: c_int = 1;
 const ECHILD: i32 = 10;
-const RB_POWER_OFF: c_int = 0x4321_FEDC;
+/// A restart, which ends the VM. `RB_POWER_OFF` would only halt the CPU,
+/// because the kernel has no ACPI, and the host would never find out.
+const RB_AUTOBOOT: c_int = 0x0123_4567;
 
 unsafe extern "C" {
     fn mount(
@@ -70,7 +72,7 @@ impl System for Linux {
         // SAFETY: neither call takes a pointer.
         unsafe {
             sync();
-            reboot(RB_POWER_OFF);
+            reboot(RB_AUTOBOOT);
         }
         Err(io::Error::last_os_error())
     }

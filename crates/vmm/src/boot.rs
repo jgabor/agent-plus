@@ -22,9 +22,11 @@ const XEN_ELFNOTE_PHYS32_ENTRY: u32 = 18;
 const GDT_ADDRESS: u64 = 0x500;
 const START_INFO_ADDRESS: u64 = 0x6000;
 const MEMORY_MAP_ADDRESS: u64 = 0x7000;
+const MODULE_LIST_ADDRESS: u64 = 0x8000;
 const COMMAND_LINE_ADDRESS: u64 = 0x2_0000;
 /// `COMMAND_LINE_SIZE` on x86, which counts the final NUL.
 const COMMAND_LINE_SIZE: usize = 2048;
+const PAGE_SIZE: u64 = 4096;
 
 /// The end of conventional memory. The PC reserves what follows, up to 1 MiB.
 const LOW_MEMORY_END: u64 = 0x9_fc00;
@@ -82,6 +84,8 @@ impl From<OutOfBounds> for Error {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Entry {
     address: u64,
+    /// The first address after the kernel, including its zeroed tail.
+    kernel_end: u64,
 }
 
 /// `len` bytes of `file` at `offset`, if they are all there.
@@ -162,9 +166,15 @@ fn check_elf_header(header: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Copies one loadable segment into guest memory, and returns the guest
-/// range its file bytes landed in.
-fn load_segment(memory: &GuestMemory, file: &[u8], header: &[u8]) -> Result<(u64, u64), Error> {
+/// A segment's place in guest memory.
+struct Loaded {
+    start: u64,
+    file_end: u64,
+    memory_end: u64,
+}
+
+/// Copies one loadable segment into guest memory.
+fn load_segment(memory: &GuestMemory, file: &[u8], header: &[u8]) -> Result<Loaded, Error> {
     let offset = u64_at(header, 8);
     let address = u64_at(header, 24);
     let file_size = u64_at(header, 32);
@@ -179,7 +189,7 @@ fn load_segment(memory: &GuestMemory, file: &[u8], header: &[u8]) -> Result<(u64
     }
     let bytes = slice(file, offset, file_size)
         .ok_or(Error::Malformed("a segment runs past the end of the file"))?;
-    address
+    let memory_end = address
         .checked_add(memory_size)
         .filter(|end| *end <= memory.size() as u64)
         .ok_or(OutOfBounds {
@@ -187,7 +197,11 @@ fn load_segment(memory: &GuestMemory, file: &[u8], header: &[u8]) -> Result<(u64
             len: memory_size as usize,
         })?;
     memory.write(address, bytes)?;
-    Ok((address, address + file_size))
+    Ok(Loaded {
+        start: address,
+        file_end: address + file_size,
+        memory_end,
+    })
 }
 
 /// Writes the structures a PVH kernel reads when it starts.
@@ -258,12 +272,43 @@ pub fn load(memory: &GuestMemory, file: &[u8], command_line: &str) -> Result<Ent
     let address = entry.ok_or(Error::Malformed("no PVH entry note"))?;
     if !loaded
         .iter()
-        .any(|(start, end)| (*start..*end).contains(&address))
+        .any(|segment| (segment.start..segment.file_end).contains(&address))
     {
         return Err(Error::Malformed("the PVH entry point isn't in a segment"));
     }
     write_boot_data(memory, command_line)?;
-    Ok(Entry { address })
+    let kernel_end = loaded.iter().map(|segment| segment.memory_end).max();
+    Ok(Entry {
+        address,
+        kernel_end: kernel_end.unwrap_or(HIGH_MEMORY),
+    })
+}
+
+/// Puts an initramfs at the top of RAM, clear of the kernel, and tells the
+/// kernel where it is. Call it after [`load`].
+pub fn load_initramfs(memory: &GuestMemory, entry: &Entry, image: &[u8]) -> Result<(), Error> {
+    let too_large = OutOfBounds {
+        address: entry.kernel_end,
+        len: image.len(),
+    };
+    let address = (memory.size() as u64)
+        .checked_sub(image.len() as u64)
+        .map(|start| start & !(PAGE_SIZE - 1))
+        .filter(|start| *start >= entry.kernel_end)
+        .ok_or(too_large)?;
+    memory.write(address, image)?;
+
+    // `struct hvm_modlist_entry`. The kernel takes its first module as the
+    // initramfs.
+    let mut module = [0; 32];
+    module[..8].copy_from_slice(&address.to_le_bytes());
+    module[8..16].copy_from_slice(&(image.len() as u64).to_le_bytes());
+    memory.write(MODULE_LIST_ADDRESS, &module)?;
+
+    // `nr_modules` and `modlist_paddr` in `struct hvm_start_info`.
+    memory.write(START_INFO_ADDRESS + 12, &1_u32.to_le_bytes())?;
+    memory.write(START_INFO_ADDRESS + 16, &MODULE_LIST_ADDRESS.to_le_bytes())?;
+    Ok(())
 }
 
 fn flat_segment(selector: u16, type_: u8) -> Segment {
@@ -407,6 +452,13 @@ mod tests {
         GuestMemory::new(SIZE).unwrap()
     }
 
+    fn entry_at(address: u64) -> Entry {
+        Entry {
+            address,
+            kernel_end: ADDRESS + code_segment().memory_size,
+        }
+    }
+
     fn load_with(file: &[u8]) -> Result<Entry, Error> {
         load(&memory(), file, "console=ttyS0")
     }
@@ -438,7 +490,7 @@ mod tests {
 
     #[test]
     fn the_entry_comes_from_the_pvh_note() {
-        assert_eq!(load_with(&valid()), Ok(Entry { address: ENTRY }));
+        assert_eq!(load_with(&valid()), Ok(entry_at(ENTRY)));
     }
 
     #[test]
@@ -449,7 +501,7 @@ mod tests {
             &(ENTRY as u32).to_le_bytes(),
         );
         let file = elf(&[code_segment(), note_segment(notes.len())], &notes);
-        assert_eq!(load_with(&file), Ok(Entry { address: ENTRY }));
+        assert_eq!(load_with(&file), Ok(entry_at(ENTRY)));
     }
 
     #[test]
@@ -458,7 +510,7 @@ mod tests {
         notes.extend(note(XEN_NOTE_NAME, 5, b"xen-3.0"));
         notes.extend(entry_note(ENTRY));
         let file = elf(&[code_segment(), note_segment(notes.len())], &notes);
-        assert_eq!(load_with(&file), Ok(Entry { address: ENTRY }));
+        assert_eq!(load_with(&file), Ok(entry_at(ENTRY)));
     }
 
     #[test]
@@ -640,6 +692,69 @@ mod tests {
             let file = elf(&[code_segment(), note_segment(notes.len())], &notes);
             assert_malformed(load_with(&file));
         }
+    }
+
+    #[test]
+    fn the_kernel_end_is_past_the_highest_segment() {
+        let mut high = code_segment();
+        high.address = ADDRESS + (1 << 16);
+        high.memory_size = 32;
+        let notes = entry_note(ENTRY);
+        // The highest segment comes first, so the order can't decide it.
+        let file = elf(&[high, code_segment(), note_segment(notes.len())], &notes);
+        assert_eq!(
+            load_with(&file).unwrap().kernel_end,
+            ADDRESS + (1 << 16) + 32
+        );
+    }
+
+    #[test]
+    fn the_initramfs_sits_page_aligned_at_the_top_of_memory() {
+        let memory = memory();
+        let entry = load(&memory, &valid(), "").unwrap();
+        let image = [0x5a; 5000];
+        load_initramfs(&memory, &entry, &image).unwrap();
+
+        let address = SIZE as u64 - 2 * PAGE_SIZE;
+        let mut bytes = [0; 5000];
+        memory.read(address, &mut bytes).unwrap();
+        assert_eq!(bytes, image);
+
+        assert_eq!(read_u32(&memory, START_INFO_ADDRESS + 12), 1);
+        assert_eq!(
+            read_u64(&memory, START_INFO_ADDRESS + 16),
+            MODULE_LIST_ADDRESS
+        );
+        assert_eq!(read_u64(&memory, MODULE_LIST_ADDRESS), address);
+        assert_eq!(read_u64(&memory, MODULE_LIST_ADDRESS + 8), 5000);
+        assert_eq!(read_u64(&memory, MODULE_LIST_ADDRESS + 16), 0);
+    }
+
+    #[test]
+    fn with_no_initramfs_the_kernel_is_told_of_no_modules() {
+        let memory = memory();
+        load(&memory, &valid(), "").unwrap();
+        assert_eq!(read_u32(&memory, START_INFO_ADDRESS + 12), 0);
+    }
+
+    #[test]
+    fn an_initramfs_may_reach_down_to_the_kernel_but_not_over_it() {
+        let memory = memory();
+        let entry = load(&memory, &valid(), "").unwrap();
+        let room = (SIZE as u64 - entry.kernel_end) & !(PAGE_SIZE - 1);
+        let fits = vec![1; room as usize];
+        assert_eq!(load_initramfs(&memory, &entry, &fits), Ok(()));
+
+        let over = vec![1; SIZE - ADDRESS as usize];
+        assert!(matches!(
+            load_initramfs(&memory, &entry, &over),
+            Err(Error::Memory(_))
+        ));
+        let beyond = vec![1; SIZE + 1];
+        assert!(matches!(
+            load_initramfs(&memory, &entry, &beyond),
+            Err(Error::Memory(_))
+        ));
     }
 
     #[test]

@@ -249,6 +249,19 @@ fn a_dependency_only_on_macos_still_fails() {
 }
 
 #[test]
+fn a_dependency_only_on_musl_still_fails() {
+    let root = workspace(
+        "musl-only",
+        "\n[target.'cfg(target_env = \"musl\")'.dependencies]\ncc = { path = \"../../vendor/cc\" }\n",
+        &[
+            ("vendor/cc/Cargo.toml", &package("cc", "")),
+            ("vendor/cc/src/lib.rs", LIB),
+        ],
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
 fn building_with_a_c_compiler_fails() {
     // The build script succeeds unless the gate has pointed CC at a program
     // that fails. The script also fails the floors, so this checks `tests`.

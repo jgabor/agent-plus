@@ -8,9 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The hosts v0.1.0 supports. Each one resolves a different dependency graph.
-const TARGETS: [&str; 3] = [
+/// The hosts v0.1.0 supports, and the static build the journey and the bench
+/// run. Each one resolves a different dependency graph.
+const TARGETS: [&str; 4] = [
     "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ];

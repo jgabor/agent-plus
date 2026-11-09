@@ -155,7 +155,9 @@ fn missing_src_fails() { /* ... */ }
 **Score:** passing steps divided by all steps.
 
 A step is a script that drives an installed release binary in a clean
-environment. A step counts only if every step in its `needs` also passes.
+environment. The binary is statically linked for
+`x86_64-unknown-linux-musl`, so the same file can run as the guest's `/init`.
+A step counts only if every step in its `needs` also passes.
 
 A step marked `spend` makes a real model call. The merge sequence leaves it,
 and any step that needs it, out of the run and the score. The nightly report
@@ -226,10 +228,10 @@ A failing floor blocks a merge regardless of scores.
 | No check is removed while the sentence it quoted is still a promise | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
 
-**C floor.** On Linux x86_64, Linux arm64, and macOS arm64, the resolved
-dependency graph has no package with a `links` key, no dependency on `cc`,
-`cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly source files, and
-no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
+**C floor.** On Linux x86_64 with glibc and with musl, Linux arm64, and macOS
+arm64, the resolved dependency graph has no package with a `links` key, no
+dependency on `cc`, `cmake`, `bindgen`, or `pkg-config`, no C, C++, or assembly
+source files, and no prebuilt library. Assembly inside Rust source, as in graviola, is allowed. A
 build script is allowed only in a dependency listed in
 `harness/build-scripts.txt`, and never in our own crates. T0 also builds with
 `CC` and `CXX` pointing at a program that fails.
@@ -267,9 +269,9 @@ of `claude -p <prompt> --output-format stream-json --verbose`, which lists the
 working directory, MCP servers, skills, and commands. The Codex probe is
 undefined (see [Open decisions](#open-decisions)).
 
-**Bench.** Builds the base and the candidate under a shared hold of the
-activity lock, then measures in the measuring slot, which is an exclusive hold.
-It interleaves runs of the two builds, and compares them.
+**Bench.** Builds the static `ap` of the base and of the candidate under a
+shared hold of the activity lock, then measures in the measuring slot, which
+is an exclusive hold. It interleaves runs of the two builds, and compares them.
 
 **Activity lock.** Every build, test, and VM run started through `xtask` takes
 the lock shared. A bench takes it exclusively: it waits for current holders to

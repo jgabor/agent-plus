@@ -1,12 +1,11 @@
 //! Runs each package's tests, and keeps the result of every test by name.
 
-use crate::Problem;
 use crate::lock::Hold;
-use crate::workspace::{self, no_cargo};
+use crate::{Problem, limit, workspace};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 pub struct Results {
     by_test: HashMap<(String, String), bool>,
@@ -38,21 +37,25 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
 
 /// Test output goes to our stderr as it arrives, so that stdout carries only
 /// the result. `CC` and `CXX` point at a program that fails, as in the gate.
+/// The package's build and tests share one memory limit, and a test that goes
+/// over it is killed, which fails the run.
 fn run_package(
     root: &Path,
     package: &str,
     hold: &Hold,
     results: &mut Results,
 ) -> Result<(), Problem> {
-    let mut command = Command::new("cargo");
+    let arguments = ["test", "--package", package, "--locked", "--no-fail-fast"];
+    let mut command = limit::scope("cargo", &arguments, None)?;
     command
-        .args(["test", "--package", package, "--locked", "--no-fail-fast"])
         .current_dir(root)
         .env("CC", "false")
         .env("CXX", "false")
         .stdout(Stdio::piped());
     hold.pass_to(&mut command);
-    let mut child = command.spawn().map_err(no_cargo)?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| Problem(format!("couldn't run `systemd-run`: {e}")))?;
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::new();

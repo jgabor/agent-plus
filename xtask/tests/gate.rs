@@ -161,3 +161,34 @@ fn missing_cargo_is_an_environment_error() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("cargo"), "{}", stderr(&output));
 }
+
+/// Allocates and touches 2 GiB, then stops, so that without a limit the test
+/// passes instead of taking the machine with it.
+const RUNAWAY: &str = "#[test]
+fn runaway() {
+    let mut blocks = Vec::new();
+    for _ in 0..2048 {
+        blocks.push(vec![1u8; 1 << 20]);
+    }
+    assert_eq!(blocks.len(), 2048);
+}
+";
+
+#[test]
+fn a_test_over_the_memory_limit_is_killed_and_the_gate_fails() {
+    let root = workspace("runaway", RUNAWAY);
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("gate")
+        .current_dir(&root)
+        .env("XTASK_MEMORY_MAX", "512M")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("SIGKILL"), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("fail tests"),
+        "{}",
+        stdout(&output)
+    );
+}

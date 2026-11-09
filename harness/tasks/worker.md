@@ -57,3 +57,10 @@ can't continue alone, park the issue as AGENTS.md says.
 
    If `git worktree remove` refuses, the worktree holds changes that didn't
    merge. Leave it, and say so in your status comment.
+
+When you stop for good and this thread has no open PR, settle it, before you
+remove any worktree. Load `mcp__t3-code__t3_thread_organize` with ToolSearch,
+and call it with `action` set to `settle` and no `threadId`. This covers a lost
+claim, a lost lease, and parking before a PR. A thread with an open PR settles
+when the PR merges. If you stopped on an error that no issue records, such as
+`claim` exiting 2, leave the thread unsettled so that the owner sees it.

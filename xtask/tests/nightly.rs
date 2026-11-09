@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
+const BUDGETS: &str = "[[budget]]\nkey = \"run_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const JOURNEY: &str = "[[step]]\nid = 1\nname = \"first\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
 const NO_ISSUES: &str = "[]";
 const REPORT_ISSUE: &str =
@@ -49,7 +49,7 @@ struct Recorded<'a> {
     pr: usize,
     proven: usize,
     passing: usize,
-    boot_ms: f64,
+    run_ms: f64,
     reason: &'a str,
 }
 
@@ -58,7 +58,7 @@ const CLEAN: Recorded = Recorded {
     pr: 9,
     proven: 1,
     passing: 1,
-    boot_ms: 100.0,
+    run_ms: 100.0,
     reason: "",
 };
 
@@ -203,13 +203,13 @@ impl Repo {
         self.write(
             &format!("harness/ledger/{}.toml", record.issue),
             &format!(
-                "issue = {}\npr = {}\ncommit = \"gated\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = {{ proven = {}, promises = 7 }}\njourney = {{ passing = {}, steps = 4 }}\nreason = \"{}\"\n\n[budgets]\nboot_ms = {}\n",
+                "issue = {}\npr = {}\ncommit = \"gated\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = {{ proven = {}, promises = 7 }}\njourney = {{ passing = {}, steps = 4 }}\nreason = \"{}\"\n\n[budgets]\nrun_ms = {}\n",
                 record.issue,
                 record.pr,
                 record.proven,
                 record.passing,
                 record.reason,
-                record.boot_ms,
+                record.run_ms,
             ),
         );
         self.commit(subject, age_hours);
@@ -416,7 +416,7 @@ fn a_lower_score_than_the_record_before_is_a_regression() {
         "Worse (#9)",
         2,
         &Recorded {
-            boot_ms: 200.0,
+            run_ms: 200.0,
             ..CLEAN
         },
     );
@@ -939,7 +939,7 @@ fn a_tighter_target_later_doesnt_blame_an_earlier_commit() {
         "Slower, inside the target (#9)",
         3,
         &Recorded {
-            boot_ms: 140.0,
+            run_ms: 140.0,
             ..CLEAN
         },
     );
@@ -966,7 +966,7 @@ fn a_commit_with_no_budget_file_compares_no_budgets() {
         "Without the file (#9)",
         3,
         &Recorded {
-            boot_ms: 200.0,
+            run_ms: 200.0,
             ..CLEAN
         },
     );

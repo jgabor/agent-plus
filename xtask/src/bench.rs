@@ -7,12 +7,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 pub const BUDGETS_FILE: &str = "harness/budgets.toml";
 const PAIRS: usize = 15;
+const BOOT_TIMEOUT_SECONDS: &str = "30";
 const FIELDS: &[&str] = &["key", "name", "target", "band_pct", "band_abs"];
 
 pub struct Budget {
@@ -32,6 +34,7 @@ struct Band {
 enum Measure {
     Time,
     Size,
+    Boot,
     NotYet,
 }
 
@@ -41,7 +44,8 @@ fn measure_of(key: &str) -> Option<Measure> {
     match key {
         "version_ms" => Some(Measure::Time),
         "binary_bytes" => Some(Measure::Size),
-        "boot_ms" | "run_ms" | "idle_mib" | "noop_build_ms" => Some(Measure::NotYet),
+        "boot_ms" => Some(Measure::Boot),
+        "run_ms" | "idle_mib" | "noop_build_ms" => Some(Measure::NotYet),
         _ => None,
     }
 }
@@ -172,7 +176,7 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     drop(hold);
 
     let measuring = lock::exclusive(root)?;
-    let rows = measure(&budgets, &baseline, &candidate)?;
+    let rows = measure(&budgets, &baseline, &candidate, &directory.join("home"))?;
     drop(measuring);
 
     let any_over = rows.iter().any(|row| row.over);
@@ -197,10 +201,10 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
                 "fail"
             }
         };
-        println!(
-            "{word} {} base {} candidate {}",
-            row.key, row.base, row.candidate
-        );
+        match row.base {
+            Some(base) => println!("{word} {} base {base} candidate {}", row.key, row.candidate),
+            None => println!("no-comparison {} candidate {}", row.key, row.candidate),
+        }
         values.insert(row.key.clone(), row.candidate);
     }
     for budget in &budgets {
@@ -320,18 +324,28 @@ fn export(root: &Path, commit: &str, tree: &Path) -> Result<(), Problem> {
 struct Row {
     key: String,
     name: String,
-    base: f64,
+    /// `None` when the base can't be measured this way at all.
+    base: Option<f64>,
     candidate: f64,
     has_band: bool,
     over: bool,
 }
 
-fn measure(budgets: &[Budget], base: &Path, candidate: &Path) -> Result<Vec<Row>, Problem> {
+fn measure(
+    budgets: &[Budget],
+    base: &Path,
+    candidate: &Path,
+    home: &Path,
+) -> Result<Vec<Row>, Problem> {
     let mut rows = Vec::new();
     for budget in budgets {
         let (before, after) = match measure_of(&budget.key) {
-            Some(Measure::Time) => interleaved(base, candidate)?,
-            Some(Measure::Size) => (size(base)?, size(candidate)?),
+            Some(Measure::Time) => {
+                let (before, after) = interleaved(base, candidate, run_once)?;
+                (Some(before), after)
+            }
+            Some(Measure::Size) => (Some(size(base)?), size(candidate)?),
+            Some(Measure::Boot) => boots(base, candidate, home)?,
             Some(Measure::NotYet) | None => continue,
         };
         rows.push(Row {
@@ -342,7 +356,8 @@ fn measure(budgets: &[Budget], base: &Path, candidate: &Path) -> Result<Vec<Row>
             has_band: budget.band.is_some(),
             over: budget
                 .band
-                .is_some_and(|band| over_band(before, after, band)),
+                .zip(before)
+                .is_some_and(|(band, before)| over_band(before, after, band)),
         });
     }
     Ok(rows)
@@ -350,16 +365,20 @@ fn measure(budgets: &[Budget], base: &Path, candidate: &Path) -> Result<Vec<Row>
 
 /// The medians of the pairs, in milliseconds. Each pair swaps which build goes
 /// first, so that neither build always runs on a machine the other just warmed.
-fn interleaved(base: &Path, candidate: &Path) -> Result<(f64, f64), Problem> {
+fn interleaved(
+    base: &Path,
+    candidate: &Path,
+    run: impl Fn(&Path) -> Result<f64, Problem>,
+) -> Result<(f64, f64), Problem> {
     let mut before = Vec::with_capacity(PAIRS);
     let mut after = Vec::with_capacity(PAIRS);
     for pair in 0..PAIRS {
         if pair % 2 == 0 {
-            before.push(run_once(base)?);
-            after.push(run_once(candidate)?);
+            before.push(run(base)?);
+            after.push(run(candidate)?);
         } else {
-            after.push(run_once(candidate)?);
-            before.push(run_once(base)?);
+            after.push(run(candidate)?);
+            before.push(run(base)?);
         }
     }
     Ok((median(before), median(after)))
@@ -383,6 +402,69 @@ fn run_once(binary: &Path) -> Result<f64, Problem> {
         )));
     }
     Ok(elapsed)
+}
+
+/// The boot medians of both builds, or of the candidate alone when the base
+/// has no `ap boot`. One warm-up run each comes first, and every run shares
+/// `home`, so no download is timed.
+fn boots(base: &Path, candidate: &Path, home: &Path) -> Result<(Option<f64>, f64), Problem> {
+    fs::create_dir_all(home)
+        .map_err(|e| Problem(format!("couldn't create {}: {e}", home.display())))?;
+    let timed = |binary: &Path| boot_once(binary, home)?.ok_or_else(|| no_boot(binary));
+    let base_boots = boot_once(base, home)?.is_some();
+    timed(candidate)?;
+    if base_boots {
+        let (before, after) = interleaved(base, candidate, timed)?;
+        return Ok((Some(before), after));
+    }
+    let after = (0..PAIRS)
+        .map(|_| timed(candidate))
+        .collect::<Result<_, _>>()?;
+    Ok((None, median(after)))
+}
+
+fn no_boot(binary: &Path) -> Problem {
+    Problem(format!("`{} boot` isn't a command", binary.display()))
+}
+
+/// Milliseconds from spawning `ap boot` until its ready line appears, or
+/// `None` if this build answers with its usage, because it has no such
+/// command. `ap` itself stops the VM at the timeout.
+fn boot_once(binary: &Path, home: &Path) -> Result<Option<f64>, Problem> {
+    let shown = binary.display();
+    let problem = |e: std::io::Error| Problem(format!("couldn't run `{shown} boot`: {e}"));
+    let start = Instant::now();
+    let mut child = Command::new(binary)
+        .args(["boot", "--timeout", BOOT_TIMEOUT_SECONDS])
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(problem)?;
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut ready = String::new();
+    let read = stdout.read_line(&mut ready);
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    child.stdout = Some(stdout.into_inner());
+    let output = child.wait_with_output().map_err(problem)?;
+    read.map_err(problem)?;
+    let errors = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if errors.starts_with("usage:") {
+            return Ok(None);
+        }
+        return Err(Problem(format!(
+            "`{shown} boot` failed: {}: {}",
+            output.status,
+            errors.trim()
+        )));
+    }
+    if ready.trim().is_empty() {
+        return Err(Problem(format!("`{shown} boot` printed no ready line")));
+    }
+    Ok(Some(elapsed))
 }
 
 fn size(binary: &Path) -> Result<f64, Problem> {

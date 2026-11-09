@@ -355,3 +355,24 @@ fn the_store_needs_an_absolute_home_without_xdg() {
     assert_eq!(store::default_root(None, Some(OsStr::new(""))), None);
     assert_eq!(store::default_root(None, Some(OsStr::new("home"))), None);
 }
+
+#[test]
+fn a_temporary_file_left_by_a_crash_is_neither_fatal_nor_deleted() {
+    let root = empty_root("stale");
+    let store = Store::new(&root);
+    let layers = root.join("layers");
+    fs::create_dir_all(&layers).unwrap();
+    // Every name this process could pick next, as a crashed process with
+    // the same id would have left them.
+    let stale: Vec<PathBuf> = (0..1000)
+        .map(|id| layers.join(format!(".{BODY_SHA256}.{}.{id}", std::process::id())))
+        .collect();
+    for path in &stale {
+        fs::write(path, "left behind").unwrap();
+    }
+
+    let path = store.put(BODY_SHA256, BODY).unwrap();
+
+    assert_eq!(fs::read(path).unwrap(), BODY);
+    assert!(stale.iter().all(|path| path.exists()));
+}

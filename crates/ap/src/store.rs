@@ -66,17 +66,7 @@ impl Store {
         let path = self.path(sha256)?;
         fs::create_dir_all(&self.layers)?;
 
-        // One name per writer, so that concurrent downloads can't mix.
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let partial = Partial(
-            self.layers
-                .join(format!(".{sha256}.{}.{id}", std::process::id())),
-        );
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial.0)?;
+        let (partial, mut file) = self.create_partial(sha256)?;
 
         let mut hash = Sha256Context::new();
         let mut buffer = vec![0; 64 * 1024];
@@ -100,6 +90,22 @@ impl Store {
         fs::rename(&partial.0, &path)?;
         File::open(&self.layers)?.sync_all()?;
         Ok(path)
+    }
+
+    /// Creates a file with a name no other writer holds. A crashed process
+    /// can leave a name behind, and its process id can come round again.
+    fn create_partial(&self, sha256: &str) -> io::Result<(Partial, File)> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let name = format!(".{sha256}.{}.{id}", std::process::id());
+            let path = self.layers.join(name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Partial(path), file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 

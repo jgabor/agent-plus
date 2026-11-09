@@ -24,8 +24,6 @@ const FOREIGN_EXTENSIONS: &[&str] = &[
     "s", "sx", "asm", "a", "o", "obj", "so", "dylib", "lib", "dll",
 ];
 
-const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
-
 const AUDIT_FILE: &str = "harness/build-scripts.txt";
 
 /// Returns one message for each broken rule. An empty list means the floors
@@ -34,26 +32,19 @@ pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
     let audited = read_audit_list(root)?;
     let metadata = TARGETS
         .iter()
-        .map(|target| read_metadata(root, target))
+        .map(|target| read_metadata(root, Some(target)))
         .collect::<Result<Vec<_>, _>>()?;
     let unexpected = |e: String| Problem(format!("unexpected `cargo metadata` output: {e}"));
     let mut known = HashSet::new();
-    for metadata in &metadata {
-        for package in list(metadata, "packages").map_err(unexpected)? {
-            known.insert(package_key(package).map_err(unexpected)?);
-        }
+    for package in list(&read_metadata(root, None)?, "packages").map_err(unexpected)? {
+        known.insert(package_key(package).map_err(unexpected)?);
     }
     let host_side = packages_cargo_builds(root, "all")?;
+    check_known(&host_side, &known)?;
     let mut findings = BTreeSet::new();
     for (target, metadata) in TARGETS.iter().zip(&metadata) {
         let target_side = packages_cargo_builds(root, target)?;
-        // A line no package matches means Cargo's format moved, and a package
-        // that fails to match would escape the floor.
-        if let Some(key) = target_side.iter().find(|key| !known.contains(*key)) {
-            return Err(Problem(format!(
-                "`cargo tree` names a package `cargo metadata` doesn't: `{key}`"
-            )));
-        }
+        check_known(&target_side, &known)?;
         let built = Built {
             target_side: &target_side,
             host_side: &host_side,
@@ -76,23 +67,37 @@ struct Built<'a> {
     host_side: &'a HashSet<String>,
 }
 
-fn read_metadata(root: &Path, target: &str) -> Result<Json, Problem> {
-    let output = Command::new("cargo")
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--locked",
-            "--all-features",
-            "--filter-platform",
-            target,
-        ])
+/// A line no package matches means Cargo's format moved, and a package that
+/// fails to match would escape the floor.
+fn check_known(built: &HashSet<String>, known: &HashSet<String>) -> Result<(), Problem> {
+    match built.iter().find(|key| !known.contains(*key)) {
+        Some(key) => Err(Problem(format!(
+            "`cargo tree` names a package `cargo metadata` doesn't: `{key}`"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn read_metadata(root: &Path, target: Option<&str>) -> Result<Json, Problem> {
+    let mut command = Command::new("cargo");
+    command.args([
+        "metadata",
+        "--format-version",
+        "1",
+        "--locked",
+        "--all-features",
+    ]);
+    if let Some(target) = target {
+        command.args(["--filter-platform", target]);
+    }
+    let output = command
         .current_dir(root)
         .output()
         .map_err(|e| Problem(format!("couldn't run `cargo metadata`: {e}")))?;
     if !output.status.success() {
         return Err(Problem(format!(
-            "`cargo metadata` failed for {target}: {}",
+            "`cargo metadata` failed for {}: {}",
+            target.unwrap_or("all platforms"),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
@@ -141,6 +146,7 @@ fn tree_line_key(line: &str) -> Result<String, Problem> {
     let line = line.strip_suffix(" (*)").unwrap_or(line);
     let (name, rest) = line.split_once(" v").ok_or_else(unexpected)?;
     let rest = rest.replacen(" (proc-macro)", "", 1);
+    let rest = rest.split(" (registry `").next().unwrap_or(&rest);
     if name.is_empty() || rest.is_empty() {
         return Err(unexpected());
     }
@@ -149,7 +155,9 @@ fn tree_line_key(line: &str) -> Result<String, Problem> {
 
 /// Identifies a package by source as well as name and version, because one
 /// tree can hold the same name and version from two sources. It follows how
-/// `cargo tree` prints a source.
+/// `cargo tree` prints a source. All registries share a key, because `cargo
+/// tree` prints a registry's name and metadata its URL. Sharing can only
+/// reject too much.
 fn package_key(package: &Json) -> Result<String, String> {
     let label = format!("{} {}", text(package, "name")?, text(package, "version")?);
     let source = field(package, "source")?.as_str();
@@ -159,15 +167,13 @@ fn package_key(package: &Json) -> Result<String, String> {
             let directory = manifest.parent().ok_or("a manifest has no parent")?;
             format!("{label} ({})", directory.display())
         }
-        Some(CRATES_IO) => label,
-        Some(other) => {
-            let url = other.strip_prefix("git+").unwrap_or(other);
-            match url.rsplit_once('#') {
-                Some((base, commit)) => {
-                    format!("{label} ({base}#{})", commit.get(..8).unwrap_or(commit))
-                }
-                None => format!("{label} ({url})"),
-            }
+        Some(source) if source.starts_with("registry+") || source.starts_with("sparse+") => label,
+        Some(source) => {
+            let (base, commit) = source
+                .strip_prefix("git+")
+                .and_then(|url| url.rsplit_once('#'))
+                .ok_or_else(|| format!("unknown source `{source}`"))?;
+            format!("{label} ({base}#{})", commit.get(..8).unwrap_or(commit))
         }
     })
 }
@@ -359,4 +365,45 @@ fn find_foreign_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key_of(source: &str) -> String {
+        let package = format!(
+            r#"{{"name":"cc","version":"1.0.0","manifest_path":"/x/Cargo.toml","source":{source}}}"#
+        );
+        package_key(&json::parse(&package).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_tree_line_and_its_package_share_a_key() {
+        for (line, source) in [
+            (
+                "cc v1.0.0",
+                r#""registry+https://github.com/rust-lang/crates.io-index""#,
+            ),
+            (
+                "cc v1.0.0 (registry `alt`)",
+                r#""registry+https://alt.example/index""#,
+            ),
+            (
+                "cc v1.0.0 (registry `alt`)",
+                r#""sparse+https://alt.example/index/""#,
+            ),
+            (
+                "cc v1.0.0 (proc-macro) (registry `alt`) (*)",
+                r#""sparse+https://alt.example/""#,
+            ),
+            (
+                "cc v1.0.0 (file:///g?branch=m#0123abcd)",
+                r#""git+file:///g?branch=m#0123abcdef""#,
+            ),
+            ("cc v1.0.0 (/x)", "null"),
+        ] {
+            assert_eq!(tree_line_key(line).ok(), Some(key_of(source)), "{line}");
+        }
+    }
 }

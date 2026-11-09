@@ -6,6 +6,7 @@ use std::io::Cursor;
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;
 const EXITED: u8 = 4;
+const READY: u8 = 5;
 
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
@@ -59,6 +60,15 @@ fn the_format_is_a_little_endian_length_a_tag_and_a_payload() {
 }
 
 #[test]
+fn ready_carries_the_kernel_release() {
+    let ready = ToHost::Ready(b"7.3.3-ap.1".to_vec());
+    let mut bytes = Vec::new();
+    ready.write(&mut bytes).unwrap();
+    assert_eq!(bytes, frame(&[&[READY], &b"7.3.3-ap.1"[..]].concat()));
+    assert_eq!(to_host(bytes).unwrap(), Some(ready));
+}
+
+#[test]
 fn an_end_between_frames_is_clean() {
     assert!(to_guest(Vec::new()).unwrap().is_none());
     assert!(to_host(Vec::new()).unwrap().is_none());
@@ -89,7 +99,7 @@ fn every_unknown_tag_is_refused() {
                 Err(ProtocolError::UnknownTag(found)) if found == tag
             ));
         }
-        if !(STDOUT..=EXITED).contains(&tag) {
+        if !(STDOUT..=READY).contains(&tag) {
             assert!(matches!(
                 to_host(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag

@@ -11,8 +11,10 @@ name = "ap"
 version = "0.0.0"
 dependencies = [
  "graviola",
+ "guest",
  "rustls",
  "rustls-graviola",
+ "vmm",
  "webpki-roots",
 ]
 

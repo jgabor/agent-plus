@@ -239,14 +239,39 @@ fn an_issue_with_no_open_pr_keeps_the_label_alone() {
 }
 
 #[test]
-fn a_closed_pr_changes_nothing() {
-    for state in ["CLOSED", "MERGED"] {
-        let repo = Repo::new(&format!("closed-{state}"));
-        repo.set_pr(state);
-        repo.set_changes(9, "100 unlabeled\n");
+fn a_pr_closed_without_merging_changes_nothing() {
+    let repo = Repo::new("closed");
+    repo.set_pr("CLOSED");
+    repo.set_changes(9, "100 unlabeled\n");
+    assert_status(&repo.mirror(&["9", "land-needed"]), 0);
+    assert!(repo.writes().is_empty(), "{}", repo.calls());
+}
+
+/// Nothing waits on the owner once the PR has landed, whoever added the label
+/// last.
+#[test]
+fn a_merged_pr_and_its_issue_lose_land_needed() {
+    for changes in ["", "100 labeled\n", "100 unlabeled\n"] {
+        let repo = Repo::new(&format!("merged-{}", changes.trim().replace(' ', "-")));
+        repo.set_pr("MERGED");
+        repo.set_changes(9, changes);
         assert_status(&repo.mirror(&["9", "land-needed"]), 0);
-        assert!(repo.writes().is_empty(), "{}", repo.calls());
+        assert_eq!(
+            repo.writes(),
+            [remove(9, "land-needed"), remove(7, "land-needed")],
+            "changes {changes:?}"
+        );
     }
+}
+
+/// A question can outlive the merge, so only the owner clears it.
+#[test]
+fn a_merged_pr_keeps_answer_needed_alone() {
+    let repo = Repo::new("merged-answer");
+    repo.set_pr("MERGED");
+    repo.set_changes(9, "100 unlabeled\n");
+    assert_status(&repo.mirror(&["9", "answer-needed"]), 0);
+    assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
 #[test]
@@ -297,4 +322,15 @@ fn bad_arguments_are_errors_and_call_nothing() {
     assert_status(&repo.mirror(&["seven", "land-needed"]), 2);
     assert_status(&repo.mirror(&["7"]), 2);
     assert_eq!(repo.calls(), "");
+}
+
+#[test]
+fn a_merged_pr_that_closes_no_issue_still_loses_land_needed() {
+    let repo = Repo::new("merged-alone");
+    repo.set_pr("MERGED");
+    let path = repo.bin.join("pr.json");
+    let pr = fs::read_to_string(&path).unwrap();
+    fs::write(&path, pr.replace(&closing("o/r", 7), "")).unwrap();
+    assert_status(&repo.mirror(&["9", "land-needed"]), 0);
+    assert_eq!(repo.writes(), [remove(9, "land-needed")]);
 }

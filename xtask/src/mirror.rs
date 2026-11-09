@@ -2,7 +2,7 @@
 //! open PR that closes it.
 //!
 //! It finds the newest change a person made to the label on either side, or
-//! on a PR for the issue that has closed, and applies it to both. Runs can start late, out of order, or again, and each
+//! on a PR for the issue that closed without merging, and applies it to both. Runs can start late, out of order, or again, and each
 //! one still ends on the newest change.
 //!
 //! A merged PR waits on nobody, so a run for one removes `land-needed` from
@@ -46,11 +46,11 @@ pub fn run(number: &str, label: &str) -> Result<Verdict, Problem> {
     }
     let items: Vec<u64> = std::iter::once(number).chain(others).collect();
     // A PR that closed without merging keeps the changes people made on it,
-    // and a rerun of an old run has to see them.
+    // and a rerun of an old run has to see them. A merged PR's changes don't
+    // count, because its merge cleared `land-needed` as a bot.
     let mut read = items.clone();
     if !is_pr {
-        let linked = gh.prs_linked(number)?.into_iter();
-        read.extend(linked.filter(|pr| !items.contains(pr)));
+        read.extend(gh.closed_prs_linked(number)?);
     }
     let mut newest: Option<(u64, bool)> = None;
     for item in &read {

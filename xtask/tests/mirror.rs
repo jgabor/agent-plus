@@ -50,7 +50,7 @@ impl Repo {
             listed(9, &closing("o/r", 7)),
         ]);
         repo.set_issue();
-        repo.set_closers(&[(9, "o/r")]);
+        repo.set_closers(&[(9, "OPEN", "o/r")]);
         repo.set_pr("OPEN");
         repo.write_gh();
         repo
@@ -61,13 +61,13 @@ impl Repo {
     }
 
     /// The PRs that GitHub links to issue 7 as closing it, open or not, as
-    /// numbers and repositories.
-    fn set_closers(&self, prs: &[(u64, &str)]) {
+    /// numbers, states, and repositories.
+    fn set_closers(&self, prs: &[(u64, &str, &str)]) {
         let nodes: Vec<String> = prs
             .iter()
-            .map(|(number, repository)| {
+            .map(|(number, state, repository)| {
                 format!(
-                    "{{\"number\":{number},\"url\":\"https://github.com/{repository}/pull/{number}\"}}"
+                    "{{\"number\":{number},\"state\":\"{state}\",\"url\":\"https://github.com/{repository}/pull/{number}\"}}"
                 )
             })
             .collect();
@@ -250,24 +250,30 @@ fn a_label_cleared_while_an_older_run_waits_stays_cleared() {
 /// The owner cleared the label on a PR that then closed, and a new PR
 /// replaced it. A rerun of the issue's old run still sees that clear, though
 /// it writes only to the open PR. A PR in another repository counts for
-/// nothing here.
+/// nothing here, and neither does a merged one, whose merge cleared the label.
 #[test]
 fn a_label_cleared_on_a_replaced_pr_stays_cleared() {
     let repo = Repo::new("replaced");
     repo.set_changes(7, "100 labeled\n");
     repo.set_changes(5, "200 unlabeled\n");
     repo.set_changes(4, "300 labeled\n");
-    repo.set_closers(&[(5, "o/r"), (4, "x/y"), (9, "o/r")]);
+    repo.set_changes(3, "400 labeled\n");
+    repo.set_closers(&[
+        (5, "CLOSED", "o/r"),
+        (4, "CLOSED", "x/y"),
+        (3, "MERGED", "o/r"),
+        (9, "OPEN", "o/r"),
+    ]);
     assert_status(&repo.mirror(&["7", "land-needed"]), 0);
     assert_eq!(
         repo.writes(),
         [remove(7, "land-needed"), remove(9, "land-needed")]
     );
-    assert!(
-        !repo.calls().contains("issues/4/events"),
-        "{}",
-        repo.calls()
-    );
+    for pr in [4, 3, 9] {
+        let events = format!("issues/{pr}/events");
+        let reads = repo.calls().matches(&events).count();
+        assert_eq!(reads, usize::from(pr == 9), "{}", repo.calls());
+    }
 }
 
 /// GitHub lists at most 100 linked PRs in one page.
@@ -275,7 +281,7 @@ fn a_label_cleared_on_a_replaced_pr_stays_cleared() {
 fn too_many_linked_prs_are_an_error_and_write_nothing() {
     let repo = Repo::new("many-closers");
     repo.set_changes(7, "100 labeled\n");
-    let prs: Vec<(u64, &str)> = (1000..1101).map(|n| (n, "o/r")).collect();
+    let prs: Vec<(u64, &str, &str)> = (1000..1101).map(|n| (n, "CLOSED", "o/r")).collect();
     repo.set_closers(&prs);
     assert_status(&repo.mirror(&["7", "land-needed"]), 2);
     assert!(repo.writes().is_empty(), "{}", repo.calls());

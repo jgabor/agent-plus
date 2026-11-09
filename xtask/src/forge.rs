@@ -211,10 +211,10 @@ impl Gh {
     }
 
     /// The PRs in this repository that GitHub links to an issue as closing
-    /// it, open, closed, or merged. A closed PR keeps the link.
-    pub fn prs_linked(&self, issue: u64) -> Result<Vec<u64>, Problem> {
+    /// it, and that closed without merging. A closed PR keeps the link.
+    pub fn closed_prs_linked(&self, issue: u64) -> Result<Vec<u64>, Problem> {
         let query = format!(
-            "query($owner: String!, $repo: String!, $issue: Int!) {{ repository(owner: $owner, name: $repo) {{ url issue(number: $issue) {{ closedByPullRequestsReferences(first: {LINKED_LIMIT}, includeClosedPrs: true) {{ totalCount nodes {{ number url }} }} }} }} }}"
+            "query($owner: String!, $repo: String!, $issue: Int!) {{ repository(owner: $owner, name: $repo) {{ url issue(number: $issue) {{ closedByPullRequestsReferences(first: {LINKED_LIMIT}, includeClosedPrs: true) {{ totalCount nodes {{ number state url }} }} }} }} }}"
         );
         let value = self.json(&[
             "api",
@@ -237,7 +237,8 @@ impl Gh {
             let count = linked.get("totalCount")?.as_u64()?;
             let mut prs = Vec::new();
             for pr in linked.get("nodes")?.as_arr()? {
-                if pr.get("url")?.as_str()?.starts_with(&here) {
+                let closed = pr.get("state")?.as_str()? == "CLOSED";
+                if closed && pr.get("url")?.as_str()?.starts_with(&here) {
                     prs.push(pr.get("number")?.as_u64()?);
                 }
             }

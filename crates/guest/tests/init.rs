@@ -14,7 +14,7 @@ struct FakeSystem {
 
 impl System for FakeSystem {
     fn mount(&mut self, mount: &Mount) -> io::Result<()> {
-        if self.mount_fails {
+        if self.mount_fails && mount.target == c"/tmp" {
             return Err(io::Error::from_raw_os_error(1));
         }
         self.log
@@ -63,7 +63,7 @@ impl Channel for FakeChannel {
 const MOUNTED: [&str; 4] = ["mount /proc", "mount /sys", "mount /dev", "mount /tmp"];
 
 #[test]
-fn the_four_filesystems_are_mounted_before_the_host_is_heard() {
+fn the_four_filesystems_are_mounted() {
     let mut system = FakeSystem::default();
     let mut channel = FakeChannel::new(vec![Ok(Event::PowerOff)]);
 
@@ -106,7 +106,7 @@ fn one_wake_reaps_every_exited_child() {
 }
 
 #[test]
-fn a_failed_mount_powers_off_without_hearing_the_host() {
+fn the_host_is_not_heard_until_the_last_mount_is_done() {
     let mut system = FakeSystem {
         mount_fails: true,
         ..FakeSystem::default()
@@ -116,7 +116,8 @@ fn a_failed_mount_powers_off_without_hearing_the_host() {
     let error = run(&mut system, &mut channel).unwrap_err();
 
     assert_eq!(error.raw_os_error(), Some(1));
-    assert_eq!(system.log, ["power off"]);
+    assert_eq!(system.log[..3], MOUNTED[..3]);
+    assert_eq!(system.log[3..], ["power off"]);
     assert_eq!(channel.reads, 0);
 }
 

@@ -5,12 +5,12 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
-use guest::protocol::{MAX_BODY, PORT, ToHost};
+use guest::protocol::{MAX_BODY, PORT, ToGuest, ToHost};
 use guest::{Channel, Event, agent};
 use vmm::initramfs::{self, Entry};
 use vmm::serial::Serial;
@@ -18,6 +18,7 @@ use vmm::vsock::{Connection, Vsock};
 use vmm::{GuestMemory, Interrupt, Ports, Stop, Vm, boot as loader};
 
 use crate::fetch::{self, Client};
+use crate::filter::Filter;
 use crate::store::Store;
 
 const KVM: &str = "/dev/kvm";
@@ -38,6 +39,18 @@ const ELF_MAGIC: &[u8] = b"\x7fELF";
 const PT_INTERP: u32 = 3;
 const PROGRAM_HEADER_MIN: usize = 56;
 
+/// How many frames of output may wait for the user's terminal. Past this the
+/// guest waits too, so a slow reader can't fill the host's memory.
+const OUTPUT_WINDOW: usize = 16;
+
+/// What the guest reports while it runs.
+pub enum Report<'a> {
+    /// The init is up, on a kernel with this release.
+    Ready(&'a str),
+    Stdout(&'a [u8]),
+    Stderr(&'a [u8]),
+}
+
 /// What a machine boots.
 pub struct Guest<'a> {
     /// An uncompressed `vmlinux`.
@@ -46,6 +59,9 @@ pub struct Guest<'a> {
     pub init: &'a [u8],
     /// More files for the guest's root filesystem.
     pub files: &'a [Entry<'a>],
+    /// A program to run once the init is ready. Without one, the machine
+    /// powers off as soon as the init reports.
+    pub command: Option<&'a [Vec<u8>]>,
     /// How long the guest may run, from entry to power-off.
     pub timeout: Duration,
 }
@@ -130,9 +146,11 @@ pub fn check_kvm(device: &Path) -> Result<(), Error> {
         .map_err(Error::Kvm)
 }
 
-/// `ap boot`: the pinned kernel, with this program as its init. Prints the
-/// guest's kernel release as soon as the init reports it.
-pub fn boot_bare(timeout: Duration) -> Result<(), Error> {
+/// `ap boot`: the pinned kernel, with this program as its init. With no
+/// command it prints the guest's kernel release as soon as the init reports
+/// it, and returns 0. With one it relays the command's output, filtered, and
+/// returns its status.
+pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
     let init = fs::read("/proc/self/exe").map_err(|error| failed("can't read ap itself", error))?;
     if !is_static(&init) {
         return Err(Error::DynamicallyLinked);
@@ -152,32 +170,113 @@ pub fn boot_bare(timeout: Duration) -> Result<(), Error> {
         kernel: &kernel,
         init: &init,
         files: &files,
+        command: (!command.is_empty()).then_some(command),
         timeout,
     };
-    // Printing has its own thread, so that a stdout nobody reads can't hold
-    // the VM past its timeout.
-    let (sender, receiver) = mpsc::channel::<String>();
-    let printer = thread::spawn(move || {
-        if let Ok(release) = receiver.recv() {
-            let _ = writeln!(io::stdout(), "{release}");
+    let mut relay = Relay::start(Instant::now() + timeout);
+    let result = boot(&guest, |report| match report {
+        Report::Ready(release) if command.is_empty() => {
+            relay.send(Piece::Release(release.to_owned()));
         }
+        Report::Ready(_) => {}
+        Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
+        Report::Stderr(bytes) => relay.send(Piece::Stderr(bytes.to_vec())),
     });
-    let result = boot(&guest, move |release| {
-        let _ = sender.send(release.to_owned());
-    });
-    if result.is_ok() {
-        let _ = printer.join();
-    }
-    result
+    relay.finish();
+    result.map(|status| status.unwrap_or(0))
 }
 
-/// Boots `guest`, calls `on_ready` with the kernel release its init reports,
-/// and returns once the machine has powered off. `on_ready` runs on the vCPU
-/// thread, so it must not block, or the timeout can't stop the guest.
+enum Piece {
+    Release(String),
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+/// Hands output to a thread of its own, so that a terminal nobody reads can't
+/// hold the VM past its timeout. Each piece is acknowledged once written, and
+/// no wait goes past the deadline.
+struct Relay {
+    pieces: Sender<Piece>,
+    written: Receiver<()>,
+    unwritten: usize,
+    deadline: Instant,
+}
+
+impl Relay {
+    fn start(deadline: Instant) -> Self {
+        let (pieces, received) = mpsc::channel();
+        let (acknowledge, written) = mpsc::channel();
+        thread::spawn(move || print(&received, &acknowledge));
+        Relay {
+            pieces,
+            written,
+            unwritten: 0,
+            deadline,
+        }
+    }
+
+    /// Sends a piece, waiting for room first. Past the deadline the piece is
+    /// dropped, because the machine is about to be stopped.
+    fn send(&mut self, piece: Piece) {
+        while self.unwritten >= OUTPUT_WINDOW {
+            if !self.wait() {
+                return;
+            }
+        }
+        self.unwritten += 1;
+        let _ = self.pieces.send(piece);
+    }
+
+    /// Waits for everything sent to be written, up to the deadline.
+    fn finish(&mut self) {
+        while self.unwritten > 0 && self.wait() {}
+    }
+
+    fn wait(&mut self) -> bool {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        let written = self.written.recv_timeout(left).is_ok();
+        if written {
+            self.unwritten -= 1;
+        }
+        written
+    }
+}
+
+/// Write errors are ignored: a reader that went away shouldn't change what
+/// the guest's command does or how it ends.
+fn print(pieces: &Receiver<Piece>, written: &Sender<()>) {
+    let mut stdout_filter = Filter::default();
+    let mut stderr_filter = Filter::default();
+    for piece in pieces {
+        match piece {
+            Piece::Release(release) => {
+                let _ = writeln!(io::stdout(), "{release}");
+            }
+            Piece::Stdout(bytes) => {
+                let mut stdout = io::stdout();
+                let _ = stdout.write_all(&stdout_filter.push(&bytes));
+                let _ = stdout.flush();
+            }
+            Piece::Stderr(bytes) => {
+                let _ = io::stderr().write_all(&stderr_filter.push(&bytes));
+            }
+        }
+        if written.send(()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Boots `guest`, calls `on_report` with what its init reports, and returns
+/// once the machine has powered off, with the status of the guest's command
+/// if it had one. `on_report` runs on the vCPU thread, so it must not block
+/// past the timeout, or the timeout can't stop the guest.
 ///
 /// The VM lives inside this call, on this thread. When it returns, for any
 /// reason, the VM is gone.
-pub fn boot(guest: &Guest, on_ready: impl FnMut(&str)) -> Result<(), Error> {
+pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, Error> {
+    let run_frame = guest.command.map(run_frame).transpose()?;
+    let wants_status = run_frame.is_some();
     let mut entries = vec![Entry::File {
         path: "init",
         mode: 0o755,
@@ -204,10 +303,12 @@ pub fn boot(guest: &Guest, on_ready: impl FnMut(&str)) -> Result<(), Error> {
         interrupt: vm.interrupt(LINE),
         connection: None,
         frame: Vec::new(),
-        answered: false,
+        run_frame,
+        finished: false,
         ready: false,
+        status: None,
         failure: None,
-        on_ready,
+        on_report,
     };
     let stop = vcpu
         .run_ports(guest.timeout, &mut machine)
@@ -216,7 +317,10 @@ pub fn boot(guest: &Guest, on_ready: impl FnMut(&str)) -> Result<(), Error> {
     match (stop, machine.failure, machine.ready) {
         (Stop::TimedOut, ..) => Err(Error::TimedOut),
         (_, Some(reason), _) => Err(Error::Failed(reason)),
-        (Stop::Shutdown, None, true) => Ok(()),
+        (Stop::Shutdown, None, true) if wants_status && machine.status.is_none() => Err(
+            Error::Failed("the guest powered off before its command finished".to_owned()),
+        ),
+        (Stop::Shutdown, None, true) => Ok(machine.status),
         (Stop::Shutdown, None, false) => Err(Error::Failed(
             "the guest powered off before its init reported ready".to_owned(),
         )),
@@ -224,6 +328,16 @@ pub fn boot(guest: &Guest, on_ready: impl FnMut(&str)) -> Result<(), Error> {
             "the guest stopped unexpectedly: {stop:?}"
         ))),
     }
+}
+
+fn run_frame(argv: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
+    let mut frame = Vec::new();
+    ToGuest::Run {
+        argv: argv.to_vec(),
+    }
+    .write(&mut frame)
+    .map_err(|error| Error::Failed(format!("can't send the command: {error:?}")))?;
+    Ok(frame)
 }
 
 fn failed(context: &str, error: io::Error) -> Error {
@@ -239,14 +353,17 @@ struct Machine<'vm, F> {
     interrupt: Interrupt<'vm>,
     connection: Option<Connection>,
     frame: Vec<u8>,
-    answered: bool,
+    /// The request to send once the init is ready.
+    run_frame: Option<Vec<u8>>,
+    finished: bool,
     ready: bool,
+    status: Option<u8>,
     failure: Option<String>,
-    on_ready: F,
+    on_report: F,
 }
 
-impl<F: FnMut(&str)> Machine<'_, F> {
-    /// Reads the guest's first frame, and hangs up, which powers it off.
+impl<F: FnMut(Report)> Machine<'_, F> {
+    /// Takes what the guest has sent. Hanging up powers it off.
     fn run_host(&mut self) {
         if self.connection.is_none() {
             self.connection = self.vsock.accept();
@@ -254,25 +371,70 @@ impl<F: FnMut(&str)> Machine<'_, F> {
         let Some(connection) = self.connection else {
             return;
         };
-        if self.answered {
-            return;
-        }
         let mut buffer = [0; 4096];
-        while !frame_is_complete(&self.frame) {
+        while !self.finished {
             let len = self.vsock.recv(connection, &mut buffer);
             if len == 0 {
                 return;
             }
             self.frame.extend_from_slice(&buffer[..len]);
-        }
-        self.answered = true;
-        match release_in(&self.frame) {
-            Ok(release) => {
-                self.ready = true;
-                (self.on_ready)(&release);
+            while !self.finished && frame_is_complete(&self.frame) {
+                self.handle_frame(connection);
             }
-            Err(reason) => self.failure = Some(reason),
         }
+    }
+
+    fn handle_frame(&mut self, connection: Connection) {
+        let mut rest = self.frame.as_slice();
+        let message = ToHost::read(&mut rest);
+        let used = self.frame.len() - rest.len();
+        let running = self.ready && self.run_frame.is_none();
+        match message {
+            Ok(Some(ToHost::Ready(release))) if !self.ready => {
+                self.handle_ready(connection, &release)
+            }
+            Ok(Some(ToHost::Stdout(bytes))) if running => {
+                (self.on_report)(Report::Stdout(&bytes));
+            }
+            Ok(Some(ToHost::Stderr(bytes))) if running => {
+                (self.on_report)(Report::Stderr(&bytes));
+            }
+            Ok(Some(ToHost::Exited(status))) if running => {
+                self.status = Some(status);
+                self.hang_up(connection);
+            }
+            _ => self.give_up(
+                connection,
+                "the guest's init didn't report ready".to_owned(),
+            ),
+        }
+        self.frame.drain(..used);
+    }
+
+    fn handle_ready(&mut self, connection: Connection, release: &[u8]) {
+        let Some(release) = printable(release) else {
+            self.give_up(
+                connection,
+                "the guest reported an invalid release".to_owned(),
+            );
+            return;
+        };
+        self.ready = true;
+        (self.on_report)(Report::Ready(&release));
+        match self.run_frame.take() {
+            Some(frame) if self.vsock.send(connection, &frame) == frame.len() => {}
+            Some(_) => self.give_up(connection, "can't send the command to the guest".to_owned()),
+            None => self.hang_up(connection),
+        }
+    }
+
+    fn give_up(&mut self, connection: Connection, reason: String) {
+        self.failure = Some(reason);
+        self.hang_up(connection);
+    }
+
+    fn hang_up(&mut self, connection: Connection) {
+        self.finished = true;
         self.vsock.close(connection);
     }
 }
@@ -289,19 +451,12 @@ fn frame_is_complete(bytes: &[u8]) -> bool {
 
 /// The release in a guest's `Ready` frame. It reaches the user's terminal, so
 /// it must hold only printable characters.
-fn release_in(mut frame: &[u8]) -> Result<String, String> {
-    match ToHost::read(&mut frame) {
-        Ok(Some(ToHost::Ready(release)))
-            if !release.is_empty() && release.iter().all(u8::is_ascii_graphic) =>
-        {
-            Ok(String::from_utf8_lossy(&release).into_owned())
-        }
-        Ok(Some(ToHost::Ready(_))) => Err("the guest reported an invalid release".to_owned()),
-        _ => Err("the guest's init didn't report ready".to_owned()),
-    }
+fn printable(release: &[u8]) -> Option<String> {
+    (!release.is_empty() && release.iter().all(u8::is_ascii_graphic))
+        .then(|| String::from_utf8_lossy(release).into_owned())
 }
 
-impl<F: FnMut(&str)> Ports for Machine<'_, F> {
+impl<F: FnMut(Report)> Ports for Machine<'_, F> {
     fn write(&mut self, port: u16, data: &[u8]) {
         self.serial.write(port, data);
     }

@@ -1,7 +1,7 @@
 //! The boot API that `ap boot` uses, on a real guest. The journey covers `ap`
 //! itself as the init, because that needs its release build.
 
-use ap::boot::{self, Error, Guest};
+use ap::boot::{self, Error, Guest, Report};
 use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -15,16 +15,21 @@ fn kernel_image() -> &'static [u8] {
 }
 
 /// Boots an init that powers off without saying anything to the host.
-fn boot_silent_init(timeout: Duration) -> (Result<(), Error>, u32) {
+fn boot_silent_init(timeout: Duration) -> (Result<Option<u8>, Error>, u32) {
     let init = fs::read(guest_binary::build("test-init")).unwrap();
     let guest = Guest {
         kernel: kernel_image(),
         init: &init,
         files: &[],
+        command: None,
         timeout,
     };
     let mut ready_calls = 0;
-    let result = boot::boot(&guest, |_| ready_calls += 1);
+    let result = boot::boot(&guest, |report| {
+        if matches!(report, Report::Ready(_)) {
+            ready_calls += 1;
+        }
+    });
     (result, ready_calls)
 }
 
@@ -42,4 +47,28 @@ fn a_guest_past_its_timeout_is_stopped_and_reported() {
     let (result, ready_calls) = boot_silent_init(Duration::from_millis(1));
     assert!(matches!(result, Err(Error::TimedOut)), "{result:?}");
     assert_eq!(ready_calls, 0);
+}
+
+#[test]
+fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
+    let init = fs::read(guest_binary::build("output-init")).unwrap();
+    let command = [b"anything".to_vec()];
+    let guest = Guest {
+        kernel: kernel_image(),
+        init: &init,
+        files: &[],
+        command: Some(&command),
+        timeout: Duration::from_secs(30),
+    };
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    let status = boot::boot(&guest, |report| match report {
+        Report::Ready(_) => {}
+        Report::Stdout(bytes) => stdout.extend_from_slice(bytes),
+        Report::Stderr(bytes) => stderr.extend_from_slice(bytes),
+    })
+    .unwrap();
+    assert_eq!(status, Some(7));
+    assert_eq!(stdout.len(), 4 << 20);
+    assert!(stdout.iter().all(|byte| *byte == b'o'));
+    assert_eq!(stderr, b"to stderr");
 }

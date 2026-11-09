@@ -78,12 +78,12 @@ shift
 [ -n "$limit" ] || exec "$@"
 setsid "$@" <&0 &
 job=$!
-setsid sh -c 'sleep "$1"; kill -KILL -- "-$2"' sh "$limit" "$job" \
+setsid sh -c 'sleep "$1"; kill -KILL "-$2"' sh "$limit" "$job" \
     </dev/null >/dev/null 2>&1 &
 watcher=$!
 wait "$job"
 status=$?
-kill -KILL -- "-$watcher" "$watcher" 2>/dev/null
+kill -KILL "-$watcher" "$watcher" 2>/dev/null
 exit "$status"
 "#;
 

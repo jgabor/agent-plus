@@ -6,6 +6,18 @@
 //! covers it: `ulimit` counts each process alone, and `cargo mutants` starts
 //! its workers in process groups of their own. If there's no scope, nothing
 //! runs.
+//!
+//! A job started inside a job keeps its own limit, and doesn't count against
+//! the enclosing one. Each scope is a new unit under the user manager, so the
+//! two are siblings, and a scope can't hold another unit. Only a slice can, so
+//! a shared limit would need a slice for every job, with its limit set by
+//! `systemctl set-property`. That leaves files in the manager's runtime
+//! directory, and an `xtask` that dies wouldn't remove them. It would also
+//! change what a job over its limit does, because the kernel then picks from
+//! every job in the slice, so an innocent job can die for a nested one.
+//!
+//! So the total is at most `MEMORY` for each job alive at once. Jobs nest only
+//! when a test of `xtask` runs `xtask`, and those fixtures are small.
 
 use crate::Problem;
 use crate::lock::Hold;

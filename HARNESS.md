@@ -656,7 +656,10 @@ passes. No scheduled work runs on GitHub.
   at a PR with a comment saying what merging accepts, so the owner reads that
   and uses a merge button.
 - Turn the scheduled tasks on.
-- Answer `answer-needed` issues.
+- Answer `answer-needed` issues. The owner can set or clear `land-needed` and
+  `answer-needed` on the issue or on the open PR that closes it. A workflow
+  runs `cargo xtask mirror` to copy the change to the other side, and only the
+  issue's label decides whether it can be claimed.
 - Publish releases.
 
 ## Build stages

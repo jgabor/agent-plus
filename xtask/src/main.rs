@@ -14,6 +14,7 @@ mod ledger;
 mod limit;
 mod lock;
 mod merge;
+mod mirror;
 mod mutation;
 mod nightly;
 mod report;
@@ -46,6 +47,8 @@ commands:
   merge <pr>       rebase, gate, record, and squash-merge a PR
   prepare <pr>     rebase, gate, and record a PR, for the owner to merge
   land <pr>        run prepare, then squash-merge the PR, for the owner
+  mirror <number> <label>
+                   copy a parking label from an issue or PR to its other side
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -92,6 +95,10 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["prepare", ..] => Err(Problem(format!("`prepare` takes `<pr>`\n\n{USAGE}"))),
         ["land", pr] => merge::land(pr),
         ["land", ..] => Err(Problem(format!("`land` takes `<pr>`\n\n{USAGE}"))),
+        ["mirror", number, label] => mirror::run(number, label),
+        ["mirror", ..] => Err(Problem(format!(
+            "`mirror` takes `<number> <label>`\n\n{USAGE}"
+        ))),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)

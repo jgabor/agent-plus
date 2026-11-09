@@ -1,0 +1,66 @@
+# Keeps land-needed and answer-needed the same on an issue and on the open PR
+# that closes it. `cargo xtask mirror` holds the logic.
+#
+# `pull_request_target` runs this file from the default branch, with a token
+# that can write. Nothing here may check out or run a PR's code.
+name: mirror-labels
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+  pull_request_target:
+    types: [labeled, unlabeled]
+
+permissions: {}
+
+jobs:
+  # The queue below has to be the same for an issue and for its PR.
+  issue:
+    if: github.event.label.name == 'land-needed' || github.event.label.name == 'answer-needed'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      number: ${{ steps.find.outputs.number }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$PR" ]; then
+            echo "number=$ISSUE" >> "$GITHUB_OUTPUT"
+          else
+            number=$(gh pr view "$PR" --repo "$REPOSITORY" \
+              --json closingIssuesReferences \
+              --jq '[.closingIssuesReferences[]
+                | select(.url | startswith("https://github.com/\(env.REPOSITORY)/issues/"))][0].number // empty')
+            echo "number=$number" >> "$GITHUB_OUTPUT"
+          fi
+
+  mirror:
+    needs: issue
+    if: needs.issue.outputs.number != ''
+    runs-on: ubuntu-latest
+    # A newer run replaces one that is still queued in its group. That loses
+    # nothing, because the group is one label on one issue and the newest
+    # change is the one to keep.
+    concurrency:
+      group: mirror-labels-${{ needs.issue.outputs.number }}-${{ github.event.label.name }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          LABEL: ${{ github.event.label.name }}
+        run: cargo xtask mirror "$NUMBER" "$LABEL"

@@ -15,19 +15,14 @@ on:
 permissions: {}
 
 jobs:
-  # The queue below has to be the same for an issue and for its PR. A merged
-  # PR that closes no issue queues on its own number.
+  # The queue below has to be the same for an issue and for its PR.
   issue:
-    if: >-
-      github.event.label.name == 'land-needed' ||
-      github.event.label.name == 'answer-needed' ||
-      (github.event.action == 'closed' && github.event.pull_request.merged)
+    if: github.event.label.name == 'land-needed' || github.event.label.name == 'answer-needed'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
     outputs:
       number: ${{ steps.find.outputs.number }}
-      label: ${{ steps.find.outputs.label }}
     steps:
       - id: find
         env:
@@ -35,13 +30,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
           PR: ${{ github.event.pull_request.number }}
-          ACTION: ${{ github.event.action }}
-          LABEL: ${{ github.event.label.name }}
         run: |
-          if [ "$ACTION" = closed ]; then
-            LABEL=land-needed
-          fi
-          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
           if [ -z "$PR" ]; then
             echo "number=$ISSUE" >> "$GITHUB_OUTPUT"
           else
@@ -49,9 +38,6 @@ jobs:
               --json closingIssuesReferences \
               --jq '[.closingIssuesReferences[]
                 | select(.url | startswith("https://github.com/\(env.REPOSITORY)/issues/"))][0].number // empty')
-            if [ -z "$number" ] && [ "$ACTION" = closed ]; then
-              number="pr-$PR"
-            fi
             echo "number=$number" >> "$GITHUB_OUTPUT"
           fi
 
@@ -63,7 +49,7 @@ jobs:
     # nothing, because the group is one label on one issue and the newest
     # change is the one to keep.
     concurrency:
-      group: mirror-labels-${{ needs.issue.outputs.number }}-${{ needs.issue.outputs.label }}
+      group: mirror-labels-${{ needs.issue.outputs.number }}-${{ github.event.label.name }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -77,5 +63,24 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
           NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
-          LABEL: ${{ needs.issue.outputs.label }}
+          LABEL: ${{ github.event.label.name }}
         run: cargo xtask mirror "$NUMBER" "$LABEL"
+
+  # Removing is safe to run at any time, so this job doesn't queue with the
+  # ones above. A newer run there could replace it while it waits.
+  merged:
+    if: github.event.action == 'closed' && github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: cargo xtask mirror "$NUMBER" land-needed

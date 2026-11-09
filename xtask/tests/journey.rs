@@ -50,6 +50,8 @@ fn journey(root: &Path) -> Output {
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("XTASK_ACTIVITY_HELD")
         .env("JOURNEY_LEAK", "from the caller")
+        .env("CC", "from the caller")
+        .env("CXX", "from the caller")
         .output()
         .unwrap()
 }

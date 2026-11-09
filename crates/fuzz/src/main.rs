@@ -6,6 +6,8 @@ use std::env;
 use std::panic;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vmm::GuestMemory;
+use vmm::virtio::Transport;
 
 const USAGE: &str = "usage: fuzz <seconds> [seed]";
 /// Inputs between looks at the clock.
@@ -20,23 +22,152 @@ struct Target {
     words: &'static [&'static str],
 }
 
-/// Network rules and device input join this list when they exist.
-const TARGETS: [Target; 1] = [Target {
-    name: "agentfile",
-    check: |input| {
-        let _ = agentfile::parse(input);
+/// Network rules join this list when they exist.
+const TARGETS: [Target; 2] = [
+    Target {
+        name: "agentfile",
+        check: |input| {
+            let _ = agentfile::parse(input);
+        },
+        corpus: &[
+            "",
+            "# a comment\n\nFROM ubuntu:24.04\n",
+            "SHARE ./out \"a b\" ro\n",
+            "SHARE \"say \\\"hi\\\"\" C:\\work\n",
+            "SYSTEM you are a helper\nPROMPT do the thing\nENV KEY=value\n",
+        ],
+        words: &[
+            "FROM", "SHARE", "SYSTEM", "PROMPT", "ENV", "--", "--force", "\"\"", "\\\"", "\\\\",
+            " rw",
+        ],
     },
-    corpus: &[
-        "",
-        "# a comment\n\nFROM ubuntu:24.04\n",
-        "SHARE ./out \"a b\" ro\n",
-        "SHARE \"say \\\"hi\\\"\" C:\\work\n",
-        "SYSTEM you are a helper\nPROMPT do the thing\nENV KEY=value\n",
-    ],
-    words: &[
-        "FROM", "SHARE", "SYSTEM", "PROMPT", "ENV", "--", "--force", "\"\"", "\\\"", "\\\\", " rw",
-    ],
-}];
+    Target {
+        name: "device",
+        check: |input| {
+            device_input(input);
+        },
+        corpus: &[
+            "",
+            // A queue with one chain of two descriptors.
+            concat!(
+                "set 0x38 8 4\nset 0x80 0x1000 4\nset 0x90 0x2000 4\nset 0xa0 0x3000 4\n",
+                "set 0x44 1 4\nset 0x70 4 4\n",
+                "mem 0x1000 0x4000\nmem 0x1008 0x1000100000010\n",
+                "mem 0x1010 0x5000\nmem 0x1018 0x200000040\n",
+                "mem 0x2000 0x10000\nrun\n",
+            ),
+            // A descriptor that names itself.
+            concat!(
+                "set 0x38 8 4\nset 0x80 0x1000 4\nset 0x90 0x2000 4\nset 0xa0 0x3000 4\n",
+                "set 0x44 1 4\nset 0x70 4 4\nmem 0x1000 0x4000\nmem 0x1008 0x100000010\n",
+                "mem 0x2000 0x10000\nrun\n",
+            ),
+            "get 0 4\nget 0x100 1\nset 0x70 0 4\nset 0x50 0 4\nset 0x64 1 4\nget 0x34 4\n",
+        ],
+        words: &[
+            "run\n",
+            "mem ",
+            "set ",
+            "get ",
+            " 4\n",
+            " 1\n",
+            "0x",
+            "0xffffffffffffffff",
+            "0xffffffff",
+            "0xfff8",
+            "0x10000",
+            "0x10000000000000",
+            "0x400000000",
+            "set 0x70 0 4\n",
+            "set 0x84 1 4\n",
+            "set 0x30 1 4\n",
+            "mem 0x2000 0x90000\n",
+        ],
+    },
+];
+
+const DEVICE_MEMORY: usize = 1 << 16;
+const DEVICE_QUEUES: usize = 2;
+const DEVICE_QUEUE_SIZE: u16 = 32;
+
+fn number(word: Option<&str>) -> Option<u64> {
+    let word = word?;
+    match word.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => word.parse().ok(),
+    }
+}
+
+/// Plays a guest: each line pokes guest memory or a device register, and
+/// `run` makes the device drain its queues. Text lets the generator's edits
+/// reach deep into a valid setup. Returns how many chains the device accepted.
+fn device_input(input: &str) -> usize {
+    let memory = GuestMemory::new(DEVICE_MEMORY).expect("guest memory");
+    let mut device = Transport::new(19, 1, vec![3; 8], DEVICE_QUEUES, DEVICE_QUEUE_SIZE);
+    let mut accepted = 0;
+    for line in input.lines() {
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("mem") => {
+                if let (Some(address), Some(value)) = (number(words.next()), number(words.next())) {
+                    let _ = memory.write(address, &value.to_le_bytes());
+                }
+            }
+            Some("set") => {
+                let (offset, value, width) = (
+                    number(words.next()),
+                    number(words.next()),
+                    number(words.next()),
+                );
+                if let (Some(offset), Some(value), Some(width)) = (offset, value, width) {
+                    let bytes = value.to_le_bytes();
+                    let _ = device.write(offset, &bytes[..(width as usize).min(8)]);
+                }
+            }
+            Some("get") => {
+                if let (Some(offset), Some(width)) = (number(words.next()), number(words.next())) {
+                    let mut bytes = [0; 8];
+                    device.read(offset, &mut bytes[..(width as usize).min(8)]);
+                }
+            }
+            Some("run") => accepted += drain(&mut device, &memory),
+            _ => {}
+        }
+    }
+    accepted
+}
+
+/// Takes every chain from every queue, and panics if an accepted chain breaks
+/// a promise the queue makes.
+fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
+    let mut accepted = 0;
+    for index in 0..DEVICE_QUEUES {
+        let Some(queue) = device.queue(index) else {
+            continue;
+        };
+        while let Ok(Some(chain)) = queue.pop(memory) {
+            assert!(chain.buffers.len() <= usize::from(DEVICE_QUEUE_SIZE));
+            let mut total = 0;
+            for buffer in &chain.buffers {
+                total += u64::from(buffer.len);
+                let mut bytes = vec![0; buffer.len as usize];
+                memory
+                    .read(buffer.address, &mut bytes)
+                    .expect("an accepted buffer lies inside guest memory");
+                if buffer.writable {
+                    memory
+                        .write(buffer.address, &bytes)
+                        .expect("an accepted buffer lies inside guest memory");
+                }
+            }
+            assert!(total <= u64::from(u32::MAX));
+            let _ = queue.add_used(memory, chain.head, 0);
+            accepted += 1;
+        }
+    }
+    device.signal_used();
+    accepted
+}
 
 struct Random(u64);
 
@@ -239,6 +370,18 @@ mod tests {
         // Only a copy repeats text with nothing new added.
         assert!(found(&|input| input == "abcabcdefgh"));
         assert!(found(&|input| input == "abc"));
+    }
+
+    #[test]
+    fn the_device_corpus_reaches_the_queue() {
+        let corpus = TARGETS[1].corpus;
+        assert_eq!(device_input(corpus[1]), 1);
+        assert_eq!(device_input(corpus[2]), 0);
+    }
+
+    #[test]
+    fn device_input_ignores_lines_it_cant_read() {
+        assert_eq!(device_input("mem x\nset 1\nget\nwhat\nmem 0x 1\n\nrun"), 0);
     }
 
     static RAN: AtomicU64 = AtomicU64::new(0);

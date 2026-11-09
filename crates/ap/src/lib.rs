@@ -2,6 +2,9 @@
 
 use std::io;
 
+pub mod fetch;
+pub mod store;
+
 /// A running guest. The real implementation is the VMM, and lanes that need
 /// a guest before it exists build against `fake-vm`.
 pub trait Vm {

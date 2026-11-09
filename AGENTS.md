@@ -294,8 +294,9 @@ needs working links, prose lines of 80 columns or fewer, and no contradictions
 with SPEC.md.
 
 Run focused checks while you iterate, through `cargo xtask run`, so a bench
-can get a quiet machine. A real model turn costs money, so use
-the fake harness, or a real harness with no credentials, unless the change
+can get a quiet machine. Run `cargo mutants` only through it, because it
+limits the memory a runaway mutant can take. A real model turn costs money, so
+use the fake harness, or a real harness with no credentials, unless the change
 depends on the model. If you must use a real model, pick the cheapest one.
 
 ## Ways to hurt yourself

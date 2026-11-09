@@ -1,8 +1,9 @@
 //! The activity lock: builds and tests share it, and a bench holds it alone.
 
-use crate::{Problem, Verdict, workspace};
+use crate::{Problem, Verdict, limit, workspace};
 use std::env;
 use std::fs::{self, File, OpenOptions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -99,17 +100,35 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
         .ok_or_else(|| Problem("`run` needs a command to run".to_string()))?;
     let root = workspace::root()?;
     let hold = shared(&root)?;
-    let mut child = Command::new(program);
-    child.args(arguments);
+    if !can_start(program) {
+        return Err(Problem(format!(
+            "couldn't run `{program}`: no such executable"
+        )));
+    }
+    let mut child = limit::scope(program, arguments, None)?;
     hold.pass_to(&mut child);
     let status = child
         .status()
-        .map_err(|e| Problem(format!("couldn't run `{program}`: {e}")))?;
+        .map_err(|e| Problem(format!("couldn't run `systemd-run`: {e}")))?;
     Ok(if status.success() {
         Verdict::Pass
     } else {
         Verdict::Fail
     })
+}
+
+/// `systemd-run` exits 1 for a program it can't start, which would look like a
+/// failed check. A name without a slash is looked up on `PATH`, as `exec` does.
+fn can_start(program: &str) -> bool {
+    if program.contains('/') {
+        return is_executable(Path::new(program));
+    }
+    env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|d| is_executable(&d.join(program))))
+}
+
+fn is_executable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Every holder passes through the turnstile, which a pending bench keeps, so

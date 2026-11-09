@@ -62,7 +62,7 @@ const CLEAN: Recorded = Recorded {
 };
 
 /// Logs its arguments, and enforces the time limit as a real scope would.
-const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"$limit\" \"$@\"\n";
+const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"${limit:-0}\" \"$@\"\n";
 
 struct Repo {
     root: PathBuf,
@@ -1423,4 +1423,8 @@ fn a_hold_inherited_from_a_parent_still_runs_the_job() {
     repo.touch(&["ap"]);
     let output = repo.xtask(&["run", env!("CARGO_BIN_EXE_xtask"), "nightly"]);
     assert_mutation_ran(&repo, &output, 1, "pass");
+    let calls = repo.read_bin("systemd-calls");
+    let run = calls.lines().next().unwrap();
+    assert!(run.contains("MemoryMax=8G"), "{run}");
+    assert!(!run.contains("RuntimeMaxSec"), "{run}");
 }

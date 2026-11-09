@@ -610,6 +610,27 @@ fn a_protected_path_needs_the_label_even_for_the_owner() {
 }
 
 #[test]
+fn a_change_to_the_harness_itself_is_only_for_the_owner() {
+    let repo = Repo::new("protected-xtask");
+    repo.change_branch("xtask/notes.txt", "A way to weaken the gate.\n");
+    let output = repo.merge();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("fail labels"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!repo.calls().contains("gh pr merge"));
+
+    repo.set_pr(&Pr {
+        labels: &["auto:merge", "spec-change"],
+        ..Pr::default()
+    });
+    assert_refused(&repo, &repo.merge(), "prepare");
+    assert_prepared(&repo, &repo.prepare());
+}
+
+#[test]
 fn a_pr_must_close_exactly_one_issue_here() {
     let repo = Repo::new("no-issue");
     for (closes, elsewhere) in [

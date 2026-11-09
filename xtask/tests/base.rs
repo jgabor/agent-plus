@@ -340,6 +340,8 @@ fn each_protected_path_needs_the_label() {
         "harness/waived.txt",
         "harness/journey.toml",
         "harness/budgets.toml",
+        "harness/tasks/nightly.md",
+        "xtask/src/gate.rs",
     ]
     .iter()
     .enumerate()
@@ -354,6 +356,31 @@ fn each_protected_path_needs_the_label() {
         repo.write(path, &content);
         repo.commit();
         assert_fails(&repo.gate(), "labels", path);
+    }
+}
+
+#[test]
+fn the_ledger_and_journey_scripts_need_no_label() {
+    for (index, path) in [
+        "harness/ledger/1.toml",
+        "harness/journey/step.sh",
+        "harnessed.txt",
+        "docs/xtask/notes.txt",
+        "SPEC.md.orig",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let repo = Repo::new(&format!("open-{index}"), NO_CHECK, &[]);
+        repo.set_prs(NOT_LABELED);
+        repo.write(path, "# comment\n");
+        repo.commit();
+        let output = repo.gate();
+        assert!(
+            stdout(&output).contains("pass labels"),
+            "{path}: {}",
+            stdout(&output)
+        );
     }
 }
 

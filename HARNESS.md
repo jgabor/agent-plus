@@ -1,7 +1,7 @@
 # Harness design
 
-> **Status: draft.** The harness is being built in the order of
-> [Build stages](#build-stages). Numeric settings are initial values.
+> **Status: built.** Every stage in [Build stages](#build-stages) is in place.
+> Numeric settings are initial values.
 
 ## Purpose
 
@@ -311,8 +311,8 @@ Files outside any single lane follow these rules:
 | `SPEC.md` | Changed only by `spec-change` PRs |
 | `harness/ledger/` | One new file per merge |
 | `harness/waived.txt` | Changed only by `spec-change` PRs, with union merge through `.gitattributes` |
-| `harness/journey.toml` | Changed only by `spec-change` PRs |
-| `harness/budgets.toml` | Changed only by `spec-change` PRs |
+| `harness/journey/` | Step scripts, which any PR may change |
+| `xtask/`, and the rest of `harness/` | Changed only by `spec-change` PRs, so a PR can't weaken its own gate |
 | `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
 
 The gate fails when a diff touches one of these `spec-change` paths and its PR
@@ -322,9 +322,6 @@ lines and waivers that quote the changed text. A branch with no open PR yet
 prints `skip labels`, because `cargo xtask merge` gates it again with the PR
 open. `cargo xtask merge` refuses a `spec-change` PR, and `cargo xtask prepare`
 readies it for the owner.
-
-Once H5 is complete, `xtask/` and `harness/` need `spec-change` too, apart from
-`harness/ledger/` and `harness/journey/`, so a PR can't weaken its own gate.
 
 ## Data formats
 
@@ -632,8 +629,8 @@ passes. No scheduled work runs on GitHub.
 ## Owner actions
 
 - Add `auto:*` labels to top-level issues.
-- Merge `spec-change` PRs, which cover SPEC.md, budgets, waivers, and journey
-  steps, with any merge button once `xtask/gate` is green.
+- Merge `spec-change` PRs, which cover SPEC.md, `xtask/`, and `harness/`, with
+  any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
 - Turn the scheduled tasks on.

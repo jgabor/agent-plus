@@ -17,6 +17,7 @@ mod merge;
 mod mirror;
 mod mutation;
 mod nightly;
+mod refresh;
 mod report;
 mod score;
 mod spec;
@@ -45,7 +46,9 @@ commands:
   record --issue <n> --pr <n>
                    write the ledger record for the current head
   merge <pr>       rebase, gate, record, and squash-merge a PR
-  prepare <pr>     rebase, gate, and record a PR, for the owner to merge
+  prepare <pr> [--keep-budgets]
+                   rebase, gate, and record a PR, for the owner to merge
+  refresh          prove each land-needed PR again that is behind main
   land <pr>        run prepare, then squash-merge the PR, for the owner
   mirror <number> <label>
                    copy a parking label from an issue or PR to its other side
@@ -91,8 +94,12 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ))),
         ["merge", pr] => merge::run(pr),
         ["merge", ..] => Err(Problem(format!("`merge` takes `<pr>`\n\n{USAGE}"))),
-        ["prepare", pr] => merge::prepare(pr),
-        ["prepare", ..] => Err(Problem(format!("`prepare` takes `<pr>`\n\n{USAGE}"))),
+        ["prepare", pr] => merge::prepare(pr, false),
+        ["prepare", pr, "--keep-budgets"] => merge::prepare(pr, true),
+        ["prepare", ..] => Err(Problem(format!(
+            "`prepare` takes `<pr> [--keep-budgets]`\n\n{USAGE}"
+        ))),
+        ["refresh"] => refresh::run(),
         ["land", pr] => merge::land(pr),
         ["land", ..] => Err(Problem(format!("`land` takes `<pr>`\n\n{USAGE}"))),
         ["mirror", number, label] => mirror::run(number, label),
@@ -105,7 +112,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly"),
+            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "refresh"),
             extra,
             ..,
         ] => Err(Problem(format!(

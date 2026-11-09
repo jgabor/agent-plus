@@ -54,6 +54,15 @@ pub struct PullRequest {
     pub changes_requested: bool,
 }
 
+/// An open PR, as far as `refresh` needs one.
+pub struct OpenPr {
+    pub number: u64,
+    pub from_fork: bool,
+    pub head_ref: String,
+    pub head: String,
+    pub closing_issues: Vec<u64>,
+}
+
 /// An issue or a PR, which GitHub numbers from one sequence.
 pub struct Labeled {
     pub is_pr: bool,
@@ -185,6 +194,30 @@ impl Gh {
             }
         }
         Ok(closing)
+    }
+
+    pub fn open_prs(&self) -> Result<Vec<OpenPr>, Problem> {
+        let limit = PR_LIMIT.to_string();
+        let args = [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences",
+        ];
+        let value = self.json(&args)?;
+        let prs = value.as_arr().ok_or_else(|| unexpected("gh pr list"))?;
+        if prs.len() >= PR_LIMIT {
+            return Err(Problem(format!(
+                "this repository has {PR_LIMIT} open PRs or more, so one could be missing. Raise `PR_LIMIT`"
+            )));
+        }
+        prs.iter()
+            .map(|pr| read_open_pr(pr).ok_or_else(|| unexpected("gh pr list")))
+            .collect()
     }
 
     /// Works on an issue or a PR, and on one that already has the label.
@@ -454,6 +487,16 @@ fn closing_here(value: &Json) -> Option<Vec<u64>> {
 
 fn read_closing(value: &Json) -> Option<(u64, Vec<u64>)> {
     Some((value.get("number")?.as_u64()?, closing_here(value)?))
+}
+
+fn read_open_pr(value: &Json) -> Option<OpenPr> {
+    Some(OpenPr {
+        number: value.get("number")?.as_u64()?,
+        from_fork: value.get("isCrossRepository")?.as_bool()?,
+        head_ref: value.get("headRefName")?.as_str()?.to_string(),
+        head: value.get("headRefOid")?.as_str()?.to_string(),
+        closing_issues: closing_here(value)?,
+    })
 }
 
 fn read_pull_request(value: &Json) -> Option<PullRequest> {

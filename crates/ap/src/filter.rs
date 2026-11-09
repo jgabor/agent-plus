@@ -265,8 +265,12 @@ impl Filter {
     }
 
     fn pass(&mut self, out: &mut Vec<u8>) {
-        self.string_open =
-            matches!(self.state, State::Osc | State::Dcs) && self.held.last() != Some(&BEL);
+        // Only ST ends a string on every terminal. An extra one does nothing.
+        if matches!(self.state, State::Osc | State::Dcs) {
+            self.string_open = self.held.last() != Some(&BEL);
+        } else if self.held == [ESC, b'\\'] {
+            self.string_open = false;
+        }
         out.append(&mut self.held);
         self.state = State::Ground;
     }

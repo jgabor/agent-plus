@@ -129,6 +129,7 @@ fn a_removed_sequence_inside_a_passed_string_is_still_removed() {
 fn removing_a_sequence_closes_a_string_it_would_have_ended() {
     assert_filters(b"\x1b]0;a\x1b[21tb", b"\x1b]0;a\x1b\\b");
     assert_filters(b"\x1bP1|a\x1bP$qm\x1b\\b", b"\x1bP1|a\x1b\\b");
+    assert_filters(b"\x1b]0;a\x1b[1m\x1b[21tb", b"\x1b]0;a\x1b[1m\x1b\\b");
 }
 
 #[test]

@@ -163,6 +163,8 @@ fn iterm2s_clipboard_sequences_are_removed() {
     assert_filters(b"a\x1b]1337;CopyToClipboard=\x07b", b"ab");
     assert_filters(b"a\x1b]1337;EndCopy\x07b", b"ab");
     assert_filters(b"a\x1b]1337;EndCopy\x1b\\b", b"ab");
+    // iTerm2 reads OSC 50 as an alias for OSC 1337.
+    assert_filters(b"a\x1b]50;Copy=:aGk=\x07b", b"ab");
 }
 
 #[test]
@@ -173,6 +175,7 @@ fn a_control_inside_iterm2s_key_does_not_hide_it() {
 #[test]
 fn other_iterm2_sequences_pass() {
     assert_passes(b"\x1b]1337;SetMark\x07");
+    assert_passes(b"\x1b]50;monospace\x07");
     assert_passes(b"\x1b]1337;CurrentDir=/tmp\x1b\\");
     assert_passes(b"\x1b]1337;File=name=Copy=;inline=1:aGk=\x07");
     assert_passes(b"\x1b]1337;copy=:aGk=\x07");

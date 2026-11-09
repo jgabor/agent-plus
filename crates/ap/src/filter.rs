@@ -35,7 +35,7 @@ enum State {
     Escape,
     Csi,
     Osc,
-    /// In an OSC 1337, reading the key that says what it does.
+    /// In an OSC 1337 or its alias 50, reading the key that says what it does.
     OscKey,
     Dcs,
     /// Inside a removed string, until whatever ends it.
@@ -222,7 +222,7 @@ impl Filter {
             }
             return;
         }
-        if byte == b';' && code(&self.held) == b"1337" {
+        if byte == b';' && matches!(&code(&self.held)[..], b"1337" | b"50") {
             self.held.push(byte);
             self.state = State::OscKey;
         } else if !is_clipboard(&self.held) {

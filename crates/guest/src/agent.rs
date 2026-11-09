@@ -5,15 +5,16 @@
 //! `waitpid(-1)` would take the status this module is waiting for. Orphans
 //! wait until it returns.
 
+use crate::linux::wait_for_output;
 use crate::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::ffi::OsStr;
-use std::io::{self, Read, Write};
+use std::io::{self, PipeReader, PipeWriter, Read, Write};
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
-use std::time::{Duration, Instant};
 
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
@@ -22,8 +23,6 @@ const SIGNALED: u8 = 128;
 /// Output waiting to be sent. The bound stops a program from filling the
 /// guest's memory faster than the host reads.
 const QUEUE: usize = 4;
-/// How long to wait for output in total once the program has ended.
-const PATIENCE: Duration = Duration::from_millis(100);
 /// The most output sent once the program has ended: its two full pipes, what
 /// is queued, and what the forwarding threads hold.
 const ALLOWANCE: usize = 2 * 64 * 1024 + (QUEUE + 2) * MAX_OUTPUT;
@@ -46,6 +45,8 @@ enum Update {
 
 fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> {
     let (program, args) = argv.split_first().ok_or(ProtocolError::Malformed)?;
+    // Both ends close on exec, so the program can't hold this open.
+    let (ended, ended_writer) = io::pipe()?;
     let spawned = Command::new(OsStr::from_bytes(program))
         .args(args.iter().map(|arg| OsStr::from_bytes(arg)))
         .stdin(Stdio::null())
@@ -59,12 +60,13 @@ fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> 
 
     let (updates, received) = sync_channel(QUEUE);
     if let Some(stdout) = child.stdout.take() {
-        forward(stdout, ToHost::Stdout, updates.clone());
+        forward(stdout, ToHost::Stdout, updates.clone(), ended.try_clone()?);
     }
     if let Some(stderr) = child.stderr.take() {
-        forward(stderr, ToHost::Stderr, updates.clone());
+        forward(stderr, ToHost::Stderr, updates.clone(), ended.try_clone()?);
     }
-    wait(child, updates);
+    drop(ended);
+    wait(child, updates, ended_writer);
 
     let status = loop {
         match received.recv() {
@@ -77,18 +79,14 @@ fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> 
     ToHost::Exited(status_of_exit(status)).write(channel)
 }
 
-/// Sends what the program left behind, until its pipes close or a background
-/// job holding them has had its allowance. Time spent writing doesn't count,
-/// so a slow host loses nothing.
+/// Sends what the program left behind, until the forwarding threads have
+/// finished or a background job flooding the pipes has had its allowance.
 fn drain(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), ProtocolError> {
-    let mut patience = PATIENCE;
     let mut allowance = ALLOWANCE;
     while allowance > 0 {
-        let started = Instant::now();
-        let Ok(Update::Output(output)) = received.recv_timeout(patience) else {
+        let Ok(Update::Output(output)) = received.recv() else {
             break;
         };
-        patience = patience.saturating_sub(started.elapsed());
         if let ToHost::Stdout(bytes) | ToHost::Stderr(bytes) = &output {
             allowance = allowance.saturating_sub(bytes.len());
         }
@@ -97,17 +95,19 @@ fn drain(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), Pr
     Ok(())
 }
 
-/// Sends a pipe's output until it closes. The thread outlives the program if
-/// a background job keeps the pipe open, and ends with the pipe or the
-/// machine.
+/// Sends a pipe's output until it closes, or until the program has ended and
+/// the pipe is empty. A background job can hold the pipe open, but everything
+/// the program wrote is in the pipe by then, however late this thread runs.
 fn forward(
-    mut pipe: impl Read + Send + 'static,
+    mut pipe: impl Read + AsFd + Send + 'static,
     wrap: fn(Vec<u8>) -> ToHost,
     updates: SyncSender<Update>,
+    ended: PipeReader,
 ) {
     thread::spawn(move || {
         let mut buffer = vec![0; MAX_OUTPUT];
-        loop {
+        // This thread is the pipe's only reader, so the read can't block.
+        while let Ok(true) = wait_for_output(pipe.as_fd(), ended.as_fd()) {
             match pipe.read(&mut buffer) {
                 Ok(0) => return,
                 Ok(count) => {
@@ -123,9 +123,13 @@ fn forward(
     });
 }
 
-fn wait(mut child: Child, updates: SyncSender<Update>) {
+/// Reports the program's end, and closes `ended` to tell the forwarding
+/// threads.
+fn wait(mut child: Child, updates: SyncSender<Update>, ended: PipeWriter) {
     thread::spawn(move || {
-        let _ = updates.send(Update::Ended(child.wait()));
+        let status = child.wait();
+        drop(ended);
+        let _ = updates.send(Update::Ended(status));
     });
 }
 
@@ -142,5 +146,56 @@ fn status_of_exit(status: ExitStatus) -> u8 {
         (Some(code), _) => code as u8,
         (None, Some(signal)) => SIGNALED + signal as u8,
         (None, None) => SIGNALED,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::pipe;
+    use std::os::fd::BorrowedFd;
+    use std::time::Duration;
+
+    /// A forwarding thread that the scheduler keeps off the CPU before every
+    /// read, for longer than a drain could reasonably wait.
+    struct Starved(PipeReader);
+
+    impl Read for Starved {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            thread::sleep(Duration::from_millis(150));
+            self.0.read(buffer)
+        }
+    }
+
+    impl AsFd for Starved {
+        fn as_fd(&self) -> BorrowedFd<'_> {
+            self.0.as_fd()
+        }
+    }
+
+    #[test]
+    fn a_delayed_forwarder_still_delivers_a_finished_programs_output() {
+        let (reader, mut writer) = pipe().unwrap();
+        let written = vec![b'o'; 3 * MAX_OUTPUT / 2];
+        writer.write_all(&written).unwrap();
+        drop(writer);
+
+        let (updates, received) = sync_channel(QUEUE);
+        let (ended, program_ended) = pipe().unwrap();
+        drop(program_ended);
+        forward(Starved(reader), ToHost::Stdout, updates, ended);
+
+        let mut channel = Vec::new();
+        drain(&received, &mut channel).unwrap();
+
+        let mut delivered = Vec::new();
+        let mut frames = channel.as_slice();
+        while let Some(report) = ToHost::read(&mut frames).unwrap() {
+            let ToHost::Stdout(bytes) = report else {
+                panic!("only output was sent");
+            };
+            delivered.extend(bytes);
+        }
+        assert_eq!(delivered.len(), written.len());
     }
 }

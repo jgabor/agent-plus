@@ -400,6 +400,26 @@ exit $code
         self.xtask(&["prepare", "9"])
     }
 
+    fn land(&self) -> Output {
+        self.xtask(&["land", "9"])
+    }
+
+    /// Where `land` runs from: a checkout of the newest `main`.
+    fn on_main(self) -> Repo {
+        self.git(&["checkout", "-q", "main"]);
+        self.forget_calls();
+        self
+    }
+
+    fn land_running(&self, on: &str, command: &str) -> Output {
+        self.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["land", "9"])
+            .env("RUN_ON", on)
+            .env("RUN_COMMAND", command)
+            .output()
+            .unwrap()
+    }
+
     /// The comments `prepare` posted on the PR, each ending in a blank line.
     fn pr_comments(&self) -> String {
         fs::read_to_string(self.bin.join("pr-comments")).unwrap_or_default()
@@ -445,7 +465,6 @@ fn assert_merged(repo: &Repo, output: &Output) {
     assert!(repo.bin.join("merged").exists(), "gh pr merge never ran");
 }
 
-/// The record is pushed and green, and nothing was squashed.
 #[track_caller]
 fn assert_prepared(repo: &Repo, output: &Output) {
     assert_eq!(
@@ -455,6 +474,12 @@ fn assert_prepared(repo: &Repo, output: &Output) {
         stdout(output),
         stderr(output)
     );
+    assert_left_prepared(repo);
+}
+
+/// The record is pushed and green, and nothing was squashed.
+#[track_caller]
+fn assert_left_prepared(repo: &Repo) {
     let head = repo.head();
     assert_eq!(
         repo.origin(&["diff-tree", "--no-commit-id", "--name-only", "-r", &head]),
@@ -1516,4 +1541,263 @@ fn a_revert_without_the_owner_is_benched() {
     let output = repo.merge();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
+}
+
+#[test]
+fn land_squashes_what_only_the_owner_may_merge() {
+    let repo = Repo::new("land-owner").on_main();
+    repo.set_issue(&[]);
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    let output = repo.land();
+    assert_merged(&repo, &output);
+
+    let head = repo.head();
+    let calls = repo.calls();
+    assert!(
+        calls.contains(&format!(
+            "gh pr merge 9 -R o/r --squash --delete-branch --match-head-commit {head}"
+        )),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(&format!(
+            "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state=success -f context=xtask/gate"
+        )),
+        "{calls}"
+    );
+    assert_eq!(repo.commits_merged(), 2);
+}
+
+#[test]
+fn land_waits_for_the_merge_slot() {
+    let repo = Repo::new("land-slot").on_main();
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["land", "9"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    assert!(!repo.calls().contains("git fetch"), "{}", repo.calls());
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(repo.bin.join("merged").exists());
+}
+
+/// A merge that lands during the wait can change the checks themselves.
+#[test]
+fn land_restarts_if_main_moves_while_it_waits_for_the_slot() {
+    let repo = Repo::new("land-slot-moved").on_main();
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["land", "9"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(500));
+    let newest = repo.head();
+    repo.origin(&["update-ref", "refs/heads/main", &newest]);
+    held.unlock().unwrap();
+    child.wait_with_output().unwrap();
+
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), newest);
+    let calls = repo.calls();
+    assert!(calls.contains("cargo xtask land 9"), "{calls}");
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+}
+
+#[test]
+fn land_keeps_the_slot_until_its_squash_finishes() {
+    let repo = Repo::new("land-outlives").on_main();
+    let killed = repo.land_running("gh pr merge", "kill -9 $PPID; sleep 2");
+    assert_eq!(killed.status.code(), None);
+    let output = repo.land();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("already merged"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(repo.bin.join("merges")).unwrap(),
+        "merged\n"
+    );
+}
+
+/// The PR is ready for a merge button, and `land` said what that accepts.
+#[track_caller]
+fn assert_stopped_to_accept(repo: &Repo, output: &Output, accepted: &str) {
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
+    assert!(stderr(output).contains(accepted), "{}", stderr(output));
+    assert_left_prepared(repo);
+    let comments = repo.pr_comments();
+    assert!(comments.contains(accepted), "{comments}");
+}
+
+#[test]
+fn land_stops_before_accepting_a_lowered_count() {
+    let repo = with_base("land-lower", 1, 1).on_main();
+    let output = repo.land();
+    assert_stopped_to_accept(&repo, &output, "spec fell from 1 to 0");
+}
+
+#[test]
+fn land_stops_before_accepting_a_revert() {
+    let (repo, _) = revert_of_a_check("land-revert", None);
+    let repo = repo.on_main();
+    let output = repo.land();
+    assert_stopped_to_accept(&repo, &output, "exact revert");
+}
+
+#[test]
+fn land_merges_nothing_when_the_gate_fails() {
+    let repo = Repo::new("land-gate");
+    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
+    let repo = repo.on_main();
+    let head = repo.head();
+    assert_failure_posted(&repo, &repo.land(), &head);
+}
+
+#[test]
+fn land_merges_nothing_when_the_branch_does_not_rebase() {
+    let repo = Repo::new("land-conflict");
+    repo.advance_main("docs.txt", "from main\n");
+    let repo = repo.on_main();
+    let head = repo.head();
+    assert_failure_posted(&repo, &repo.land(), &head);
+}
+
+#[test]
+fn land_merges_nothing_when_main_moves_during_the_proof() {
+    let repo = Repo::new("land-moved").on_main();
+    let elsewhere = repo.head();
+    let moved = repo.update_ref("refs/heads/main", &elsewhere);
+    let output = repo.land_running("cargo build --release", &moved);
+    assert_refused(&repo, &output, "moved");
+}
+
+#[test]
+fn land_succeeds_on_an_already_merged_pr_without_merging_again() {
+    let repo = Repo::new("land-merged").on_main();
+    repo.set_pr(&Pr {
+        state: "MERGED",
+        ..Pr::default()
+    });
+    let output = repo.land();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!repo.calls().contains("gh pr merge"));
+}
+
+#[test]
+fn land_updates_a_checkout_behind_main_and_restarts() {
+    let repo = Repo::new("land-behind");
+    repo.advance_main("other.txt", "y\n");
+    let repo = repo.on_main();
+    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    repo.forget_calls();
+    let newest = repo.origin(&["rev-parse", "refs/heads/main"]);
+    let seen = repo.bin.join("restart");
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["land", "9"])
+        .env(
+            "RUSTUP_TOOLCHAIN",
+            env::var("RUSTUP_TOOLCHAIN").unwrap_or_default(),
+        )
+        .env("RUN_ON", "cargo xtask land 9")
+        .env(
+            "RUN_COMMAND",
+            // The fixture has no xtask to build, so the test's binary stands
+            // in for the rebuilt one.
+            format!(
+                "echo \"toolchain=$RUSTUP_TOOLCHAIN\" > '{}'; exec '{}' land 9",
+                seen.display(),
+                env!("CARGO_BIN_EXE_xtask")
+            ),
+        )
+        .output()
+        .unwrap();
+
+    assert_merged(&repo, &output);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), newest);
+    let calls = repo.calls();
+    let restart = calls.find("cargo xtask land 9").expect(&calls);
+    let first_gh = calls.find("gh ").expect(&calls);
+    assert!(restart < first_gh, "{calls}");
+    // Rustup sets this for its children, and it would outrank a toolchain
+    // file that the update just changed.
+    assert_eq!(fs::read_to_string(seen).unwrap(), "toolchain=\n");
+}
+
+#[track_caller]
+fn assert_checkout_refused(repo: &Repo, output: &Output, message: &str) {
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
+    assert!(stderr(output).contains(message), "{}", stderr(output));
+    let calls = repo.calls();
+    for forbidden in ["gh ", "--ff-only", "cargo xtask"] {
+        assert!(!calls.contains(forbidden), "{forbidden}: {calls}");
+    }
+}
+
+#[test]
+fn land_refuses_local_commits_on_main() {
+    let repo = Repo::new("land-ahead").on_main();
+    repo.write("local.txt", "x\n");
+    repo.commit();
+    repo.forget_calls();
+    assert_checkout_refused(&repo, &repo.land(), "local commits");
+}
+
+#[test]
+fn land_refuses_changes_to_tracked_files() {
+    let repo = Repo::new("land-changed").on_main();
+    repo.write("SPEC.md", "# Changed\n");
+    assert_checkout_refused(&repo, &repo.land(), "tracked files");
+}
+
+#[test]
+fn land_refuses_another_branch_that_is_not_at_main() {
+    let repo = Repo::new("land-branch");
+    repo.forget_calls();
+    assert_checkout_refused(&repo, &repo.land(), "isn't at `origin/main`");
+}
+
+#[test]
+fn land_runs_from_anything_at_the_newest_main() {
+    let repo = Repo::new("land-detached").on_main();
+    repo.git(&["checkout", "-q", "--detach"]);
+    repo.forget_calls();
+    assert_merged(&repo, &repo.land());
+}
+
+#[test]
+fn land_allows_untracked_files() {
+    let repo = Repo::new("land-untracked").on_main();
+    repo.write("notes.txt", "x\n");
+    assert_merged(&repo, &repo.land());
+}
+
+#[test]
+fn land_takes_one_pr() {
+    let repo = Repo::new("land-usage").on_main();
+    for args in [&["land"][..], &["land", "x"], &["land", "9", "x"]] {
+        let output = repo.xtask(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(stderr(&output).contains("`land` takes"), "{args:?}");
+    }
+    assert!(!repo.calls().contains("gh "), "{}", repo.calls());
 }

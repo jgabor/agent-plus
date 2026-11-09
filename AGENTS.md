@@ -267,9 +267,9 @@ All of these must be true on the latest commit:
 
 Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass.
 On any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
-everything but the squash, which is the owner's. After a merge, close the
-loop: remove `in-progress`, remove your worktree, and make sure the issue
-closed.
+everything but the squash, which is the owner's. `cargo xtask land` is the
+owner's too, and agents never run it. After a merge, close the loop: remove
+`in-progress`, remove your worktree, and make sure the issue closed.
 
 ### Untrusted input
 

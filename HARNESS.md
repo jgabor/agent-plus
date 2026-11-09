@@ -424,6 +424,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
 | `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
 | `cargo xtask prepare <pr>` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
+| `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
@@ -517,12 +518,19 @@ git directory. The kernel releases the lock when the process exits, so a killed
 merge can't keep the slot.
 
 `cargo xtask merge` runs every step. `cargo xtask prepare` stops before the
-squash, and leaves the owner a complete PR to merge with any button. Only
-these two commands post `xtask/gate`, so green means complete.
+squash, and leaves the owner a complete PR to merge with any button. `cargo
+xtask land` follows `prepare`'s rules, and goes on through the squash. Only
+these three commands post `xtask/gate`, so green means complete.
+
+`land` takes the merge slot first, and then makes sure the newest checks run,
+because xtask compiles from the checkout. If `main` is behind `origin/main`, it
+fast-forwards and starts again through `cargo`. It refuses local commits,
+changes to tracked files, and any other branch that isn't at `origin/main`.
 
 1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
-   `spec-change` PR. Both commands refuse a PR that comes from a fork, doesn't
-   close exactly one issue, doesn't target `main`, or has changes requested.
+   `spec-change` PR. All three commands refuse a PR that comes from a fork,
+   doesn't close exactly one issue, doesn't target `main`, or has changes
+   requested.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
@@ -536,7 +544,8 @@ these two commands post `xtask/gate`, so green means complete.
    is the `main` it was tested on, and push with `--force-with-lease`.
 6. Verify that the new head differs from the gated head only by that record.
    If a count fell or the PR is an exact revert, comment on the PR naming what
-   merging accepts. Post `xtask/gate` on the new head. `prepare` stops here.
+   merging accepts. Post `xtask/gate` on the new head. `prepare` stops here,
+   and so does `land` if merging would accept something, so the owner reads it.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
@@ -638,9 +647,9 @@ passes. No scheduled work runs on GitHub.
   any merge button once `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
-- Or run `just merge <pr>` on `main`, which runs `prepare` and squashes if it
-  passes. It stops at a PR with a comment saying what merging accepts, so the
-  owner reads that and uses a merge button.
+- Or run `cargo xtask land <pr>`, which proves the PR and squashes it. It stops
+  at a PR with a comment saying what merging accepts, so the owner reads that
+  and uses a merge button.
 - Turn the scheduled tasks on.
 - Answer `needs-owner` issues.
 - Publish releases.

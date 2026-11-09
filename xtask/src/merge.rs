@@ -11,6 +11,7 @@ use crate::{Problem, Verdict, base, bench, journey, lock, workspace};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::thread;
@@ -83,19 +84,47 @@ fn refuse(why: &str) -> Result<Verdict, Problem> {
     Ok(Verdict::Fail)
 }
 
+/// Whose rules the sequence follows, and how far it goes.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// An agent's rules, through the squash.
+    Merge,
+    /// The owner's rules, up to the squash.
+    Prepare,
+    /// The owner's rules, through the squash.
+    Land,
+}
+
+impl Mode {
+    fn command(self) -> &'static str {
+        match self {
+            Mode::Merge => "merge",
+            Mode::Prepare => "prepare",
+            Mode::Land => "land",
+        }
+    }
+}
+
 /// The whole sequence, under the rules for an agent.
 pub fn run(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, false)
+    sequence(pr, Mode::Merge)
 }
 
 /// The sequence up to the squash, which is the owner's. It also takes what
 /// only the owner can accept, and says so on the PR.
 pub fn prepare(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, true)
+    sequence(pr, Mode::Prepare)
 }
 
-fn sequence(pr: &str, prepare: bool) -> Result<Verdict, Problem> {
-    let command = if prepare { "prepare" } else { "merge" };
+/// `prepare`, then the squash, in one hold of the merge slot. It stops short
+/// of the squash if merging would accept something, so the owner reads it.
+pub fn land(pr: &str) -> Result<Verdict, Problem> {
+    sequence(pr, Mode::Land)
+}
+
+fn sequence(pr: &str, mode: Mode) -> Result<Verdict, Problem> {
+    let command = mode.command();
+    let prepare = mode != Mode::Merge;
     let number: u64 = pr
         .parse()
         .map_err(|_| Problem(format!("`{command}` takes a PR number, but got `{pr}`")))?;
@@ -106,11 +135,19 @@ fn sequence(pr: &str, prepare: bool) -> Result<Verdict, Problem> {
         )));
     }
     let gh = Gh::new(&root);
-    if let Decision::Refused(why) = decide(&gh, number, prepare)? {
+    if mode != Mode::Land
+        && let Decision::Refused(why) = decide(&gh, number, prepare)?
+    {
         return refuse(&why);
     }
     let slot = lock::merge_slot(&root)?;
     start_timeout();
+    // After the slot, because a merge during the wait can change the checks.
+    if mode == Mode::Land
+        && let Some(verdict) = use_the_newest_checks(&root, number)?
+    {
+        return Ok(verdict);
+    }
     let (pr, issue) = match decide(&gh, number, prepare)? {
         Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
@@ -175,13 +212,75 @@ fn sequence(pr: &str, prepare: bool) -> Result<Verdict, Problem> {
         gh.comment_on_pr(number, &acceptance(&recorded, &accepted))?;
     }
     gh.post_status(&recorded, "xtask/gate", "success")?;
-    if prepare {
+    if mode == Mode::Prepare {
         println!("prepare: PR {number} is ready to merge at {recorded}");
         return Ok(Verdict::Pass);
     }
+    if !accepted.is_empty() {
+        eprintln!("land: PR {number} is ready at {recorded}, but merging it accepts:");
+        for item in &accepted {
+            eprintln!("- {item}");
+        }
+        return refuse("read that, and use a merge button if you accept it");
+    }
     gh.merge_pr(number, &recorded, &slot)?;
-    println!("merge: PR {number} merged at {recorded}");
+    println!("{command}: PR {number} merged at {recorded}");
     Ok(Verdict::Pass)
+}
+
+/// xtask compiles from this checkout, so an old one would run old checks. If
+/// `main` is behind, this updates it and starts `land` again from the new
+/// code, which takes the slot again. Returns a verdict if `land` must stop.
+fn use_the_newest_checks(root: &Path, number: u64) -> Result<Option<Verdict>, Problem> {
+    let stop = |why: &str| refuse(why).map(Some);
+    base::git_text(
+        root,
+        &["fetch", "-q", "origin", &format!("+refs/heads/main:{MAIN}")],
+    )?;
+    if exit_code(root, &["diff", "--quiet", "HEAD"])? != 0 {
+        return stop(
+            "this checkout has changes to tracked files, and the checks run from it. Commit or discard them",
+        );
+    }
+    let newest = base::git_text(root, &["rev-parse", MAIN])?;
+    if head(root)? == newest.trim() {
+        return Ok(None);
+    }
+    if base::git_text(root, &["branch", "--show-current"])?.trim() != "main" {
+        return stop(
+            "this checkout isn't on `main`, and isn't at `origin/main`. Run this on `main`",
+        );
+    }
+    if exit_code(root, &["merge-base", "--is-ancestor", "HEAD", MAIN])? != 0 {
+        return stop(
+            "`main` here has local commits, and the checks run from it. Push or drop them",
+        );
+    }
+    base::git_text(root, &["merge", "-q", "--ff-only", MAIN])?;
+    // Rustup sets this for its children, and it would outrank a toolchain file
+    // that the update just changed.
+    let problem = process::Command::new("cargo")
+        .args(["xtask", "land", &number.to_string()])
+        .current_dir(root)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .exec();
+    Err(Problem(format!(
+        "couldn't restart `cargo xtask land`: {problem}"
+    )))
+}
+
+/// For the git commands that answer yes or no by exiting 0 or 1. Anything else
+/// is git failing, which isn't a no.
+fn exit_code(root: &Path, args: &[&str]) -> Result<i32, Problem> {
+    let output = base::git(root, args)?;
+    match output.status.code() {
+        Some(code @ (0 | 1)) => Ok(code),
+        _ => Err(Problem(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+    }
 }
 
 /// A status that can't be posted leaves the verdict as it is.

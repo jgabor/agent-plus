@@ -6,7 +6,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const JOURNEY: &str = "[[step]]\nid = 1\nname = \"first\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
@@ -61,6 +61,9 @@ const CLEAN: Recorded = Recorded {
     reason: "",
 };
 
+/// Logs its arguments, and enforces the time limit as a real scope would.
+const SYSTEMD_RUN: &str = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/systemd-calls\"\nlimit=\nwhile [ \"$1\" != \"--\" ]; do\n    case \"$1\" in RuntimeMaxSec=*) limit=\"${1#RuntimeMaxSec=}\";; esac\n    shift\ndone\nshift\nexec timeout -s KILL \"$limit\" \"$@\"\n";
+
 struct Repo {
     root: PathBuf,
     bin: PathBuf,
@@ -87,6 +90,9 @@ impl Repo {
         let gh = repo.bin.join("gh");
         fs::write(&gh, format!("#!/bin/sh\n{GH}")).unwrap();
         fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        let systemd = repo.bin.join("systemd-run");
+        fs::write(&systemd, SYSTEMD_RUN).unwrap();
+        fs::set_permissions(&systemd, fs::Permissions::from_mode(0o755)).unwrap();
         repo.set_issues(NO_ISSUES);
         repo.set_report_comments(&[]);
         let files = [
@@ -131,10 +137,13 @@ impl Repo {
         command
             .current_dir(&self.root)
             .env("PATH", path)
+            .env("CARGO_HOME", self.root.parent().unwrap().join("cargo-home"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")
-            .env_remove("XTASK_ACTIVITY_HELD");
+            .env_remove("XTASK_ACTIVITY_HELD")
+            .env_remove("XTASK_FUZZ_SECONDS")
+            .env_remove("XTASK_MUTATION_SECONDS");
         command
     }
 
@@ -241,6 +250,39 @@ impl Repo {
             ),
             ("o", "A remark from the owner."),
         ]);
+    }
+
+    /// Puts a fake `cargo-mutants` on the path. It logs its arguments and limits,
+    /// and then runs `body`, with `$d` as this directory.
+    fn set_mutants(&self, body: &str) {
+        let path = self.bin.join("cargo-mutants");
+        let script = format!(
+            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
+        );
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A fake `cargo-mutants` that reports these survivors.
+    fn set_survivors(&self, missed: &str) {
+        fs::write(self.bin.join("missed.txt"), missed).unwrap();
+        self.set_mutants("cat \"$d/missed.txt\" > target/mutants/mutants.out/missed.txt\nexit 2\n");
+    }
+
+    fn read_bin(&self, name: &str) -> String {
+        fs::read_to_string(self.bin.join(name))
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// Commits a change to these crates, recent enough to be mutated.
+    fn touch(&self, crates: &[&str]) {
+        for name in crates {
+            self.write(&format!("crates/{name}/note.txt"), "changed\n");
+        }
+        self.commit("Touch crates", 1);
+        self.sync();
     }
 
     fn calls(&self) -> Vec<String> {
@@ -948,4 +990,437 @@ fn a_missing_tool_stops_nightly_before_any_check() {
     );
     assert_eq!(repo.calls(), Vec::<String>::new());
     assert!(!repo.root.join("target/bench").exists());
+}
+
+const MISSED: &str = "crates/ap/src/main.rs:1:1: replace main with ()\n";
+const MANIFEST: &str = "[package]\nname = \"NAME\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+
+fn manifest(name: &str) -> String {
+    MANIFEST.replace("NAME", name)
+}
+
+#[track_caller]
+fn assert_mutation_ran(repo: &Repo, output: &Output, code: i32, state: &str) {
+    assert_eq!(output.status.code(), Some(code), "{}", stderr(output));
+    let comment = repo.comment();
+    assert!(
+        comment.contains(&format!("- {state} mutation\n")),
+        "{comment}"
+    );
+}
+
+#[test]
+fn a_surviving_mutant_opens_an_issue() {
+    let repo = Repo::new("survivor");
+    repo.set_survivors(MISSED);
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert_eq!(
+        repo.read_bin("mutants-calls"),
+        "mutants --colors never --no-shuffle -o target/mutants -p ap"
+    );
+    let calls = repo.calls().join("\n");
+    assert!(
+        calls.contains("issue create --title Mutants survive in ap --body "),
+        "{calls}"
+    );
+    assert!(calls.contains(MISSED.trim()), "{calls}");
+    assert!(calls.contains("## Done when"), "{calls}");
+    assert!(!calls.contains("--label"), "{calls}");
+}
+
+#[test]
+fn mutants_run_as_one_contained_job() {
+    let repo = Repo::new("memory");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.read_bin("systemd-calls");
+    for part in [
+        "--user --scope --quiet --collect --expand-environment=no",
+        "TimeoutStopSec=30",
+        "MemoryMax=8G",
+        "MemorySwapMax=0",
+        "OOMPolicy=continue",
+        "RuntimeMaxSec=3600",
+        "-- cargo mutants ",
+    ] {
+        assert!(calls.contains(part), "{part} in {calls}");
+    }
+}
+
+#[test]
+fn mutants_build_in_the_target_directory() {
+    let repo = Repo::new("mutants-tmp");
+    repo.set_mutants("test -d \"$TMPDIR\" || exit 9\nexit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let tmp = repo.read_bin("mutants-tmp");
+    assert!(tmp.ends_with("/target/mutants/tmp"), "{tmp}");
+}
+
+#[test]
+fn no_survivors_open_no_issue() {
+    let repo = Repo::new("no-survivors");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(
+        !repo.calls().join("\n").contains("Mutants survive"),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+#[test]
+fn only_changed_crates_of_the_product_are_mutated() {
+    let (demo, fake, t1, other) = (
+        manifest("demo"),
+        manifest("fake-x"),
+        manifest("t1"),
+        manifest("other"),
+    );
+    let tasks = manifest("xtask");
+    let repo = Repo::with(
+        "changed-crates",
+        "fn main() {}\n",
+        &[
+            ("crates/demo/Cargo.toml", &demo),
+            ("crates/demo/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/fake-x/Cargo.toml", &fake),
+            ("crates/fake-x/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/xtask/Cargo.toml", &tasks),
+            ("crates/xtask/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/t1/Cargo.toml", &t1),
+            ("crates/t1/src/lib.rs", "pub fn f() {}\n"),
+            ("crates/other/Cargo.toml", &other),
+            ("crates/other/src/lib.rs", "pub fn f() {}\n"),
+        ],
+    );
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["demo", "fake-x", "t1", "xtask"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.read_bin("mutants-calls");
+    assert!(calls.ends_with(" -o target/mutants -p demo"), "{calls}");
+}
+
+#[test]
+fn each_crate_gets_its_own_issue() {
+    let demo = manifest("demo");
+    let repo = Repo::with(
+        "two-crates",
+        "fn main() {}\n",
+        &[
+            ("crates/demo/Cargo.toml", &demo),
+            ("crates/demo/src/lib.rs", "pub fn f() {}\n"),
+        ],
+    );
+    repo.set_survivors(&format!(
+        "{MISSED}crates/demo/src/lib.rs:1:1: replace f with ()\n"
+    ));
+    repo.touch(&["ap", "demo"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.calls().join("\n");
+    assert!(calls.contains("--title Mutants survive in ap "), "{calls}");
+    assert!(
+        calls.contains("--title Mutants survive in demo "),
+        "{calls}"
+    );
+    assert!(repo.read_bin("mutants-calls").ends_with(" -p ap -p demo"));
+}
+
+#[test]
+fn an_open_issue_for_a_crate_isnt_filed_again() {
+    let repo = Repo::new("survivor-open");
+    repo.set_survivors(MISSED);
+    repo.touch(&["ap"]);
+    repo.set_issues(
+        "[{\"number\":40,\"title\":\"Mutants survive in ap\",\"labels\":[],\"isPinned\":false}]",
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(
+        !repo.calls().join("\n").contains("--title Mutants"),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+#[test]
+fn a_long_list_of_survivors_is_cut_short() {
+    let repo = Repo::new("many-survivors");
+    let missed: String = (0..150)
+        .map(|n| format!("crates/ap/src/main.rs:{n}:1: replace main with ()\n"))
+        .collect();
+    repo.set_survivors(&missed);
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.calls().join("\n");
+    assert!(calls.contains("main.rs:99:1"), "{calls}");
+    assert!(!calls.contains("main.rs:100:1"), "{calls}");
+    assert!(calls.contains("and 50 more"), "{calls}");
+}
+
+#[test]
+fn mutation_stops_at_its_limit_and_keeps_what_it_found() {
+    let repo = Repo::new("mutation-limit");
+    fs::write(repo.bin.join("missed.txt"), MISSED).unwrap();
+    repo.set_mutants("cat \"$d/missed.txt\" > target/mutants/mutants.out/missed.txt\nsleep 30\n");
+    repo.touch(&["ap"]);
+    let started = Instant::now();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .env("XTASK_MUTATION_SECONDS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(
+        stdout(&output).contains("second limit"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        repo.calls().join("\n").contains("Mutants survive in ap"),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+#[test]
+fn mutation_that_cant_test_the_baseline_fails() {
+    let repo = Repo::new("baseline");
+    repo.set_mutants("exit 4\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 1, "fail");
+    assert!(
+        stderr(&output).contains("cargo mutants"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn an_earlier_result_isnt_read_again() {
+    let repo = Repo::new("stale");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    repo.write("target/mutants/mutants.out/missed.txt", MISSED);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(
+        !repo.calls().join("\n").contains("Mutants survive"),
+        "{:?}",
+        repo.calls()
+    );
+}
+
+fn with_fuzz(name: &str, main: &str) -> Repo {
+    let fuzz = manifest("fuzz");
+    Repo::with(
+        name,
+        "fn main() {}\n",
+        &[
+            ("crates/fuzz/Cargo.toml", &fuzz),
+            ("crates/fuzz/src/main.rs", main),
+        ],
+    )
+}
+
+#[test]
+fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
+    let repo = with_fuzz(
+        "fuzz-runs",
+        "fn main() {\n    let seconds = std::env::args().nth(1).unwrap();\n    assert_eq!(seconds, \"3300\");\n}\n",
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- pass fuzz\n"),
+        "{}",
+        repo.comment()
+    );
+    let calls = repo.read_bin("systemd-calls");
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 2, "{calls}");
+    assert!(lines[0].contains("RuntimeMaxSec=300 "), "{calls}");
+    assert!(lines[0].contains("-- cargo build --release"), "{calls}");
+    assert!(lines[1].contains("RuntimeMaxSec=3600 "), "{calls}");
+    assert!(lines[1].ends_with("/release/fuzz 3300"), "{calls}");
+    assert!(
+        lines.iter().all(|line| line.contains("MemoryMax=8G")),
+        "{calls}"
+    );
+}
+
+#[test]
+fn a_fuzz_failure_fails_the_step() {
+    let repo = with_fuzz("fuzz-fails", "fn main() {\n    panic!(\"found one\");\n}\n");
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- fail fuzz\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+#[test]
+fn a_hung_fuzz_target_is_killed_and_fails() {
+    let repo = with_fuzz(
+        "fuzz-hangs",
+        "fn main() {\n    std::thread::sleep(std::time::Duration::from_secs(60));\n}\n",
+    );
+    let started = Instant::now();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .env("XTASK_FUZZ_SECONDS", "1")
+        .output()
+        .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- fail fuzz\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+#[test]
+fn code_a_report_covered_isnt_mutated_again() {
+    let repo = Repo::new("mutation-reported");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    repo.set_last_report(&repo.short("HEAD"));
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "skip");
+    assert!(!repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn a_change_older_than_a_day_is_mutated_if_no_report_covered_it() {
+    let repo = Repo::new("mutation-unreported");
+    repo.set_mutants("exit 0\n");
+    let start = repo.short("HEAD");
+    repo.write("crates/ap/note.txt", "changed\n");
+    repo.commit("Touch ap", 48);
+    repo.sync();
+    repo.set_last_report(&start);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn mutants_run_under_the_activity_lock() {
+    let repo = Repo::new("mutation-lock");
+    repo.set_mutants(
+        "flock -n -x .git/xtask/activity.lock true && echo free > \"$d/lock\" || echo held > \"$d/lock\"\nexit 0\n",
+    );
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert_eq!(repo.read_bin("lock"), "held");
+}
+
+#[test]
+fn the_fuzzer_is_built_to_panic_on_overflow() {
+    let repo = with_fuzz(
+        "fuzz-checks",
+        "fn main() {\n    let args = std::env::args().count();\n    assert!(std::panic::catch_unwind(|| debug_assert_eq!(args, 0)).is_err());\n    assert!(std::panic::catch_unwind(|| u8::MAX + args as u8).is_err());\n}\n",
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- pass fuzz\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+#[test]
+fn a_mutation_run_killed_before_its_limit_fails() {
+    let repo = Repo::new("mutation-killed");
+    repo.set_mutants("kill -KILL $$\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 1, "fail");
+}
+
+#[test]
+fn a_night_mutation_failed_is_tried_again() {
+    let repo = Repo::new("mutation-retried");
+    repo.set_mutants("exit 0\n");
+    let start = repo.short("HEAD");
+    repo.write("crates/ap/note.txt", "changed\n");
+    repo.commit("Touch ap", 48);
+    repo.sync();
+    let failed = repo.short("HEAD");
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[
+        (
+            "o",
+            &format!("# Nightly report for `{start}`\n\n- pass mutation\n"),
+        ),
+        (
+            "o",
+            &format!("# Nightly report for `{failed}`\n\n- fail mutation\n"),
+        ),
+    ]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(repo.bin.join("mutants-calls").exists());
+}
+
+#[test]
+fn the_job_itself_keeps_the_activity_lock() {
+    let repo = Repo::new("mutation-lock-passed");
+    repo.set_mutants("readlink /proc/$$/fd/0 > \"$d/stdin\"\nexit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let stdin = repo.read_bin("stdin");
+    assert!(stdin.ends_with("/.git/xtask/activity.lock"), "{stdin}");
+}
+
+#[test]
+fn a_waiting_issue_that_mentions_failure_isnt_a_failed_night() {
+    let repo = Repo::new("mutation-title");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let head = repo.short("HEAD");
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[(
+        "o",
+        &format!("# Nightly report for `{head}`\n\n- #30 Investigate - fail mutation\n"),
+    )]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "skip");
+}
+
+#[test]
+fn a_hold_inherited_from_a_parent_still_runs_the_job() {
+    let repo = Repo::new("mutation-inherited");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["run", env!("CARGO_BIN_EXE_xtask"), "nightly"]);
+    assert_mutation_ran(&repo, &output, 1, "pass");
 }

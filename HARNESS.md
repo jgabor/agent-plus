@@ -588,6 +588,7 @@ passes. No scheduled work runs on GitHub.
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
 | Fuzzing and mutation limit | 1 hour each |
+| Fuzzing and mutation memory | 8 GiB per job |
 | Lease length | 12 hours |
 | Merge timeout | 30 minutes |
 | Attempts on one failing check | 3 |

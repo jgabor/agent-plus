@@ -3,7 +3,8 @@
 use crate::forge::{Forge, Gh};
 use crate::report::ISSUE_TITLE;
 use crate::{
-    Problem, Verdict, base, bench, bisect, gate, journey, ledger, lock, report, workspace,
+    Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, lock, mutation, report,
+    workspace,
 };
 use std::path::Path;
 
@@ -30,9 +31,13 @@ pub fn run() -> Result<Verdict, Problem> {
     // No unattended run may spend money until HARNESS.md sets a limit.
     checks.push(("t3", SKIP));
     checks.push(("journey", state(journey_holds(&root))));
+    checks.push((
+        "fuzz",
+        fuzz::run(&root, &hold).transpose().map_or(SKIP, state),
+    ));
+    let mutated = mutation::run(&root, &hold).transpose();
+    checks.push(("mutation", mutated.map_or(SKIP, state)));
     drop(hold);
-    checks.push(("fuzz", SKIP));
-    checks.push(("mutation", SKIP));
 
     // A report that can't be built still leaves its result on the commit.
     let built = report::build(&root);

@@ -6,4 +6,5 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+graviola = "0.4"
 ruzstd = "0.9"

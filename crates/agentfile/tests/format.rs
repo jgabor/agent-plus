@@ -56,7 +56,7 @@ fn a_line_that_starts_with_a_hash_is_a_comment() {
 // spec(Format): There are no trailing comments: a `#` anywhere else is part of the argument, because prompts, URLs, and paths contain `#`.
 #[test]
 fn a_hash_after_the_start_is_part_of_the_argument() {
-    let source = "AGENT claude\nSHARE ./a#b # not a comment\nPROMPT fix #12 # now\n";
+    let source = "AGENT claude\nSKILL ./a#b # not a comment\nPROMPT fix #12 # now\n";
     assert_eq!(
         arguments_of(source, 2),
         ["./a#b", "#", "not", "a", "comment"]

@@ -72,11 +72,12 @@ impl Layers {
         Ok(data)
     }
 
-    /// Syncs the directory that holds the layers, so that every layer in it
-    /// survives a power loss. Another writer may have renamed one into it and
-    /// been killed before syncing.
+    /// Syncs the directory that holds the layers, and every directory above
+    /// it, so that every layer in it survives a power loss. Another writer
+    /// may have made the directory or renamed a layer into it, and been killed
+    /// before syncing.
     pub(crate) fn sync(&self) -> io::Result<()> {
-        File::open(&self.dir)?.sync_all()
+        sync_up_from(&self.dir)
     }
 
     /// The file that holds the layer with this digest, which may not exist.

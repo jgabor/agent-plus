@@ -55,19 +55,14 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// The repository's name, without a trailing `.git`. `None` when only the
-    /// host knows it, as for `REPO .`.
+    /// The repository's name, without a trailing `.git`. `None` for a local
+    /// path, because the name comes from its canonical path on the host.
     pub fn name(&self) -> Option<&str> {
-        let path = match &self.source {
-            Source::Remote(remote) => remote.repository.as_str(),
-            Source::Local(path) => path.as_str(),
+        let Source::Remote(remote) = &self.source else {
+            return None;
         };
-        let last = path.trim_end_matches('/').rsplit('/').next()?;
-        let name = last.strip_suffix(".git").unwrap_or(last);
-        match name {
-            "" | "." | ".." | "~" => None,
-            name => Some(name),
-        }
+        let last = remote.repository.rsplit('/').next()?;
+        Some(last.strip_suffix(".git").unwrap_or(last))
     }
 }
 
@@ -146,6 +141,20 @@ impl Sources {
                 });
             } else {
                 named.insert(name, repo.line);
+            }
+        }
+        let mut servers: HashMap<&str, usize> = HashMap::new();
+        for mcp in &sources.mcp {
+            let Mcp::Remote { line, name, .. } = mcp else {
+                continue;
+            };
+            if let Some(first) = servers.get(name.as_str()) {
+                errors.push(Error {
+                    line: *line,
+                    message: format!("line {first} already names an MCP server `{name}`"),
+                });
+            } else {
+                servers.insert(name, *line);
             }
         }
         if errors.is_empty() {
@@ -227,6 +236,12 @@ fn repo(line: usize, arguments: &[&str]) -> Result<Repo, String> {
         [rest @ .., "history"] if !rest.is_empty() => (true, rest),
         _ => (false, arguments),
     };
+    if arguments.len() <= 3 && rest.len() > 1 && rest[1..].contains(&"history") {
+        return Err(
+            "`history` must be the last argument of `REPO`. To use it as a destination, write `./history`"
+                .to_string(),
+        );
+    }
     let (text, destination) = match rest {
         [text] => (*text, None),
         [text, destination] => (*text, Some(*destination)),
@@ -271,12 +286,18 @@ fn mcp(line: usize, arguments: &[&str]) -> Result<Mcp, String> {
             if name.is_empty() {
                 return Err("`MCP` needs a server name before its URL".to_string());
             }
-            let host = url
+            let Some(rest) = url
                 .strip_prefix("https://")
-                .or_else(|| url.strip_prefix("http://"));
-            if host.is_none_or(|host| host.split('/').next().unwrap_or("").is_empty()) {
+                .or_else(|| url.strip_prefix("http://"))
+            else {
                 return Err(format!(
                     "`MCP <name> <url>` takes an `https` or `http` URL, but found `{url}`"
+                ));
+            };
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+            if host_of(authority).is_empty() {
+                return Err(format!(
+                    "`MCP <name> <url>` takes an `https` or `http` URL with a host, but found `{url}`"
                 ));
             }
             Ok(Mcp::Remote {
@@ -345,14 +366,14 @@ fn shorthand(text: &str) -> Result<Remote, String> {
 /// Reads a forge URL or a Git URL, which is `<scheme>://<rest>`.
 fn url(text: &str, scheme: &str, rest: &str) -> Result<Remote, String> {
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host_of(authority);
     let path = path.trim_end_matches('/');
     if host.is_empty() || path.is_empty() {
         return Err(format!(
-            "a Git URL names a repository after its host, but found `{text}`"
+            "a Git URL names a host and a repository on it, but found `{text}`"
         ));
     }
-    if scheme == "https" && matches!(host, "github.com" | "www.github.com") {
+    if scheme == "https" && authority == host && matches!(host, "github.com" | "www.github.com") {
         return github(text, host, path);
     }
     let (path, reference) = split_reference(path).map_err(|_| empty_reference(text))?;
@@ -366,6 +387,22 @@ fn url(text: &str, scheme: &str, rest: &str) -> Result<Remote, String> {
 
 /// Reads a GitHub URL: a repository root, or a `/tree/<ref>/` page in one.
 fn github(text: &str, host: &str, path: &str) -> Result<Remote, String> {
+    // A ref follows a repository root, and may contain `/`.
+    if let Some((root, reference)) = path.split_once('@')
+        && let [owner, repository] = root.split('/').collect::<Vec<_>>().as_slice()
+        && !owner.is_empty()
+        && !repository.is_empty()
+    {
+        if reference.is_empty() {
+            return Err(empty_reference(text));
+        }
+        return Ok(Remote {
+            form: Form::Git,
+            repository: format!("https://{host}/{root}"),
+            subdirectory: None,
+            reference: Some(reference.to_string()),
+        });
+    }
     let parts: Vec<&str> = path.split('/').collect();
     let (owner, repository, rest) = match parts.as_slice() {
         [owner, repository, rest @ ..] if !owner.is_empty() && !repository.is_empty() => {
@@ -375,23 +412,55 @@ fn github(text: &str, host: &str, path: &str) -> Result<Remote, String> {
     };
     let root = format!("https://{host}/{owner}/{repository}");
     match rest {
-        [] => {
-            let (path, reference) = split_reference(path).map_err(|_| empty_reference(text))?;
+        [] => Ok(Remote {
+            form: Form::Git,
+            repository: root,
+            subdirectory: None,
+            reference: None,
+        }),
+        ["tree", reference, subdirectory @ ..] if !reference.is_empty() => {
+            let subdirectory = decode(text, &subdirectory.join("/"))?;
+            let subdirectory: Vec<&str> = match subdirectory.as_str() {
+                "" => Vec::new(),
+                joined => joined.split('/').collect(),
+            };
             Ok(Remote {
-                form: Form::Git,
-                repository: format!("https://{host}/{path}"),
-                subdirectory: None,
-                reference,
+                form: Form::Forge,
+                repository: root,
+                subdirectory: subdirectory_of(text, &subdirectory)?,
+                reference: Some(decode(text, reference)?),
             })
         }
-        ["tree", reference, subdirectory @ ..] if !reference.is_empty() => Ok(Remote {
-            form: Form::Forge,
-            repository: root,
-            subdirectory: subdirectory_of(text, subdirectory)?,
-            reference: Some(reference.to_string()),
-        }),
         _ => Err(not_github(text)),
     }
+}
+
+/// The host in a URL's authority, without its user or port.
+fn host_of(authority: &str) -> &str {
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    if host.starts_with('[') {
+        return host.split_inclusive(']').next().unwrap_or(host);
+    }
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Decodes the `%XX` escapes in a part of a URL.
+fn decode(text: &str, part: &str) -> Result<String, String> {
+    let wrong = || format!("a URL has an escape that isn't valid UTF-8, in `{text}`");
+    let mut bytes = Vec::new();
+    let mut rest = part.as_bytes();
+    while let [first, after @ ..] = rest {
+        if *first == b'%' {
+            let digits = after.get(..2).ok_or_else(wrong)?;
+            let digits = std::str::from_utf8(digits).map_err(|_| wrong())?;
+            bytes.push(u8::from_str_radix(digits, 16).map_err(|_| wrong())?);
+            rest = &after[2..];
+        } else {
+            bytes.push(*first);
+            rest = after;
+        }
+    }
+    String::from_utf8(bytes).map_err(|_| wrong())
 }
 
 fn not_github(text: &str) -> String {

@@ -354,9 +354,6 @@ fn history_is_matched_exactly_and_only_last() {
         .map(|repo| (repo.destination.as_deref(), repo.history))
         .collect();
     assert_eq!(read, [(Some("History"), false), (Some("./history"), false)]);
-    let message = message_of("REPO owner/a history ~/a\n");
-    assert!(message.contains("`REPO`"), "{message}");
-    assert!(message.contains("3"), "{message}");
 }
 
 #[test]
@@ -387,13 +384,14 @@ fn a_trailing_dot_git_is_not_part_of_the_name() {
             Some("widget"),
             Some("linux"),
             Some("skills"),
-            Some("lib"),
+            None,
             None,
         ]
     );
 }
 
-// spec(REPO): Two repositories with the same name are an error; give one a destination.
+// A local repository's name is left to the host, because canonicalizing
+// its path can change the name, so this proves only the text-decided part.
 #[test]
 fn two_repositories_with_the_same_name_are_an_error() {
     let instructions = parse(
@@ -580,4 +578,90 @@ fn read_keeps_each_instruction_in_file_order_and_skips_the_rest() {
     assert_eq!(lines, [3, 5]);
     assert_eq!(sources.add.len(), 1);
     assert!(sources.plugin.is_empty() && sources.skill.is_empty() && sources.mcp.is_empty());
+}
+
+#[test]
+fn a_github_url_ref_may_contain_a_slash() {
+    assert_eq!(
+        source_of("https://github.com/torvalds/linux@release/v1"),
+        remote(
+            Form::Git,
+            "https://github.com/torvalds/linux",
+            None,
+            Some("release/v1")
+        )
+    );
+}
+
+#[test]
+fn a_github_tree_url_is_percent_decoded() {
+    assert_eq!(
+        source_of("https://github.com/owner/repo/tree/feature%2Bx/My%20Skills/a"),
+        remote(
+            Form::Forge,
+            "https://github.com/owner/repo",
+            Some("My Skills/a"),
+            Some("feature+x")
+        )
+    );
+    for url in [
+        "https://github.com/owner/repo/tree/main/%2e%2e/escape",
+        "https://github.com/owner/repo/tree/main/a%2F..%2F..",
+        "https://github.com/owner/repo/tree/main/bad%zz",
+        "https://github.com/owner/repo/tree/main/bad%ff",
+    ] {
+        let message = message_of(&format!("REPO {url}\n"));
+        assert!(message.contains(&format!("`{url}`")), "{url}: {message}");
+    }
+}
+
+#[test]
+fn a_url_needs_a_host() {
+    for line in [
+        "REPO https://:443/team/repo\n",
+        "REPO ssh://git@/team/repo\n",
+        "MCP example https://:443/mcp\n",
+        "MCP example https://user@/mcp\n",
+    ] {
+        let message = message_of(line);
+        assert!(message.contains("host"), "{line:?}: {message}");
+    }
+    let url = "https://[::1]:8080/team/repo";
+    assert_eq!(source_of(url), remote(Form::Git, url, None, None));
+    sources("MCP example http://[::1]:8080/mcp\n");
+}
+
+#[test]
+fn history_written_anywhere_but_last_is_an_error() {
+    for line in [
+        "REPO owner/a history history\n",
+        "REPO owner/a history ~/a\n",
+    ] {
+        let message = message_of(line);
+        assert!(message.contains("`./history`"), "{line:?}: {message}");
+    }
+}
+
+#[test]
+fn two_mcp_servers_with_the_same_name_are_an_error() {
+    let instructions = parse(
+        "AGENT claude\n\
+         MCP example https://one.example/mcp\n\
+         MCP other https://two.example/mcp\n\
+         MCP example https://three.example/mcp\n",
+    )
+    .unwrap();
+    let errors = Sources::read(&instructions).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].line, 4);
+    assert!(
+        errors[0].message.contains("`example`"),
+        "{}",
+        errors[0].message
+    );
+    assert!(
+        errors[0].message.contains("line 2"),
+        "{}",
+        errors[0].message
+    );
 }

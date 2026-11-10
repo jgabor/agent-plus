@@ -1,6 +1,6 @@
 //! The argument rules of an Agentfile line.
 
-use agentfile::{Error, Instruction, parse};
+use agentfile::{Error, Instruction, Text, parse};
 
 /// Parses `line` after an `AGENT` line, and returns its arguments.
 fn arguments_of(line: &str) -> Vec<String> {
@@ -53,9 +53,15 @@ fn one_dash_is_a_value() {
 
 #[test]
 fn text_instructions_keep_double_dashes() {
-    for name in ["SYSTEM", "PROMPT", "ENV", "system"] {
-        let source = format!("{name} Run tool --verbose\n");
-        assert_eq!(arguments_of(&source), ["Run tool --verbose"], "{name}");
+    assert_eq!(
+        arguments_of("ENV Run tool --verbose\n"),
+        ["Run tool --verbose"]
+    );
+    for name in ["SYSTEM", "PROMPT", "system"] {
+        let source = format!("AGENT claude\n{name} Run tool --verbose\n");
+        let text = parse(&source).unwrap().remove(1).text;
+        let expected = Text::Literal("Run tool --verbose".to_string());
+        assert_eq!(text, Some(expected), "{name}");
     }
 }
 
@@ -77,6 +83,7 @@ fn the_instruction_name_is_uppercased() {
             line: 2,
             name: "SHARE".to_string(),
             arguments: vec!["./out".to_string()],
+            text: None,
         }]
     );
 }

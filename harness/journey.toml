@@ -6,11 +6,11 @@ commands = ["ap --version", "ap boot"]
 
 [[milestone]]
 name = "Author"
-commands = ["ap init", "ap fmt", "ap build", "ap update", "ap ls", "ap inspect", "ap rm"]
+commands = ["ap init", "ap fmt", "ap build", "ap ls", "ap inspect", "ap rm"]
 
 [[milestone]]
 name = "Run"
-commands = ["ap run", "ap ps", "ap attach", "ap logs", "ap exec", "ap stop"]
+commands = ["ap run", "ap update", "ap ps", "ap attach", "ap logs", "ap exec", "ap stop"]
 
 [[milestone]]
 name = "Review and land"

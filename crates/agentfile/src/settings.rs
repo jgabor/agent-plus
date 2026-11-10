@@ -207,7 +207,7 @@ fn setting(instruction: &Instruction) -> Option<Result<Setting, String>> {
 }
 
 /// Reads `<harness>[:<version>]`.
-fn agent(value: &str) -> Result<Agent, String> {
+pub(crate) fn agent(value: &str) -> Result<Agent, String> {
     let (harness, version) = value.split_once(':').unwrap_or((value, "latest"));
     let harness = word(
         "AGENT",
@@ -226,7 +226,7 @@ fn agent(value: &str) -> Result<Agent, String> {
 }
 
 /// Matches `value` exactly against the words that `name` takes.
-fn word<T: Copy>(name: &str, value: &str, words: &[(&str, T)]) -> Result<T, String> {
+pub(crate) fn word<T: Copy>(name: &str, value: &str, words: &[(&str, T)]) -> Result<T, String> {
     if let Some((_, found)) = words.iter().find(|(word, _)| *word == value) {
         return Ok(*found);
     }

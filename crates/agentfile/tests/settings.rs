@@ -39,13 +39,11 @@ fn agent(harness: Harness, version: &str) -> Agent {
     }
 }
 
-// spec(AGENT): | `claude` | Claude Code |
 #[test]
 fn agent_claude_is_the_claude_code_harness() {
     assert_eq!(settings("AGENT claude\n").agent.harness, Harness::Claude);
 }
 
-// spec(AGENT): | `codex` | OpenAI Codex CLI |
 #[test]
 fn agent_codex_is_the_codex_harness() {
     assert_eq!(settings("AGENT codex\n").agent.harness, Harness::Codex);
@@ -74,7 +72,6 @@ fn an_unknown_harness_is_named_in_its_error() {
     assert!(errors[0].message.contains("`gemini`"), "{errors:?}");
 }
 
-// spec(AGENT): `<version>` is an exact version or a channel the harness publishes, such as `latest` or `stable`.
 #[test]
 fn the_version_follows_a_colon_and_is_kept_as_written() {
     for (source, expected) in [
@@ -159,12 +156,13 @@ fn the_default_os_is_desktop() {
 
 #[test]
 fn os_takes_exactly_one_argument() {
-    for line in ["OS\n", "OS minimal standard\n"] {
-        assert!(error_of(line).message.contains("OS"), "{line:?}");
-    }
+    assert_eq!(error_of("OS\n").message, "`OS` needs an argument");
+    assert_eq!(
+        error_of("OS minimal standard desktop\n").message,
+        "`OS` takes one argument, but found 3"
+    );
 }
 
-// spec(MODEL): `<model>` is passed to the harness unchanged, so it accepts whatever names or aliases the harness accepts.
 #[test]
 fn model_is_kept_unchanged() {
     for (line, model) in [
@@ -235,7 +233,6 @@ fn effort_works_with_or_without_model() {
     );
 }
 
-// spec(EFFORT): `ap` doesn't know which levels each model supports, because `MODEL` is passed through unchecked.
 #[test]
 fn every_level_parses_with_any_model() {
     for model in ["haiku", "gpt-6.1-sol", "no-such-model"] {
@@ -289,7 +286,6 @@ fn the_default_compression_is_3() {
     assert_eq!(Compression::default().level(), 3);
 }
 
-// spec(COMPRESSION): Levels `1` to `22` follow zstd.
 #[test]
 fn compression_levels_1_to_22_are_accepted() {
     for level in 1..=22 {
@@ -301,7 +297,6 @@ fn compression_levels_1_to_22_are_accepted() {
     }
 }
 
-// spec(COMPRESSION): Negative levels `-1` to `-7` select the fast modes, like `zstd --fast=N`.
 #[test]
 fn compression_levels_minus_1_to_minus_7_are_accepted() {
     for level in -7..=-1 {
@@ -314,8 +309,13 @@ fn compression_levels_minus_1_to_minus_7_are_accepted() {
 }
 
 #[test]
-fn compression_is_a_plain_integer() {
-    for word in ["fast", "3.0", "+3", "03", "1e1", "three", "\" 3\"", "\"\""] {
+fn compression_is_a_decimal_integer() {
+    for (word, level) in [("+3", 3), ("03", 3), ("-03", -3)] {
+        let settings = settings_after_agent(&format!("COMPRESSION {word}\n"));
+        assert_eq!(settings.compression.level(), level, "{word}");
+    }
+    let huge = "99999999999999999999";
+    for word in ["fast", "3.0", "1e1", "three", "\" 3\"", "\"\"", "-", huge] {
         let message = error_of(&format!("COMPRESSION {word}\n")).message;
         assert!(message.contains("`1` to `22`"), "{word}: {message}");
         assert!(message.contains("`-1` to `-7`"), "{word}: {message}");

@@ -239,15 +239,11 @@ fn word<T: Copy>(name: &str, value: &str, words: &[(&str, T)]) -> Result<T, Stri
     Err(format!("`{name}` takes {list}, but found `{value}`"))
 }
 
-/// Reads a level written as a plain integer, such as `19` or `-3`.
+/// Reads a level written as a decimal integer, such as `19` or `-3`.
 fn compression(value: &str) -> Result<Compression, String> {
-    let digits = value.strip_prefix('-').unwrap_or(value);
-    let plain = (1..=2).contains(&digits.len())
-        && digits.bytes().all(|byte| byte.is_ascii_digit())
-        && !digits.starts_with('0');
-    plain
-        .then(|| value.parse::<i8>().ok())
-        .flatten()
+    value
+        .parse::<i8>()
+        .ok()
         .filter(|level| (1..=22).contains(level) || (-7..=-1).contains(level))
         .map(Compression)
         .ok_or_else(|| {

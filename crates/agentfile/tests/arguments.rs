@@ -1,31 +1,39 @@
 //! The argument rules of an Agentfile line.
 
-use agentfile::{Instruction, parse};
+use agentfile::{Error, Instruction, parse};
 
-fn arguments_of(source: &str) -> Vec<String> {
-    let instructions = parse(source).unwrap();
-    assert_eq!(instructions.len(), 1, "{instructions:?}");
-    instructions[0].arguments.clone()
+/// Parses `line` after an `AGENT` line, and returns its arguments.
+fn arguments_of(line: &str) -> Vec<String> {
+    let instructions = parse(&format!("AGENT claude\n{line}")).unwrap();
+    assert_eq!(instructions.len(), 2, "{instructions:?}");
+    instructions[1].arguments.clone()
+}
+
+/// Parses `line` after an `AGENT` line, and returns its one error.
+fn error_of(line: &str) -> Error {
+    let mut errors = parse(&format!("AGENT claude\n{line}")).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    errors.remove(0)
 }
 
 // spec(Arguments): An unquoted argument that starts with `--` is an error, which keeps flags available to later versions.
 #[test]
 fn an_unquoted_double_dash_argument_is_an_error() {
-    let error = parse("SHARE --force\n").unwrap_err();
-    assert_eq!(error.line, 1);
+    let error = error_of("SHARE --force\n");
+    assert_eq!(error.line, 2);
     assert!(error.message.contains("--force"), "{}", error.message);
 }
 
 #[test]
 fn any_argument_can_be_the_flag() {
-    let error = parse("# comment\n\nSHARE ./out --rw\n").unwrap_err();
-    assert_eq!(error.line, 3);
+    let error = error_of("# comment\n\nSHARE ./out --rw\n");
+    assert_eq!(error.line, 4);
     assert!(error.message.contains("--rw"), "{}", error.message);
 }
 
 #[test]
 fn an_argument_that_starts_unquoted_and_continues_quoted_is_a_flag() {
-    assert!(parse("SHARE --\"force\"\n").is_err());
+    error_of("SHARE --\"force\"\n");
 }
 
 #[test]
@@ -53,15 +61,20 @@ fn text_instructions_keep_double_dashes() {
 
 #[test]
 fn comments_and_blank_lines_are_not_instructions() {
-    assert_eq!(parse("  # SHARE --force\n\n   \n").unwrap(), []);
+    assert_eq!(
+        parse("AGENT claude\n  # SHARE --force\n\n   \n")
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
 fn the_instruction_name_is_uppercased() {
     assert_eq!(
-        parse("share ./out\n").unwrap(),
+        parse("AGENT claude\nshare ./out\n").unwrap()[1..],
         [Instruction {
-            line: 1,
+            line: 2,
             name: "SHARE".to_string(),
             arguments: vec!["./out".to_string()],
         }]
@@ -88,12 +101,12 @@ fn outside_quotes_a_backslash_is_a_backslash() {
 
 #[test]
 fn an_unterminated_quote_is_an_error() {
-    let error = parse("SHARE \"./out\n").unwrap_err();
-    assert_eq!(error.line, 1);
+    let error = error_of("SHARE \"./out\n");
+    assert_eq!(error.line, 2);
 }
 
 #[test]
 fn an_error_prints_its_line_and_message() {
-    let error = parse("\nSHARE \"./out\n").unwrap_err();
-    assert_eq!(error.to_string(), "line 2: a quote is never closed");
+    let error = error_of("\nSHARE \"./out\n");
+    assert_eq!(error.to_string(), "line 3: a quote is never closed");
 }

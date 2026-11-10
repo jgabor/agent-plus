@@ -6,5 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+agentfile = { path = "../agentfile" }
 graviola = "0.4"
 ruzstd = "0.9"

@@ -8,14 +8,18 @@
 //! places `ADD`, `SHARE`, and `REPO` in the guest, and rejects destinations
 //! that collide or are reserved. [`format`] rewrites an Agentfile by the rules
 //! of `ap fmt`. [`Grants::read`] lists what an Agentfile asks of the host,
-//! and [`Grants`] prints and reads that list as text.
+//! and [`Grants`] prints and reads that list as text. [`print_argument`] and
+//! [`read_arguments`] are that text form's argument rules, for other records
+//! kept in the same syntax.
 
 mod files;
 pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
 mod format;
 pub use format::format;
 mod grants;
-pub use grants::{Grants, Location, PathGrant, Widening};
+pub use grants::{
+    Grants, Location, PathGrant, Widening, arguments as read_arguments, printed as print_argument,
+};
 mod network;
 pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
 mod paths;

@@ -8,7 +8,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path};
 
 /// The `.gitignore` files under one directory.
 pub struct Gitignore {
@@ -71,11 +71,14 @@ impl Gitignore {
     /// ignored too, whatever a later pattern says.
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
         let mut rel = Vec::new();
-        for part in path.iter() {
+        for part in path.components() {
+            if part == Component::CurDir {
+                continue;
+            }
             if !rel.is_empty() {
                 rel.push(b'/');
             }
-            rel.extend_from_slice(part.as_encoded_bytes());
+            rel.extend_from_slice(part.as_os_str().as_encoded_bytes());
         }
         let parents = rel.iter().enumerate().filter(|&(_, &b)| b == b'/');
         for (end, _) in parents {
@@ -130,6 +133,8 @@ fn parse(text: &[u8]) -> Vec<Pattern> {
             continue;
         }
         let line = line.strip_suffix(b"\r").unwrap_or(line);
+        // Git keeps a pattern as a C string, so a NUL ends it.
+        let line = line.split(|&b| b == 0).next().unwrap_or(line);
         let mut p = trim_trailing_spaces(line);
         let negated = p.first() == Some(&b'!');
         if negated {
@@ -357,7 +362,8 @@ fn class(name: &[u8], c: u8) -> Option<bool> {
         b"lower" => c.is_ascii_lowercase(),
         b"print" => c.is_ascii_graphic() || c == b' ',
         b"punct" => c.is_ascii_punctuation(),
-        b"space" => c.is_ascii_whitespace() || c == 0x0b,
+        // Git's own `isspace`, which leaves out vertical tab and form feed.
+        b"space" => matches!(c, b' ' | b'\t' | b'\n' | b'\r'),
         b"upper" => c.is_ascii_uppercase(),
         b"xdigit" => c.is_ascii_hexdigit(),
         _ => return None,

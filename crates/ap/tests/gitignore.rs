@@ -2,8 +2,10 @@
 //! test builds a directory, and every path in it must get the same answer
 //! from the module and from git.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -95,7 +97,7 @@ fn oracle(root: &Path, paths: &[(PathBuf, bool)]) -> Vec<PathBuf> {
         .stdout
         .split(|&b| b == 0)
         .filter(|p| !p.is_empty())
-        .map(|p| PathBuf::from(String::from_utf8(p.to_vec()).unwrap()))
+        .map(|p| PathBuf::from(OsString::from_vec(p.to_vec())))
         .collect()
 }
 
@@ -347,6 +349,66 @@ fn a_symlinked_gitignore_is_not_read() {
         "symlink",
         &[("rules", "a\n"), (".gitignore -> rules", ""), ("a", "")],
     );
+}
+
+#[test]
+fn posix_classes() {
+    const CLASSES: &[&str] = &[
+        "alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space",
+        "upper", "xdigit",
+    ];
+    for class in CLASSES {
+        let rules = format!("x[[:{class}:]]\n");
+        // Every byte a name can hold, below 0x80 and one above it.
+        let names: Vec<String> = (1..=0x80u8)
+            .filter(|&b| b != b'/')
+            .map(|b| format!("x{}", b as char))
+            .collect();
+        let mut tree = vec![(".gitignore", rules.as_str())];
+        tree.extend(names.iter().map(|n| (n.as_str(), "")));
+        agrees(&format!("class-{class}"), &tree);
+    }
+}
+
+#[test]
+fn a_nul_ends_a_pattern() {
+    agrees(
+        "nul",
+        &[
+            (".gitignore", "secret\0junk\n"),
+            ("secret", ""),
+            ("other", ""),
+        ],
+    );
+}
+
+#[test]
+fn a_leading_dot_component_is_the_root() {
+    let root = scratch("dot");
+    build(&root, &[(".gitignore", "/secret\n*\n!keep\n")]);
+    let ignore = Gitignore::load(&root).unwrap();
+    assert!(ignore.is_ignored(Path::new("./secret"), false));
+    assert!(!ignore.is_ignored(Path::new("./keep"), false));
+}
+
+#[test]
+fn names_that_are_not_utf8() {
+    let root = scratch("not-utf8");
+    build(&root, &[(".gitignore", "a*\n")]);
+    for name in [&b"a\xff"[..], b"b\xff"] {
+        fs::write(root.join(OsString::from_vec(name.to_vec())), "").unwrap();
+    }
+    let mut all = Vec::new();
+    paths(&root, Path::new(""), &mut all);
+    let want = oracle(&root, &all);
+    let ignore = Gitignore::load(&root).unwrap();
+    let got: Vec<PathBuf> = all
+        .iter()
+        .filter(|(path, is_dir)| ignore.is_ignored(path, *is_dir))
+        .map(|(path, _)| path.clone())
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(want.len(), 1);
 }
 
 /// A small generator, so a failure prints the seed that reproduces it.

@@ -344,7 +344,7 @@ fn host_name(text: &str) -> Result<String, String> {
 
 /// Reads the part of a URL rule after `<scheme>://`.
 fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
-    let scheme = match scheme {
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
         "https" => Scheme::Https,
         "http" => Scheme::Http,
         _ => return Err("the scheme must be `https` or `http`".to_string()),
@@ -355,6 +355,9 @@ fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
     };
     if path.contains(['?', '#']) {
         return Err("a URL rule has no query or fragment".to_string());
+    }
+    if !path_is_written_right(path) {
+        return Err("its path has a character that RFC 3986 doesn't allow there".to_string());
     }
     if path.to_ascii_lowercase().contains("%2f") {
         return Err("its path has an encoded slash".to_string());
@@ -376,6 +379,30 @@ fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
         port,
         path: path.to_string(),
     })
+}
+
+/// Whether every character of `path` is one RFC 3986 allows in a path, and
+/// every `%` starts an escape of two hex digits.
+fn path_is_written_right(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let mut at = 0;
+    while let Some(&b) = bytes.get(at) {
+        if b == b'%' {
+            if !bytes
+                .get(at + 1..at + 3)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            {
+                return false;
+            }
+            at += 3;
+            continue;
+        }
+        if !(b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&b)) {
+            return false;
+        }
+        at += 1;
+    }
+    true
 }
 
 /// Reads an agent name, by the rule under `ap build` in SPEC.md: 1 to 63

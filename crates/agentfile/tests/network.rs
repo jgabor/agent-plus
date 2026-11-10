@@ -297,10 +297,39 @@ fn a_url_rule_takes_only_http_and_https() {
     for line in [
         "NETWORK +ftp://example.com/a\n",
         "NETWORK +ssh://github.com/jgabor\n",
-        "NETWORK +HTTPS://github.com/jgabor\n",
     ] {
         error_of(line);
     }
+}
+
+#[test]
+fn a_url_scheme_is_read_in_any_case() {
+    assert_eq!(
+        destination_of("NETWORK +HTTPS://github.com/jgabor\n"),
+        url(Scheme::Https, "github.com", None, "/jgabor")
+    );
+}
+
+#[test]
+fn a_url_path_is_written_as_rfc_3986_allows() {
+    for line in [
+        "NETWORK \"+https://github.com/my repo\"\n",
+        "NETWORK +https://github.com/%zz\n",
+        "NETWORK +https://github.com/a%2\n",
+        "NETWORK +https://github.com/a\\b\n",
+        "NETWORK +https://github.com/caf\u{e9}\n",
+    ] {
+        error_of(line);
+    }
+    assert_eq!(
+        destination_of("NETWORK +https://example.com/a%20b/~c:d@e!$&'()*+,;=\n"),
+        url(
+            Scheme::Https,
+            "example.com",
+            None,
+            "/a%20b/~c:d@e!$&'()*+,;="
+        )
+    );
 }
 
 #[test]

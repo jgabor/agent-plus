@@ -136,19 +136,29 @@ pub struct Command {
     pub specified_by: Vec<String>,
 }
 
-/// Every heading, with its depth, in document order.
-fn headings_of(spec: &str) -> Vec<(usize, &str, usize)> {
-    let mut found = Vec::new();
+/// Whether each line is a fence or inside one.
+fn fenced(lines: &[&str]) -> Vec<bool> {
     let mut fence: Option<(u8, usize)> = None;
-    for (index, line) in spec.lines().enumerate() {
+    let inside = |line: &&str| {
         let trimmed = line.trim_start();
-        if let Some(open) = fence {
-            if closes_fence(trimmed, open) {
-                fence = None;
-            }
-        } else if let Some(open) = opens_fence(trimmed) {
-            fence = Some(open);
-        } else if let Some(title) = heading(line) {
+        match fence {
+            Some(open) if closes_fence(trimmed, open) => fence = None,
+            Some(_) => {}
+            None => fence = opens_fence(trimmed),
+        }
+        // A closing fence has just cleared `fence`, and is still fenced.
+        fence.is_some() || opens_fence(trimmed).is_some()
+    };
+    lines.iter().map(inside).collect()
+}
+
+/// Every heading, with its depth and its line, in document order.
+fn headings_of<'a>(lines: &[&'a str], fenced: &[bool]) -> Vec<(usize, &'a str, usize)> {
+    let mut found = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if !fenced[index]
+            && let Some(title) = heading(line)
+        {
             let depth = line.bytes().take_while(|b| *b == b'#').count();
             found.push((depth, title, index));
         }
@@ -157,15 +167,18 @@ fn headings_of(spec: &str) -> Vec<(usize, &str, usize)> {
 }
 
 pub fn headings(spec: &str) -> HashSet<String> {
-    let titles = headings_of(spec).into_iter();
+    let lines: Vec<&str> = spec.lines().collect();
+    let titles = headings_of(&lines, &fenced(&lines)).into_iter();
     titles.map(|(_, title, _)| title.to_string()).collect()
 }
 
 /// The commands, in document order. A command is a heading one level below
-/// Commands, and its entry runs to the next heading.
+/// Commands, and its entry runs to the next heading. Fenced lines are examples,
+/// and aren't part of an entry.
 pub fn commands(spec: &str) -> Vec<Command> {
     let lines: Vec<&str> = spec.lines().collect();
-    let headings = headings_of(spec);
+    let fenced = fenced(&lines);
+    let headings = headings_of(&lines, &fenced);
     let mut commands = Vec::new();
     let mut inside = None;
     for (at, (depth, title, line)) in headings.iter().enumerate() {
@@ -175,9 +188,9 @@ pub fn commands(spec: &str) -> Vec<Command> {
             Some(parent) if *depth <= parent => break,
             Some(parent) if *depth == parent + 1 => {
                 let end = headings.get(at + 1).map_or(lines.len(), |next| next.2);
-                let words: Vec<&str> = lines[line + 1..end]
-                    .iter()
-                    .flat_map(|line| line.split_whitespace())
+                let words: Vec<&str> = (line + 1..end)
+                    .filter(|at| !fenced[*at])
+                    .flat_map(|at| lines[at].split_whitespace())
                     .collect();
                 let entry = words.join(" ");
                 let arrives = if entry.starts_with("**Planned.**") {
@@ -350,6 +363,18 @@ mod tests {
     #[test]
     fn a_closing_bracket_that_isnt_a_link_specifies_nothing() {
         let spec = "## Commands\n\n### ap x\n\nSee [Run](#run) (the long one) specifies nothing.\n";
+        assert_eq!(commands(spec), [command("ap x", Arrives::V010, &[])]);
+    }
+
+    #[test]
+    fn a_pointer_inside_a_fence_specifies_nothing() {
+        let spec = "## Commands\n\n### ap x\n\nOne.\n\n```\n[Build](#build) specifies `ap x`.\n**Planned.**\n```\n\n[Run](#run) specifies it.\n";
+        assert_eq!(commands(spec), [command("ap x", Arrives::V010, &["Run"])]);
+    }
+
+    #[test]
+    fn a_marker_inside_a_leading_fence_marks_nothing() {
+        let spec = "## Commands\n\n### ap x\n\n```\n**Planned.** Later.\n```\n\nOne.\n";
         assert_eq!(commands(spec), [command("ap x", Arrives::V010, &[])]);
     }
 

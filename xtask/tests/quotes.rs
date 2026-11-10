@@ -575,3 +575,13 @@ fn a_pointer_to_a_heading_that_isnt_there_fails_the_gate() {
     assert!(out.contains("fail spec"), "{out}");
     assert!(err.contains("`Bild`"), "{err}");
 }
+
+/// The nightly bisect gates trees from before milestones. Today's reader
+/// refuses their journey files, and the gate must not.
+#[test]
+fn a_journey_file_from_before_milestones_is_not_compared() {
+    let steps = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/s.sh\"\n";
+    let (code, out, err) = gate_with_commands("commands-before", COMMANDS, steps);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("pass spec"), "{out}");
+}

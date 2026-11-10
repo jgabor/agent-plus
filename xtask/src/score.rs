@@ -181,7 +181,11 @@ fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
             }
         }
     }
-    if !root.join(JOURNEY_FILE).exists() {
+    // A journey file from before milestones lists no commands, and today's
+    // reader refuses it. The nightly bisect gates such trees, so they are left
+    // alone here, as is a workspace with no journey file.
+    let listing = fs::read_to_string(root.join(JOURNEY_FILE)).unwrap_or_default();
+    if !listing.lines().any(|line| line.trim() == "[[milestone]]") {
         return Ok(findings);
     }
     let milestones = journey::milestones(root)?;

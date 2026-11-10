@@ -17,6 +17,7 @@ dependencies = [
  "libc",
  "rustls",
  "rustls-graviola",
+ "store",
  "vmm",
  "webpki-roots",
 ]

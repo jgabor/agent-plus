@@ -196,6 +196,131 @@ impl Grants {
     }
 }
 
+/// One way that an Agentfile's grants are wider than the grants you
+/// approved, by the list under SPEC.md's Grants section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Widening {
+    /// A host path you haven't approved, including an approved path whose
+    /// canonical location changed.
+    Path(PathGrant),
+    /// An approved path that the agent may now write to.
+    Write(String),
+    /// A new host environment variable.
+    Variable(String),
+    /// A new secret, from `SEAL` when `sealed` is true and `SECRET`
+    /// otherwise.
+    Secret { secret: Secret, sealed: bool },
+    /// A new bound host of an approved secret.
+    Host { secret: String, host: String },
+    /// An approved secret that becomes `visible`.
+    Visible(String),
+    /// An approved secret that moves from `SECRET` to `SEAL`.
+    Sealed(String),
+    /// `AUTH key` or `AUTH token`, added or changed from the other one.
+    Auth(Auth),
+    /// A new `NETWORK +` rule.
+    Allow(NetworkRule),
+    /// An approved `NETWORK -` rule that is gone.
+    Unblock(NetworkRule),
+    /// The network default moves from `-` to `+`.
+    Open,
+    /// The `POLICY` default moves from `-` to `+`, so the agent may call
+    /// every agent that no rule names.
+    CallAny,
+    /// An agent that the agent may now call.
+    Call(String),
+}
+
+impl Grants {
+    /// Lists how these grants are wider than `approved`, in the order the
+    /// text form prints them. It is empty when they only narrow, or are the
+    /// same. Git credentials and the harness hosts aren't compared yet.
+    pub fn widening(&self, approved: &Grants) -> Vec<Widening> {
+        let mut wider = Vec::new();
+        for path in &self.paths {
+            match approved.paths.iter().find(|old| old.path == path.path) {
+                None => wider.push(Widening::Path(path.clone())),
+                Some(old) if path.write && !old.write => {
+                    wider.push(Widening::Write(path.path.clone()));
+                }
+                Some(_) => {}
+            }
+        }
+        wider.extend(
+            self.variables
+                .iter()
+                .filter(|name| !approved.variables.contains(name))
+                .map(|name| Widening::Variable(name.clone())),
+        );
+        for (sealed, list) in [(false, &self.secrets), (true, &self.seals)] {
+            for secret in list {
+                let old_secret = approved.secrets.iter().find(|old| old.name == secret.name);
+                let old_seal = approved.seals.iter().find(|old| old.name == secret.name);
+                let Some(old) = old_secret.or(old_seal) else {
+                    wider.push(Widening::Secret {
+                        secret: secret.clone(),
+                        sealed,
+                    });
+                    continue;
+                };
+                if sealed && old_secret.is_some() {
+                    wider.push(Widening::Sealed(secret.name.clone()));
+                }
+                if secret.visible && !old.visible {
+                    wider.push(Widening::Visible(secret.name.clone()));
+                }
+                wider.extend(
+                    secret
+                        .hosts
+                        .iter()
+                        .filter(|host| !old.hosts.contains(host))
+                        .map(|host| Widening::Host {
+                            secret: secret.name.clone(),
+                            host: host.clone(),
+                        }),
+                );
+            }
+        }
+        if let Some(auth) = self.auth
+            && approved.auth != Some(auth)
+        {
+            wider.push(Widening::Auth(auth));
+        }
+        if self.network.default == Sign::Allow && approved.network.default == Sign::Deny {
+            wider.push(Widening::Open);
+        }
+        let (now, old) = (&self.network.rules, &approved.network.rules);
+        wider.extend(
+            now.iter()
+                .filter(|rule| rule.sign == Sign::Allow && !old.contains(rule))
+                .map(|rule| Widening::Allow(rule.clone())),
+        );
+        wider.extend(
+            old.iter()
+                .filter(|rule| rule.sign == Sign::Deny && !now.contains(rule))
+                .map(|rule| Widening::Unblock(rule.clone())),
+        );
+        // Agents that no rule names follow the default, so only the default
+        // and the named agents can change.
+        if self.policy.default == Sign::Allow && approved.policy.default == Sign::Deny {
+            wider.push(Widening::CallAny);
+        }
+        let mut names: Vec<&String> = (self.policy.rules.iter())
+            .chain(&approved.policy.rules)
+            .map(|(_, name)| name)
+            .collect();
+        names.sort();
+        names.dedup();
+        wider.extend(
+            names
+                .into_iter()
+                .filter(|name| self.policy.allows(name) && !approved.policy.allows(name))
+                .map(|name| Widening::Call(name.clone())),
+        );
+        wider
+    }
+}
+
 impl fmt::Display for Grants {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut line = |name: &str, arguments: &[&str]| {

@@ -15,7 +15,7 @@ pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Wor
 mod format;
 pub use format::format;
 mod grants;
-pub use grants::{Grants, Location, PathGrant};
+pub use grants::{Grants, Location, PathGrant, Widening};
 mod network;
 pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
 mod paths;

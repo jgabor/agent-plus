@@ -59,6 +59,20 @@ fn issue(number: u64, state: &str, labels: &[&str], text: &str, comments: &[Stri
     )
 }
 
+/// An issue that GitHub lists as a sub-issue of `parent`.
+fn sub_issue(number: u64, state: &str, touches: &str, parent: u64) -> String {
+    sub_issue_of("o/r", number, state, touches, parent)
+}
+
+/// A sub-issue in `o/r` whose parent is in the repository `home`.
+fn sub_issue_of(home: &str, number: u64, state: &str, touches: &str, parent: u64) -> String {
+    let text = issue(number, state, &["auto:merge"], &body(touches, ""), &[]);
+    let links = format!(
+        ",\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":{{\"id\":\"I_x\",\"number\":{parent},\"state\":\"OPEN\",\"title\":\"t\",\"url\":\"https://github.com/{home}/issues/{parent}\"}}}}"
+    );
+    format!("{}{links}", text.strip_suffix('}').unwrap())
+}
+
 fn open(number: u64, labels: &[&str], touches: &str) -> String {
     issue(number, "OPEN", labels, &body(touches, ""), &[])
 }
@@ -296,23 +310,75 @@ fn touches_ends_at_the_next_heading() {
 #[test]
 fn a_parent_is_not_claimable() {
     let parent = open(1, &["auto:merge"], T);
-    let child = |state: &str| {
-        issue(
-            5,
-            state,
-            &["auto:merge"],
-            &body("`crates/b`", "Part of #1.\n"),
-            &[],
-        )
-    };
+    let sub = |state: &str| sub_issue(5, state, "`crates/b`", 1);
     assert_eq!(
-        listed("parent-open", &[parent.clone(), child("OPEN")]),
+        listed("parent-open", &[parent.clone(), sub("OPEN")]),
         vec![5]
     );
     assert_eq!(
-        listed("parent-closed", &[parent, child("CLOSED")]),
+        listed("parent-closed", &[parent, sub("CLOSED")]),
         Vec::<u64>::new()
     );
+}
+
+/// A parent in another repository has a number that means nothing in this one.
+#[test]
+fn a_parent_in_another_repository_is_not_a_parent_here() {
+    let unrelated = open(1, &["auto:merge"], T);
+    for (name, home) in [("parent-elsewhere", "o/other"), ("parent-prefix", "o/r2")] {
+        let sub = sub_issue_of(home, 5, "OPEN", "`crates/b`", 1);
+        assert_eq!(listed(name, &[unrelated.clone(), sub]), vec![1, 5]);
+    }
+}
+
+/// Both ways of reading an issue ask GitHub for its parent, and for the URL
+/// that says which repository the parent is in.
+#[test]
+fn every_read_of_an_issue_asks_for_its_parent() {
+    let labels = &["auto:merge", "in-progress"][..];
+    let full = issue(7, "OPEN", labels, &body(T, ""), &filler(100));
+    let repo = Repo::new("parent-asked", std::slice::from_ref(&full));
+    fs::write(repo.bin.join("view.json"), full).unwrap();
+    repo.next();
+    let calls = repo.calls();
+    for read in ["issue list", "issue view 7"] {
+        let asked = calls.lines().find(|call| call.starts_with(read));
+        let asked = asked.unwrap_or_else(|| panic!("no `{read}` in {calls}"));
+        assert!(asked.contains(",parent,url"), "{asked}");
+    }
+}
+
+/// GitHub's own link is the only record of a parent. A line in the body isn't.
+#[test]
+fn a_part_of_line_does_not_make_a_parent() {
+    let named = open(1, &["auto:merge"], T);
+    let naming = issue(
+        5,
+        "OPEN",
+        &["auto:merge"],
+        &body("`crates/b`", "Part of #1.\n"),
+        &[],
+    );
+    assert_eq!(listed("part-of-line", &[named, naming]), vec![1, 5]);
+}
+
+#[test]
+fn an_issue_with_no_parent_field_or_a_null_one_has_no_parent() {
+    let null = issue(5, "OPEN", &["auto:merge"], &body("`crates/b`", ""), &[]);
+    let null = format!("{},\"parent\":null}}", null.strip_suffix('}').unwrap());
+    assert_eq!(
+        listed("null-parent", &[open(1, &["auto:merge"], T), null]),
+        vec![1, 5]
+    );
+}
+
+#[test]
+fn a_parent_that_is_not_an_issue_is_a_problem() {
+    let odd = issue(5, "OPEN", &["auto:merge"], &body("`crates/b`", ""), &[]);
+    let odd = format!("{},\"parent\":{{}}}}", odd.strip_suffix('}').unwrap());
+    let repo = Repo::new("odd-parent", &[odd]);
+    let output = repo.xtask(&["next"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
 
 #[test]

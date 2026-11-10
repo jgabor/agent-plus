@@ -1,7 +1,7 @@
-//! `ap build [--strict] [-t name] [dir]`, from SPEC.md's Build section. It
-//! checks the Agentfile against the host, turns each `ADD` and the harness
-//! configuration into a layer, and records the agent in the store. A layer
-//! whose key an agent already recorded is a hit, and isn't built again.
+//! `ap build [--strict] [--replace] [-t name] [dir]`, from SPEC.md's Build
+//! section. It checks the Agentfile against the host, turns each `ADD` and the
+//! harness configuration into a layer, and records the agent in the store. A
+//! layer whose key an agent already recorded is a hit, and isn't built again.
 //!
 //! Nothing is fetched yet, so the instructions that need a fetch fail, and
 //! no lockfile is written. Grants aren't approved here.
@@ -31,22 +31,27 @@ const PROMPT: &str = "/etc/ap/prompt";
 /// The arguments of `ap build`.
 pub struct Args {
     strict: bool,
+    /// Whether the build may take the name over from another directory.
+    replace: bool,
     /// The name from `-t`.
     name: Option<String>,
     /// The directory, or `None` for the current one.
     dir: Option<PathBuf>,
 }
 
-/// Reads `ap build`'s arguments: `--strict`, `-t <name>`, and a directory,
-/// each at most once, in any order. Any other flag is bad usage.
+/// Reads `ap build`'s arguments: `--strict`, `--replace`, `-t <name>`, and a
+/// directory, each at most once, in any order. Any other flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut strict = false;
+    let mut replace = false;
     let mut name = None;
     let mut dir = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--strict" && !strict {
             strict = true;
+        } else if arg == "--replace" && !replace {
+            replace = true;
         } else if arg == "-t" && name.is_none() {
             name = Some(args.next()?.to_str()?.to_string());
         } else if arg.as_encoded_bytes().starts_with(b"-") || dir.is_some() {
@@ -55,7 +60,12 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
             dir = Some(PathBuf::from(arg));
         }
     }
-    Some(Args { strict, name, dir })
+    Some(Args {
+        strict,
+        replace,
+        name,
+        dir,
+    })
 }
 
 /// Builds the agent, and returns the exit status. What each layer did goes
@@ -164,9 +174,10 @@ fn build(args: &Args) -> Result<(), String> {
     let layers = ::store::Layers::new(&root);
     if let Some(old) = agents.get(&name).map_err(|error| format!("ap: {error}"))?
         && old.directory != directory
+        && !args.replace
     {
         return Err(format!(
-            "ap: agent {name} was built from {}, not {directory}",
+            "ap: agent {name} was built from {}, not {directory}. If you moved it, build with `--replace` to take over the name",
             old.directory
         ));
     }
@@ -207,7 +218,7 @@ fn build(args: &Args) -> Result<(), String> {
         if lines.iter().all(|line| line.starts_with("hit ")) && unchanged()? {
             break lines;
         }
-        match agents.record(&agent, false) {
+        match agents.record(&agent, args.replace) {
             Ok(()) => break lines,
             // Another `ap` freed a layer this build found. Put every layer.
             Err(error) if error.kind() == io::ErrorKind::NotFound && use_cache => {

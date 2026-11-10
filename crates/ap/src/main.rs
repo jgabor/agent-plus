@@ -14,7 +14,7 @@ mod commands {
 
 const USAGE: &str = "usage: ap --version
        ap fmt [--check] [dir]
-       ap build [--strict] [-t name] [dir]
+       ap build [--strict] [--replace] [-t name] [dir]
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 

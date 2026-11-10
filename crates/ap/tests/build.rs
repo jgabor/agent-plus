@@ -238,6 +238,7 @@ fn bad_usage_exits_2() {
         &["build", "-t"],
         &["build", "a", "b"],
         &["build", "--strict", "--strict"],
+        &["build", "--replace", "--replace"],
     ] {
         let output = scratch.ap(&dir, args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -251,7 +252,7 @@ fn the_usage_message_lists_build() {
     let output = scratch.ap(&scratch.root, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("ap build [--strict] [-t name] [dir]"),
+        stderr(&output).contains("ap build [--strict] [--replace] [-t name] [dir]"),
         "{}",
         stderr(&output)
     );
@@ -268,6 +269,46 @@ fn another_directory_under_a_name_fails() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("agent"), "{}", stderr(&output));
     assert_eq!(scratch.agent("agent").directory, first.to_str().unwrap());
+}
+
+// spec(Build): If you moved the directory, `ap build --replace` takes over the name and keeps the agent's persisted state, and history and pending changes for paths under the old directory move to the new one.
+#[test]
+fn replace_takes_over_a_name_from_a_moved_directory() {
+    let scratch = Scratch::new("replace");
+    let old = scratch.project("old", "AGENT claude\nSYSTEM \"before\"\n");
+    scratch.build(&old, &["-t", "agent"]);
+    let before = scratch.agent("agent");
+    let moved = scratch.root.join("moved");
+    fs::rename(&old, &moved).unwrap();
+    fs::write(moved.join("Agentfile"), "AGENT claude\nSYSTEM \"after\"\n").unwrap();
+
+    let output = scratch.ap(&moved, &["build", "-t", "agent"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("--replace"), "{}", stderr(&output));
+    assert_eq!(scratch.agent("agent"), before);
+
+    let out = scratch.build(&moved, &["--replace", "-t", "agent"]);
+    assert!(out.ends_with("agent agent\n"), "{out}");
+    let after = scratch.agent("agent");
+    assert_eq!(after.directory, moved.to_str().unwrap());
+    assert!(holds(&scratch.configuration("agent"), "after"));
+    // The old configuration layer is freed, and only the new one is kept.
+    assert_eq!(scratch.layer_files().len(), after.layers.len());
+
+    // The name now belongs to the new directory, so a plain build is a hit.
+    let out = scratch.build(&moved, &["-t", "agent"]);
+    assert!(
+        layer_lines(&out).iter().all(|(verb, _)| verb == "hit"),
+        "{out}"
+    );
+}
+
+#[test]
+fn replace_on_a_new_name_just_builds() {
+    let scratch = Scratch::new("replace-new");
+    let dir = scratch.project("notes", "AGENT claude\n");
+    scratch.build(&dir, &["--replace"]);
+    assert_eq!(scratch.agent("notes").directory, dir.to_str().unwrap());
 }
 
 #[test]

@@ -112,7 +112,7 @@ impl Policy {
 }
 
 /// One line of `NETWORK` or `POLICY`: a bare rule, or a rule.
-enum Line<T> {
+pub(crate) enum Line<T> {
     Bare(Sign),
     Rule(T),
 }
@@ -180,7 +180,7 @@ fn disagreements(instructions: &[Instruction], name: &str) -> Vec<Error> {
 }
 
 /// Reads one line, with `read` for the part after the sign of a rule.
-fn line<T>(
+pub(crate) fn line<T>(
     instruction: &Instruction,
     read: fn(Sign, &str) -> Result<T, String>,
 ) -> Result<Line<T>, String> {
@@ -210,7 +210,7 @@ fn line<T>(
     read(sign, rest).map(Line::Rule)
 }
 
-fn rule(sign: Sign, text: &str) -> Result<NetworkRule, String> {
+pub(crate) fn rule(sign: Sign, text: &str) -> Result<NetworkRule, String> {
     let destination = if let Some((scheme, rest)) = text.split_once("://") {
         url(scheme, rest).map_err(|reason| format!("`{text}` isn't a URL rule: {reason}"))?
     } else {
@@ -408,7 +408,7 @@ fn path_is_written_right(path: &str) -> bool {
 /// Reads an agent name, by the rule under `ap build` in SPEC.md: 1 to 63
 /// lowercase letters, digits, and `-`, starting and ending with a letter or
 /// digit.
-fn agent_rule(sign: Sign, name: &str) -> Result<(Sign, String), String> {
+pub(crate) fn agent_rule(sign: Sign, name: &str) -> Result<(Sign, String), String> {
     let fits = (1..=63).contains(&name.len())
         && name
             .bytes()

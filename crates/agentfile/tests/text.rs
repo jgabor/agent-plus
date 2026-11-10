@@ -237,6 +237,16 @@ fn a_blank_line_or_an_indented_fence_is_an_error() {
     assert_eq!(lines, [2, 8], "{errors:?}");
 }
 
+#[test]
+fn a_misplaced_block_still_reports_its_own_errors() {
+    let errors = errors_of("SYSTEM\n\n```\n```\nBOGUS\n");
+    let lines: Vec<_> = errors.iter().map(|error| error.line).collect();
+    assert_eq!(lines, [2, 4, 6], "{errors:?}");
+    let errors = errors_of("SYSTEM\n  ```\nBe brief.\n");
+    let lines: Vec<_> = errors.iter().map(|error| error.line).collect();
+    assert_eq!(lines, [2, 3], "{errors:?}");
+}
+
 // spec(Text values): Text followed by backticks on the instruction line is single-line text, not a fence.
 #[test]
 fn text_then_backticks_is_single_line_text() {
@@ -317,6 +327,8 @@ fn hash_lines_blank_lines_and_dollars_are_content() {
         text_of("PROMPT\n```\n# Title\n\n  # indented\nSHARE --force\n$HOME ${X}\n```\n"),
         literal("# Title\n\n  # indented\nSHARE --force\n$HOME ${X}\n")
     );
+    let source = "SYSTEM\n```\n\n```\n\n\nSHARE ./out\n";
+    assert_eq!(instructions_of(source)[1].line, 8);
 }
 
 // spec(Text values): The value is the lines between the fences, joined with newlines and ending with a newline.

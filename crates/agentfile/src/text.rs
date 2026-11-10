@@ -18,18 +18,22 @@ pub(crate) fn read(
     rest: &str,
     lines: &[&str],
     next: &mut usize,
-) -> Result<Text, Error> {
+) -> Result<Text, Vec<Error>> {
     if let Some(fence) = opening_fence(rest) {
-        return read_block(line, fence, lines, next);
+        return read_block(line, fence, lines, next).map_err(|error| vec![error]);
     }
     if !rest.is_empty() {
         return Ok(single_line(rest));
     }
     if let Some(fence) = lines.get(*next).and_then(|text| opening_fence(text)) {
         *next += 1;
-        return read_block(line + 1, fence, lines, next);
+        return read_block(line + 1, fence, lines, next).map_err(|error| vec![error]);
     }
-    // Skip a block that opens after blank lines or indented, so its lines
+    let mut errors = vec![Error {
+        line,
+        message: "a fenced block must open on the next line, in the first column".to_string(),
+    }];
+    // Read a block that opens after blank lines or indented, so its lines
     // aren't read as instructions.
     let mut at = *next;
     while lines.get(at).is_some_and(|text| text.trim().is_empty()) {
@@ -40,12 +44,9 @@ pub(crate) fn read(
         .and_then(|text| opening_fence(text.trim_start()))
     {
         *next = at + 1;
-        let _ = read_block(at + 1, fence, lines, next);
+        errors.extend(read_block(at + 1, fence, lines, next).err());
     }
-    Err(Error {
-        line,
-        message: "a fenced block must open on the next line, in the first column".to_string(),
-    })
+    Err(errors)
 }
 
 /// Reads single-line text, which may be a bare path.

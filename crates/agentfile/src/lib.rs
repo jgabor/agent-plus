@@ -160,8 +160,8 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
                     value = Some(text);
                     Vec::new()
                 }
-                Err(error) => {
-                    errors.push(error);
+                Err(found) => {
+                    errors.extend(found);
                     continue;
                 }
             }

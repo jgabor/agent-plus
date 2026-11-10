@@ -32,6 +32,26 @@ fn any_argument_can_be_the_flag() {
 }
 
 #[test]
+fn every_flag_on_a_line_is_an_error() {
+    let errors = parse("AGENT claude\nSHARE --a --b --c\n").unwrap_err();
+    let found: Vec<_> = errors.iter().map(|e| (e.line, &e.message)).collect();
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for (error, flag) in errors.iter().zip(["--a", "--b", "--c"]) {
+        assert_eq!(error.line, 2, "{found:?}");
+        assert!(error.message.contains(flag), "{found:?}");
+    }
+}
+
+#[test]
+fn an_unclosed_quote_ends_the_line_errors() {
+    let errors = parse("AGENT claude\nSHARE --a \"x --b\n").unwrap_err();
+    let messages: Vec<_> = errors.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages[0].contains("--a"), "{messages:?}");
+    assert_eq!(messages[1], "a quote is never closed");
+}
+
+#[test]
 fn an_argument_that_starts_unquoted_and_continues_quoted_is_a_flag() {
     error_of("SHARE --\"force\"\n");
 }

@@ -191,8 +191,8 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
         } else {
             match split_arguments(rest) {
                 Ok(arguments) => arguments,
-                Err(message) => {
-                    fail(message);
+                Err(messages) => {
+                    messages.into_iter().for_each(fail);
                     continue;
                 }
             }
@@ -224,20 +224,33 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
     }
 }
 
-fn split_arguments(text: &str) -> Result<Vec<String>, String> {
+/// Splits a line's arguments, or returns every error in them. An unclosed
+/// quote is the last error, since nothing after it can be split.
+fn split_arguments(text: &str) -> Result<Vec<String>, Vec<String>> {
     let mut arguments = Vec::new();
+    let mut errors = Vec::new();
     let mut rest = text.trim_start();
     while !rest.is_empty() {
-        let (value, after) = read_argument(rest)?;
+        let (value, after) = match read_argument(rest) {
+            Ok(read) => read,
+            Err(message) => {
+                errors.push(message);
+                break;
+            }
+        };
         if rest.starts_with("--") {
-            return Err(format!(
+            errors.push(format!(
                 "an Agentfile has no flags, but found `{value}`. Quote it to use it as a value"
             ));
         }
         arguments.push(value);
         rest = after.trim_start();
     }
-    Ok(arguments)
+    if errors.is_empty() {
+        Ok(arguments)
+    } else {
+        Err(errors)
+    }
 }
 
 /// Reads one argument from the start of `text`, and returns what follows it.

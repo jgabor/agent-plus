@@ -8,7 +8,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const FIELDS: &str = "number,state,body,labels,comments,parent";
+const FIELDS: &str = "number,state,body,labels,comments,parent,url";
 const ISSUE_LIMIT: usize = 2000;
 /// `gh issue list` gives at most this many comments per issue.
 pub const LISTED_COMMENTS: usize = 100;
@@ -523,11 +523,22 @@ fn read_issue(value: &Json) -> Option<Issue> {
         body: value.get("body")?.as_str()?.to_string(),
         labels: read_labels(value)?,
         comments: comments.iter().map(read_comment).collect::<Option<_>>()?,
-        parent: match value.get("parent") {
-            None | Some(Json::Null) => None,
-            Some(parent) => Some(parent.get("number")?.as_u64()?),
-        },
+        parent: parent_here(value)?,
     })
+}
+
+/// The issue's parent, when it is in this repository. GitHub also lets a
+/// parent be in another repository, where its number means nothing here.
+fn parent_here(value: &Json) -> Option<Option<u64>> {
+    let parent = match value.get("parent") {
+        None | Some(Json::Null) => return Some(None),
+        Some(parent) => parent,
+    };
+    let number = parent.get("number")?.as_u64()?;
+    let url = value.get("url")?.as_str()?;
+    let here = format!("{}/issues/", url.rsplit_once("/issues/")?.0);
+    let is_here = parent.get("url")?.as_str()?.starts_with(&here);
+    Some(is_here.then_some(number))
 }
 
 /// The issues in this repository that a PR closes. GitHub also lists issues

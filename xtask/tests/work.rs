@@ -61,11 +61,16 @@ fn issue(number: u64, state: &str, labels: &[&str], text: &str, comments: &[Stri
 
 /// An issue that GitHub lists as a sub-issue of `parent`.
 fn sub_issue(number: u64, state: &str, touches: &str, parent: u64) -> String {
+    sub_issue_of("o/r", number, state, touches, parent)
+}
+
+/// A sub-issue in `o/r` whose parent is in the repository `home`.
+fn sub_issue_of(home: &str, number: u64, state: &str, touches: &str, parent: u64) -> String {
     let text = issue(number, state, &["auto:merge"], &body(touches, ""), &[]);
-    let parent = format!(
-        ",\"parent\":{{\"id\":\"I_x\",\"number\":{parent},\"state\":\"OPEN\",\"title\":\"t\",\"url\":\"https://github.com/o/r/issues/{parent}\"}}}}"
+    let links = format!(
+        ",\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":{{\"id\":\"I_x\",\"number\":{parent},\"state\":\"OPEN\",\"title\":\"t\",\"url\":\"https://github.com/{home}/issues/{parent}\"}}}}"
     );
-    format!("{}{parent}", text.strip_suffix('}').unwrap())
+    format!("{}{links}", text.strip_suffix('}').unwrap())
 }
 
 fn open(number: u64, labels: &[&str], touches: &str) -> String {
@@ -314,6 +319,33 @@ fn a_parent_is_not_claimable() {
         listed("parent-closed", &[parent, sub("CLOSED")]),
         Vec::<u64>::new()
     );
+}
+
+/// A parent in another repository has a number that means nothing in this one.
+#[test]
+fn a_parent_in_another_repository_is_not_a_parent_here() {
+    let unrelated = open(1, &["auto:merge"], T);
+    for (name, home) in [("parent-elsewhere", "o/other"), ("parent-prefix", "o/r2")] {
+        let sub = sub_issue_of(home, 5, "OPEN", "`crates/b`", 1);
+        assert_eq!(listed(name, &[unrelated.clone(), sub]), vec![1, 5]);
+    }
+}
+
+/// Both ways of reading an issue ask GitHub for its parent, and for the URL
+/// that says which repository the parent is in.
+#[test]
+fn every_read_of_an_issue_asks_for_its_parent() {
+    let labels = &["auto:merge", "in-progress"][..];
+    let full = issue(7, "OPEN", labels, &body(T, ""), &filler(100));
+    let repo = Repo::new("parent-asked", std::slice::from_ref(&full));
+    fs::write(repo.bin.join("view.json"), full).unwrap();
+    repo.next();
+    let calls = repo.calls();
+    for read in ["issue list", "issue view 7"] {
+        let asked = calls.lines().find(|call| call.starts_with(read));
+        let asked = asked.unwrap_or_else(|| panic!("no `{read}` in {calls}"));
+        assert!(asked.contains(",parent,url"), "{asked}");
+    }
 }
 
 /// GitHub's own link is the only record of a parent. A line in the body isn't.

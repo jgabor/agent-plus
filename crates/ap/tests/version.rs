@@ -7,6 +7,7 @@ fn ap(args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+// spec(ap --version): `ap --version` prints the version.
 #[test]
 fn version_prints_the_name_and_version() {
     let output = ap(&["--version"]);

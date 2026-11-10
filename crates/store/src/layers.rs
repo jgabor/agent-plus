@@ -29,18 +29,19 @@ impl Layers {
         let digest = sha256(data);
         let path = self.dir.join(&digest);
         if path.try_exists()? {
-            // Another writer may have renamed it but not yet synced its name.
-            File::open(&self.dir)?.sync_all()?;
+            // Another writer may have renamed it, or made a directory above
+            // it, and been killed before syncing.
+            sync_up_from(&self.dir)?;
             return Ok(digest);
         }
-        create_dir_synced(&self.dir)?;
+        fs::create_dir_all(&self.dir)?;
         let (partial, mut file) = self.create_partial(&digest)?;
         file.write_all(&crate::compress(data))?;
         file.sync_all()?;
         // Another writer may have finished first. Its file holds the same
         // bytes, so replacing it is harmless.
         fs::rename(&partial.0, &path)?;
-        File::open(&self.dir)?.sync_all()?;
+        sync_up_from(&self.dir)?;
         Ok(digest)
     }
 
@@ -89,23 +90,27 @@ impl Layers {
     }
 }
 
-/// Creates `dir` and any missing parents, and syncs each parent that gains
-/// an entry, so that a layer written inside survives a power loss.
-fn create_dir_synced(dir: &Path) -> io::Result<()> {
-    if dir.as_os_str().is_empty() || dir.try_exists()? {
-        return Ok(());
+/// Syncs `dir` and every directory above it, so that a layer's name and
+/// each directory on its path survive a power loss. A directory that existed
+/// may have been made by a writer that was killed before syncing it. A
+/// directory above `dir` that can be passed through but not read is skipped.
+fn sync_up_from(dir: &Path) -> io::Result<()> {
+    File::open(dir)?.sync_all()?;
+    for dir in dir.ancestors().skip(1) {
+        // A relative path's last ancestor is empty, and means the current
+        // directory.
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        match File::open(dir) {
+            Ok(file) => file.sync_all()?,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(error) => return Err(error),
+        }
     }
-    // A relative path's last parent is empty, and means the current directory.
-    let parent = match dir.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
-    create_dir_synced(parent)?;
-    match fs::create_dir(dir) {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
-        _ => {}
-    }
-    File::open(parent)?.sync_all()
+    Ok(())
 }
 
 fn sha256(data: &[u8]) -> String {

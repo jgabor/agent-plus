@@ -72,6 +72,8 @@ pub fn run(args: &Args) -> u8 {
 
 /// One layer the agent needs.
 struct Planned {
+    /// The line of the instruction the layer comes from.
+    line: usize,
     /// What `ap build` calls the layer when it reports on it.
     label: String,
     key: String,
@@ -160,8 +162,7 @@ fn build(args: &Args) -> Result<(), String> {
 
     let agents = ::store::Agents::new(&root);
     let layers = ::store::Layers::new(&root);
-    let old = agents.get(&name).map_err(|error| format!("ap: {error}"))?;
-    if let Some(old) = &old
+    if let Some(old) = agents.get(&name).map_err(|error| format!("ap: {error}"))?
         && old.directory != directory
     {
         return Err(format!(
@@ -190,15 +191,20 @@ fn build(args: &Args) -> Result<(), String> {
                     .0
             }
         };
-        let (built, lines) =
-            store_layers(&agents, &layers, current, use_cache).map_err(|e| format!("ap: {e}"))?;
+        let (built, lines) = store_layers(&agents, &layers, current, use_cache, &report)?;
         let agent = ::store::Agent {
             name: name.clone(),
             directory: directory.to_string(),
             layers: built,
             declared: declared.clone(),
         };
-        if old.as_ref() == Some(&agent) {
+        // A build that put no layer leaves an unchanged record as it is. The
+        // record is read again, because another `ap` may have changed it.
+        let unchanged = || -> Result<bool, String> {
+            let current = agents.get(&name).map_err(|error| format!("ap: {error}"))?;
+            Ok(current.as_ref() == Some(&agent))
+        };
+        if lines.iter().all(|line| line.starts_with("hit ")) && unchanged()? {
             break lines;
         }
         match agents.record(&agent, false) {
@@ -220,26 +226,51 @@ fn build(args: &Args) -> Result<(), String> {
 const NAME_RULE: &str = "A name is 1 to 63 lowercase letters, digits, and `-`, starting and ending with a letter or digit";
 
 /// Puts each layer in the store, unless an agent already recorded its key,
-/// and returns the agent's layers with a line for each.
+/// and returns the agent's layers with a line for each. Every image is made
+/// before any is put, so a layer that can't be made leaves the store as it
+/// was, and its error names its line.
 fn store_layers(
     agents: &::store::Agents,
     layers: &::store::Layers,
     planned: Vec<Planned>,
     use_cache: bool,
-) -> io::Result<(Vec<::store::Layer>, Vec<String>)> {
-    let mut built = Vec::new();
-    let mut lines = Vec::new();
+    report: &dyn Fn(Vec<Error>) -> String,
+) -> Result<(Vec<::store::Layer>, Vec<String>), String> {
+    let io = |error: io::Error| format!("ap: {error}");
+    // Each layer's key and label, with its digest on a hit or its image.
+    let mut made = Vec::new();
+    let mut errors = Vec::new();
     for layer in planned {
         let found = if use_cache {
-            agents.layer(&layer.key)?
+            agents.layer(&layer.key).map_err(io)?
         } else {
             None
         };
-        let label = layer.label.clone();
-        let key = layer.key.clone();
-        let (status, digest) = match found {
-            Some(digest) => ("hit", digest),
-            None => ("built", layers.put(&layer.image()?)?),
+        let (line, label, key) = (layer.line, layer.label.clone(), layer.key.clone());
+        let content = match found {
+            Some(digest) => Ok(digest),
+            None => match layer.image() {
+                Ok(image) => Err(image),
+                Err(error) => {
+                    errors.push(Error {
+                        line,
+                        message: error.to_string(),
+                    });
+                    continue;
+                }
+            },
+        };
+        made.push((key, label, content));
+    }
+    if !errors.is_empty() {
+        return Err(report(errors));
+    }
+    let mut built = Vec::new();
+    let mut lines = Vec::new();
+    for (key, label, content) in made {
+        let (status, digest) = match content {
+            Ok(digest) => ("hit", digest),
+            Err(image) => ("built", layers.put(&image).map_err(io)?),
         };
         lines.push(format!("{status} {label}"));
         built.push(::store::Layer { key, digest });
@@ -264,16 +295,12 @@ fn plan(
     take(&mut errors, Network::read(instructions));
     take(&mut errors, Policy::read(instructions));
     let guest = take(&mut errors, GuestPath::read(instructions, dir_name));
-    let (Some(settings), Some(sources), Some(files), Some(guest)) =
-        (settings, sources, files, guest)
-    else {
-        errors.sort_by_key(|error| error.line);
-        errors.dedup();
-        return Err(errors);
-    };
 
     let mut warnings = Vec::new();
     let mut planned = Vec::new();
+    // The line of the first `SYSTEM` or `PROMPT`, which the harness
+    // configuration comes from.
+    let mut text_line = None;
     let mut system = Vec::new();
     let mut prompt = None;
     let fail = |line: usize, message: String| Error { line, message };
@@ -289,6 +316,7 @@ fn plan(
         let Some(text) = &instruction.text else {
             continue;
         };
+        text_line.get_or_insert(line);
         let value = match text {
             Text::Literal(value) => value.as_bytes().to_vec(),
             Text::Path(path) => match read_text(path, context, home) {
@@ -305,6 +333,14 @@ fn plan(
             prompt = Some(value);
         }
     }
+    // Checking `ADD` and `SHARE` on the host needs their typed values.
+    let (Some(settings), Some(sources), Some(files), Some(guest)) =
+        (settings, sources, files, guest)
+    else {
+        errors.sort_by_key(|error| error.line);
+        errors.dedup();
+        return Err(errors);
+    };
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
@@ -322,6 +358,7 @@ fn plan(
                     label.push_str(&agentfile::print_argument(destination));
                 }
                 planned.push(Planned {
+                    line: add.line,
                     label,
                     key: layer.key.clone(),
                     content: Content::Add(layer),
@@ -339,9 +376,11 @@ fn plan(
         errors.sort_by_key(|error| error.line);
         return Err(errors);
     }
+    let line = text_line.unwrap_or(1);
     let image = configuration(settings.agent.harness, &system, prompt.as_deref())
-        .map_err(|error| vec![fail(1, error.to_string())])?;
+        .map_err(|error| vec![fail(line, error.to_string())])?;
     planned.push(Planned {
+        line,
         label: "harness configuration".to_string(),
         key: configuration_key(&image),
         content: Content::Image(image),
@@ -383,18 +422,19 @@ fn configuration(
             Harness::Claude => "/home/agent/.claude/CLAUDE.md",
             Harness::Codex => "/home/agent/.codex/AGENTS.md",
         };
-        let mut text = Vec::new();
+        let mut text: Vec<u8> = Vec::new();
         for value in system {
             if !text.is_empty() {
-                text.extend_from_slice(b"\n\n");
+                if !text.ends_with(b"\n") {
+                    text.push(b'\n');
+                }
+                text.push(b'\n');
             }
-            let end = value
-                .iter()
-                .rposition(|b| *b != b'\n')
-                .map_or(0, |at| at + 1);
-            text.extend_from_slice(&value[..end]);
+            text.extend_from_slice(value);
         }
-        text.push(b'\n');
+        if !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
         insert(&mut root, file, text);
     }
     if let Some(prompt) = prompt {

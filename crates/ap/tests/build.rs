@@ -9,7 +9,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use store::{Agent, Agents, Declared};
+use store::{Agent, Agents, Declared, Layers};
 
 /// A test's own directory, with a home directory and a project in it.
 struct Scratch {
@@ -71,6 +71,14 @@ impl Scratch {
         self.agents().get(name).unwrap().expect("no agent")
     }
 
+    /// The uncompressed image of an agent's last layer, the harness
+    /// configuration.
+    fn configuration(&self, name: &str) -> Vec<u8> {
+        let agent = self.agent(name);
+        let last = agent.layers.last().expect("no layers");
+        Layers::new(self.store()).get(&last.digest).unwrap()
+    }
+
     /// The layer files in the store, by name.
     fn layer_files(&self) -> Vec<String> {
         match fs::read_dir(self.store().join("zstd-layers")) {
@@ -103,6 +111,14 @@ fn layer_lines(out: &str) -> Vec<(String, String)> {
             (status.to_string(), label.to_string())
         })
         .collect()
+}
+
+/// Whether `image` holds `text` as one run of bytes, which is how an
+/// uncompressed EROFS image keeps a small file.
+fn holds(image: &[u8], text: &str) -> bool {
+    image
+        .windows(text.len())
+        .any(|window| window == text.as_bytes())
 }
 
 fn declared(name: &str, arguments: &[&str]) -> Declared {
@@ -333,10 +349,13 @@ fn a_text_path_is_read_at_build_time() {
         "AGENT claude\nSYSTEM ./system.md\nPROMPT ./prompt.md\nADD ./data\n",
     );
     fs::write(dir.join("system.md"), "Be careful.\n").unwrap();
-    fs::write(dir.join("prompt.md"), "Review it.\n").unwrap();
+    fs::write(dir.join("prompt.md"), "Review the notes.\n").unwrap();
     fs::write(dir.join("data"), "one").unwrap();
     scratch.build(&dir, &[]);
     let before = scratch.agent("notes").layers;
+    let image = scratch.configuration("notes");
+    assert!(holds(&image, "Be careful.\n"));
+    assert!(holds(&image, "Review the notes.\n"));
 
     for file in ["system.md", "prompt.md"] {
         fs::write(dir.join(file), "Something else.\n").unwrap();
@@ -347,6 +366,22 @@ fn a_text_path_is_read_at_build_time() {
     let after = scratch.agent("notes").layers;
     assert_eq!(after[0], before[0]);
     assert_ne!(after[1], before[1]);
+}
+
+// spec(SYSTEM): The values concatenate in file order, separated by a blank line.
+#[test]
+fn system_values_concatenate_with_a_blank_line() {
+    let scratch = Scratch::new("system-join");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nSYSTEM One.\nSYSTEM ./two.md\nSYSTEM\n```\nThree.\n```\n",
+    );
+    // A value's own blank lines are kept.
+    fs::write(dir.join("two.md"), "Two.\n\n").unwrap();
+    scratch.build(&dir, &[]);
+    let image = scratch.configuration("notes");
+    assert!(holds(&image, "One.\n\nTwo.\n\n\nThree.\n"));
+    assert!(holds(&image, "CLAUDE.md"));
 }
 
 #[test]
@@ -464,6 +499,45 @@ fn build_reports_every_error() {
             "{message}"
         );
     }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+#[test]
+fn a_destination_error_does_not_hide_other_errors() {
+    let scratch = Scratch::new("destination-and-more");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nADD ./data /etc/data\nREPO jgabor/agent-plus\nSYSTEM ./missing.md\n",
+    );
+    fs::write(dir.join("data"), "one").unwrap();
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    let lines: Vec<&str> = message.lines().collect();
+    assert_eq!(lines.len(), 3, "{message}");
+    for (line, number) in lines.iter().zip(2..) {
+        assert!(
+            line.starts_with(&format!("Agentfile:{number}: ")),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_layer_that_can_not_be_made_writes_nothing() {
+    let scratch = Scratch::new("bad-image");
+    let long = "x".repeat(256);
+    let dir = scratch.project(
+        "notes",
+        &format!("AGENT claude\nADD ./a\nADD ./b /work/{long}\n"),
+    );
+    fs::write(dir.join("a"), "one").unwrap();
+    fs::write(dir.join("b"), "two").unwrap();
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(scratch.layer_files().is_empty());
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 

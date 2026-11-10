@@ -70,8 +70,19 @@ impl Table {
 
 /// Reads a file made only of `[[name]]` tables. An error names its line.
 pub fn array_of_tables(text: &str, name: &str) -> Result<Vec<Table>, String> {
-    let header = format!("[[{name}]]");
-    let mut tables: Vec<Table> = Vec::new();
+    let tables = arrays_of_tables(text, &[name])?;
+    Ok(tables.into_iter().map(|(_, table)| table).collect())
+}
+
+/// Reads a file made only of `[[name]]` tables, for each name in `names`. Each
+/// table comes with its name, in the file's order. An error names its line.
+pub fn arrays_of_tables<'a>(
+    text: &str,
+    names: &[&'a str],
+) -> Result<Vec<(&'a str, Table)>, String> {
+    let headers: Vec<String> = names.iter().map(|name| format!("`[[{name}]]`")).collect();
+    let headers = headers.join(" or ");
+    let mut tables: Vec<(&str, Table)> = Vec::new();
     for (index, line) in text.lines().enumerate() {
         let number = index + 1;
         let line = line.trim();
@@ -79,15 +90,16 @@ pub fn array_of_tables(text: &str, name: &str) -> Result<Vec<Table>, String> {
             continue;
         }
         if line.starts_with('[') {
-            if line != header {
-                return Err(format!("line {number}: expected `{header}`, got `{line}`"));
-            }
-            tables.push(Table::default());
+            let name = names
+                .iter()
+                .find(|name| line == format!("[[{name}]]"))
+                .ok_or_else(|| format!("line {number}: expected {headers}, got `{line}`"))?;
+            tables.push((name, Table::default()));
             continue;
         }
-        let table = tables
+        let (_, table) = tables
             .last_mut()
-            .ok_or_else(|| format!("line {number}: a key must come after `{header}`"))?;
+            .ok_or_else(|| format!("line {number}: a key must come after {headers}"))?;
         add_line(table, line).map_err(|e| format!("line {number}: {e}"))?;
     }
     Ok(tables)
@@ -272,7 +284,38 @@ fn read_array(text: &str) -> Result<(Value, &str), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, array_of_tables, document, quoted};
+    use super::{Value, array_of_tables, arrays_of_tables, document, quoted};
+
+    #[test]
+    fn reads_tables_of_several_names_in_file_order() {
+        let text = "[[step]]\nid = 1\n[[milestone]]\nname = \"m\"\n[[step]]\nid = 2\n";
+        let tables = arrays_of_tables(text, &["milestone", "step"]).unwrap();
+        let names: Vec<&str> = tables.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, ["step", "milestone", "step"]);
+        assert_eq!(tables[0].1.int("id"), Some(1));
+        assert_eq!(tables[1].1.str("name"), Some("m"));
+        assert_eq!(tables[2].1.int("id"), Some(2));
+    }
+
+    #[test]
+    fn a_header_outside_the_names_is_an_error_that_lists_them() {
+        let error = arrays_of_tables("[[stage]]\n", &["milestone", "step"]).unwrap_err();
+        assert_eq!(
+            error,
+            "line 1: expected `[[milestone]]` or `[[step]]`, got `[[stage]]`"
+        );
+        let error = arrays_of_tables("[step]\n", &["step"]).unwrap_err();
+        assert_eq!(error, "line 1: expected `[[step]]`, got `[step]`");
+    }
+
+    #[test]
+    fn a_key_before_any_header_is_an_error_that_lists_the_names() {
+        let error = arrays_of_tables("id = 1\n", &["milestone", "step"]).unwrap_err();
+        assert_eq!(
+            error,
+            "line 1: a key must come after `[[milestone]]` or `[[step]]`"
+        );
+    }
 
     #[test]
     fn reads_the_value_types() {

@@ -13,6 +13,7 @@ pub use secrets::{Auth, Env, Part, Secret, Secrets};
 mod settings;
 pub use settings::{Agent, Compression, Effort, Harness, Mode, Os, Settings};
 mod sources;
+pub use sources::{Add, Form, Mcp, Plugin, Remote, Repo, Skill, Source, Sources};
 mod text;
 
 use std::collections::HashMap;

@@ -85,13 +85,19 @@ pub(crate) fn one_quoted_string(text: &str) -> Option<String> {
 
 /// The number of backticks that open a fence at the start of `text`, if
 /// there are enough. What follows them is the info string.
-fn opening_fence(text: &str) -> Option<usize> {
+pub(crate) fn opening_fence(text: &str) -> Option<usize> {
     let ticks = backticks(text);
     (ticks >= 3).then_some(ticks)
 }
 
 fn backticks(text: &str) -> usize {
     text.len() - text.trim_start_matches('`').len()
+}
+
+/// Whether `text` closes a block that opened with `fence` backticks.
+pub(crate) fn closes(text: &str, fence: usize) -> bool {
+    let ticks = backticks(text);
+    ticks >= fence && text[ticks..].trim().is_empty()
 }
 
 /// Reads a block whose opening fence of `fence` backticks is on
@@ -105,8 +111,7 @@ fn read_block(
     let start = *next;
     while let Some(text) = lines.get(*next) {
         *next += 1;
-        let ticks = backticks(text);
-        if ticks >= fence && text[ticks..].trim().is_empty() {
+        if closes(text, fence) {
             let content = &lines[start..*next - 1];
             if content.is_empty() {
                 return Err(Error {

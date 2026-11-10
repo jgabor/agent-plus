@@ -129,7 +129,10 @@ fn init_writes_a_formatted_agentfile_that_builds() {
     let source = fs::read_to_string(dir.join("Agentfile")).unwrap();
     let instructions = agentfile::parse(&source).unwrap();
     let context = dir.canonicalize().unwrap();
-    let grants = ap::approval::grants(&instructions, &context, &scratch.home).unwrap();
+    let grants = ap::approval::grants(&instructions, |text| {
+        ap::paths::HostPath::resolve(text, &context, &scratch.home)
+    })
+    .unwrap();
     let file = scratch.root.join("approved-grants");
     fs::write(&file, grants.to_string()).unwrap();
     let approve = format!("--approve={}", file.display());

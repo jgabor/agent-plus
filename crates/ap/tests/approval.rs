@@ -355,13 +355,20 @@ fn the_prompt_escapes_what_would_hide() {
     let scratch = Scratch::new("escapes");
     let hidden = scratch.root.join("\u{202e}txt.sh");
     fs::write(&hidden, "two").unwrap();
-    let dir = scratch.project(
-        "notes",
+    scratch.project(
+        "n\u{202e}otes",
         "AGENT claude\nADD \"../\u{202e}txt.sh\" /x\nENV A \"$B\"\nNETWORK -\n",
     );
-    let run = scratch.on_terminal(&dir, &["build"], "n\n");
+    let args = ["build", "-t", "notes", "n\u{202e}otes"];
+    let run = scratch.on_terminal(&scratch.root, &args, "n\n");
     assert_eq!(run.code, Some(1), "{}", run.screen);
     let shown = format!("  PATH {}/\\u{{202e}}txt.sh\n", scratch.root.display());
     assert!(run.screen.contains(&shown), "{}", run.screen);
+    assert!(
+        run.screen
+            .contains("n\\u{202e}otes/Agentfile asks for these grants:"),
+        "{}",
+        run.screen
+    );
     assert!(!run.screen.contains('\u{202e}'), "{}", run.screen);
 }

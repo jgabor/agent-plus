@@ -76,7 +76,10 @@ impl Scratch {
             .ok()?;
         let source = fs::read_to_string(context.join("Agentfile")).ok()?;
         let instructions = agentfile::parse(&source).ok()?;
-        let grants = ap::approval::grants(&instructions, &context, &self.home).ok()?;
+        let grants = ap::approval::grants(&instructions, |text| {
+            ap::paths::HostPath::resolve(text, &context, &self.home)
+        })
+        .ok()?;
         let file = self.root.join("approved-grants");
         fs::write(&file, grants.to_string()).unwrap();
         Some(file)

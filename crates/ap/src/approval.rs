@@ -9,20 +9,19 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
-use agentfile::{Error, Grants, Instruction, Location};
+use agentfile::{Error, Grants, Instruction, Location, print_argument};
 use store::Approvals;
 
 use crate::paths::HostPath;
 
-/// Lists what the instructions ask of the host. Host paths resolve against
-/// the build context and `home`, as [`HostPath::resolve`] says.
+/// Lists what the instructions ask of the host. `resolve` resolves a host
+/// path, as [`HostPath::resolve`] does.
 pub fn grants(
     instructions: &[Instruction],
-    context: &Path,
-    home: &Path,
+    mut resolve: impl FnMut(&str) -> io::Result<HostPath>,
 ) -> Result<Grants, Vec<Error>> {
     Grants::read(instructions, |text| {
-        let host = HostPath::resolve(text, context, home).map_err(|error| error.to_string())?;
+        let host = resolve(text).map_err(|error| error.to_string())?;
         let path = host.path().to_str().ok_or_else(|| {
             format!(
                 "{} isn't UTF-8, so it can't be approved",
@@ -55,6 +54,8 @@ pub fn approve(
     grants: &Grants,
     approver: Approver,
 ) -> Result<(), String> {
+    // You may not have chosen the names either, so they show as they are.
+    let shown = print_argument(shown);
     let store = |error: io::Error| format!("ap: {error}");
     let approved = approvals.get(agentfile).map_err(store)?;
     let keep = || match approved.as_ref() == Some(grants) {
@@ -67,7 +68,7 @@ pub fn approve(
         if !wider.is_empty() {
             return Err(format!(
                 "ap: {shown} asks for more than {} approves:\n{}",
-                file.display(),
+                print_argument(&file.display().to_string()),
                 indented(wider.iter().map(ToString::to_string))
             ));
         }

@@ -12,6 +12,22 @@ Sources	A local path is useful when you develop a plugin or skill and want to tr
 Grants	Grants are what an Agentfile asks of your host.	Names the term grant; approval behavior is stated in later units.
 Grants	In CI, keep that file where the code under test can't change it.	Advises CI users where to keep the file, and claims nothing about ap.
 Run	Sign-in pages often redirect to a local callback (`http://localhost:<port>` or `http://127.0.0.1:<port>`).	Describes how vendor sign-in pages usually behave.
+Commands	This section lists every `ap` command.	Introduces the section and claims no behavior.
+Commands	Where another section specifies a command, its entry points there.	Says how the section is laid out and claims no behavior.
+ap init	[AUTH](#auth), [NETWORK](#network), and [POLICY](#policy) say which lines it writes.	Only points to the sections that specify this, and adds no behavior.
+ap build	[Build](#build) specifies `ap build`.	Only points to the sections that specify this, and adds no behavior.
+ap update	[Build](#build) says what it resolves.	Only points to the sections that specify this, and adds no behavior.
+ap fmt	[Text values](#text-values) names a rewrite it makes.	Only points to the sections that specify this, and adds no behavior.
+ap inspect	[Grants](#grants) specifies `ap inspect --grants`, and [NETWORK](#network) names hosts that it also shows.	Only points to the sections that specify this, and adds no behavior.
+ap rm	[Build](#build) says which layers it frees, and [SHARE](#share) says when it refuses.	Only points to the sections that specify this, and adds no behavior.
+ap run	[Run](#run) specifies `ap run`.	Only points to the sections that specify this, and adds no behavior.
+ap logs	[Grants](#grants) says what it escapes.	Only points to the sections that specify this, and adds no behavior.
+ap diff	[SHARE](#share) specifies `ap diff`.	Only points to the sections that specify this, and adds no behavior.
+ap apply	[SHARE](#share) specifies `ap apply`.	Only points to the sections that specify this, and adds no behavior.
+ap discard	[SHARE](#share) specifies `ap discard`.	Only points to the sections that specify this, and adds no behavior.
+ap reset	[PERSIST](#persist) specifies `ap reset <agent>`, and [Grants](#grants) specifies `ap reset <digest>`.	Only points to the sections that specify this, and adds no behavior.
+ap reset	[SHARE](#share) says when it refuses.	Only points to the sections that specify this, and adds no behavior.
+ap secret	[SECRET](#secret) says when a run reads them.	Only points to the sections that specify this, and adds no behavior.
 AGENT	**Redistribution.** Claude Code is proprietary.	States the license status of a vendor's product.
 OS	Demand decides which toolchains ship.	Describes how the project picks toolchains, not anything ap does.
 OS	X11-only tools, such as `xdotool`, can't see native Wayland windows, so agents use the tools below.	Describes a limit of X11 tools under Wayland.

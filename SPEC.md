@@ -460,6 +460,126 @@ directory) and writes an image into the local store.
 - **Desktop.** With `OS desktop`, `ap run --gui <agent>` opens the agent's
   desktop in a native window.
 
+## Commands
+
+This section lists every `ap` command. Where another section specifies a
+command, its entry points there.
+
+### ap init
+
+`ap init [dir]` writes an Agentfile into `dir`. [AUTH](#auth),
+[NETWORK](#network), and [POLICY](#policy) say which lines it writes.
+
+### ap build
+
+[Build](#build) specifies `ap build`. `ap build --exe` exports an agent as a
+standalone executable.
+
+### ap update
+
+`ap update [agent]` rewrites `Agentfile.lock` with the versions and refs it
+resolves. [Build](#build) says what it resolves.
+
+### ap fmt
+
+`ap fmt [dir]` formats the Agentfile in `dir`. [Text values](#text-values)
+names a rewrite it makes.
+
+### ap ls
+
+`ap ls` lists the built agents.
+
+### ap inspect
+
+`ap inspect <agent>` shows an agent's layers and its approved grants: shares,
+host environment variables, secrets, git credentials, network policy, and the
+agents it may call. [Grants](#grants) specifies `ap inspect --grants`, and
+[NETWORK](#network) names hosts that it also shows.
+
+### ap rm
+
+`ap rm <agent>` removes an agent and its persisted state. [Build](#build)
+says which layers it frees, and [SHARE](#share) says when it refuses.
+
+### ap run
+
+[Run](#run) specifies `ap run`.
+
+### ap ps
+
+`ap ps` lists the running agents, with their forwarded ports.
+
+### ap attach
+
+`ap attach <run>` attaches to a running agent's terminal.
+
+### ap logs
+
+`ap logs <run>` shows a run's output and its network decisions.
+[Grants](#grants) says what it escapes.
+
+### ap exec
+
+`ap exec <run> <command>` runs a command inside a running agent.
+
+### ap stop
+
+`ap stop <run>` stops a run.
+
+### ap diff
+
+[SHARE](#share) specifies `ap diff`.
+
+### ap apply
+
+[SHARE](#share) specifies `ap apply`.
+
+### ap discard
+
+[SHARE](#share) specifies `ap discard`.
+
+### ap reset
+
+[PERSIST](#persist) specifies `ap reset <agent>`, and [Grants](#grants)
+specifies `ap reset <digest>`. [SHARE](#share) says when it refuses.
+
+### ap secret
+
+`ap secret set`, `ap secret rm`, and `ap secret ls` set, remove, and list the
+secrets in `ap`'s secret store. [SECRET](#secret) says when a run reads them.
+
+### ap acp
+
+`ap acp <agent>` exposes an agent over the Agent Client Protocol.
+
+### ap api
+
+`ap api` serves the control API on a local socket.
+
+### ap push
+
+**Planned.** `ap push` shares an agent through a registry. [AGENT](#agent)
+and [SEAL](#seal) say which layers it leaves out.
+
+### ap pull
+
+**Planned.** `ap pull` fetches an agent from a registry. [Grants](#grants)
+says how a pulled image is approved.
+
+### ap mcp
+
+*Proposed:* `ap mcp` lets apps on your host drive an agent's desktop.
+
+### ap boot
+
+`ap boot [--timeout N] [-- COMMAND...]` boots a bare machine with no agent.
+Without a command, it prints the machine's kernel release and powers off.
+With a command, it runs the command in the machine and exits with its status.
+
+### ap --version
+
+`ap --version` prints the version.
+
 ## Instructions
 
 ### AGENT

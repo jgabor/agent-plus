@@ -122,9 +122,6 @@ desktop in a native window.
 
 ### Core commands
 
-> [!NOTE]
-> The command set is a proposal.
-
 #### Agents
 
 - `ap init [dir]`: create an Agentfile with sensible defaults, network and

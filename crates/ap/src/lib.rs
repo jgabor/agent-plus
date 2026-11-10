@@ -5,6 +5,7 @@ use std::io;
 pub mod boot;
 pub mod fetch;
 pub mod filter;
+pub mod gitignore;
 pub mod paths;
 pub mod store;
 

@@ -2,7 +2,7 @@
 //! Paths section, and opens them without following a symlink swapped in after
 //! the check. The guest side is the `agentfile` crate's.
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -61,48 +61,58 @@ impl HostPath {
     /// fails instead of following it. Read the path only through the handle.
     /// The handle is nonblocking, which matters only for a special file.
     pub fn open(&self) -> io::Result<File> {
-        let names: Vec<&[u8]> = self
+        let (parent, name) = self.open_parent()?;
+        // Nonblocking, so a FIFO can't hang it.
+        self.open_at(&parent, &name, libc::O_RDONLY | libc::O_NONBLOCK)
+    }
+
+    /// Opens the directory that holds the canonical path the way `open`
+    /// does, with only search permission, and returns it with the last
+    /// name, so a caller can look at what is there before opening it. The
+    /// root's name is `.`.
+    pub fn open_parent(&self) -> io::Result<(File, CString)> {
+        let mut names = self
             .path
             .components()
             .filter_map(|component| match component {
                 Component::Normal(name) => Some(name.as_bytes()),
                 // A canonical path holds only the root and names.
                 _ => None,
-            })
-            .collect();
-        let mut file = File::open("/")?;
-        for (index, name) in names.iter().enumerate() {
-            // A directory on the way needs only search permission. The
-            // last component opens nonblocking, so a FIFO can't hang it.
-            let flags = libc::O_CLOEXEC
-                | libc::O_NOFOLLOW
-                | if index + 1 < names.len() {
-                    SEARCH
-                } else {
-                    libc::O_RDONLY | libc::O_NONBLOCK
-                };
-            let name = CString::new(*name).map_err(io::Error::other)?;
-            // SAFETY: the descriptor is open, and the name is a valid C
-            // string that outlives the call.
-            let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
-            if fd < 0 {
-                let error = io::Error::last_os_error();
-                return Err(match error.raw_os_error() {
-                    Some(libc::ELOOP) | Some(libc::ENOTDIR) => io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{} changed after it was checked: {error}",
-                            self.path.display()
-                        ),
-                    ),
-                    _ => with_path(&self.path, error),
-                });
-            }
-            // SAFETY: `openat` returned a new descriptor that nothing else owns.
-            file = unsafe { File::from_raw_fd(fd) };
+            });
+        let last = names.next_back().unwrap_or(b".");
+        let mut dir = File::open("/")?;
+        for name in names {
+            // A directory on the way needs only search permission.
+            dir = self.open_at(&dir, &c_name(name)?, SEARCH)?;
         }
-        Ok(file)
+        Ok((dir, c_name(last)?))
     }
+
+    fn open_at(&self, dir: &File, name: &CStr, flags: libc::c_int) -> io::Result<File> {
+        let flags = flags | libc::O_CLOEXEC | libc::O_NOFOLLOW;
+        // SAFETY: the descriptor is open, and the name is a valid C string
+        // that outlives the call.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::ELOOP) | Some(libc::ENOTDIR) => io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{} changed after it was checked: {error}",
+                        self.path.display()
+                    ),
+                ),
+                _ => with_path(&self.path, error),
+            });
+        }
+        // SAFETY: `openat` returned a new descriptor that nothing else owns.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+}
+
+fn c_name(name: &[u8]) -> io::Result<CString> {
+    CString::new(name).map_err(io::Error::other)
 }
 
 fn canonical(path: &Path) -> io::Result<PathBuf> {

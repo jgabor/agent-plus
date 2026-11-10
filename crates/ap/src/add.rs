@@ -7,12 +7,11 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, OsStr};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 use agentfile::Add;
@@ -175,39 +174,40 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// What the `<src>` itself holds. A special file is skipped.
+    /// What the `<src>` itself holds. It is looked at through the handle of
+    /// its directory before it is opened, so a special file is skipped
+    /// without opening it, and a symlink swapped in for it is refused.
     fn top(&mut self) -> io::Result<Option<Entry>> {
-        let file = match self.host.open() {
-            Ok(file) => file,
-            // A socket can't be opened. If something was swapped in on the
-            // way to it, this skips it instead of failing, and reads nothing.
-            Err(_)
-                if fs::symlink_metadata(self.host.path())
-                    .is_ok_and(|metadata| metadata.file_type().is_socket()) =>
-            {
-                self.skip(b"");
-                return Ok(None);
-            }
-            Err(error) => return Err(error),
-        };
-        let stat = fstat(&file).map_err(|error| self.error(b"", error))?;
-        let content = match stat.st_mode & libc::S_IFMT {
+        let (parent, name) = self.host.open_parent()?;
+        let stat = stat_at(&parent, &name).map_err(|error| self.error(b"", error))?;
+        match stat.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
-                let data = read_all(file, &stat).map_err(|error| self.error(b"", error))?;
-                Some(Entry::File(permissions(&stat), data))
+                let read = || {
+                    let file = open_at(&parent, &name, libc::O_NONBLOCK | libc::O_NOCTTY)?;
+                    let stat = same(&file, &stat)?;
+                    Ok(Entry::File(permissions(&stat), read_all(file, &stat)?))
+                };
+                read().map(Some).map_err(|error| self.error(b"", error))
             }
             libc::S_IFDIR => {
+                let dir = open_at(&parent, &name, libc::O_DIRECTORY)
+                    .and_then(|dir| Ok((same(&dir, &stat)?, dir)));
+                let (stat, dir) = dir.map_err(|error| self.error(b"", error))?;
                 // A file named explicitly is copied, so only a directory
                 // reads the `.gitignore` files.
                 self.ignore = Some(Gitignore::default());
-                Some(self.dir(&file, permissions(&stat), &mut Vec::new(), false)?)
+                self.dir(&dir, permissions(&stat), &mut Vec::new(), false)
+                    .map(Some)
             }
+            libc::S_IFLNK => Err(self.error(
+                b"",
+                io::Error::other("it changed after it was checked, to a symlink"),
+            )),
             _ => {
                 self.skip(b"");
-                None
+                Ok(None)
             }
-        };
-        Ok(content)
+        }
     }
 
     /// The entries of the directory open as `dir`, which is `rel` below the

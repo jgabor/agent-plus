@@ -551,3 +551,49 @@ fn a_special_file_behind_a_swapped_directory_is_an_error() {
         "{error}"
     );
 }
+
+#[test]
+fn a_socket_behind_a_swapped_directory_is_an_error() {
+    let s = Scratch::new("swapped-socket");
+    write(&s.context.join("data/sock"), "placeholder");
+    fs::create_dir_all(s.root.join("elsewhere")).unwrap();
+    let _socket = UnixListener::bind(s.root.join("elsewhere/sock")).unwrap();
+    let host = s.host("./data/sock");
+    fs::rename(s.context.join("data"), s.context.join("old")).unwrap();
+    symlink(s.root.join("elsewhere"), s.context.join("data")).unwrap();
+    let result = Layer::read(&add("./data/sock", None), &host, "/home/agent/sock");
+    let Err(error) = result else {
+        panic!("a swapped directory was followed");
+    };
+    assert!(
+        error.to_string().contains("changed after it was checked"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_named_special_file_nobody_can_read_is_skipped() {
+    let s = Scratch::new("unreadable-fifo");
+    mkfifo(&s.context.join("pipe"));
+    chmod(&s.context.join("pipe"), 0o000);
+    let layer = s.read("./pipe", "/home/agent/pipe");
+    assert_eq!(layer.warnings.len(), 1, "{:?}", layer.warnings);
+}
+
+#[test]
+fn a_symlink_swapped_in_for_a_named_file_is_an_error() {
+    let s = Scratch::new("swapped-file");
+    write(&s.context.join("a.txt"), "a");
+    write(&s.root.join("secret.txt"), "secret");
+    let host = s.host("./a.txt");
+    fs::remove_file(s.context.join("a.txt")).unwrap();
+    symlink(s.root.join("secret.txt"), s.context.join("a.txt")).unwrap();
+    let result = Layer::read(&add("./a.txt", None), &host, "/home/agent/a.txt");
+    let Err(error) = result else {
+        panic!("a swapped symlink was followed");
+    };
+    assert!(
+        error.to_string().contains("changed after it was checked"),
+        "{error}"
+    );
+}

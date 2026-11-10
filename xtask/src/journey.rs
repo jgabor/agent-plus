@@ -22,6 +22,12 @@ struct Step {
     spend: bool,
 }
 
+/// A named group of steps, and the `ap` commands it delivers.
+pub struct Milestone {
+    pub name: String,
+    pub commands: Vec<String>,
+}
+
 /// What happened to one step: `pass`, `fail`, or `skip`.
 pub struct Outcome {
     pub id: i64,
@@ -53,7 +59,7 @@ pub fn outcomes(root: &Path) -> Result<Vec<Outcome>, Problem> {
 }
 
 /// The milestones, in roadmap order.
-pub fn milestones(root: &Path) -> Result<Vec<String>, Problem> {
+pub fn milestones(root: &Path) -> Result<Vec<Milestone>, Problem> {
     Ok(read(root)?.0)
 }
 
@@ -68,7 +74,8 @@ pub fn left_out(root: &Path) -> Result<usize, Problem> {
     Ok(out.len())
 }
 
-fn tally(outcomes: &[Outcome]) -> (usize, usize) {
+/// How many of these steps pass, and how many there are.
+pub fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     let passing = outcomes.iter().filter(|o| o.state == "pass").count();
     (passing, outcomes.len())
 }
@@ -105,12 +112,12 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
 }
 
 /// The milestones in the file's order, and the steps in the order of their ids.
-fn read(root: &Path) -> Result<(Vec<String>, Vec<Step>), Problem> {
+fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
     let text = fs::read_to_string(root.join(JOURNEY_FILE))
         .map_err(|e| Problem(format!("couldn't read {JOURNEY_FILE}: {e}")))?;
     let tables = toml::arrays_of_tables(&text, &["milestone", "step"])
         .map_err(|e| Problem(format!("{JOURNEY_FILE}: {e}")))?;
-    let mut milestones = Vec::new();
+    let mut milestones: Vec<Milestone> = Vec::new();
     let mut commands = HashSet::new();
     let mut steps = BTreeMap::new();
     for (kind, table) in tables {
@@ -161,14 +168,14 @@ fn read(root: &Path) -> Result<(Vec<String>, Vec<Step>), Problem> {
                 )));
             }
         }
-        if !milestones.contains(&step.milestone) {
+        if !milestones.iter().any(|known| known.name == step.milestone) {
             return Err(Problem(format!(
                 "{JOURNEY_FILE}: step {} is in the milestone `{}`, which has no `[[milestone]]` table",
                 step.id, step.milestone
             )));
         }
     }
-    for name in &milestones {
+    for Milestone { name, .. } in &milestones {
         if !steps.values().any(|step| step.milestone == *name) {
             return Err(Problem(format!(
                 "{JOURNEY_FILE}: the milestone `{name}` has no step"
@@ -178,18 +185,17 @@ fn read(root: &Path) -> Result<(Vec<String>, Vec<Step>), Problem> {
     Ok((milestones, steps.into_values().collect()))
 }
 
-/// A milestone's name. Its commands are only checked here: no milestone
-/// repeats a name, and no command is listed twice in the file.
+/// No milestone repeats a name, and no command is listed twice in the file.
 fn read_milestone(
     table: &toml::Table,
-    milestones: &[String],
+    milestones: &[Milestone],
     commands: &mut HashSet<String>,
-) -> Result<String, Problem> {
+) -> Result<Milestone, Problem> {
     let bad = |what: String| Problem(format!("{JOURNEY_FILE}: {what}"));
     let name = table
         .str("name")
         .ok_or_else(|| bad("a milestone has no `name`".to_string()))?;
-    if milestones.iter().any(|known| known == name) {
+    if milestones.iter().any(|known| known.name == name) {
         return Err(bad(format!("the milestone `{name}` appears twice")));
     }
     let listed = table.strs("commands").ok_or_else(|| {
@@ -197,12 +203,15 @@ fn read_milestone(
             "the milestone `{name}` has no string array `commands`"
         ))
     })?;
-    for command in listed {
+    for command in &listed {
         if !commands.insert(command.to_string()) {
             return Err(bad(format!("the command `{command}` is listed twice")));
         }
     }
-    Ok(name.to_string())
+    Ok(Milestone {
+        name: name.to_string(),
+        commands: listed.into_iter().map(str::to_string).collect(),
+    })
 }
 
 /// Builds a statically linked `ap` for release from `root`, so the same file

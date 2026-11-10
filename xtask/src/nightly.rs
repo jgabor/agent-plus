@@ -1,10 +1,11 @@
 //! `cargo xtask nightly`: the slow checks on `main`, then the report.
 
 use crate::forge::{Forge, Gh};
+use crate::journey::Outcome;
 use crate::report::ISSUE_TITLE;
 use crate::{
     Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, lock, mutation, report,
-    workspace,
+    roadmap, workspace,
 };
 use std::path::Path;
 
@@ -30,7 +31,8 @@ pub fn run() -> Result<Verdict, Problem> {
     checks.push(("t2", t2(&root)));
     // No unattended run may spend money until HARNESS.md sets a limit.
     checks.push(("t3", SKIP));
-    checks.push(("journey", state(journey_holds(&root))));
+    let walked = journey::outcomes(&root);
+    checks.push(("journey", state(journey_holds(&root, &walked))));
     checks.push((
         "fuzz",
         fuzz::run(&root, &hold).transpose().map_or(SKIP, state),
@@ -54,8 +56,15 @@ pub fn run() -> Result<Verdict, Problem> {
     } else {
         Ok(())
     };
+    // The roadmap shows the journey this night ran. A journey that couldn't
+    // run has already failed its check.
+    let written = match &walked {
+        Ok(outcomes) => roadmap::write(&root, outcomes),
+        Err(_) => Ok(()),
+    };
     posted?;
     responded?;
+    written?;
     for (name, state) in &checks {
         println!("{state} {name}");
     }
@@ -112,8 +121,11 @@ fn t2(root: &Path) -> &'static str {
 
 /// A step that isn't built yet fails today, so what counts is a count lower
 /// than the ledger's.
-fn journey_holds(root: &Path) -> Result<Verdict, Problem> {
-    let (passing, steps) = journey::count(root)?;
+fn journey_holds(root: &Path, walked: &Result<Vec<Outcome>, Problem>) -> Result<Verdict, Problem> {
+    let outcomes = walked
+        .as_ref()
+        .map_err(|Problem(message)| Problem(message.clone()))?;
+    let (passing, steps) = journey::tally(outcomes);
     println!("journey {passing} of {steps}");
     let floor = ledger::at_head(root)?.map_or(0, |record| record.passing);
     if passing < floor {

@@ -1885,7 +1885,7 @@ fn land_takes_one_pr() {
 /// One row of `gh pr list`.
 fn listed(number: u64, branch: &str, head: &str, closes: u64, fork: bool) -> String {
     format!(
-        "{{\"number\":{number},\"url\":\"https://github.com/o/r/pull/{number}\",\"isCrossRepository\":{fork},\"headRefName\":{},\"headRefOid\":{},\"closingIssuesReferences\":[{{\"number\":{closes},\"url\":\"https://github.com/o/r/issues/{closes}\"}}]}}",
+        "{{\"number\":{number},\"title\":\"t\",\"labels\":[],\"url\":\"https://github.com/o/r/pull/{number}\",\"isCrossRepository\":{fork},\"headRefName\":{},\"headRefOid\":{},\"closingIssuesReferences\":[{{\"number\":{closes},\"url\":\"https://github.com/o/r/issues/{closes}\"}}]}}",
         quoted(branch),
         quoted(head)
     )

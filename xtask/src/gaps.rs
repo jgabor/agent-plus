@@ -28,6 +28,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     // order that has a step still to pass.
     let milestone = journey::milestones(&root)?
         .into_iter()
+        .map(|milestone| milestone.name)
         .find(|name| steps.iter().any(|step| step.milestone == *name));
     let missed = bench::missed(&budgets, &values);
     if json {

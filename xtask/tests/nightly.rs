@@ -20,7 +20,15 @@ const CHECKS_PASSED: &str = "## Checks\n\n- pass bench\n- pass gate\n- skip t2\n
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
-  "issue list") cat "$(dirname "$0")/issues.json" ;;
+  "issue list")
+    case "$*" in
+      *"--state all"*) cat "$(dirname "$0")/all-issues.json" 2>/dev/null || echo '[]' ;;
+      *) cat "$(dirname "$0")/issues.json" ;;
+    esac ;;
+  "pr list") echo '[]' ;;
+  "issue edit")
+    if [ -e "$(dirname "$0")/no-edits" ]; then echo "edits are off" >&2; exit 1; fi
+    cat > "$(dirname "$0")/edited-$3" ;;
   "issue view") cat "$(dirname "$0")/issue.json" ;;
   "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
@@ -309,6 +317,24 @@ impl Repo {
         }
         self.commit("Touch crates", 1);
         self.sync();
+    }
+
+    /// Makes this the one issue with the roadmap's title, open or closed.
+    fn set_roadmap_issue(&self, state: &str, body: &str) {
+        fs::write(
+            self.bin.join("all-issues.json"),
+            format!(
+                "[{{\"number\":158,\"state\":\"{state}\",\"title\":\"Roadmap\",\"body\":{body:?},\"labels\":[],\"url\":\"https://github.com/o/r/issues/158\",\"parent\":null}}]"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn edits(&self) -> Vec<String> {
+        let edits = self.calls().into_iter();
+        edits
+            .filter(|call| call.starts_with("issue edit"))
+            .collect()
     }
 
     fn calls(&self) -> Vec<String> {
@@ -649,6 +675,90 @@ fn nightly_pins_a_report_issue_that_lost_its_pin() {
     assert!(calls.contains(&"issue pin 12".to_string()), "{calls:?}");
     assert!(
         calls.contains(&"issue comment 12 --body-file -".to_string()),
+        "{calls:?}"
+    );
+}
+
+/// The roadmap issue's body is what `cargo xtask roadmap` prints, from the
+/// same run of the journey that the night's check used.
+#[test]
+fn nightly_writes_the_roadmap_to_its_issue() {
+    let repo = Repo::new("roadmap-written");
+    repo.set_roadmap_issue("OPEN", "typed by hand");
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(repo.edits(), ["issue edit 158 --body-file -"]);
+    let written = fs::read_to_string(repo.bin.join("edited-158")).unwrap();
+    assert!(
+        written.starts_with("The nightly job writes this issue from `cargo xtask roadmap`"),
+        "{written}"
+    );
+    assert!(written.contains("\njourney 1 of 4\n"), "{written}");
+    assert!(
+        written.contains(
+            "- [x] Step 1: first\n- [ ] Step 2: model (skipped)\n- [ ] Step 3: after the model (skipped)\n- [ ] Step 4: last (fails)\n"
+        ),
+        "{written}"
+    );
+    assert_eq!(stdout(&repo.xtask(&["roadmap"])), written);
+}
+
+/// Writing the same roadmap again would only add an edit to the issue.
+#[test]
+fn nightly_leaves_an_unchanged_roadmap_alone() {
+    let repo = Repo::new("roadmap-unchanged");
+    let printed = stdout(&repo.xtask(&["roadmap"]));
+    assert!(printed.contains("journey 1 of 4"), "{printed}");
+    // GitHub's website saves line ends as `\r\n`, and may drop the last one.
+    repo.set_roadmap_issue("OPEN", printed.replace('\n', "\r\n").trim_end());
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(repo.edits(), Vec::<String>::new());
+}
+
+/// Closing the roadmap issue is how the owner turns the roadmap off.
+#[test]
+fn nightly_writes_no_roadmap_without_an_open_issue_for_it() {
+    let repo = Repo::new("roadmap-closed");
+    repo.set_roadmap_issue("CLOSED", "typed by hand");
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let calls = repo.calls();
+    assert_eq!(repo.edits(), Vec::<String>::new());
+    assert!(
+        !calls.iter().any(|call| call.contains("--title Roadmap")),
+        "{calls:?}"
+    );
+    assert!(
+        !calls.iter().any(|call| call.starts_with("pr list")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_roadmap_that_cant_be_written_is_an_error() {
+    let repo = Repo::new("roadmap-refused");
+    repo.set_roadmap_issue("OPEN", "typed by hand");
+    fs::write(repo.bin.join("no-edits"), "").unwrap();
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("edits are off"),
+        "{}",
+        stderr(&output)
+    );
+    // The night's result is still on the commit, and the report still went out.
+    let status = format!("statuses/{head} -f state=success -f context=xtask/nightly");
+    let calls = repo.calls();
+    assert!(
+        calls.iter().any(|call| call.ends_with(&status)),
+        "{calls:?}"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call.starts_with("issue comment 77")),
         "{calls:?}"
     );
 }

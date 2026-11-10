@@ -23,7 +23,11 @@ if ! flock -n "$d/../repo/.git/xtask/nightly.lock" true 2>/dev/null; then
   echo "$1 $2" >> "$d/held"
 fi
 case "$1 $2" in
-  "issue list") cat "$d/issues.json" ;;
+  "issue list")
+    case "$*" in
+      *"--state all"*) echo '[]' ;;
+      *) cat "$d/issues.json" ;;
+    esac ;;
   "issue view") cat "$d/issue.json" ;;
   "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create")

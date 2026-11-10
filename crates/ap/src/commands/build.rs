@@ -1,15 +1,17 @@
-//! `ap build [--strict] [--replace] [-t name] [dir]`, from SPEC.md's Build
-//! section. It checks the Agentfile against the host, turns each `ADD` and the
+//! `ap build [--strict] [--replace] [--approve=file] [-t name] [dir]`, from
+//! SPEC.md's Build section. It checks the Agentfile against the host, asks
+//! you to approve its grants as `ap::approval` says, turns each `ADD` and the
 //! harness configuration into a layer, and records the agent in the store. A
 //! layer whose key an agent already recorded is a hit, and isn't built again.
 //!
 //! Nothing is fetched yet, so the instructions that need a fetch fail, and
-//! no lockfile is written. Grants aren't approved here.
+//! no lockfile is written.
 
-use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Cursor, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use agentfile::{
@@ -33,17 +35,21 @@ pub struct Args {
     strict: bool,
     /// Whether the build may take the name over from another directory.
     replace: bool,
+    /// The file from `--approve=<file>`.
+    approve: Option<PathBuf>,
     /// The name from `-t`.
     name: Option<String>,
     /// The directory, or `None` for the current one.
     dir: Option<PathBuf>,
 }
 
-/// Reads `ap build`'s arguments: `--strict`, `--replace`, `-t <name>`, and a
-/// directory, each at most once, in any order. Any other flag is bad usage.
+/// Reads `ap build`'s arguments: `--strict`, `--replace`, `--approve=<file>`,
+/// `-t <name>`, and a directory, each at most once, in any order. Any other
+/// flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut strict = false;
     let mut replace = false;
+    let mut approve = None;
     let mut name = None;
     let mut dir = None;
     let mut args = args.iter();
@@ -52,6 +58,11 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
             strict = true;
         } else if arg == "--replace" && !replace {
             replace = true;
+        } else if let Some(file) = arg.as_encoded_bytes().strip_prefix(b"--approve=")
+            && !file.is_empty()
+            && approve.is_none()
+        {
+            approve = Some(PathBuf::from(OsStr::from_bytes(file)));
         } else if arg == "-t" && name.is_none() {
             name = Some(args.next()?.to_str()?.to_string());
         } else if arg.as_encoded_bytes().starts_with(b"-") || dir.is_some() {
@@ -63,6 +74,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
     Some(Args {
         strict,
         replace,
+        approve,
         name,
         dir,
     })
@@ -115,13 +127,21 @@ fn build(args: &Args) -> Result<(), String> {
         None => (PathBuf::from("Agentfile"), PathBuf::from(".")),
     };
     let shown = path.display();
-    let bytes = fs::read(&path).map_err(|error| match error.kind() {
+    // The approval is kept with the canonical path, so the Agentfile is read
+    // from there, and not through a symlink swapped in since.
+    let missing = |error: io::Error| match error.kind() {
         io::ErrorKind::NotFound => match &args.dir {
             Some(dir) => format!("ap: no Agentfile in {}", dir.display()),
             None => "ap: no Agentfile in the current directory".to_string(),
         },
-        _ => format!("ap: {shown}: {error}"),
-    })?;
+        _ => format!("ap: {error}"),
+    };
+    let agentfile = HostPath::resolve("Agentfile", &context, Path::new("/")).map_err(missing)?;
+    let mut bytes = Vec::new();
+    agentfile
+        .open()
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| format!("ap: {shown}: {error}"))?;
     let source = String::from_utf8(bytes).map_err(|_| format!("ap: {shown} isn't UTF-8 text"))?;
 
     let context = context
@@ -162,7 +182,12 @@ fn build(args: &Args) -> Result<(), String> {
         lines.join("\n")
     };
     let instructions = agentfile::parse(&source).map_err(report)?;
-    let (planned, warnings) = plan(&instructions, &context, &home, dir_name).map_err(report)?;
+    let mut resolved = Resolved {
+        context: context.clone(),
+        home: home.clone(),
+        paths: HashMap::new(),
+    };
+    let (planned, warnings) = plan(&instructions, &mut resolved, dir_name).map_err(report)?;
     if args.strict && !warnings.is_empty() {
         return Err(report(warnings));
     }
@@ -181,6 +206,23 @@ fn build(args: &Args) -> Result<(), String> {
             old.directory
         ));
     }
+    // The grants come from the resolutions the layers are made from, so a
+    // path that changes on the host can't put what you didn't approve in a
+    // layer.
+    let grants = ap::approval::grants(&instructions, |text| resolved.get(text)).map_err(report)?;
+    let approver = match &args.approve {
+        Some(file) => ap::approval::Approver::File(file),
+        None => ap::approval::Approver::Terminal,
+    };
+    let approvals = ::store::Approvals::new(&root);
+    ap::approval::approve(
+        &approvals,
+        agentfile.path(),
+        &shown.to_string(),
+        &grants,
+        approver,
+    )?;
+
     let declared: Vec<::store::Declared> = instructions
         .iter()
         .filter(|instruction| instruction.text.is_none())
@@ -197,7 +239,7 @@ fn build(args: &Args) -> Result<(), String> {
         let current = match planned.take() {
             Some(current) => current,
             None => {
-                plan(&instructions, &context, &home, dir_name)
+                plan(&instructions, &mut resolved, dir_name)
                     .map_err(report)?
                     .0
             }
@@ -289,13 +331,32 @@ fn store_layers(
     Ok((built, lines))
 }
 
+/// Each host path a build resolved, by its text, so that approval and every
+/// plan of the layers use the same resolution. A layer opens its path
+/// without following a symlink swapped in since.
+struct Resolved {
+    context: PathBuf,
+    home: PathBuf,
+    paths: HashMap<String, Result<HostPath, String>>,
+}
+
+impl Resolved {
+    /// Resolves `text` as [`HostPath::resolve`] does, the first time only.
+    fn get(&mut self, text: &str) -> io::Result<HostPath> {
+        let (context, home) = (&self.context, &self.home);
+        let resolved = self.paths.entry(text.to_string()).or_insert_with(|| {
+            HostPath::resolve(text, context, home).map_err(|error| error.to_string())
+        });
+        resolved.clone().map_err(io::Error::other)
+    }
+}
+
 /// Checks the Agentfile against the host, and plans its layers: one for each
 /// `ADD`, in line order, and the harness configuration last. It returns
 /// every error it finds, or the layers and the warnings.
 fn plan(
     instructions: &[Instruction],
-    context: &Path,
-    home: &Path,
+    resolved: &mut Resolved,
     dir_name: &str,
 ) -> Result<(Vec<Planned>, Vec<Error>), Vec<Error>> {
     let mut errors = Vec::new();
@@ -330,7 +391,7 @@ fn plan(
         text_line.get_or_insert(line);
         let value = match text {
             Text::Literal(value) => value.as_bytes().to_vec(),
-            Text::Path(path) => match read_text(path, context, home) {
+            Text::Path(path) => match resolved.get(path).and_then(|host| read_text(&host)) {
                 Ok(value) => value,
                 Err(error) => {
                     errors.push(fail(line, error.to_string()));
@@ -356,7 +417,8 @@ fn plan(
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
         };
-        let layer = HostPath::resolve(&add.source, context, home)
+        let layer = resolved
+            .get(&add.source)
             .and_then(|host| add::Layer::read(add, &host, &guest.path));
         match layer {
             Ok(layer) => {
@@ -379,7 +441,7 @@ fn plan(
         }
     }
     for share in &files.share {
-        if let Err(error) = HostPath::resolve(&share.source, context, home) {
+        if let Err(error) = resolved.get(&share.source) {
             errors.push(fail(share.line, error.to_string()));
         }
     }
@@ -407,8 +469,7 @@ fn take<T>(errors: &mut Vec<Error>, result: Result<T, Vec<Error>>) -> Option<T> 
 
 /// Reads the file a `SYSTEM` or `PROMPT` path names, through the handle that
 /// its checked path opens.
-fn read_text(path: &str, context: &Path, home: &Path) -> io::Result<Vec<u8>> {
-    let host = HostPath::resolve(path, context, home)?;
+fn read_text(host: &HostPath) -> io::Result<Vec<u8>> {
     let mut value = Vec::new();
     host.open()?.read_to_end(&mut value).map_err(|error| {
         io::Error::new(error.kind(), format!("{}: {error}", host.path().display()))

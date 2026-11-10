@@ -1,5 +1,5 @@
-//! The local store's layers, the zstd frames they're kept in, and the agents
-//! built from them, in pure Rust.
+//! The local store's layers, the zstd frames they're kept in, the agents
+//! built from them, and the grants you approved, in pure Rust.
 //!
 //! The encoder is `ruzstd`'s, which only has a mode close to zstd's level 1.
 //! A frame it writes is a standard zstd frame, and any zstd decoder reads it.
@@ -10,9 +10,11 @@ use ruzstd::decoding::StreamingDecoder;
 use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 
 mod agents;
+mod approvals;
 mod layers;
 
 pub use agents::{Agent, Agents, Declared, Layer, valid_name};
+pub use approvals::Approvals;
 pub use layers::Layers;
 
 /// Compresses `data` into one zstd frame.

@@ -336,3 +336,53 @@ fn each_widening_is_listed() {
         ]
     );
 }
+
+// spec(Grants): A later build that **widens** a grant asks again and shows what changed.
+#[test]
+fn each_widening_shows_as_one_line() {
+    let approved = "SHARE ~/a /a\nSECRET T @a.com\nSECRET S @s.com\n\
+                    NETWORK -\nNETWORK -evil.com\nPOLICY -\n";
+    let now = "SHARE ~/a /a rw\nSHARE ~/b /b\nENV USER $USER\nSECRET T @a.com @b.com visible\n\
+               SEAL S @s.com\nSEAL N @n.com\nAUTH token\nNETWORK +\nNETWORK +github.com\n\
+               POLICY +\nPOLICY -writer\n";
+    let lines: Vec<String> = widened(approved, now)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "PATH /home/u/a rw, which was read-only",
+            "PATH /home/u/b",
+            "VARIABLE USER",
+            "T becomes visible",
+            "T may go to @b.com",
+            "SEAL N @n.com",
+            "S moves from SECRET to SEAL",
+            "AUTH token",
+            "NETWORK + replaces NETWORK -",
+            "NETWORK +github.com",
+            "NETWORK -evil.com is gone",
+            "POLICY + replaces POLICY -",
+        ]
+    );
+}
+
+// spec(Grants): Approval prompts escape control characters and bidirectional overrides in paths, names, and hosts, so a grant shows as it is.
+#[test]
+fn a_widening_escapes_what_would_hide() {
+    let path = Widening::Path(PathGrant {
+        path: "/home/u/\u{202e}txt.sh\n".to_string(),
+        write: false,
+    });
+    assert_eq!(path.to_string(), "PATH /home/u/\\u{202e}txt.sh\\u{a}");
+    let host = Widening::Host {
+        secret: "T".to_string(),
+        host: "a.com\u{1b}[2K".to_string(),
+    };
+    assert_eq!(host.to_string(), "T may go to @a.com\\u{1b}[2K");
+    assert_eq!(
+        Widening::Call("re viewer".to_string()).to_string(),
+        "may call \"re viewer\""
+    );
+}

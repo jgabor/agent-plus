@@ -321,6 +321,58 @@ impl Grants {
     }
 }
 
+/// One line that shows what widened, with its paths, names, and hosts
+/// printed as the text form prints them, so each shows as it is.
+impl fmt::Display for Widening {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Widening::Path(path) if path.write => write!(f, "PATH {} rw", printed(&path.path)),
+            Widening::Path(path) => write!(f, "PATH {}", printed(&path.path)),
+            Widening::Write(path) => write!(f, "PATH {} rw, which was read-only", printed(path)),
+            Widening::Variable(name) => write!(f, "VARIABLE {}", printed(name)),
+            Widening::Secret { secret, sealed } => {
+                write!(
+                    f,
+                    "{} {}",
+                    if *sealed { "SEAL" } else { "SECRET" },
+                    printed(&secret.name)
+                )?;
+                for host in &secret.hosts {
+                    write!(f, " {}", printed(&format!("@{host}")))?;
+                }
+                if secret.visible {
+                    write!(f, " visible")?;
+                }
+                Ok(())
+            }
+            Widening::Host { secret, host } => write!(
+                f,
+                "{} may go to {}",
+                printed(secret),
+                printed(&format!("@{host}"))
+            ),
+            Widening::Visible(name) => write!(f, "{} becomes visible", printed(name)),
+            Widening::Sealed(name) => write!(f, "{} moves from SECRET to SEAL", printed(name)),
+            Widening::Auth(auth) => write!(
+                f,
+                "AUTH {}",
+                match auth {
+                    Auth::Key => "key",
+                    Auth::Token => "token",
+                    Auth::Login => "login",
+                }
+            ),
+            Widening::Allow(rule) => write!(f, "NETWORK {}", printed(&rule_text(rule))),
+            Widening::Unblock(rule) => {
+                write!(f, "NETWORK {} is gone", printed(&rule_text(rule)))
+            }
+            Widening::Open => write!(f, "NETWORK + replaces NETWORK -"),
+            Widening::CallAny => write!(f, "POLICY + replaces POLICY -"),
+            Widening::Call(name) => write!(f, "may call {}", printed(name)),
+        }
+    }
+}
+
 impl fmt::Display for Grants {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut line = |name: &str, arguments: &[&str]| {

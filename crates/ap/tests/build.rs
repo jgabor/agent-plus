@@ -39,8 +39,16 @@ impl Scratch {
         dir
     }
 
-    /// Runs `ap` in `dir`, with only `HOME` in its environment.
+    /// Runs `ap` in `dir`, with only `HOME` in its environment. A build
+    /// approves exactly the grants its Agentfile asks for, since approval
+    /// has tests of its own.
     fn ap(&self, dir: &Path, args: &[&str]) -> Output {
+        let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        if args.first().is_some_and(|command| command == "build")
+            && let Some(file) = self.approval(dir, &args[1..])
+        {
+            args.push(format!("--approve={}", file.display()));
+        }
         Command::new(env!("CARGO_BIN_EXE_ap"))
             .args(args)
             .current_dir(dir)
@@ -48,6 +56,33 @@ impl Scratch {
             .env("HOME", &self.home)
             .output()
             .unwrap()
+    }
+
+    /// Writes the grants that the Agentfile `ap build` would read asks for,
+    /// and returns the file, or `None` if they can't be read.
+    fn approval(&self, dir: &Path, args: &[String]) -> Option<PathBuf> {
+        let mut target = None;
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            if arg == "-t" {
+                args.next()?;
+            } else if !arg.starts_with('-') {
+                target = Some(dir.join(arg));
+            }
+        }
+        let context = target
+            .unwrap_or_else(|| dir.to_path_buf())
+            .canonicalize()
+            .ok()?;
+        let source = fs::read_to_string(context.join("Agentfile")).ok()?;
+        let instructions = agentfile::parse(&source).ok()?;
+        let grants = ap::approval::grants(&instructions, |text| {
+            ap::paths::HostPath::resolve(text, &context, &self.home)
+        })
+        .ok()?;
+        let file = self.root.join("approved-grants");
+        fs::write(&file, grants.to_string()).unwrap();
+        Some(file)
     }
 
     /// Runs `ap build` in `dir`, and fails the test unless it exits 0.
@@ -252,7 +287,8 @@ fn the_usage_message_lists_build() {
     let output = scratch.ap(&scratch.root, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("ap build [--strict] [--replace] [-t name] [dir]"),
+        stderr(&output)
+            .contains("ap build [--strict] [--replace] [--approve=file] [-t name] [dir]"),
         "{}",
         stderr(&output)
     );

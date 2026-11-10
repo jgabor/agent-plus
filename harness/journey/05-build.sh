@@ -16,8 +16,10 @@ EOF
 echo "Be careful." >notes/system.md
 echo "one" >notes/data
 echo "fn main() {}" >notes/src/main.rs
+# The approval of these grants is step 6's.
+printf 'NETWORK +\nPOLICY +\n' >grants
 
-ap build notes >first
+ap build --approve=grants notes >first
 if [ "$(grep -c '^built ' first)" -ne 3 ] || ! grep -qx 'agent notes' first; then
   echo "the first build didn't build three layers:" >&2
   cat first >&2
@@ -39,7 +41,7 @@ snapshot() {
 }
 
 snapshot >before
-ap build notes >second
+ap build --approve=grants notes >second
 if [ "$(grep -c '^hit ' second)" -ne 3 ] || grep -q '^built ' second; then
   echo "a rebuild with nothing changed wasn't a hit for every layer:" >&2
   cat second >&2
@@ -53,7 +55,7 @@ if ! cmp -s before after; then
 fi
 
 echo "two" >notes/data
-ap build notes >third
+ap build --approve=grants notes >third
 if [ "$(grep -c '^built ' third)" -ne 1 ] || ! grep -q '^built ADD ./data$' third; then
   echo "changing one added file didn't rebuild only its layer:" >&2
   cat third >&2

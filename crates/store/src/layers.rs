@@ -132,7 +132,7 @@ pub(crate) fn sync_up_from(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn sha256(data: &[u8]) -> String {
+pub(crate) fn sha256(data: &[u8]) -> String {
     let mut hash = Sha256Context::new();
     hash.update(data);
     hash.finish().iter().map(|b| format!("{b:02x}")).collect()

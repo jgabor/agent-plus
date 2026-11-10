@@ -1,5 +1,5 @@
-//! The boot API that `ap boot` uses, on a real guest. The journey covers `ap`
-//! itself as the init, because that needs its release build.
+//! The boot API that `ap boot` uses, on a real guest. `ap_boot_command` runs
+//! `ap` itself as the init.
 
 use ap::boot::{self, Error, Guest, Report};
 use std::fs;

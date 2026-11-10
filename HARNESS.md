@@ -70,7 +70,7 @@ clean machine:
 
 ```
 owner -> labeled parent issue
-planner: score gaps -> child issues
+planner: score gaps -> sub-issues
 dispatcher: claimable issues -> one worker per free slot
 worker: worktree -> check -> change -> gate -> review -> PR
 merge slot: rebase -> gate -> ledger record -> squash merge -> main
@@ -414,13 +414,13 @@ base, or zero if there is none.
 ### Issue and status comment
 
 The issue body and status comment follow [AGENTS.md](AGENTS.md#issues). `xtask`
-reads the `Touches`, `Blocked by`, and `Part of` lines, and the `State` and
-`Lease until` fields.
+reads the `Touches` and `Blocked by` lines, the parent that GitHub records for
+a sub-issue, and the `State` and `Lease until` fields.
 
 - The paths in `Touches` are its backticked words. Two issues overlap when one
   path is a prefix of the other.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
-  issue that another issue names in `Part of`.
+  issue that GitHub lists another issue under, as a sub-issue.
 - A parent that delivers a milestone names it on a line of its own,
   `Milestone: <name>.`. The planner reads that line, and `xtask` doesn't.
 - `xtask` reads status comments only from the repository owner's account.
@@ -500,7 +500,7 @@ claim race exits.
 
 Runs every planning period, and stops at once if the issues in progress and
 the issues `cargo xtask next` lists already fill the worker slots. The planner
-reads `cargo xtask gaps`, and files child issues under a parent. Each child
+reads `cargo xtask gaps`, and files sub-issues under a parent. Each sub-issue
 inherits its parent's `auto:*` label.
 
 The planner works on one milestone at a time: the first on the roadmap with a

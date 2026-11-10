@@ -63,7 +63,7 @@ work starts from this label, so treat it as the owner's written permission.
 | `auto:pr` | Work it to a PR that passes the merge gate, and run `cargo xtask prepare <pr>`. The owner merges with any merge button |
 | `auto:merge` | Work it through to merged, once the merge gate passes |
 
-- Only the owner adds these labels. The one exception: a child issue you file
+- Only the owner adds these labels. The one exception: a sub-issue you file
   under a parent inherits the parent's label. Never widen a label.
 - Both labels let you push your own branch, force-push it with
   `--force-with-lease` after a rebase, and run the tests the work needs.
@@ -74,11 +74,13 @@ work starts from this label, so treat it as the owner's written permission.
 ### Issues
 
 One issue is one problem and one PR. If the work won't fit in one PR that can
-be reviewed in a sitting, make a parent issue that lists its children as a
-checklist. A parent can run for days. A child should take hours.
+be reviewed in a sitting, make a parent issue, and file each part as a GitHub
+sub-issue of it (`gh issue create --parent <n>`). That link is the only record
+of which issue belongs to which. A parent can run for days. A sub-issue should
+take hours.
 
 Search before filing. The title states the outcome. The body has three
-sections and two optional lines:
+sections and one optional line:
 
 ```markdown
 ## Goal
@@ -90,15 +92,15 @@ The checks that prove it: SPEC sentences, journey steps, or a budget.
 ## Touches
 The crates or paths this will change.
 
-Part of #12.
 Blocked by #34.
 ```
 
 A parent that delivers a milestone names it on a line of its own, such as
 `Milestone: Author.`.
 
-If you find other work along the way, file a new issue with no `auto:*` label
-and keep going. Don't fix it in this PR.
+If you find other work along the way, file a new issue with no parent and no
+`auto:*` label, and keep going. It isn't a sub-issue, because it wasn't part of
+the parent's plan. Don't fix it in this PR.
 
 | Other labels | Meaning |
 |---|---|

@@ -20,22 +20,20 @@ write no code. Nobody reads this thread while you run, so never ask a question.
    because the search is loose. If there is none, say which milestone has no
    parent, and stop. If there are several, take the lowest number. Read its
    goal. Never add an `auto:*` label to an issue that doesn't inherit one.
-5. Read the parent's children, open and closed, with `gh issue list --state all
-   --limit 1000 --search '"Part of #<parent>" in:body'`. Leave out any gap that
-   an open child already covers.
+5. Read the parent's sub-issues, open and closed, with `gh issue view <parent>
+   --json subIssues`. Leave out any gap that an open sub-issue already covers.
 6. Choose the next work, only from gaps within the parent's goal and its
    milestone. If none are, say so and stop. The milestone's failing steps come
    first, in journey order, then the budgets and promises that the parent's
    goal names.
-7. File at most 3 minus the sum from step 1, and add each issue to the parent's
-   `## Children` checklist. Follow Issues in AGENTS.md:
+7. File at most 3 minus the sum from step 1, each as a sub-issue of the parent,
+   with `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
    - `Done when` names the journey step, the budget, or the exact SPEC
      sentences that prove it.
    - `Touches` names real paths in backticks, so that the queue can tell which
      issues overlap.
-   - End with `Part of #<parent>.`, and add `Blocked by #<n>.` when one issue
-     needs another first.
+   - End with `Blocked by #<n>.` when one issue needs another first.
    - Add the parent's `auto:*` label. If the work needs a change to SPEC.md, a
      budget, a waiver, or a journey step, add no `auto:*` label.
 8. List the issues you filed, then stop.

@@ -59,6 +59,15 @@ fn issue(number: u64, state: &str, labels: &[&str], text: &str, comments: &[Stri
     )
 }
 
+/// An issue that GitHub lists as a sub-issue of `parent`.
+fn sub_issue(number: u64, state: &str, touches: &str, parent: u64) -> String {
+    let text = issue(number, state, &["auto:merge"], &body(touches, ""), &[]);
+    let parent = format!(
+        ",\"parent\":{{\"id\":\"I_x\",\"number\":{parent},\"state\":\"OPEN\",\"title\":\"t\",\"url\":\"https://github.com/o/r/issues/{parent}\"}}}}"
+    );
+    format!("{}{parent}", text.strip_suffix('}').unwrap())
+}
+
 fn open(number: u64, labels: &[&str], touches: &str) -> String {
     issue(number, "OPEN", labels, &body(touches, ""), &[])
 }
@@ -296,23 +305,48 @@ fn touches_ends_at_the_next_heading() {
 #[test]
 fn a_parent_is_not_claimable() {
     let parent = open(1, &["auto:merge"], T);
-    let child = |state: &str| {
-        issue(
-            5,
-            state,
-            &["auto:merge"],
-            &body("`crates/b`", "Part of #1.\n"),
-            &[],
-        )
-    };
+    let sub = |state: &str| sub_issue(5, state, "`crates/b`", 1);
     assert_eq!(
-        listed("parent-open", &[parent.clone(), child("OPEN")]),
+        listed("parent-open", &[parent.clone(), sub("OPEN")]),
         vec![5]
     );
     assert_eq!(
-        listed("parent-closed", &[parent, child("CLOSED")]),
+        listed("parent-closed", &[parent, sub("CLOSED")]),
         Vec::<u64>::new()
     );
+}
+
+/// GitHub's own link is the only record of a parent. A line in the body isn't.
+#[test]
+fn a_part_of_line_does_not_make_a_parent() {
+    let named = open(1, &["auto:merge"], T);
+    let naming = issue(
+        5,
+        "OPEN",
+        &["auto:merge"],
+        &body("`crates/b`", "Part of #1.\n"),
+        &[],
+    );
+    assert_eq!(listed("part-of-line", &[named, naming]), vec![1, 5]);
+}
+
+#[test]
+fn an_issue_with_no_parent_field_or_a_null_one_has_no_parent() {
+    let null = issue(5, "OPEN", &["auto:merge"], &body("`crates/b`", ""), &[]);
+    let null = format!("{},\"parent\":null}}", null.strip_suffix('}').unwrap());
+    assert_eq!(
+        listed("null-parent", &[open(1, &["auto:merge"], T), null]),
+        vec![1, 5]
+    );
+}
+
+#[test]
+fn a_parent_that_is_not_an_issue_is_a_problem() {
+    let odd = issue(5, "OPEN", &["auto:merge"], &body("`crates/b`", ""), &[]);
+    let odd = format!("{},\"parent\":{{}}}}", odd.strip_suffix('}').unwrap());
+    let repo = Repo::new("odd-parent", &[odd]);
+    let output = repo.xtask(&["next"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
 
 #[test]

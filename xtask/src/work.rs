@@ -255,10 +255,7 @@ impl<'a> View<'a> {
             .filter(|issue| issue.open)
             .map(|issue| issue.number)
             .collect();
-        let parents = issues
-            .iter()
-            .flat_map(|issue| references(&issue.body, "Part of"))
-            .collect();
+        let parents = issues.iter().filter_map(|issue| issue.parent).collect();
         Ok(View {
             forge,
             owner,
@@ -722,6 +719,7 @@ mod tests {
             body: TOUCHES.to_string(),
             labels: vec!["auto:merge".to_string()],
             comments,
+            parent: None,
         }
     }
 

@@ -8,7 +8,7 @@ use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const FIELDS: &str = "number,state,body,labels,comments";
+const FIELDS: &str = "number,state,body,labels,comments,parent";
 const ISSUE_LIMIT: usize = 2000;
 /// `gh issue list` gives at most this many comments per issue.
 pub const LISTED_COMMENTS: usize = 100;
@@ -31,6 +31,8 @@ pub struct Issue {
     pub body: String,
     pub labels: Vec<String>,
     pub comments: Vec<Comment>,
+    /// The issue that GitHub lists this one under, as a sub-issue.
+    pub parent: Option<u64>,
 }
 
 /// An open issue, as far as the nightly report needs one.
@@ -521,6 +523,10 @@ fn read_issue(value: &Json) -> Option<Issue> {
         body: value.get("body")?.as_str()?.to_string(),
         labels: read_labels(value)?,
         comments: comments.iter().map(read_comment).collect::<Option<_>>()?,
+        parent: match value.get("parent") {
+            None | Some(Json::Null) => None,
+            Some(parent) => Some(parent.get("number")?.as_u64()?),
+        },
     })
 }
 

@@ -372,3 +372,18 @@ fn the_prompt_escapes_what_would_hide() {
     );
     assert!(!run.screen.contains('\u{202e}'), "{}", run.screen);
 }
+
+// spec(Grants): The approval is stored with the Agentfile's canonical path, not with the agent's name, so another directory never inherits it.
+#[test]
+fn a_linked_agentfile_is_approved_by_where_it_really_is() {
+    let scratch = Scratch::new("linked");
+    let real = scratch.project("real", NOTES);
+    let dir = scratch.project("notes", NOTES);
+    fs::remove_file(dir.join("Agentfile")).unwrap();
+    std::os::unix::fs::symlink(real.join("Agentfile"), dir.join("Agentfile")).unwrap();
+    let run = scratch.on_terminal(&dir, &["build"], "y\n");
+    assert_eq!(run.code, Some(0), "{}", run.screen);
+    assert!(scratch.approved(&real).is_some());
+    let approvals = Approvals::new(scratch.store());
+    assert_eq!(approvals.get(&dir.join("Agentfile")).unwrap(), None);
+}

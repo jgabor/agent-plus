@@ -127,13 +127,21 @@ fn build(args: &Args) -> Result<(), String> {
         None => (PathBuf::from("Agentfile"), PathBuf::from(".")),
     };
     let shown = path.display();
-    let bytes = fs::read(&path).map_err(|error| match error.kind() {
+    // The approval is kept with the canonical path, so the Agentfile is read
+    // from there, and not through a symlink swapped in since.
+    let missing = |error: io::Error| match error.kind() {
         io::ErrorKind::NotFound => match &args.dir {
             Some(dir) => format!("ap: no Agentfile in {}", dir.display()),
             None => "ap: no Agentfile in the current directory".to_string(),
         },
-        _ => format!("ap: {shown}: {error}"),
-    })?;
+        _ => format!("ap: {error}"),
+    };
+    let agentfile = HostPath::resolve("Agentfile", &context, Path::new("/")).map_err(missing)?;
+    let mut bytes = Vec::new();
+    agentfile
+        .open()
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| format!("ap: {shown}: {error}"))?;
     let source = String::from_utf8(bytes).map_err(|_| format!("ap: {shown} isn't UTF-8 text"))?;
 
     let context = context
@@ -198,9 +206,6 @@ fn build(args: &Args) -> Result<(), String> {
             old.directory
         ));
     }
-    let agentfile = path
-        .canonicalize()
-        .map_err(|error| format!("ap: {shown}: {error}"))?;
     // The grants come from the resolutions the layers are made from, so a
     // path that changes on the host can't put what you didn't approve in a
     // layer.
@@ -212,7 +217,7 @@ fn build(args: &Args) -> Result<(), String> {
     let approvals = ::store::Approvals::new(&root);
     ap::approval::approve(
         &approvals,
-        &agentfile,
+        agentfile.path(),
         &shown.to_string(),
         &grants,
         approver,

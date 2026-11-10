@@ -11,6 +11,7 @@ name = "ap"
 version = "0.0.0"
 dependencies = [
  "agentfile",
+ "erofs",
  "graviola",
  "guest",
  "libc",

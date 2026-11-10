@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Component, Path};
 
 /// The `.gitignore` files under one directory.
+#[derive(Default)]
 pub struct Gitignore {
     /// Each `.gitignore` that was read, by the directory that holds it. A
     /// directory is its path relative to the root, as bytes, with a trailing
@@ -42,10 +43,7 @@ impl Gitignore {
         let here = root.join(bytes_to_path(&dir));
         let file = here.join(".gitignore");
         if fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
-            let patterns = parse(&fs::read(&file)?);
-            if !patterns.is_empty() {
-                self.files.push((dir.clone(), patterns));
-            }
+            self.push(dir.clone(), &fs::read(&file)?);
         }
         let mut subdirs = Vec::new();
         for entry in fs::read_dir(&here)? {
@@ -66,20 +64,30 @@ impl Gitignore {
         Ok(())
     }
 
+    /// Adds the content of the `.gitignore` in `dir`, which is relative to
+    /// the root, for a caller that walks the directory itself. Add a
+    /// directory's file before any file below it, skip directories that are
+    /// ignored or named `.git`, and don't follow symlinks, as `load` does.
+    pub fn add(&mut self, dir: &Path, content: &[u8]) {
+        let mut dir = relative(dir);
+        if !dir.is_empty() {
+            dir.push(b'/');
+        }
+        self.push(dir, content);
+    }
+
+    fn push(&mut self, dir: Vec<u8>, content: &[u8]) {
+        let patterns = parse(content);
+        if !patterns.is_empty() {
+            self.files.push((dir, patterns));
+        }
+    }
+
     /// Whether git ignores `path`, which is relative to the root and names a
     /// directory when `is_dir` is set. A path inside an ignored directory is
     /// ignored too, whatever a later pattern says.
     pub fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
-        let mut rel = Vec::new();
-        for part in path.components() {
-            if part == Component::CurDir {
-                continue;
-            }
-            if !rel.is_empty() {
-                rel.push(b'/');
-            }
-            rel.extend_from_slice(part.as_os_str().as_encoded_bytes());
-        }
+        let rel = relative(path);
         let parents = rel.iter().enumerate().filter(|&(_, &b)| b == b'/');
         for (end, _) in parents {
             if self.matches(&rel[..end], true) {
@@ -374,4 +382,19 @@ fn bytes_to_path(bytes: &[u8]) -> &Path {
     // SAFETY: every byte string here was built from `OsStr` bytes and ASCII
     // `/`, so it is valid encoded bytes.
     Path::new(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(bytes) })
+}
+
+/// `path` as bytes, with `/` between its names and no `.`.
+fn relative(path: &Path) -> Vec<u8> {
+    let mut rel = Vec::new();
+    for part in path.components() {
+        if part == Component::CurDir {
+            continue;
+        }
+        if !rel.is_empty() {
+            rel.push(b'/');
+        }
+        rel.extend_from_slice(part.as_os_str().as_encoded_bytes());
+    }
+    rel
 }

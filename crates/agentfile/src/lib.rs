@@ -7,12 +7,15 @@
 //! [`Network::read`], turns them into typed values. [`GuestPath::read`]
 //! places `ADD`, `SHARE`, and `REPO` in the guest, and rejects destinations
 //! that collide or are reserved. [`format`] rewrites an Agentfile by the rules
-//! of `ap fmt`.
+//! of `ap fmt`. [`Grants::read`] lists what an Agentfile asks of the host,
+//! and [`Grants`] prints and reads that list as text.
 
 mod files;
 pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
 mod format;
 pub use format::format;
+mod grants;
+pub use grants::{Grants, Location, PathGrant};
 mod network;
 pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
 mod paths;

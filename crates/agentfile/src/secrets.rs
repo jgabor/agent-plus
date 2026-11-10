@@ -311,7 +311,7 @@ fn default_of(inner: &str, default: &str) -> Result<String, String> {
 
 /// The length of the variable name at the start of `text`: a letter or `_`,
 /// then letters, digits, and `_`. Zero when `text` starts with no name.
-fn name_length(text: &str) -> usize {
+pub(crate) fn name_length(text: &str) -> usize {
     let mut chars = text.chars();
     if !chars
         .next()
@@ -325,7 +325,7 @@ fn name_length(text: &str) -> usize {
 }
 
 /// Reads `<name> [@<host>...] [visible]` for `SECRET` or `SEAL`.
-fn secret(instruction: &str, arguments: &[String]) -> Result<Secret, String> {
+pub(crate) fn secret(instruction: &str, arguments: &[String]) -> Result<Secret, String> {
     let Some((name, rest)) = arguments.split_first() else {
         return Err(format!("`{instruction}` needs a name"));
     };
@@ -391,7 +391,7 @@ fn default_hosts(name: &str) -> &'static [&'static str] {
     }
 }
 
-fn auth(arguments: &[String]) -> Result<Auth, String> {
+pub(crate) fn auth(arguments: &[String]) -> Result<Auth, String> {
     match arguments {
         [value] => word(
             "AUTH",

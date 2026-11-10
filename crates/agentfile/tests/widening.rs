@@ -174,6 +174,8 @@ fn a_new_bound_host_widens() {
             host: "api.github.com".to_string(),
         }]
     );
+    // Host names ignore case.
+    assert_eq!(widened("SECRET T @a.com\n", "SECRET T @A.COM\n"), []);
 }
 
 // spec(Grants): a new secret, a new bound host, or a secret that becomes `visible` or moves from `SECRET` to `SEAL`

@@ -273,7 +273,7 @@ impl Grants {
                     secret
                         .hosts
                         .iter()
-                        .filter(|host| !old.hosts.contains(host))
+                        .filter(|host| !old.hosts.iter().any(|old| old.eq_ignore_ascii_case(host)))
                         .map(|host| Widening::Host {
                             secret: secret.name.clone(),
                             host: host.clone(),

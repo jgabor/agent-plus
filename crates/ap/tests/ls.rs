@@ -40,7 +40,12 @@ impl Scratch {
         let dir = self.root.join(path);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), "AGENT claude\n").unwrap();
-        let output = self.ap(&["build", dir.to_str().unwrap()]);
+        // Approval has tests of its own, so the build approves what it asks
+        // for.
+        let grants = self.root.join("approved-grants");
+        fs::write(&grants, "NETWORK +\nPOLICY +\n").unwrap();
+        let approve = format!("--approve={}", grants.display());
+        let output = self.ap(&["build", &approve, dir.to_str().unwrap()]);
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         dir
     }

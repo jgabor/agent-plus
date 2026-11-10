@@ -373,8 +373,8 @@ fn url(text: &str, scheme: &str, rest: &str) -> Result<Remote, String> {
             "a Git URL names a host and a repository on it, but found `{text}`"
         ));
     }
-    if scheme == "https" && authority == host && matches!(host, "github.com" | "www.github.com") {
-        return github(text, host, path);
+    if scheme == "https" && matches!(host, "github.com" | "www.github.com") {
+        return github(text, authority, path);
     }
     let (path, reference) = split_reference(path).map_err(|_| empty_reference(text))?;
     Ok(Remote {
@@ -386,7 +386,8 @@ fn url(text: &str, scheme: &str, rest: &str) -> Result<Remote, String> {
 }
 
 /// Reads a GitHub URL: a repository root, or a `/tree/<ref>/` page in one.
-fn github(text: &str, host: &str, path: &str) -> Result<Remote, String> {
+/// `authority` keeps any user and port, so the clone URL keeps them too.
+fn github(text: &str, authority: &str, path: &str) -> Result<Remote, String> {
     // A ref follows a repository root, and may contain `/`.
     if let Some((root, reference)) = path.split_once('@')
         && let [owner, repository] = root.split('/').collect::<Vec<_>>().as_slice()
@@ -398,7 +399,7 @@ fn github(text: &str, host: &str, path: &str) -> Result<Remote, String> {
         }
         return Ok(Remote {
             form: Form::Git,
-            repository: format!("https://{host}/{root}"),
+            repository: format!("https://{authority}/{root}"),
             subdirectory: None,
             reference: Some(reference.to_string()),
         });
@@ -410,7 +411,7 @@ fn github(text: &str, host: &str, path: &str) -> Result<Remote, String> {
         }
         _ => return Err(not_github(text)),
     };
-    let root = format!("https://{host}/{owner}/{repository}");
+    let root = format!("https://{authority}/{owner}/{repository}");
     match rest {
         [] => Ok(Remote {
             form: Form::Git,

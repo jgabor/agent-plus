@@ -154,6 +154,15 @@ fn a_github_tree_url_names_its_ref_and_subdirectory() {
         source_of("https://github.com/anthropics/skills/tree/v1.2"),
         remote(Form::Forge, skills, None, Some("v1.2"))
     );
+    assert_eq!(
+        source_of("https://git@github.com/anthropics/skills/tree/main/skills/pdf"),
+        remote(
+            Form::Forge,
+            "https://git@github.com/anthropics/skills",
+            Some("skills/pdf"),
+            Some("main")
+        )
+    );
 }
 
 #[test]

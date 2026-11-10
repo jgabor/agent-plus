@@ -25,6 +25,11 @@ fn digest_matches(path: &Path) -> bool {
     output.stdout.starts_with(pinned("sha256").as_bytes())
 }
 
+/// The release the pinned kernel reports.
+pub fn release() -> &'static str {
+    pinned("version")
+}
+
 /// Returns the path of the pinned `vmlinux`, downloading it if it's missing.
 pub fn vmlinux() -> PathBuf {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest");

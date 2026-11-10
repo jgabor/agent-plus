@@ -9,11 +9,20 @@ const TARGET: &str = "x86_64-unknown-linux-musl";
 
 /// Builds the binary `name` of this package, and returns its path.
 pub fn build(name: &str) -> PathBuf {
+    build_in("t1", name)
+}
+
+/// Builds `ap` itself, which boots as its own guest's init.
+pub fn ap() -> PathBuf {
+    build_in("ap", "ap")
+}
+
+fn build_in(package: &str, name: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target_directory = root.join("target/t1-guest");
     let status = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
         .current_dir(&root)
-        .args(["build", "--quiet", "--package", "t1", "--bin", name])
+        .args(["build", "--quiet", "--package", package, "--bin", name])
         .args(["--target", TARGET, "--target-dir"])
         .arg(&target_directory)
         .status()

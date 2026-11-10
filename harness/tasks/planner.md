@@ -15,11 +15,11 @@ write no code. Nobody reads this thread while you run, so never ask a question.
    stop.
 4. Find the parent: the open issue that has an `auto:*` label and a line in
    its body that reads `Milestone: <name>.`, with that milestone's name. Search
-   with `gh issue list --state open --limit 1000 --search '"Milestone: <name>."
-   in:body' --json number,labels,body`, and check the line yourself, because
-   the search is loose. If there is none, say which milestone has no parent, and stop. If
-   there are several, take the lowest number. Read its goal. Never add an
-   `auto:*` label to an issue that doesn't inherit one.
+   with `gh issue list --state open --limit 1000 --json number,labels,body
+   --search '"Milestone: <name>." in:body'`, and check the line yourself,
+   because the search is loose. If there is none, say which milestone has no
+   parent, and stop. If there are several, take the lowest number. Read its
+   goal. Never add an `auto:*` label to an issue that doesn't inherit one.
 5. Read the parent's children, open and closed, with `gh issue list --state all
    --limit 1000 --search '"Part of #<parent>" in:body'`. Leave out any gap that
    an open child already covers.

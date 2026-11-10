@@ -10,9 +10,11 @@ use ap::boot;
 mod commands {
     pub mod build;
     pub mod fmt;
+    pub mod init;
 }
 
 const USAGE: &str = "usage: ap --version
+       ap init [dir]
        ap fmt [--check] [dir]
        ap build [--strict] [--replace] [-t name] [dir]
        ap boot [--timeout N] [-- COMMAND...]";
@@ -31,6 +33,11 @@ fn main() -> ExitCode {
     if args.len() == 1 && args[0] == "--version" {
         println!("ap {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
+    }
+    if args.first().is_some_and(|command| command == "init")
+        && let Some(dir) = commands::init::parse(&args[1..])
+    {
+        return ExitCode::from(commands::init::run(dir.as_ref()));
     }
     if args.first().is_some_and(|command| command == "fmt")
         && let Some(fmt) = commands::fmt::parse(&args[1..])

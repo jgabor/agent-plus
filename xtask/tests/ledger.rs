@@ -7,8 +7,7 @@ use std::process::{Command, Output};
 const SPEC: &str = "# A\n\nOne. Two.\n";
 const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
 const AP: &str = "fn main() {}\n";
-const JOURNEY: &str =
-    "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
 const STEP: &str = "#!/bin/sh\nexit 0\n";
 
 fn record_text(issue: u32, budgets: &str) -> String {

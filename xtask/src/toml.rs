@@ -66,6 +66,20 @@ impl Table {
             _ => None,
         }
     }
+
+    /// The strings in an array. `None` if it isn't an array of strings.
+    pub fn strs(&self, key: &str) -> Option<Vec<&str>> {
+        match self.get(key) {
+            Some(Value::Arr(items)) => items
+                .iter()
+                .map(|item| match item {
+                    Value::Str(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
 }
 
 /// Reads a file made only of `[[name]]` tables. An error names its line.
@@ -315,6 +329,18 @@ mod tests {
             error,
             "line 1: a key must come after `[[milestone]]` or `[[step]]`"
         );
+    }
+
+    #[test]
+    fn reads_an_array_of_strings() {
+        let text =
+            "[[m]]\nsome = [\"ap run\", \"ap ps\"]\nnone = []\nmixed = [\"a\", 1]\nword = \"a\"\n";
+        let table = &array_of_tables(text, "m").unwrap()[0];
+        assert_eq!(table.strs("some"), Some(vec!["ap run", "ap ps"]));
+        assert_eq!(table.strs("none"), Some(vec![]));
+        assert_eq!(table.strs("mixed"), None);
+        assert_eq!(table.strs("word"), None);
+        assert_eq!(table.strs("missing"), None);
     }
 
     #[test]

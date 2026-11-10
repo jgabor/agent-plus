@@ -32,8 +32,8 @@ reason specific to agents.
 - **harness**: the program an agent runs, such as Claude Code or Codex.
 - **host** and **guest**: the user's machine, and the microVM.
 - **grant**: something an Agentfile asks of the host, which the user approves.
-- **hill**, **floor**, **journey**, **ledger**, **gate**, and **dispatcher**:
-  see [HARNESS.md](HARNESS.md).
+- **hill**, **floor**, **journey**, **milestone**, **roadmap**, **ledger**,
+  **gate**, and **dispatcher**: see [HARNESS.md](HARNESS.md).
 
 ## Ways of working
 

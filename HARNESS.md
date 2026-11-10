@@ -56,6 +56,8 @@ clean machine:
 | Hill | A score that one change can raise |
 | Floor | A condition that must always hold |
 | Journey | The ordered steps of real use of `ap` |
+| Milestone | A named group of journey steps that one parent issue delivers |
+| Roadmap | The milestones in order, and what comes after v0.1.0 |
 | Budget | A performance or size target |
 | Ledger | The per-merge record of scores and budgets |
 | Gate | The program that decides whether a change may merge |
@@ -90,7 +92,7 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | Work in flight | Pushed branches |
 | Scores and budgets over time | `harness/ledger/` |
 | Waived sentences | `harness/waived.txt` |
-| Journey definition | `harness/journey.toml` |
+| Journey and milestone definitions | `harness/journey.toml` |
 | Budget targets and bands | `harness/budgets.toml` |
 | Audited build scripts | `harness/build-scripts.txt` |
 
@@ -338,14 +340,24 @@ readies it for the owner.
 ### Journey definition
 
 ```toml
+[[milestone]]
+name = "Boot"
+commands = ["ap --version", "ap boot"]
+
 [[step]]
 id = 3
 name = "The VMM boots a kernel to guest init"
+milestone = "Boot"
 needs = [1]
 script = "harness/journey/03-boot.sh"
 ```
 
 A step can also set `floor = "floor_guest_host"`, or `spend = true`.
+
+The `[[milestone]]` tables are in roadmap order. `commands` lists the `ap`
+subcommands that the milestone delivers, and it can be empty. Every step names
+one milestone, every milestone has a step, and no command is listed twice. A
+file that breaks one of these is an error.
 
 ### Budgets
 
@@ -421,7 +433,7 @@ is a failure, and 2 is bad usage or an environment error.
 |---|---|
 | `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and prints the result. It posts no status |
 | `cargo xtask score` | Prints the three scores |
-| `cargo xtask gaps` | Lists failing steps in journey order, then missed budgets, then unproven promises in SPEC order |
+| `cargo xtask gaps` | Lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |

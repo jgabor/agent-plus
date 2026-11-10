@@ -15,6 +15,7 @@ const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
 struct Step {
     id: i64,
     name: String,
+    milestone: String,
     needs: Vec<i64>,
     script: String,
     floor: Option<String>,
@@ -25,6 +26,7 @@ struct Step {
 pub struct Outcome {
     pub id: i64,
     pub name: String,
+    pub milestone: String,
     pub state: &'static str,
 }
 
@@ -86,6 +88,7 @@ fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
         outcomes.push(Outcome {
             id: step.id,
             name: step.name.clone(),
+            milestone: step.milestone.clone(),
             state: word,
         });
     }
@@ -97,10 +100,12 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
         .map_err(|e| Problem(format!("couldn't read {JOURNEY_FILE}: {e}")))?;
     let tables = toml::arrays_of_tables(&text, &["milestone", "step"])
         .map_err(|e| Problem(format!("{JOURNEY_FILE}: {e}")))?;
+    let mut milestones = Vec::new();
+    let mut commands = HashSet::new();
     let mut steps = BTreeMap::new();
     for (kind, table) in tables {
-        // A milestone groups steps. Nothing reads one yet.
         if kind == "milestone" {
+            milestones.push(read_milestone(&table, &milestones, &mut commands)?);
             continue;
         }
         let bad = |what: &str| Problem(format!("{JOURNEY_FILE}: a step {what}"));
@@ -110,6 +115,10 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
             name: table
                 .str("name")
                 .ok_or_else(|| bad("has no `name`"))?
+                .to_string(),
+            milestone: table
+                .str("milestone")
+                .ok_or_else(|| Problem(format!("{JOURNEY_FILE}: step {id} has no `milestone`")))?
                 .to_string(),
             needs: table
                 .ints("needs")
@@ -142,8 +151,48 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
                 )));
             }
         }
+        if !milestones.contains(&step.milestone) {
+            return Err(Problem(format!(
+                "{JOURNEY_FILE}: step {} is in the milestone `{}`, which has no `[[milestone]]` table",
+                step.id, step.milestone
+            )));
+        }
+    }
+    for name in &milestones {
+        if !steps.values().any(|step| step.milestone == *name) {
+            return Err(Problem(format!(
+                "{JOURNEY_FILE}: the milestone `{name}` has no step"
+            )));
+        }
     }
     Ok(steps.into_values().collect())
+}
+
+/// A milestone's name. Its commands are only checked here: no milestone
+/// repeats a name, and no command is listed twice in the file.
+fn read_milestone(
+    table: &toml::Table,
+    milestones: &[String],
+    commands: &mut HashSet<String>,
+) -> Result<String, Problem> {
+    let bad = |what: String| Problem(format!("{JOURNEY_FILE}: {what}"));
+    let name = table
+        .str("name")
+        .ok_or_else(|| bad("a milestone has no `name`".to_string()))?;
+    if milestones.iter().any(|known| known == name) {
+        return Err(bad(format!("the milestone `{name}` appears twice")));
+    }
+    let listed = table.strs("commands").ok_or_else(|| {
+        bad(format!(
+            "the milestone `{name}` has no string array `commands`"
+        ))
+    })?;
+    for command in listed {
+        if !commands.insert(command.to_string()) {
+            return Err(bad(format!("the command `{command}` is listed twice")));
+        }
+    }
+    Ok(name.to_string())
 }
 
 /// Builds a statically linked `ap` for release from `root`, so the same file

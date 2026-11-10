@@ -170,7 +170,11 @@ fn init_with_bad_arguments_prints_usage() {
     for args in [&["init", "a", "b"][..], &["init", "--force"]] {
         let output = scratch.ap(&scratch.root, args);
         assert_eq!(output.status.code(), Some(2));
-        assert!(stderr(&output).contains("ap init [dir]"), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("ap init [dir]"),
+            "{}",
+            stderr(&output)
+        );
     }
     assert!(!scratch.root.join("a").exists());
     assert!(!scratch.root.join("Agentfile").exists());

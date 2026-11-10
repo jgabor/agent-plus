@@ -13,6 +13,7 @@ dependencies = [
  "agentfile",
  "graviola",
  "guest",
+ "libc",
  "rustls",
  "rustls-graviola",
  "vmm",

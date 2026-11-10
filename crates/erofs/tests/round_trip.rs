@@ -95,10 +95,26 @@ struct Reader<'a> {
     block: usize,
     meta: usize,
     seen: usize,
+    cover: Cover,
+}
+
+/// What the seeded trees exercised, so a change to the generator can't
+/// quietly stop covering a case.
+#[derive(Default)]
+struct Cover {
+    empty_files: usize,
+    block_files: usize,
+    multi_block_dirs: usize,
+    longest_name: usize,
+    deepest: usize,
 }
 
 impl Reader<'_> {
     fn read(img: &[u8]) -> Tree {
+        Self::read_covering(img).0
+    }
+
+    fn read_covering(img: &[u8]) -> (Tree, Cover) {
         let sb = &img[SUPER_OFFSET..];
         assert_eq!(u32_at(sb, 0), MAGIC, "magic");
         let blkszbits = sb[12];
@@ -108,7 +124,11 @@ impl Reader<'_> {
         assert_eq!(compat & COMPAT_SB_CHKSUM, COMPAT_SB_CHKSUM, "checksum on");
         // super.c: crc32c(0x5045B54A) over the rest of block 0 after
         // .checksum.
-        let len = if block > SUPER_OFFSET { block - SUPER_OFFSET } else { block };
+        let len = if block > SUPER_OFFSET {
+            block - SUPER_OFFSET
+        } else {
+            block
+        };
         assert_eq!(
             crc32c(0x5045_B54A, &img[SUPER_OFFSET + 8..SUPER_OFFSET + len]),
             u32_at(sb, 4),
@@ -128,13 +148,15 @@ impl Reader<'_> {
             block,
             meta: u32_at(sb, 40) as usize * block,
             seen: 0,
+            cover: Cover::default(),
         };
-        let tree = reader.inode(root, root);
+        let tree = reader.inode(root, root, 0);
         assert_eq!(reader.seen, inos, "inos");
-        tree
+        (tree, reader.cover)
     }
 
-    fn inode(&mut self, nid: u64, parent: u64) -> Tree {
+    fn inode(&mut self, nid: u64, parent: u64, depth: usize) -> Tree {
+        self.cover.deepest = self.cover.deepest.max(depth);
         self.seen += 1;
         let at = self.meta + nid as usize * 32;
         let i = &self.img[at..at + 32];
@@ -162,6 +184,8 @@ impl Reader<'_> {
         match mode & S_IFMT {
             S_IFREG => {
                 assert_eq!(nlink, 1, "file nlink");
+                self.cover.empty_files += usize::from(size == 0);
+                self.cover.block_files += usize::from(size > 0 && size.is_multiple_of(self.block));
                 Tree::File(perm, data.to_vec())
             }
             S_IFLNK => {
@@ -170,7 +194,8 @@ impl Reader<'_> {
                 Tree::Symlink(perm, data.to_vec())
             }
             S_IFDIR => {
-                let entries = self.dir(nid, parent, data);
+                self.cover.multi_block_dirs += usize::from(size > self.block);
+                let entries = self.dir(nid, parent, data, depth);
                 let subdirs = entries
                     .values()
                     .filter(|t| matches!(t, Tree::Dir(..)))
@@ -183,13 +208,13 @@ impl Reader<'_> {
     }
 
     /// Follows `erofs_readdir` and `erofs_fill_dentries`.
-    fn dir(&mut self, nid: u64, parent: u64, data: &[u8]) -> BTreeMap<Vec<u8>, Tree> {
+    fn dir(&mut self, nid: u64, parent: u64, data: &[u8], depth: usize) -> BTreeMap<Vec<u8>, Tree> {
         let mut found = Vec::new();
         for (index, blk) in data.chunks(self.block).enumerate() {
             let maxsize = blk.len();
             let nameoff0 = usize::from(u16_at(blk, 8));
             assert!(
-                nameoff0 != 0 && nameoff0 < self.block && nameoff0 % 12 == 0,
+                nameoff0 != 0 && nameoff0 < self.block && nameoff0.is_multiple_of(12),
                 "nameoff0 {nameoff0} in block {index}"
             );
             let count = nameoff0 / 12;
@@ -227,7 +252,8 @@ impl Reader<'_> {
                 }
                 _ => {
                     assert!(!name.contains(&b'/') && !name.contains(&0));
-                    let tree = self.inode(child, nid);
+                    self.cover.longest_name = self.cover.longest_name.max(name.len());
+                    let tree = self.inode(child, nid, depth + 1);
                     let want = match tree {
                         Tree::Dir(..) => FT_DIR,
                         Tree::File(..) => FT_REG_FILE,
@@ -238,11 +264,7 @@ impl Reader<'_> {
                 }
             }
         }
-        assert_eq!(
-            entries.len() + 2,
-            names.len(),
-            "a directory holds . and .."
-        );
+        assert_eq!(entries.len() + 2, names.len(), "a directory holds . and ..");
         entries
     }
 }
@@ -300,7 +322,8 @@ impl Rng {
         let mut entries = BTreeMap::new();
         let count = match self.below(8) {
             0 => 0,
-            1 => 100 + self.below(200),
+            // Only where no subdirectory can follow, to keep trees small.
+            1 if depth == 3 => 100 + self.below(200),
             _ => self.below(8),
         };
         for _ in 0..count {
@@ -333,16 +356,31 @@ impl Rng {
 
 #[test]
 fn seeded_random_trees_round_trip() {
-    for seed in 1..=40u64 {
-        let tree = Rng(seed * 0x9E37_79B9_7F4A_7C15).tree(0);
-        assert_eq!(Reader::read(&image(&tree)), tree, "seed {seed}");
+    let mut total = Cover::default();
+    for seed in 1..=400u64 {
+        let tree = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15)).tree(0);
+        let (read, cover) = Reader::read_covering(&image(&tree));
+        assert_eq!(read, tree, "seed {seed}");
+        total.empty_files += cover.empty_files;
+        total.block_files += cover.block_files;
+        total.multi_block_dirs += cover.multi_block_dirs;
+        total.longest_name = total.longest_name.max(cover.longest_name);
+        total.deepest = total.deepest.max(cover.deepest);
     }
+    assert!(total.empty_files > 0, "empty files");
+    assert!(total.block_files > 0, "files that end on a block boundary");
+    assert!(
+        total.multi_block_dirs > 0,
+        "directories of more than one block"
+    );
+    assert_eq!(total.longest_name, 255, "the longest names");
+    assert!(total.deepest >= 3, "nested directories");
 }
 
 #[test]
 fn the_same_tree_gives_the_same_bytes() {
     for seed in 1..=10u64 {
-        let tree = Rng(seed * 0xD1B5_4A32_D192_ED03).tree(0);
+        let tree = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03)).tree(0);
         assert_eq!(image(&tree), image(&tree), "seed {seed}");
     }
 }
@@ -358,8 +396,14 @@ fn edge_cases_round_trip() {
         (b"empty".to_vec(), Tree::File(0o600, Vec::new())),
         (b"one-block".to_vec(), Tree::File(0o644, vec![7; 4096])),
         (b"two-blocks".to_vec(), Tree::File(0o755, vec![9; 8192])),
-        (b"link".to_vec(), Tree::Symlink(0o777, b"one-block".to_vec())),
-        (b"long-link".to_vec(), Tree::Symlink(0o777, vec![b'x'; 4095])),
+        (
+            b"link".to_vec(),
+            Tree::Symlink(0o777, b"one-block".to_vec()),
+        ),
+        (
+            b"long-link".to_vec(),
+            Tree::Symlink(0o777, vec![b'x'; 4095]),
+        ),
         (b"big".to_vec(), Tree::Dir(0o700, big)),
         (b"empty-dir".to_vec(), Tree::Dir(0o1777, BTreeMap::new())),
         (vec![b'n'; 255], Tree::File(0o4755, b"setuid".to_vec())),
@@ -410,7 +454,10 @@ fn a_file_too_large_for_compact_inodes_is_refused() {
     );
     let err = refused(root);
     assert!(matches!(err, Error::TooLarge { .. }), "{err}");
-    assert_eq!(err.to_string(), "huge: 4294967296 bytes is more than the image format holds");
+    assert_eq!(
+        err.to_string(),
+        "huge: 4294967296 bytes is more than the image format holds"
+    );
 }
 
 #[test]

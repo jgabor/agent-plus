@@ -58,9 +58,22 @@ pub struct PullRequest {
     pub changes_requested: bool,
 }
 
-/// An open PR, as far as `refresh` needs one.
+/// An issue, as far as the roadmap needs one.
+pub struct RoadmapIssue {
+    pub number: u64,
+    pub open: bool,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<String>,
+    /// The issue that GitHub lists this one under, as a sub-issue.
+    pub parent: Option<u64>,
+}
+
+/// An open PR, as far as `refresh` and the roadmap need one.
 pub struct OpenPr {
     pub number: u64,
+    pub title: String,
+    pub labels: Vec<String>,
     pub from_fork: bool,
     pub head_ref: String,
     pub head: String,
@@ -265,7 +278,7 @@ impl Gh {
             "--limit",
             &limit,
             "--json",
-            "number,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences",
+            "number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences",
         ];
         let value = self.json(&args)?;
         let prs = value.as_arr().ok_or_else(|| unexpected("gh pr list"))?;
@@ -323,6 +336,21 @@ impl Gh {
             .iter()
             .map(|item| read_open_issue(item).ok_or_else(|| unexpected("gh issue list")))
             .collect()
+    }
+
+    /// Every issue, open or closed.
+    pub fn roadmap_issues(&self) -> Result<Vec<RoadmapIssue>, Problem> {
+        self.listed("all", "number,state,title,body,labels,parent,url")?
+            .iter()
+            .map(|item| read_roadmap_issue(item).ok_or_else(|| unexpected("gh issue list")))
+            .collect()
+    }
+
+    /// Replaces an issue's body.
+    pub fn edit_issue(&self, number: u64, body: &str) -> Result<(), Problem> {
+        let number = number.to_string();
+        self.text(&["issue", "edit", &number, "--body-file", "-"], Some(body))?;
+        Ok(())
     }
 
     /// Returns the new issue's number.
@@ -515,6 +543,17 @@ fn read_open_issue(value: &Json) -> Option<OpenIssue> {
     })
 }
 
+fn read_roadmap_issue(value: &Json) -> Option<RoadmapIssue> {
+    Some(RoadmapIssue {
+        number: value.get("number")?.as_u64()?,
+        open: value.get("state")?.as_str()? == "OPEN",
+        title: value.get("title")?.as_str()?.to_string(),
+        body: value.get("body")?.as_str()?.to_string(),
+        labels: read_labels(value)?,
+        parent: parent_here(value)?,
+    })
+}
+
 fn read_issue(value: &Json) -> Option<Issue> {
     let comments = value.get("comments")?.as_arr()?;
     Some(Issue {
@@ -566,6 +605,8 @@ fn read_closing(value: &Json) -> Option<(u64, Vec<u64>)> {
 fn read_open_pr(value: &Json) -> Option<OpenPr> {
     Some(OpenPr {
         number: value.get("number")?.as_u64()?,
+        title: value.get("title")?.as_str()?.to_string(),
+        labels: read_labels(value)?,
         from_fork: value.get("isCrossRepository")?.as_bool()?,
         head_ref: value.get("headRefName")?.as_str()?.to_string(),
         head: value.get("headRefOid")?.as_str()?.to_string(),

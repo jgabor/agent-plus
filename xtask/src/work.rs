@@ -12,7 +12,8 @@ const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
 /// What parks an issue: a PR ready to merge, or a question waiting for an answer.
 pub const LAND_NEEDED: &str = "land-needed";
-pub const PARKED: [&str; 2] = [LAND_NEEDED, "answer-needed"];
+pub const ANSWER_NEEDED: &str = "answer-needed";
+pub const PARKED: [&str; 2] = [LAND_NEEDED, ANSWER_NEEDED];
 const STATUS_MARK: &str = "<!-- status -->";
 const DEFAULT_BRANCH: &str = "main";
 

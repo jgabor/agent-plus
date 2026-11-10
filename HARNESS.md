@@ -422,7 +422,7 @@ a sub-issue, and the `State` and `Lease until` fields.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
   issue that GitHub lists another issue under, as a sub-issue.
 - A parent that delivers a milestone names it on a line of its own,
-  `Milestone: <name>.`. The planner reads that line, and `xtask` doesn't.
+  `Milestone: <name>.`. The planner and `cargo xtask roadmap` read that line.
 - `xtask` reads status comments only from the repository owner's account.
 - When two live claims exist, the status comment with the lowest id wins.
 
@@ -448,6 +448,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
+| `cargo xtask roadmap` | Prints the [roadmap](#roadmap), and writes nothing |
 
 `cargo xtask next` prints an array of
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
@@ -628,8 +629,32 @@ does the following on `main`:
    fails, comments how to run it. A later night leaves an issue that says how
    it ended alone.
 
+6. Write the [roadmap](#roadmap), with this run of the journey, to the open
+   issue titled `Roadmap`.
+
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.
+
+### Roadmap
+
+`cargo xtask roadmap` prints the roadmap as markdown, and the nightly job makes
+it the body of the open issue titled `Roadmap`. Nobody edits that issue. To
+change the roadmap, change what it is built from. It has three parts:
+
+1. Each milestone, in the order of `harness/journey.toml`, with its commands
+   and its steps as the journey just ran them. The milestone's parent is the
+   issue whose body names it in a `Milestone:` line, and it is shown with how
+   many of its sub-issues are closed. An open parent whose steps all pass is
+   ready to close.
+2. What comes after v0.1.0, which is the open sub-issues of the roadmap issue.
+3. What waits on the owner: open PRs and issues labeled `land-needed` or
+   `answer-needed`, and open issues with no `auto:*` label and no parent in
+   this repository. A listed PR stands for the issues it closes, so they are
+   left out, and so are the issues that `xtask` writes.
+
+The same inputs give the same text, and the nightly job leaves a body that
+already says it alone. With no open issue titled `Roadmap`, it writes nothing,
+so closing that issue turns the roadmap off.
 
 ### Release check
 

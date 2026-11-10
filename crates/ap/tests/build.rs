@@ -164,7 +164,11 @@ fn build_without_an_agentfile_fails() {
     fs::create_dir(scratch.root.join("empty")).unwrap();
     let output = scratch.ap(&scratch.root, &["build", "empty"]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("no Agentfile"), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no Agentfile"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 // spec(Build): **Name.** The image is named after the Agentfile's directory.
@@ -265,7 +269,10 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
 
     let first = layer_lines(&scratch.build(&dir, &[]));
     assert_eq!(first.len(), 3, "{first:?}");
-    assert!(first.iter().all(|(status, _)| status == "built"), "{first:?}");
+    assert!(
+        first.iter().all(|(status, _)| status == "built"),
+        "{first:?}"
+    );
     let before = snapshot(&scratch.store());
 
     let second = layer_lines(&scratch.build(&dir, &[]));
@@ -273,7 +280,10 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
         lines.iter().map(|(_, label)| label.clone()).collect()
     };
     assert_eq!(labels(&second), labels(&first));
-    assert!(second.iter().all(|(status, _)| status == "hit"), "{second:?}");
+    assert!(
+        second.iter().all(|(status, _)| status == "hit"),
+        "{second:?}"
+    );
     assert_eq!(snapshot(&scratch.store()), before);
 }
 
@@ -449,7 +459,10 @@ fn build_reports_every_error() {
     let lines: Vec<&str> = message.lines().collect();
     assert_eq!(lines.len(), 4, "{message}");
     for (line, number) in lines.iter().zip(2..) {
-        assert!(line.starts_with(&format!("Agentfile:{number}: ")), "{message}");
+        assert!(
+            line.starts_with(&format!("Agentfile:{number}: ")),
+            "{message}"
+        );
     }
     assert!(scratch.agents().list().unwrap().is_empty());
 }

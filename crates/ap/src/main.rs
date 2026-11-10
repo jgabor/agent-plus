@@ -8,11 +8,13 @@ use std::time::Duration;
 use ap::boot;
 
 mod commands {
+    pub mod build;
     pub mod fmt;
 }
 
 const USAGE: &str = "usage: ap --version
        ap fmt [--check] [dir]
+       ap build [--strict] [-t name] [dir]
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -34,6 +36,11 @@ fn main() -> ExitCode {
         && let Some(fmt) = commands::fmt::parse(&args[1..])
     {
         return ExitCode::from(commands::fmt::run(&fmt));
+    }
+    if args.first().is_some_and(|command| command == "build")
+        && let Some(build) = commands::build::parse(&args[1..])
+    {
+        return ExitCode::from(commands::build::run(&build));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

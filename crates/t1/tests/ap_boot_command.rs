@@ -3,7 +3,7 @@
 
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 use std::sync::OnceLock;
 
 use ap::fetch;
@@ -22,10 +22,16 @@ fn vmlinux() -> &'static Path {
     PATH.get_or_init(kernel::vmlinux)
 }
 
+/// Where one test keeps its files, named per process too, because another
+/// run of this suite may share the target directory.
+fn scratch(test: &str) -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ap-boot-{test}-{}", process::id()))
+}
+
 /// A home of its own for one test, with the kernel already in its store, so
-/// that nothing reads the owner's files or the network.
+/// that `ap` reads none of the owner's files and fetches nothing.
 fn home(test: &str) -> PathBuf {
-    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    let home = scratch(test);
     let _ = fs::remove_dir_all(&home);
     let store = Store::new(home.join(".local/share/ap"));
     let kernel = File::open(vmlinux()).unwrap();
@@ -43,7 +49,7 @@ fn ap_boot(test: &str, args: &[&str]) -> Output {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    fs::remove_dir_all(Path::new(env!("CARGO_TARGET_TMPDIR")).join(test)).unwrap();
+    fs::remove_dir_all(scratch(test)).unwrap();
     output
 }
 
@@ -82,7 +88,11 @@ fn ap_boot_boots_a_machine_that_holds_no_agent() {
 fn ap_boot_without_a_command_prints_the_release_and_powers_off() {
     let output = ap_boot("release", &["--timeout", "30"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(text(&output.stdout), format!("{}\n", kernel::release()), "{output:?}");
+    assert_eq!(
+        text(&output.stdout),
+        format!("{}\n", kernel::release()),
+        "{output:?}"
+    );
     assert_eq!(text(&output.stderr), "", "{output:?}");
 }
 
@@ -91,10 +101,16 @@ fn ap_boot_without_a_command_prints_the_release_and_powers_off() {
 fn ap_boot_with_a_command_runs_it_in_the_machine_and_exits_with_its_status() {
     let version = ap_boot("version", &["--timeout", "30", "--", "ap", "--version"]);
     assert_eq!(version.status.code(), Some(0), "{version:?}");
-    let host = Command::new(guest_binary::ap()).arg("--version").output().unwrap();
+    let host = Command::new(guest_binary::ap())
+        .arg("--version")
+        .output()
+        .unwrap();
     assert_eq!(version.stdout, host.stdout, "{version:?}");
 
-    let bad_flag = ap_boot("bad-flag", &["--timeout", "30", "--", "ap", "--no-such-flag"]);
+    let bad_flag = ap_boot(
+        "bad-flag",
+        &["--timeout", "30", "--", "ap", "--no-such-flag"],
+    );
     assert_eq!(bad_flag.status.code(), Some(USAGE), "{bad_flag:?}");
     assert!(text(&bad_flag.stderr).contains("usage"), "{bad_flag:?}");
 

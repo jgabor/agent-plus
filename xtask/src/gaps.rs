@@ -30,9 +30,10 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
             .iter()
             .map(|step| {
                 format!(
-                    "{{\"id\":{},\"name\":{},\"state\":{}}}",
+                    "{{\"id\":{},\"name\":{},\"milestone\":{},\"state\":{}}}",
                     step.id,
                     quoted(&step.name),
+                    quoted(&step.milestone),
                     quoted(step.state)
                 )
             })
@@ -71,7 +72,10 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
         return Ok(verdict);
     }
     for step in steps {
-        println!("step {} {} {}", step.id, step.state, step.name);
+        println!(
+            "step {} {} {}: {}",
+            step.id, step.state, step.milestone, step.name
+        );
     }
     for budget in missed {
         let value = budget

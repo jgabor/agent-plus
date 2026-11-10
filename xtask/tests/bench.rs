@@ -21,8 +21,7 @@ const BOOT_FAILS: &str = "fn main() -> std::process::ExitCode {\n    if std::env
 const FAST: &str = "fn main() {}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
-const JOURNEY: &str =
-    "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
 const RESULT: &str = "target/bench/result.toml";
 
 fn stdout(output: &Output) -> String {

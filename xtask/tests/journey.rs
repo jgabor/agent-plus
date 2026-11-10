@@ -7,12 +7,20 @@ use std::process::{Command, Output};
 const AP: &str = "fn main() {\n    println!(\"ap test\");\n}\n";
 const PASS: &str = "#!/bin/sh\nexit 0\n";
 const FAIL: &str = "#!/bin/sh\nexit 1\n";
+/// The milestone that every step from `step` is in.
+const MILESTONE: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n";
 
 fn manifest() -> String {
     "[package]\nname = \"ap\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".to_string()
 }
 
-fn workspace(name: &str, journey: &str, files: &[(&str, &str)]) -> PathBuf {
+/// A workspace whose journey is `steps`, all in the milestone `m`.
+fn workspace(name: &str, steps: &str, files: &[(&str, &str)]) -> PathBuf {
+    workspace_with(name, &format!("{MILESTONE}{steps}"), files)
+}
+
+/// A workspace whose `harness/journey.toml` is exactly `journey`.
+fn workspace_with(name: &str, journey: &str, files: &[(&str, &str)]) -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("journey")
         .join(name);
@@ -66,7 +74,7 @@ fn stderr(output: &Output) -> String {
 
 fn step(id: u32, needs: &str, script: &str) -> String {
     format!(
-        "[[step]]\nid = {id}\nname = \"step {id}\"\nneeds = [{needs}]\nscript = \"{script}\"\n\n"
+        "[[step]]\nid = {id}\nname = \"step {id}\"\nmilestone = \"m\"\nneeds = [{needs}]\nscript = \"{script}\"\n\n"
     )
 }
 
@@ -130,7 +138,7 @@ fn a_step_is_skipped_unless_every_need_passes() {
 #[test]
 fn a_spend_step_and_what_needs_it_do_not_run() {
     let toml = format!(
-        "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = true\n\n{}",
+        "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = true\n\n{}",
         step(2, "1", "harness/journey/touch.sh"),
     );
     let root = workspace(
@@ -147,7 +155,7 @@ fn a_spend_step_and_what_needs_it_do_not_run() {
 
 #[test]
 fn a_step_naming_a_floor_fails_while_its_check_does_not_exist() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
     let root = workspace("floor-missing", toml, &[("harness/journey/one.sh", PASS)]);
     let output = journey(&root);
     assert_eq!(stdout(&output), "fail step 1\njourney 0 of 1\n");
@@ -160,7 +168,7 @@ fn a_step_naming_a_floor_fails_while_its_check_does_not_exist() {
 
 #[test]
 fn a_step_naming_a_floor_passes_once_its_check_exists() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
     let t1 = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
     let root = workspace(
         "floor-present",
@@ -281,7 +289,8 @@ fn a_journey_needs_no_arguments() {
 
 #[test]
 fn a_step_without_a_name_is_a_problem() {
-    let toml = "[[step]]\nid = 1\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+    let toml =
+        "[[step]]\nid = 1\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
     let root = workspace("no-name", toml, &[("harness/journey/one.sh", PASS)]);
     let output = journey(&root);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
@@ -290,7 +299,7 @@ fn a_step_without_a_name_is_a_problem() {
 
 #[test]
 fn a_mistyped_spend_is_a_problem() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = \"true\"\n";
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = \"true\"\n";
     let root = workspace("spend-type", toml, &[("harness/journey/one.sh", PASS)]);
     let output = journey(&root);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
@@ -299,7 +308,7 @@ fn a_mistyped_spend_is_a_problem() {
 
 #[test]
 fn a_mistyped_floor_is_a_problem() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = [\"floor_guest_host\"]\n";
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = [\"floor_guest_host\"]\n";
     let root = workspace("floor-type", toml, &[("harness/journey/one.sh", PASS)]);
     let output = journey(&root);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
@@ -308,7 +317,7 @@ fn a_mistyped_floor_is_a_problem() {
 
 #[test]
 fn a_comment_is_not_a_floor_check() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
+    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nfloor = \"floor_guest_host\"\n";
     let t1 = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
     let root = workspace(
         "floor-comment",
@@ -322,38 +331,170 @@ fn a_comment_is_not_a_floor_check() {
     assert_journey(&root, "fail step 1\njourney 0 of 1\n");
 }
 
-/// The file as the journey will write it: milestone tables, and a `milestone`
-/// key on each step.
+fn milestone(name: &str, commands: &str) -> String {
+    format!("[[milestone]]\nname = \"{name}\"\ncommands = [{commands}]\n\n")
+}
+
+fn step_in(id: u32, milestone: &str) -> String {
+    format!(
+        "[[step]]\nid = {id}\nname = \"step {id}\"\nmilestone = \"{milestone}\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n\n"
+    )
+}
+
+/// Runs the journey on `journey`, which must be a problem that names `word`.
+#[track_caller]
+fn assert_problem(name: &str, toml: &str, word: &str) {
+    let root = workspace_with(name, toml, &[("harness/journey/one.sh", PASS)]);
+    let output = journey(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains(word), "{}", stderr(&output));
+}
+
 #[test]
-fn milestone_tables_and_keys_are_read_and_skipped() {
-    let toml = "[[milestone]]\nname = \"Boot\"\ncommands = [\"ap boot\"]\n\n\
-        [[milestone]]\nname = \"Author\"\ncommands = []\n\n\
-        [[step]]\nid = 1\nname = \"one\"\nmilestone = \"Boot\"\nneeds = []\nscript = \"harness/journey/pass.sh\"\n\n\
-        [[step]]\nid = 2\nname = \"two\"\nmilestone = \"Author\"\nneeds = [1]\nscript = \"harness/journey/fail.sh\"\n";
-    let root = workspace(
-        "milestone-tables",
-        toml,
-        &[
-            ("harness/journey/pass.sh", PASS),
-            ("harness/journey/fail.sh", FAIL),
-        ],
+fn steps_in_several_milestones_run() {
+    let toml = format!(
+        "{}{}{}{}{}",
+        milestone("Boot", "\"ap --version\", \"ap boot\""),
+        milestone("Author", "\"ap fmt\""),
+        step_in(1, "Boot"),
+        step_in(2, "Author"),
+        step_in(3, "Boot"),
     );
-    assert_journey(&root, "pass step 1\nfail step 2\njourney 1 of 2\n");
+    let root = workspace_with("milestones", &toml, &[("harness/journey/one.sh", PASS)]);
+    assert_journey(
+        &root,
+        "pass step 1\npass step 2\npass step 3\njourney 3 of 3\n",
+    );
+}
+
+#[test]
+fn a_step_without_a_milestone_is_a_problem() {
+    let toml = format!(
+        "{}[[step]]\nid = 4\nname = \"s\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n",
+        milestone("Boot", "")
+    );
+    assert_problem("no-milestone", &toml, "step 4 has no `milestone`");
+}
+
+#[test]
+fn a_mistyped_milestone_is_a_problem() {
+    let toml = format!(
+        "{}[[step]]\nid = 4\nname = \"s\"\nmilestone = 1\nneeds = []\nscript = \"harness/journey/one.sh\"\n",
+        milestone("Boot", "")
+    );
+    assert_problem("milestone-type", &toml, "step 4 has no `milestone`");
+}
+
+#[test]
+fn a_step_in_a_milestone_that_does_not_exist_is_a_problem() {
+    let toml = format!("{}{}", milestone("Boot", ""), step_in(4, "Boat"));
+    assert_problem(
+        "unknown-milestone",
+        &toml,
+        "step 4 is in the milestone `Boat`",
+    );
+}
+
+#[test]
+fn a_milestone_with_no_step_is_a_problem() {
+    let toml = format!(
+        "{}{}{}",
+        milestone("Boot", ""),
+        milestone("Author", ""),
+        step_in(1, "Boot")
+    );
+    assert_problem(
+        "empty-milestone",
+        &toml,
+        "the milestone `Author` has no step",
+    );
+}
+
+#[test]
+fn a_repeated_milestone_is_a_problem() {
+    let toml = format!(
+        "{}{}{}",
+        milestone("Boot", ""),
+        milestone("Boot", ""),
+        step_in(1, "Boot")
+    );
+    assert_problem(
+        "repeated-milestone",
+        &toml,
+        "the milestone `Boot` appears twice",
+    );
+}
+
+#[test]
+fn a_command_in_two_milestones_is_a_problem() {
+    let toml = format!(
+        "{}{}{}{}",
+        milestone("Boot", "\"ap boot\""),
+        milestone("Author", "\"ap fmt\", \"ap boot\""),
+        step_in(1, "Boot"),
+        step_in(2, "Author"),
+    );
+    assert_problem(
+        "shared-command",
+        &toml,
+        "the command `ap boot` is listed twice",
+    );
+}
+
+#[test]
+fn a_command_twice_in_one_milestone_is_a_problem() {
+    let toml = format!(
+        "{}{}",
+        milestone("Boot", "\"ap boot\", \"ap boot\""),
+        step_in(1, "Boot")
+    );
+    assert_problem(
+        "doubled-command",
+        &toml,
+        "the command `ap boot` is listed twice",
+    );
+}
+
+#[test]
+fn a_milestone_without_a_name_is_a_problem() {
+    let toml = format!("[[milestone]]\ncommands = []\n\n{}", step_in(1, "Boot"));
+    assert_problem("unnamed-milestone", &toml, "a milestone has no `name`");
+}
+
+#[test]
+fn a_milestone_without_commands_is_a_problem() {
+    let toml = format!("[[milestone]]\nname = \"Boot\"\n\n{}", step_in(1, "Boot"));
+    assert_problem(
+        "no-commands",
+        &toml,
+        "the milestone `Boot` has no string array `commands`",
+    );
+}
+
+#[test]
+fn mistyped_commands_are_a_problem() {
+    let toml = format!(
+        "[[milestone]]\nname = \"Boot\"\ncommands = [1]\n\n{}",
+        step_in(1, "Boot")
+    );
+    assert_problem(
+        "commands-type",
+        &toml,
+        "the milestone `Boot` has no string array `commands`",
+    );
 }
 
 #[test]
 fn a_table_that_is_neither_a_milestone_nor_a_step_is_a_problem() {
     let toml = format!(
-        "{}[[stage]]\nid = 2\n",
-        step(1, "", "harness/journey/one.sh")
+        "{}{}[[stage]]\nid = 1\n",
+        milestone("Boot", ""),
+        step_in(1, "Boot")
     );
-    let root = workspace("other-table", &toml, &[("harness/journey/one.sh", PASS)]);
-    let output = journey(&root);
-    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
-    assert!(
-        stderr(&output).contains("expected `[[milestone]]` or `[[step]]`, got `[[stage]]`"),
-        "{}",
-        stderr(&output)
+    assert_problem(
+        "other-table",
+        &toml,
+        "expected `[[milestone]]` or `[[step]]`, got `[[stage]]`",
     );
 }
 

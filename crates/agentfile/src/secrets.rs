@@ -203,6 +203,11 @@ fn env(rest: &str) -> Result<Env, String> {
         return Err("`ENV` needs a key and a value".to_string());
     }
     let (key, after) = read_argument(rest)?;
+    if rest.starts_with("--") {
+        return Err(format!(
+            "an Agentfile has no flags, but found `{key}`. Quote it to use it as a key"
+        ));
+    }
     if key.is_empty() {
         return Err("`ENV` needs a key before its value".to_string());
     }
@@ -280,15 +285,28 @@ fn parts(value: &str) -> Result<Vec<Part>, String> {
     Ok(parts)
 }
 
-/// The default in `${<inner>}`, which is literal apart from `\$`.
+/// The default in `${<inner>}`. It is literal, apart from `\$`, and a `$`
+/// that would start a variable is an error.
 fn default_of(inner: &str, default: &str) -> Result<String, String> {
-    let escaped = default.replace("\\$", "");
-    if escaped.contains('$') {
-        return Err(format!(
-            "the default in `${{{inner}}}` can't use a variable. Write `\\$` for a dollar sign"
-        ));
+    let mut value = String::new();
+    let mut rest = default;
+    while let Some(c) = rest.chars().next() {
+        if let Some(after) = rest.strip_prefix("\\$") {
+            value.push('$');
+            rest = after;
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('$')
+            && (after.starts_with('{') || name_length(after) > 0)
+        {
+            return Err(format!(
+                "the default in `${{{inner}}}` can't use a variable. Write `\\$` for a dollar sign"
+            ));
+        }
+        value.push(c);
+        rest = &rest[c.len_utf8()..];
     }
-    Ok(default.replace("\\$", "$"))
+    Ok(value)
 }
 
 /// The length of the variable name at the start of `text`: a letter or `_`,

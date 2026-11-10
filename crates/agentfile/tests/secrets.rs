@@ -116,6 +116,13 @@ fn env_needs_a_key_and_a_value() {
 }
 
 #[test]
+fn an_env_key_that_starts_with_two_dashes_is_a_flag() {
+    let error = error_of("ENV --force value\n");
+    assert!(error.message.contains("`--force`"), "{error:?}");
+    assert_eq!(secrets_of("ENV \"--force\" value\n").env[0].key, "--force");
+}
+
+#[test]
 fn an_env_key_cannot_be_empty_or_hold_an_equals_sign() {
     for line in ["ENV \"\" value\n", "ENV KEY=value other\n"] {
         error_of(line);
@@ -153,7 +160,6 @@ fn an_env_value_parses_into_literal_parts_and_variables() {
     );
 }
 
-// spec(Variables): `${NAME:-default}` uses `default` when `NAME` is unset or empty.
 #[test]
 fn a_variable_can_have_a_default() {
     assert_eq!(
@@ -171,6 +177,10 @@ fn a_variable_can_have_a_default() {
     assert_eq!(
         env_value("ENV PRICE ${PRICE:-\\$5}!\n"),
         [variable_or("PRICE", "$5"), literal("!")]
+    );
+    assert_eq!(
+        env_value("ENV PRICE ${PRICE:-$5 or 5$}\n"),
+        [variable_or("PRICE", "$5 or 5$")]
     );
 }
 
@@ -393,7 +403,6 @@ fn visible_is_matched_exactly_and_comes_last() {
     }
 }
 
-// spec(SEAL): At run time it works like a [`SECRET`](#secret) with the same arguments, and the rules for bound hosts and `visible` are the same.
 #[test]
 fn seal_takes_the_same_arguments_as_secret() {
     let lines = "DEPLOY_TOKEN @deploy.example.com\nAWS_SECRET_ACCESS_KEY visible\nGH_TOKEN\n";

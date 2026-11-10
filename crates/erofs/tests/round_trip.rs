@@ -210,6 +210,8 @@ impl Reader<'_> {
     /// Follows `erofs_readdir` and `erofs_fill_dentries`.
     fn dir(&mut self, nid: u64, parent: u64, data: &[u8], depth: usize) -> BTreeMap<Vec<u8>, Tree> {
         let mut found = Vec::new();
+        // Each block's bytes in use, and its first name's length.
+        let mut packing = Vec::new();
         for (index, blk) in data.chunks(self.block).enumerate() {
             let maxsize = blk.len();
             let nameoff0 = usize::from(u16_at(blk, 8));
@@ -218,6 +220,7 @@ impl Reader<'_> {
                 "nameoff0 {nameoff0} in block {index}"
             );
             let count = nameoff0 / 12;
+            let before = found.len();
             for k in 0..count {
                 let de = &blk[k * 12..k * 12 + 12];
                 let nameoff = usize::from(u16_at(de, 8));
@@ -235,7 +238,20 @@ impl Reader<'_> {
                 let name = blk[nameoff..nameoff + len].to_vec();
                 found.push((name, u64_at(de, 0), de[10]));
             }
+            let names = found[before..].iter().map(|(n, ..)| n.len());
+            packing.push((nameoff0 + names.sum::<usize>(), found[before].0.len()));
         }
+        // Not the format's rule, but the writer's: no block could have taken
+        // the next entry, and the directory ends where its last name does.
+        for pair in packing.windows(2) {
+            assert!(pair[0].0 + 12 + pair[1].1 > self.block, "packed blocks");
+        }
+        let last = packing.last().expect("a directory has a block").0;
+        assert_eq!(
+            last,
+            (data.len() - 1) % self.block + 1,
+            "no padding at the end"
+        );
         let names: Vec<_> = found.iter().map(|(n, ..)| n.clone()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -434,10 +450,15 @@ fn root_with(name: &[u8], node: Node) -> Dir {
     }
 }
 
+/// Writes into a sink that can't grow past one write, so a tree the writer
+/// wrongly accepts fails the test instead of filling memory.
 fn refused(root: Dir) -> Error {
-    let mut out = Vec::new();
+    let mut out = FirstBlock(Vec::new());
     let err = erofs::write(root, &mut out).expect_err("the writer refuses");
-    assert!(out.is_empty(), "nothing is written before a refusal");
+    assert!(
+        out.0.is_empty(),
+        "nothing is written before a refusal: {err}"
+    );
     err
 }
 
@@ -479,6 +500,62 @@ fn an_image_with_more_blocks_than_the_format_counts_is_refused() {
         entries,
     });
     assert!(matches!(err, Error::ImageTooLarge { .. }), "{err}");
+}
+
+/// Keeps the first block, then fails, so a test can read the superblock of
+/// an image too large to write.
+struct FirstBlock(Vec<u8>);
+
+impl io::Write for FirstBlock {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.0.is_empty() {
+            return Err(io::Error::other("only the first block"));
+        }
+        self.0.extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn an_image_of_exactly_the_most_blocks_is_written() {
+    let huge = u64::from(u32::MAX);
+    let tree = |last: u64| {
+        let entries = (0..4096u64)
+            .map(|n| {
+                let size = if n == 0 { last } else { huge };
+                let content: Box<dyn Read> = Box::new(io::repeat(0).take(size));
+                let file = File {
+                    mode: 0o644,
+                    size,
+                    content,
+                };
+                (n.to_string().into_bytes(), Node::File(file))
+            })
+            .collect();
+        Dir {
+            mode: 0o755,
+            entries,
+        }
+    };
+    let Error::ImageTooLarge { blocks } = refused(tree(huge)) else {
+        panic!("the image is too large");
+    };
+    let over = (blocks - u64::from(u32::MAX)) * 4096;
+    // The largest size that keeps the image at exactly `u32::MAX` blocks.
+    let fits = huge + 1 - over;
+    let err = refused(tree(fits + 1));
+    assert!(
+        matches!(err, Error::ImageTooLarge { blocks } if blocks == u64::from(u32::MAX) + 1),
+        "{err}"
+    );
+    let mut out = FirstBlock(Vec::new());
+    let err = erofs::write(tree(fits), &mut out).expect_err("the sink fails");
+    assert!(matches!(err, Error::Io(_)), "{err}");
+    assert_eq!(u32_at(&out.0[SUPER_OFFSET..], 36), u32::MAX, "blocks count");
 }
 
 #[test]

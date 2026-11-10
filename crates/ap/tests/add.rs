@@ -529,3 +529,25 @@ fn files_are_read_through_the_handle_the_path_module_opened() {
         "{error}"
     );
 }
+
+#[test]
+fn a_special_file_behind_a_swapped_directory_is_an_error() {
+    let s = Scratch::new("swapped-parent");
+    mkfifo(&{
+        fs::create_dir_all(s.context.join("data")).unwrap();
+        s.context.join("data/pipe")
+    });
+    fs::create_dir_all(s.root.join("elsewhere")).unwrap();
+    mkfifo(&s.root.join("elsewhere/pipe"));
+    let host = s.host("./data/pipe");
+    fs::rename(s.context.join("data"), s.context.join("old")).unwrap();
+    symlink(s.root.join("elsewhere"), s.context.join("data")).unwrap();
+    let result = Layer::read(&add("./data/pipe", None), &host, "/home/agent/pipe");
+    let Err(error) = result else {
+        panic!("a swapped directory was followed");
+    };
+    assert!(
+        error.to_string().contains("changed after it was checked"),
+        "{error}"
+    );
+}

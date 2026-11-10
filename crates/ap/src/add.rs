@@ -12,6 +12,7 @@ use std::io::{self, Cursor, Read};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
 use agentfile::Add;
@@ -174,20 +175,21 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// What the `<src>` itself holds. A special file is skipped before it is
-    /// opened, because a socket can't be, and opening a device can do
-    /// something.
+    /// What the `<src>` itself holds. A special file is skipped.
     fn top(&mut self) -> io::Result<Option<Entry>> {
-        let kind = fs::symlink_metadata(self.host.path())
-            .map_err(|error| self.error(b"", error))?
-            .file_type();
-        // A symlink here was swapped in after the check, and `open` refuses
-        // it.
-        if !kind.is_file() && !kind.is_dir() && !kind.is_symlink() {
-            self.skip(b"");
-            return Ok(None);
-        }
-        let file = self.host.open()?;
+        let file = match self.host.open() {
+            Ok(file) => file,
+            // A socket can't be opened. If something was swapped in on the
+            // way to it, this skips it instead of failing, and reads nothing.
+            Err(_)
+                if fs::symlink_metadata(self.host.path())
+                    .is_ok_and(|metadata| metadata.file_type().is_socket()) =>
+            {
+                self.skip(b"");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         let stat = fstat(&file).map_err(|error| self.error(b"", error))?;
         let content = match stat.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
@@ -455,7 +457,12 @@ fn list(dir: &File) -> io::Result<Vec<std::ffi::CString>> {
     };
     // SAFETY: `stream` is open, and isn't used again.
     unsafe { libc::closedir(stream) };
-    result
+    // In name order, so the walk, its warnings, and the key don't depend on
+    // the order the file system lists them.
+    result.map(|mut names| {
+        names.sort();
+        names
+    })
 }
 
 #[cfg(target_os = "linux")]

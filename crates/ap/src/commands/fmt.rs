@@ -87,16 +87,18 @@ fn replace(path: &Path, contents: &[u8]) -> io::Result<()> {
     name.push(target.file_name().unwrap_or_default());
     name.push(format!(".ap-fmt-{}", std::process::id()));
     let temporary = target.with_file_name(name);
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let written = (|| {
-        let mut file = File::options()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        file.set_permissions(permissions)?;
         file.write_all(contents)?;
+        // After the write, which can clear setuid and setgid bits.
+        file.set_permissions(permissions)?;
         file.sync_all()?;
         fs::rename(&temporary, &target)
     })();
+    // Only a file this run created is removed.
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }

@@ -72,7 +72,7 @@ fn fmt_replaces_the_file_atomically_and_keeps_its_mode() {
     let dir = scratch("atomic");
     let file = dir.join("Agentfile");
     fs::write(&file, MESSY).unwrap();
-    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o4640)).unwrap();
     let before = fs::metadata(&file).unwrap().ino();
     let output = ap(&dir, &["fmt"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -80,7 +80,7 @@ fn fmt_replaces_the_file_atomically_and_keeps_its_mode() {
     // A rename puts a new file in place, where a write in place keeps the old
     // one and could leave half of it behind.
     assert_ne!(after.ino(), before);
-    assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+    assert_eq!(after.permissions().mode() & 0o7777, 0o4640);
     assert_eq!(fs::read_to_string(&file).unwrap(), TIDY);
     assert_eq!(names(&dir), ["Agentfile"]);
 }

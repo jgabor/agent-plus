@@ -7,6 +7,7 @@
 //! values.
 
 mod files;
+pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
 mod network;
 mod secrets;
 pub use secrets::{Auth, Env, Part, Secret, Secrets};

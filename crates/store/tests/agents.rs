@@ -46,6 +46,7 @@ fn agent(name: &str, directory: &str, layers: Vec<Layer>) -> Agent {
     Agent {
         name: name.to_string(),
         directory: directory.to_string(),
+        agentfile: format!("{directory}/Agentfile"),
         layers,
         declared: vec![declared("AGENT", &["claude"])],
     }
@@ -146,6 +147,7 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
         fs::read_to_string(root.join("agents/notes")).unwrap(),
         format!(
             "DIRECTORY \"/home/me/my notes\"\n\
+             AGENTFILE \"/home/me/my notes/Agentfile\"\n\
              LAYER \"key src\" {digest} \"ADD ./src /work\"\n\
              AGENT claude\n\
              SHARE ./out /work/out rw\n\
@@ -163,24 +165,27 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
         .unwrap();
     let path = root.join("agents/notes");
 
+    // A record that is right until its last line.
+    let head = "DIRECTORY /work/notes\nAGENTFILE /work/notes/Agentfile\n";
+    let digest = "0".repeat(64);
     for text in [
-        "DIRECTORY /work/notes\nAGENT \"claude\n",
-        "DIRECTORY /work/notes\nLAYER key\n",
-        "DIRECTORY /work/notes\nLAYER key not-a-digest ADD\n",
-        &format!("DIRECTORY /work/notes\nLAYER key {} \n", "0".repeat(64)),
-        &format!("DIRECTORY /work/notes\nLAYER key {} \"\"\n", "0".repeat(64)),
-        &format!(
-            "DIRECTORY /work/notes\nLAYER key {} ADD x\n",
-            "0".repeat(64)
-        ),
-        "DIRECTORY /work/notes\nBOGUS word\n",
-        "AGENT claude\n",
-        "DIRECTORY /a\nDIRECTORY /b\n",
-        "DIRECTORY relative\n",
-        "DIRECTORY /work/notes\nENV \\x\n",
-        "DIRECTORY /work/notes\nSYSTEM hello\n",
+        format!("{head}AGENT \"claude\n"),
+        format!("{head}LAYER key\n"),
+        format!("{head}LAYER key not-a-digest ADD\n"),
+        format!("{head}LAYER key {digest}\n"),
+        format!("{head}LAYER key {digest} \"\"\n"),
+        format!("{head}LAYER key {digest} ADD x\n"),
+        format!("{head}BOGUS word\n"),
+        format!("{head}ENV \\x\n"),
+        format!("{head}SYSTEM hello\n"),
+        format!("{head}AGENTFILE /work/notes/Agentfile\n"),
+        "AGENTFILE /work/notes/Agentfile\nAGENT claude\n".to_string(),
+        "DIRECTORY /work/notes\nAGENT claude\n".to_string(),
+        "DIRECTORY /work/notes\nAGENTFILE Agentfile\n".to_string(),
+        "DIRECTORY /a\nDIRECTORY /b\n".to_string(),
+        "DIRECTORY relative\n".to_string(),
     ] {
-        fs::write(&path, text).unwrap();
+        fs::write(&path, &text).unwrap();
         let error = agents.get("notes").unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData, "{text:?}");
         assert!(error.to_string().contains("notes"), "{error}");
@@ -218,6 +223,12 @@ fn recording_an_agent_with_a_relative_directory_is_refused() {
             .record(&agent("notes", directory, Vec::new()), false)
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidInput, "{directory:?}");
+    }
+    for agentfile in ["", "Agentfile", "./notes/Agentfile"] {
+        let mut recorded = agent("notes", "/work/notes", Vec::new());
+        recorded.agentfile = agentfile.to_string();
+        let error = agents.record(&recorded, false).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidInput, "{agentfile:?}");
     }
 }
 

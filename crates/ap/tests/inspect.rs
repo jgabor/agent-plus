@@ -203,6 +203,41 @@ fn inspect_grants_escapes_what_it_prints() {
 }
 
 #[test]
+fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
+    let scratch = Scratch::new("symlink");
+    let file = scratch.root.join("grants");
+    let wide = scratch.project("wide", "AGENT claude\n");
+    fs::write(&file, "NETWORK +\nPOLICY +\n").unwrap();
+    scratch.build(&scratch.home, &wide, &file);
+    let real = scratch.project("real", "AGENT claude\nNETWORK -\nPOLICY -\n");
+    let dir = scratch.root.join("notes");
+    fs::create_dir_all(&dir).unwrap();
+    std::os::unix::fs::symlink(real.join("Agentfile"), dir.join("Agentfile")).unwrap();
+    fs::write(&file, "NETWORK -\nPOLICY -\n").unwrap();
+    scratch.build(&scratch.home, &dir, &file);
+
+    // The link now leads to an Agentfile whose approval is wider, and then
+    // nowhere.
+    fs::remove_file(dir.join("Agentfile")).unwrap();
+    std::os::unix::fs::symlink(wide.join("Agentfile"), dir.join("Agentfile")).unwrap();
+    let output = scratch.ap(&["inspect", "--grants", "notes"]);
+    assert_eq!(
+        stdout(&output),
+        "NETWORK -\nPOLICY -\n",
+        "{}",
+        stderr(&output)
+    );
+    fs::remove_file(dir.join("Agentfile")).unwrap();
+    let output = scratch.ap(&["inspect", "--grants", "notes"]);
+    assert_eq!(
+        stdout(&output),
+        "NETWORK -\nPOLICY -\n",
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn inspect_an_unknown_agent_exits_1_and_names_it() {
     let scratch = Scratch::new("unknown");
     for args in [

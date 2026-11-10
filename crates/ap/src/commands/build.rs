@@ -223,6 +223,9 @@ fn build(args: &Args) -> Result<(), String> {
         approver,
     )?;
 
+    let Some(agentfile_path) = agentfile.path().to_str().map(str::to_string) else {
+        return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
+    };
     let declared: Vec<::store::Declared> = instructions
         .iter()
         .filter(|instruction| instruction.text.is_none())
@@ -248,6 +251,7 @@ fn build(args: &Args) -> Result<(), String> {
         let agent = ::store::Agent {
             name: name.clone(),
             directory: directory.to_string(),
+            agentfile: agentfile_path.clone(),
             layers: built,
             declared: declared.clone(),
         };

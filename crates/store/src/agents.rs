@@ -7,12 +7,15 @@
 //!
 //! ```text
 //! DIRECTORY /home/me/notes
+//! AGENTFILE /home/me/notes/Agentfile
 //! LAYER 0b1f63c4… 9829b1f2… "ADD ./src /work"
 //! AGENT claude
 //! SHARE ./out /work/out rw
 //! ```
 //!
-//! `DIRECTORY` is the directory the agent was built from. Each `LAYER` holds
+//! `DIRECTORY` is the directory the agent was built from, and `AGENTFILE` is
+//! the canonical path of the Agentfile that the build read, which keys its
+//! approval. Each `LAYER` holds
 //! a layer's key and its digest, shortened here, and the instruction that
 //! made it, in the agent's order. Every other line is an instruction the Agentfile declared,
 //! with its arguments.
@@ -41,6 +44,9 @@ pub struct Agent {
     pub name: String,
     /// The canonical directory the agent was built from.
     pub directory: String,
+    /// The canonical path of the Agentfile the build read. Its approval is
+    /// kept with this path.
+    pub agentfile: String,
     /// The agent's layers, in order.
     pub layers: Vec<Layer>,
     /// The instructions the Agentfile declared, in order.
@@ -282,6 +288,12 @@ fn record_text(agent: &Agent) -> io::Result<String> {
             agent.directory
         ));
     }
+    if !agent.agentfile.starts_with('/') {
+        return invalid(format!(
+            "an agent's Agentfile is a canonical path, but found {:?}",
+            agent.agentfile
+        ));
+    }
     let mut text = String::new();
     let mut line = |name: &str, arguments: &[&str]| {
         text.push_str(name);
@@ -292,6 +304,7 @@ fn record_text(agent: &Agent) -> io::Result<String> {
         text.push('\n');
     };
     line("DIRECTORY", &[&agent.directory]);
+    line("AGENTFILE", &[&agent.agentfile]);
     for layer in &agent.layers {
         if layer.key.is_empty() || layer.instruction.is_empty() {
             return invalid("a layer's key and instruction can't be empty".to_string());
@@ -314,6 +327,7 @@ fn record_text(agent: &Agent) -> io::Result<String> {
 /// Reads the text of the record named `name`.
 fn read_record(name: &str, text: &str) -> Result<Agent, String> {
     let mut directory = None;
+    let mut agentfile = None;
     let mut layers = Vec::new();
     let mut declared = Vec::new();
     for (index, content) in text.split('\n').enumerate() {
@@ -332,6 +346,11 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
                 _ if directory.is_some() => return Err(fail("a second `DIRECTORY`".to_string())),
                 [path] if path.starts_with('/') => directory = arguments.pop(),
                 _ => return Err(fail("`DIRECTORY` takes a canonical path".to_string())),
+            },
+            "AGENTFILE" => match arguments.as_slice() {
+                _ if agentfile.is_some() => return Err(fail("a second `AGENTFILE`".to_string())),
+                [path] if path.starts_with('/') => agentfile = arguments.pop(),
+                _ => return Err(fail("`AGENTFILE` takes a canonical path".to_string())),
             },
             "LAYER" => match arguments.as_slice() {
                 [key, digest, instruction]
@@ -362,9 +381,13 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
     let Some(directory) = directory else {
         return Err("the record has no `DIRECTORY`".to_string());
     };
+    let Some(agentfile) = agentfile else {
+        return Err("the record has no `AGENTFILE`".to_string());
+    };
     Ok(Agent {
         name: name.to_string(),
         directory,
+        agentfile,
         layers,
         declared,
     })

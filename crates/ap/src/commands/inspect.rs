@@ -69,15 +69,13 @@ fn inspect(args: &Args) -> Result<String, String> {
         .get(&args.name)
         .map_err(store)?
         .ok_or_else(unknown)?;
-    // The approval is kept with the Agentfile's canonical path, as `ap build`
-    // resolved it. A missing Agentfile was at that path when it was built.
-    let agentfile = Path::new(&agent.directory).join("Agentfile");
-    let agentfile = agentfile.canonicalize().unwrap_or(agentfile);
+    // The approval is kept with the Agentfile's canonical path, as the build
+    // resolved it, so where the path leads now doesn't matter.
     let Some(grants) = ::store::Approvals::new(&root)
-        .get(&agentfile)
+        .get(Path::new(&agent.agentfile))
         .map_err(store)?
     else {
-        let shown = agentfile::print_argument(&agentfile.display().to_string());
+        let shown = agentfile::print_argument(&agent.agentfile);
         return Err(format!("ap: no grants are approved for {shown}"));
     };
     if args.grants {

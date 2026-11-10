@@ -322,16 +322,17 @@ fn a_comment_is_not_a_floor_check() {
     assert_journey(&root, "fail step 1\njourney 0 of 1\n");
 }
 
+/// The file as the journey will write it: milestone tables, and a `milestone`
+/// key on each step.
 #[test]
-fn milestone_tables_are_read_and_skipped() {
-    let toml = format!(
-        "[[milestone]]\nname = \"Boot\"\ncommands = [\"ap boot\"]\n\n{}[[milestone]]\nname = \"Author\"\ncommands = []\n\n{}",
-        step(1, "", "harness/journey/pass.sh"),
-        step(2, "1", "harness/journey/fail.sh"),
-    );
+fn milestone_tables_and_keys_are_read_and_skipped() {
+    let toml = "[[milestone]]\nname = \"Boot\"\ncommands = [\"ap boot\"]\n\n\
+        [[milestone]]\nname = \"Author\"\ncommands = []\n\n\
+        [[step]]\nid = 1\nname = \"one\"\nmilestone = \"Boot\"\nneeds = []\nscript = \"harness/journey/pass.sh\"\n\n\
+        [[step]]\nid = 2\nname = \"two\"\nmilestone = \"Author\"\nneeds = [1]\nscript = \"harness/journey/fail.sh\"\n";
     let root = workspace(
         "milestone-tables",
-        &toml,
+        toml,
         &[
             ("harness/journey/pass.sh", PASS),
             ("harness/journey/fail.sh", FAIL),

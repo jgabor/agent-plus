@@ -24,7 +24,10 @@ pub fn grants(
     Grants::read(instructions, |text| {
         let host = HostPath::resolve(text, context, home).map_err(|error| error.to_string())?;
         let path = host.path().to_str().ok_or_else(|| {
-            format!("{} isn't UTF-8, so it can't be approved", host.path().display())
+            format!(
+                "{} isn't UTF-8, so it can't be approved",
+                host.path().display()
+            )
         })?;
         Ok(Location {
             path: path.to_string(),

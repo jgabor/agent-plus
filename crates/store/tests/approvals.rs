@@ -42,7 +42,10 @@ fn a_new_approval_replaces_the_old_one() {
     let approvals = Approvals::new(&root);
     let notes = Path::new("/home/me/notes/Agentfile");
     approvals
-        .put(notes, &grants("PATH /home/me/shared\nNETWORK -\nPOLICY -\n"))
+        .put(
+            notes,
+            &grants("PATH /home/me/shared\nNETWORK -\nPOLICY -\n"),
+        )
         .unwrap();
     let wider = grants("PATH /home/me/shared rw\nNETWORK +\nPOLICY -\n");
     approvals.put(notes, &wider).unwrap();
@@ -69,7 +72,10 @@ fn a_relative_path_can_not_key_an_approval() {
     let root = store_root("relative");
     let approvals = Approvals::new(&root);
     let error = approvals
-        .put(Path::new("notes/Agentfile"), &grants("NETWORK -\nPOLICY -\n"))
+        .put(
+            Path::new("notes/Agentfile"),
+            &grants("NETWORK -\nPOLICY -\n"),
+        )
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidInput);
     assert!(!root.join("approvals").exists());
@@ -95,5 +101,8 @@ fn a_damaged_approval_is_an_error() {
     assert_eq!(error.kind(), ErrorKind::InvalidData);
     assert!(error.to_string().contains("line 2"), "{error}");
     fs::write(&file, "AGENTFILE /home/me/other/Agentfile\nNETWORK -\n").unwrap();
-    assert_eq!(approvals.get(notes).unwrap_err().kind(), ErrorKind::InvalidData);
+    assert_eq!(
+        approvals.get(notes).unwrap_err().kind(),
+        ErrorKind::InvalidData
+    );
 }

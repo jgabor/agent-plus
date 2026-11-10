@@ -331,7 +331,12 @@ impl fmt::Display for Widening {
             Widening::Write(path) => write!(f, "PATH {} rw, which was read-only", printed(path)),
             Widening::Variable(name) => write!(f, "VARIABLE {}", printed(name)),
             Widening::Secret { secret, sealed } => {
-                write!(f, "{} {}", if *sealed { "SEAL" } else { "SECRET" }, printed(&secret.name))?;
+                write!(
+                    f,
+                    "{} {}",
+                    if *sealed { "SEAL" } else { "SECRET" },
+                    printed(&secret.name)
+                )?;
                 for host in &secret.hosts {
                     write!(f, " {}", printed(&format!("@{host}")))?;
                 }

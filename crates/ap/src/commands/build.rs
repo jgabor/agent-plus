@@ -202,7 +202,13 @@ fn build(args: &Args) -> Result<(), String> {
         None => ap::approval::Approver::Terminal,
     };
     let approvals = ::store::Approvals::new(&root);
-    ap::approval::approve(&approvals, &agentfile, &shown.to_string(), &grants, approver)?;
+    ap::approval::approve(
+        &approvals,
+        &agentfile,
+        &shown.to_string(),
+        &grants,
+        approver,
+    )?;
 
     let declared: Vec<::store::Declared> = instructions
         .iter()

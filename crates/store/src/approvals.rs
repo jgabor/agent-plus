@@ -57,13 +57,15 @@ impl Approvals {
         if named.as_deref() != Some(std::slice::from_ref(&key)) {
             return Err(invalid("line 1 doesn't name its Agentfile".to_string()));
         }
-        rest.parse().map(Some).map_err(|errors: Vec<agentfile::Error>| {
-            let lines: Vec<String> = errors
-                .iter()
-                .map(|error| format!("line {}: {}", error.line + 1, error.message))
-                .collect();
-            invalid(lines.join(", "))
-        })
+        rest.parse()
+            .map(Some)
+            .map_err(|errors: Vec<agentfile::Error>| {
+                let lines: Vec<String> = errors
+                    .iter()
+                    .map(|error| format!("line {}: {}", error.line + 1, error.message))
+                    .collect();
+                invalid(lines.join(", "))
+            })
     }
 
     /// Stores `grants` as approved for the Agentfile at this canonical path,

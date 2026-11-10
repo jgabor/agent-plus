@@ -70,7 +70,10 @@ impl Scratch {
                 target = Some(dir.join(arg));
             }
         }
-        let context = target.unwrap_or_else(|| dir.to_path_buf()).canonicalize().ok()?;
+        let context = target
+            .unwrap_or_else(|| dir.to_path_buf())
+            .canonicalize()
+            .ok()?;
         let source = fs::read_to_string(context.join("Agentfile")).ok()?;
         let instructions = agentfile::parse(&source).ok()?;
         let grants = ap::approval::grants(&instructions, &context, &self.home).ok()?;
@@ -281,7 +284,8 @@ fn the_usage_message_lists_build() {
     let output = scratch.ap(&scratch.root, &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("ap build [--strict] [--replace] [--approve=file] [-t name] [dir]"),
+        stderr(&output)
+            .contains("ap build [--strict] [--replace] [--approve=file] [-t name] [dir]"),
         "{}",
         stderr(&output)
     );

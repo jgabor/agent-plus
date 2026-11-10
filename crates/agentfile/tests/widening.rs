@@ -345,7 +345,10 @@ fn each_widening_shows_as_one_line() {
     let now = "SHARE ~/a /a rw\nSHARE ~/b /b\nENV USER $USER\nSECRET T @a.com @b.com visible\n\
                SEAL S @s.com\nSEAL N @n.com\nAUTH token\nNETWORK +\nNETWORK +github.com\n\
                POLICY +\nPOLICY -writer\n";
-    let lines: Vec<String> = widened(approved, now).iter().map(ToString::to_string).collect();
+    let lines: Vec<String> = widened(approved, now)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(
         lines,
         [

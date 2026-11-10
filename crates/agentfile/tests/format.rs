@@ -30,7 +30,7 @@ fn arguments_of(source: &str, line: usize) -> Vec<String> {
 // spec(Format): Instructions are case-insensitive.
 #[test]
 fn instruction_names_are_read_in_any_case() {
-    let source = "agent claude\nShare ./out\nnEtWoRk github.com\n";
+    let source = "agent claude\nShare ./out\nnEtWoRk +github.com\n";
     assert_eq!(
         names(source),
         [

@@ -13,6 +13,7 @@ mod commands {
     pub mod init;
     pub mod inspect;
     pub mod ls;
+    pub mod rm;
 }
 
 const USAGE: &str = "usage: ap --version
@@ -21,6 +22,7 @@ const USAGE: &str = "usage: ap --version
        ap build [--strict] [--replace] [--approve=file] [-t name] [dir]
        ap ls
        ap inspect [--grants] agent
+       ap rm agent
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -62,6 +64,11 @@ fn main() -> ExitCode {
         && let Some(inspect) = commands::inspect::parse(&args[1..])
     {
         return ExitCode::from(commands::inspect::run(&inspect));
+    }
+    if args.first().is_some_and(|command| command == "rm")
+        && let Some(name) = commands::rm::parse(&args[1..])
+    {
+        return ExitCode::from(commands::rm::run(&name));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

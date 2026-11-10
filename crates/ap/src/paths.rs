@@ -9,6 +9,12 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
+/// Opens a directory only to walk through it.
+#[cfg(target_os = "linux")]
+const SEARCH: libc::c_int = libc::O_PATH | libc::O_DIRECTORY;
+#[cfg(target_os = "macos")]
+const SEARCH: libc::c_int = libc::O_SEARCH;
+
 /// A host path from an Agentfile, canonicalized and checked against the
 /// build context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +34,8 @@ impl HostPath {
         let joined = if text == "~" {
             home.to_path_buf()
         } else if let Some(rest) = text.strip_prefix("~/") {
-            home.join(rest)
+            // `~//etc` stays under home.
+            home.join(rest.trim_start_matches('/'))
         } else {
             // An absolute `text` replaces `context`.
             context.join(text)
@@ -52,6 +59,7 @@ impl HostPath {
     /// Opens the canonical path one component at a time from `/`, refusing
     /// a symlink at any of them. If one was swapped in after `resolve`, this
     /// fails instead of following it. Read the path only through the handle.
+    /// The handle is nonblocking, which matters only for a special file.
     pub fn open(&self) -> io::Result<File> {
         let names: Vec<&[u8]> = self
             .path
@@ -64,10 +72,15 @@ impl HostPath {
             .collect();
         let mut file = File::open("/")?;
         for (index, name) in names.iter().enumerate() {
-            let mut flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW;
-            if index + 1 < names.len() {
-                flags |= libc::O_DIRECTORY;
-            }
+            // A directory on the way needs only search permission. The
+            // last component opens nonblocking, so a FIFO can't hang it.
+            let flags = libc::O_CLOEXEC
+                | libc::O_NOFOLLOW
+                | if index + 1 < names.len() {
+                    SEARCH
+                } else {
+                    libc::O_RDONLY | libc::O_NONBLOCK
+                };
             let name = CString::new(*name).map_err(io::Error::other)?;
             // SAFETY: the descriptor is open, and the name is a valid C
             // string that outlives the call.

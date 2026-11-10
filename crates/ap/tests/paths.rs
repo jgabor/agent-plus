@@ -5,7 +5,8 @@
 
 use std::fs;
 use std::io::{ErrorKind, Read};
-use std::os::unix::fs::symlink;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use ap::paths::HostPath;
@@ -222,4 +223,44 @@ fn a_file_swapped_for_a_symlink_after_the_check_fails_the_open() {
     fs::rename(&s.context, s.root.join("old")).unwrap();
     symlink(s.root.join("old"), &s.context).unwrap();
     assert!(dir.open().is_err(), "nor a symlink named directly");
+}
+
+#[test]
+fn a_tilde_path_with_repeated_slashes_stays_under_home() {
+    let s = Scratch::new("tilde-slashes");
+    write(&s.home.join("etc/notes"), "home");
+    let host = s.resolve("~//etc/notes").unwrap();
+    assert_eq!(host.path(), s.home.join("etc/notes"));
+}
+
+#[test]
+fn a_directory_that_can_be_searched_but_not_listed_can_be_walked() {
+    let s = Scratch::new("search-only");
+    write(&s.context.join("locked/file.txt"), "inside");
+    let locked = s.context.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o111)).unwrap();
+    let opened = s.resolve("./locked/file.txt").map(|host| contents(&host));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(opened.unwrap(), "inside");
+}
+
+#[test]
+fn a_file_swapped_for_a_fifo_after_the_check_does_not_hang_the_open() {
+    let s = Scratch::new("swap-fifo");
+    write(&s.context.join("file.txt"), "checked");
+    let host = s.resolve("./file.txt").unwrap();
+    fs::remove_file(s.context.join("file.txt")).unwrap();
+    let path = std::ffi::CString::new(s.context.join("file.txt").as_os_str().as_bytes()).unwrap();
+    // SAFETY: the path is a valid C string.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(host.open().map(|_| ()));
+    });
+    let opened = receiver.recv_timeout(std::time::Duration::from_secs(5));
+    assert!(
+        opened.is_ok(),
+        "the open must return, not wait for a writer"
+    );
 }

@@ -112,7 +112,7 @@ fn a_recorded_agent_reads_back_the_same() {
         declared("ENV", &["GREETING=\"hello, $USER\""]),
         declared("SHARE", &["./a b", "/work", "rw"]),
         declared("PORT", &[""]),
-        declared("SYSTEM", &[]),
+        declared("NETWORK", &[]),
     ];
 
     agents.record(&recorded, false).unwrap();
@@ -170,6 +170,7 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
         "DIRECTORY /a\nDIRECTORY /b\n",
         "DIRECTORY relative\n",
         "DIRECTORY /work/notes\nENV \\x\n",
+        "DIRECTORY /work/notes\nSYSTEM hello\n",
     ] {
         fs::write(&path, text).unwrap();
         let error = agents.get("notes").unwrap_err();
@@ -183,7 +184,15 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
 fn recording_a_declaration_that_is_not_an_instruction_is_refused() {
     let root = store_root("bad-declaration");
     let agents = Agents::new(&root);
-    for name in ["DIRECTORY", "LAYER", "share", "BOGUS", ""] {
+    for name in [
+        "DIRECTORY",
+        "LAYER",
+        "share",
+        "BOGUS",
+        "",
+        "SYSTEM",
+        "PROMPT",
+    ] {
         let mut recorded = agent("notes", "/work/notes", Vec::new());
         recorded.declared = vec![declared(name, &["x"])];
         let error = agents.record(&recorded, false).unwrap_err();

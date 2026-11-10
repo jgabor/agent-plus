@@ -17,8 +17,9 @@
 //! instruction the Agentfile declared, with its arguments.
 //!
 //! A record appears under its name complete and synced, or not at all.
-//! Writers hold a lock on the store's agents while they change one, and free
-//! a layer only when no record still names it. A layer that a build has put
+//! A record names only layers that are synced. Writers hold a lock on the
+//! store's agents while they change one, and free a layer only when no
+//! record still names it. A layer that a build has put
 //! and not yet recorded can be freed in that time, so recording it is then
 //! an error, and the build puts it again.
 
@@ -54,7 +55,9 @@ pub struct Layer {
     pub digest: String,
 }
 
-/// An instruction that an Agentfile declared.
+/// An instruction that an Agentfile declared. `SYSTEM` and `PROMPT` take
+/// text instead of arguments, so a record can't hold them. Their text goes
+/// into the harness configuration layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Declared {
     /// The instruction's name, in uppercase.
@@ -115,6 +118,9 @@ impl Agents {
                     format!("the store has no layer {}", layer.digest),
                 ));
             }
+        }
+        if !agent.layers.is_empty() {
+            self.layers.sync()?;
         }
         let (partial, mut file) = create_partial(&self.dir, &agent.name)?;
         file.write_all(text.as_bytes())?;
@@ -257,6 +263,11 @@ fn check_name(name: &str) -> io::Result<()> {
     ))
 }
 
+/// Whether a record can hold this instruction: one that takes arguments.
+fn declarable(name: &str) -> bool {
+    name != "SYSTEM" && name != "PROMPT" && INSTRUCTIONS.iter().any(|d| d.name == name)
+}
+
 /// The text of `agent`'s record, after checking each part of it.
 fn record_text(agent: &Agent) -> io::Result<String> {
     let invalid = |message: String| Err(io::Error::new(io::ErrorKind::InvalidInput, message));
@@ -287,8 +298,8 @@ fn record_text(agent: &Agent) -> io::Result<String> {
         line("LAYER", &[&layer.key, &layer.digest]);
     }
     for declared in &agent.declared {
-        if !INSTRUCTIONS.iter().any(|d| d.name == declared.name) {
-            return invalid(format!("`{}` isn't an instruction", declared.name));
+        if !declarable(&declared.name) {
+            return invalid(format!("a record can't declare `{}`", declared.name));
         }
         let arguments: Vec<&str> = declared.arguments.iter().map(String::as_str).collect();
         line(&declared.name, &arguments);
@@ -326,7 +337,7 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
                 }
                 _ => return Err(fail("`LAYER` takes a key and a SHA-256 digest".to_string())),
             },
-            _ if INSTRUCTIONS.iter().any(|d| d.name == word) => declared.push(Declared {
+            _ if declarable(&word) => declared.push(Declared {
                 name: word,
                 arguments,
             }),

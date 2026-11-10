@@ -1,15 +1,17 @@
-//! `ap build [--strict] [--replace] [-t name] [dir]`, from SPEC.md's Build
-//! section. It checks the Agentfile against the host, turns each `ADD` and the
+//! `ap build [--strict] [--replace] [--approve=file] [-t name] [dir]`, from
+//! SPEC.md's Build section. It checks the Agentfile against the host, asks
+//! you to approve its grants as `ap::approval` says, turns each `ADD` and the
 //! harness configuration into a layer, and records the agent in the store. A
 //! layer whose key an agent already recorded is a hit, and isn't built again.
 //!
 //! Nothing is fetched yet, so the instructions that need a fetch fail, and
-//! no lockfile is written. Grants aren't approved here.
+//! no lockfile is written.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Cursor, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use agentfile::{
@@ -33,17 +35,21 @@ pub struct Args {
     strict: bool,
     /// Whether the build may take the name over from another directory.
     replace: bool,
+    /// The file from `--approve=<file>`.
+    approve: Option<PathBuf>,
     /// The name from `-t`.
     name: Option<String>,
     /// The directory, or `None` for the current one.
     dir: Option<PathBuf>,
 }
 
-/// Reads `ap build`'s arguments: `--strict`, `--replace`, `-t <name>`, and a
-/// directory, each at most once, in any order. Any other flag is bad usage.
+/// Reads `ap build`'s arguments: `--strict`, `--replace`, `--approve=<file>`,
+/// `-t <name>`, and a directory, each at most once, in any order. Any other
+/// flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut strict = false;
     let mut replace = false;
+    let mut approve = None;
     let mut name = None;
     let mut dir = None;
     let mut args = args.iter();
@@ -52,6 +58,11 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
             strict = true;
         } else if arg == "--replace" && !replace {
             replace = true;
+        } else if let Some(file) = arg.as_encoded_bytes().strip_prefix(b"--approve=")
+            && !file.is_empty()
+            && approve.is_none()
+        {
+            approve = Some(PathBuf::from(OsStr::from_bytes(file)));
         } else if arg == "-t" && name.is_none() {
             name = Some(args.next()?.to_str()?.to_string());
         } else if arg.as_encoded_bytes().starts_with(b"-") || dir.is_some() {
@@ -63,6 +74,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
     Some(Args {
         strict,
         replace,
+        approve,
         name,
         dir,
     })
@@ -181,6 +193,17 @@ fn build(args: &Args) -> Result<(), String> {
             old.directory
         ));
     }
+    let agentfile = path
+        .canonicalize()
+        .map_err(|error| format!("ap: {shown}: {error}"))?;
+    let grants = ap::approval::grants(&instructions, &context, &home).map_err(report)?;
+    let approver = match &args.approve {
+        Some(file) => ap::approval::Approver::File(file),
+        None => ap::approval::Approver::Terminal,
+    };
+    let approvals = ::store::Approvals::new(&root);
+    ap::approval::approve(&approvals, &agentfile, &shown.to_string(), &grants, approver)?;
+
     let declared: Vec<::store::Declared> = instructions
         .iter()
         .filter(|instruction| instruction.text.is_none())

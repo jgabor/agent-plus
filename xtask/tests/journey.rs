@@ -322,6 +322,41 @@ fn a_comment_is_not_a_floor_check() {
     assert_journey(&root, "fail step 1\njourney 0 of 1\n");
 }
 
+/// The file as the journey will write it: milestone tables, and a `milestone`
+/// key on each step.
+#[test]
+fn milestone_tables_and_keys_are_read_and_skipped() {
+    let toml = "[[milestone]]\nname = \"Boot\"\ncommands = [\"ap boot\"]\n\n\
+        [[milestone]]\nname = \"Author\"\ncommands = []\n\n\
+        [[step]]\nid = 1\nname = \"one\"\nmilestone = \"Boot\"\nneeds = []\nscript = \"harness/journey/pass.sh\"\n\n\
+        [[step]]\nid = 2\nname = \"two\"\nmilestone = \"Author\"\nneeds = [1]\nscript = \"harness/journey/fail.sh\"\n";
+    let root = workspace(
+        "milestone-tables",
+        toml,
+        &[
+            ("harness/journey/pass.sh", PASS),
+            ("harness/journey/fail.sh", FAIL),
+        ],
+    );
+    assert_journey(&root, "pass step 1\nfail step 2\njourney 1 of 2\n");
+}
+
+#[test]
+fn a_table_that_is_neither_a_milestone_nor_a_step_is_a_problem() {
+    let toml = format!(
+        "{}[[stage]]\nid = 2\n",
+        step(1, "", "harness/journey/one.sh")
+    );
+    let root = workspace("other-table", &toml, &[("harness/journey/one.sh", PASS)]);
+    let output = journey(&root);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("expected `[[milestone]]` or `[[step]]`, got `[[stage]]`"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 /// Whether `elf`, a 64-bit little-endian ELF file, asks for a dynamic loader.
 fn has_interpreter(elf: &[u8]) -> bool {
     assert_eq!(&elf[..4], b"\x7fELF");

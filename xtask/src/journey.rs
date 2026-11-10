@@ -95,10 +95,14 @@ fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
     let text = fs::read_to_string(root.join(JOURNEY_FILE))
         .map_err(|e| Problem(format!("couldn't read {JOURNEY_FILE}: {e}")))?;
-    let tables = toml::array_of_tables(&text, "step")
+    let tables = toml::arrays_of_tables(&text, &["milestone", "step"])
         .map_err(|e| Problem(format!("{JOURNEY_FILE}: {e}")))?;
     let mut steps = BTreeMap::new();
-    for table in tables {
+    for (kind, table) in tables {
+        // A milestone groups steps. Nothing reads one yet.
+        if kind == "milestone" {
+            continue;
+        }
         let bad = |what: &str| Problem(format!("{JOURNEY_FILE}: a step {what}"));
         let id = table.int("id").ok_or_else(|| bad("has no integer `id`"))?;
         let step = Step {

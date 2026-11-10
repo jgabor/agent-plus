@@ -308,7 +308,7 @@ fn full() -> (Vec<Issue<'static>>, Vec<String>) {
         },
         Issue {
             number: 43,
-            title: "Found along the way",
+            title: "Share <src> with `ap run <agent>`",
             ..PLAIN
         },
         Issue {
@@ -324,6 +324,17 @@ fn full() -> (Vec<Issue<'static>>, Vec<String>) {
             ..PLAIN
         },
         Issue {
+            number: 49,
+            title: "Its PR is ready, and the label isn't copied yet",
+            ..PLAIN
+        },
+        Issue {
+            number: 51,
+            title: "Asked, and then finished",
+            labels: &["auto:merge", "answer-needed"],
+            ..PLAIN
+        },
+        Issue {
             number: 47,
             state: "CLOSED",
             title: "Closed, so it waits on nobody",
@@ -336,8 +347,9 @@ fn full() -> (Vec<Issue<'static>>, Vec<String>) {
             41,
             "Group the journey's steps",
             &["spec-change", "land-needed"],
-            &[40],
+            &[49, 40],
         ),
+        pr(52, "Finish what was asked about", &["land-needed"], &[51]),
         pr(45, "A PR that closes nothing", &["land-needed"], &[]),
         pr(48, "A PR that waits on nobody", &[], &[43]),
     ];
@@ -379,9 +391,10 @@ Commands: none.
 
 ### To merge
 
-- #41 Group the journey's steps (closes #40)
+- #41 Group the journey's steps (closes #40, #49)
 - #45 A PR that closes nothing
 - #46 Ready, with no PR
+- #52 Finish what was asked about (closes #51)
 
 ### To answer
 
@@ -390,7 +403,7 @@ Commands: none.
 ### To label or close
 
 - #10 Boot the machine
-- #43 Found along the way
+- #43 Share \\<src> with `ap run <agent>`
 ";
 
 #[test]

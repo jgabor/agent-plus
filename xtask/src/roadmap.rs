@@ -79,7 +79,7 @@ fn markdown(
         text.push_str(&format!(
             "\n### {}. {}\n\nParent: {}\nCommands: {commands}\n\n",
             index + 1,
-            milestone.name,
+            shown(&milestone.name),
             parent(&issues, &milestone.name, done)
         ));
         for step in steps {
@@ -88,7 +88,7 @@ fn markdown(
                 "fail" => (" ", " (fails)"),
                 _ => (" ", " (skipped)"),
             };
-            let (id, name) = (step.id, &step.name);
+            let (id, name) = (step.id, shown(&step.name));
             text.push_str(&format!("- [{mark}] Step {id}: {name}{note}\n"));
         }
     }
@@ -101,13 +101,29 @@ fn markdown(
         .collect();
     section(&mut text, "## After v0.1.0", later);
 
-    text.push_str("\n## Waiting on the owner\n");
-    section(&mut text, "### To merge", parked(&issues, prs, LAND_NEEDED));
-    let to_answer = parked(&issues, prs, ANSWER_NEEDED);
-    section(&mut text, "### To answer", to_answer);
-    let unlabeled = issues
+    // A parked PR is the thing to act on, so it stands for the issues it closes.
+    let is_parked = |label: &String| PARKED.contains(&label.as_str());
+    let prs: Vec<&OpenPr> = prs
         .iter()
-        .filter(|issue| issue.open && issue.parent.is_none() && !written(&issue.title))
+        .filter(|pr| pr.labels.iter().any(is_parked))
+        .collect();
+    let covered = |issue: &&&RoadmapIssue| {
+        let closes = |pr: &&OpenPr| pr.closing_issues.contains(&issue.number);
+        prs.iter().any(closes)
+    };
+    let waiting: Vec<&RoadmapIssue> = issues
+        .iter()
+        .filter(|issue| issue.open && !covered(issue))
+        .copied()
+        .collect();
+    text.push_str("\n## Waiting on the owner\n");
+    let to_merge = parked(&waiting, &prs, LAND_NEEDED);
+    section(&mut text, "### To merge", to_merge);
+    let to_answer = parked(&waiting, &prs, ANSWER_NEEDED);
+    section(&mut text, "### To answer", to_answer);
+    let unlabeled = waiting
+        .iter()
+        .filter(|issue| issue.parent.is_none() && !written(&issue.title))
         .filter(|issue| {
             let waits = |label: &String| label.starts_with("auto:") || is_parked(label);
             !issue.labels.iter().any(waits)
@@ -123,12 +139,22 @@ fn written(title: &str) -> bool {
     title == ISSUE_TITLE || title == report::ISSUE_TITLE
 }
 
-fn is_parked(label: &str) -> bool {
-    PARKED.contains(&label)
+fn line(number: u64, title: &str) -> String {
+    format!("#{number} {}", shown(title))
 }
 
-fn line(number: u64, title: &str) -> String {
-    format!("#{number} {title}")
+/// A title or a name as GitHub should show it. Outside a code span, `<` would
+/// start a tag, and GitHub drops a tag it doesn't know along with its text.
+fn shown(text: &str) -> String {
+    let parts: Vec<String> = text
+        .split('`')
+        .enumerate()
+        .map(|(index, part)| match index % 2 {
+            0 => part.replace('<', "\\<"),
+            _ => part.to_string(),
+        })
+        .collect();
+    parts.join("`")
 }
 
 fn section(text: &mut String, heading: &str, lines: Vec<String>) {
@@ -169,14 +195,11 @@ fn parent(issues: &[&RoadmapIssue], milestone: &str, done: bool) -> String {
     )
 }
 
-/// The open PRs with this label, then the open issues with it that none of
-/// those PRs closes. A label is on both sides of a PR and its issue, and the
-/// PR is the one to act on.
-fn parked(issues: &[&RoadmapIssue], prs: &[OpenPr], label: &str) -> Vec<String> {
+/// The parked PRs with this label, then the waiting issues with it.
+fn parked(waiting: &[&RoadmapIssue], prs: &[&OpenPr], label: &str) -> Vec<String> {
     let has = |labels: &[String]| labels.iter().any(|name| name == label);
-    let prs: Vec<&OpenPr> = prs.iter().filter(|pr| has(&pr.labels)).collect();
     let mut lines: Vec<(u64, String)> = Vec::new();
-    for pr in &prs {
+    for pr in prs.iter().filter(|pr| has(&pr.labels)) {
         let mut closes = pr.closing_issues.clone();
         closes.sort_unstable();
         let closes: Vec<String> = closes.iter().map(|issue| format!("#{issue}")).collect();
@@ -187,16 +210,8 @@ fn parked(issues: &[&RoadmapIssue], prs: &[OpenPr], label: &str) -> Vec<String> 
         };
         lines.push((pr.number, format!("{}{closes}", line(pr.number, &pr.title))));
     }
-    for issue in issues
-        .iter()
-        .filter(|issue| issue.open && has(&issue.labels))
-    {
-        if !prs
-            .iter()
-            .any(|pr| pr.closing_issues.contains(&issue.number))
-        {
-            lines.push((issue.number, line(issue.number, &issue.title)));
-        }
+    for issue in waiting.iter().filter(|issue| has(&issue.labels)) {
+        lines.push((issue.number, line(issue.number, &issue.title)));
     }
     lines.sort();
     lines.into_iter().map(|(_, line)| line).collect()

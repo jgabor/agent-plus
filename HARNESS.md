@@ -422,7 +422,7 @@ a sub-issue, and the `State` and `Lease until` fields.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
   issue that GitHub lists another issue under, as a sub-issue.
 - A parent that delivers a milestone names it on a line of its own,
-  `Milestone: <name>.`. The planner reads that line, and `xtask` doesn't.
+  `Milestone: <name>.`. The planner and `cargo xtask roadmap` read that line.
 - `xtask` reads status comments only from the repository owner's account.
 - When two live claims exist, the status comment with the lowest id wins.
 
@@ -648,9 +648,9 @@ change the roadmap, change what it is built from. It has three parts:
    ready to close.
 2. What comes after v0.1.0, which is the open sub-issues of the roadmap issue.
 3. What waits on the owner: open PRs and issues labeled `land-needed` or
-   `answer-needed`, and open issues with no `auto:*` label and no parent. An
-   issue that a listed PR closes is left out, and so are the issues that
-   `xtask` writes.
+   `answer-needed`, and open issues with no `auto:*` label and no parent in
+   this repository. A listed PR stands for the issues it closes, so they are
+   left out, and so are the issues that `xtask` writes.
 
 The same inputs give the same text, and the nightly job leaves a body that
 already says it alone. With no open issue titled `Roadmap`, it writes nothing,

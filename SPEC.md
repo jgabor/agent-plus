@@ -111,7 +111,8 @@ these words as a destination, write it as a path, such as `./rw`.
 
 **Single-line text.** If the rest of the line is exactly one quoted string,
 the value is that string's content. Otherwise, the value is the rest of the
-line, verbatim, quotes included.
+line, verbatim, quotes included. Whitespace at either end of the rest of the
+line isn't part of the value.
 
 ```
 SYSTEM You are a careful reviewer.
@@ -481,8 +482,25 @@ standalone executable.
 
 ### ap fmt
 
-`ap fmt [dir]` formats the Agentfile in `dir`. [Text values](#text-values)
-names a rewrite it makes.
+`ap fmt [dir]` rewrites the Agentfile in `dir` in place. `dir` defaults to
+the current directory. `ap fmt --check` writes nothing, and exits 1 if the
+file would change.
+
+Formatting makes these changes:
+
+- Instruction names become uppercase.
+- One space separates an instruction from its arguments.
+- Trailing whitespace is removed outside fenced blocks.
+- Line endings become LF, and the file ends with exactly one newline.
+- Outside fenced blocks, a run of blank lines becomes one, and blank lines at
+  the start of the file are removed.
+- The end-of-line fence form becomes the next-line form, as
+  [Text values](#text-values) says.
+
+`ap fmt` never changes an argument, a quote, a text value, the content of a
+fenced block, a comment's text, or the order of lines. A file with errors
+isn't changed: `ap fmt` prints the errors and exits 1. Formatting a formatted
+file changes nothing.
 
 ### ap ls
 

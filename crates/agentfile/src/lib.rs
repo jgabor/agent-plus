@@ -4,10 +4,12 @@
 //! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text in its one
 //! argument. Each group of instructions checks its own arguments in its own
 //! module, and [`Settings::read`] and [`Secrets::read`] turn them into typed
-//! values.
+//! values. [`format`] rewrites an Agentfile by the rules of `ap fmt`.
 
 mod files;
 pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
+mod format;
+pub use format::format;
 mod network;
 mod secrets;
 pub use secrets::{Auth, Env, Part, Secret, Secrets};

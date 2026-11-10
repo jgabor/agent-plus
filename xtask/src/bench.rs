@@ -20,6 +20,19 @@ const BOOT_TIMEOUT_SECONDS: &str = "30";
 /// boot that fails exits with 124 or 125.
 const USAGE_STATUS: i32 = 2;
 const FIELDS: &[&str] = &["key", "name", "target", "band_pct", "band_abs"];
+/// The fixed directory that `noop_build_ms` rebuilds: the Agentfile of
+/// journey step 5, with its files.
+const NOOP_FILES: &[(&str, &str)] = &[
+    (
+        "agent/Agentfile",
+        "AGENT claude\nSYSTEM ./system.md\nPROMPT Review the notes.\nMODEL opus\nADD ./data\nADD ./src /work\nSHARE ./out\n",
+    ),
+    ("agent/system.md", "Be careful.\n"),
+    ("agent/data", "one\n"),
+    ("agent/src/main.rs", "fn main() {}\n"),
+    ("agent/out/.keep", ""),
+    ("grants", "NETWORK +\nPOLICY +\n"),
+];
 
 pub struct Budget {
     key: String,
@@ -39,6 +52,7 @@ enum Measure {
     Time,
     Size,
     Boot,
+    Build,
     NotYet,
 }
 
@@ -49,7 +63,8 @@ fn measure_of(key: &str) -> Option<Measure> {
         "version_ms" => Some(Measure::Time),
         "binary_bytes" => Some(Measure::Size),
         "boot_ms" => Some(Measure::Boot),
-        "run_ms" | "idle_mib" | "noop_build_ms" => Some(Measure::NotYet),
+        "noop_build_ms" => Some(Measure::Build),
+        "run_ms" | "idle_mib" => Some(Measure::NotYet),
         _ => None,
     }
 }
@@ -180,7 +195,7 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     drop(hold);
 
     let measuring = lock::exclusive(root)?;
-    let rows = measure(&budgets, &baseline, &candidate, &directory.join("home"))?;
+    let rows = measure(&budgets, &baseline, &candidate, &directory)?;
     drop(measuring);
 
     let any_over = rows.iter().any(|row| row.over);
@@ -339,7 +354,7 @@ fn measure(
     budgets: &[Budget],
     base: &Path,
     candidate: &Path,
-    home: &Path,
+    directory: &Path,
 ) -> Result<Vec<Row>, Problem> {
     let mut rows = Vec::new();
     for budget in budgets {
@@ -349,7 +364,8 @@ fn measure(
                 (Some(before), after)
             }
             Some(Measure::Size) => (Some(size(base)?), size(candidate)?),
-            Some(Measure::Boot) => boots(base, candidate, home)?,
+            Some(Measure::Boot) => boots(base, candidate, &directory.join("home"))?,
+            Some(Measure::Build) => noop_builds(base, candidate, &directory.join("noop"))?,
             Some(Measure::NotYet) | None => continue,
         };
         rows.push(Row {
@@ -429,6 +445,88 @@ fn boots(base: &Path, candidate: &Path, home: &Path) -> Result<(Option<f64>, f64
 
 fn no_boot(binary: &Path) -> Problem {
     Problem(format!("`{} boot` isn't a command", binary.display()))
+}
+
+/// The medians of rebuilding the fixed directory with nothing changed, for
+/// both builds, or for the candidate alone when the base has no `ap build`.
+/// Each build has a `HOME` of its own, so neither reads the other's store,
+/// and builds the directory once to warm up, so every timed run is a rebuild.
+fn noop_builds(
+    base: &Path,
+    candidate: &Path,
+    directory: &Path,
+) -> Result<(Option<f64>, f64), Problem> {
+    let problem =
+        |e: std::io::Error| Problem(format!("couldn't write {}: {e}", directory.display()));
+    if directory.exists() {
+        fs::remove_dir_all(directory).map_err(problem)?;
+    }
+    for (path, content) in NOOP_FILES {
+        let path = directory.join(path);
+        fs::create_dir_all(path.parent().expect("a file has a parent")).map_err(problem)?;
+        fs::write(&path, content).map_err(problem)?;
+    }
+    let homes = [
+        directory.join("home/base"),
+        directory.join("home/candidate"),
+    ];
+    for home in &homes {
+        fs::create_dir_all(home).map_err(problem)?;
+    }
+    let home_of = |binary: &Path| if binary == base { &homes[0] } else { &homes[1] };
+    let timed = |binary: &Path| {
+        build_once(binary, directory, home_of(binary))?.ok_or_else(|| no_build(binary))
+    };
+    let base_builds = build_once(base, directory, home_of(base))?.is_some();
+    timed(candidate)?;
+    if base_builds {
+        let (before, after) = interleaved(base, candidate, timed)?;
+        return Ok((Some(before), after));
+    }
+    let after = (0..PAIRS)
+        .map(|_| timed(candidate))
+        .collect::<Result<_, _>>()?;
+    Ok((None, median(after)))
+}
+
+fn no_build(binary: &Path) -> Problem {
+    Problem(format!(
+        "`{} build --approve=<file> <dir>` isn't a command",
+        binary.display()
+    ))
+}
+
+/// Milliseconds that `ap build` takes on the fixed directory, with its grants
+/// approved, or `None` if this build exits with its usage status, because it
+/// has no such command.
+fn build_once(binary: &Path, directory: &Path, home: &Path) -> Result<Option<f64>, Problem> {
+    let shown = binary.display();
+    let mut approve = std::ffi::OsString::from("--approve=");
+    approve.push(directory.join("grants"));
+    let start = Instant::now();
+    let output = Command::new(binary)
+        .arg("build")
+        .arg(approve)
+        .arg(directory.join("agent"))
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| Problem(format!("couldn't run `{shown} build`: {e}")))?;
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    if output.status.code() == Some(USAGE_STATUS) {
+        return Ok(None);
+    }
+    if !output.status.success() {
+        return Err(Problem(format!(
+            "`{shown} build` failed: {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(Some(elapsed))
 }
 
 /// Milliseconds from spawning `ap boot` until its ready line appears, or

@@ -326,7 +326,11 @@ fn store_layers(
             Err(image) => ("built", layers.put(&image).map_err(io)?),
         };
         lines.push(format!("{status} {label}"));
-        built.push(::store::Layer { key, digest });
+        built.push(::store::Layer {
+            key,
+            digest,
+            instruction: label,
+        });
     }
     Ok((built, lines))
 }

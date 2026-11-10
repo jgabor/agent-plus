@@ -7,14 +7,15 @@
 //!
 //! ```text
 //! DIRECTORY /home/me/notes
-//! LAYER "ADD ./src /work" 9829b1f290c032dec81bbccca3afe4287aa636485c0382bb1b877417681e3d03
+//! LAYER 0b1f63c4… 9829b1f2… "ADD ./src /work"
 //! AGENT claude
 //! SHARE ./out /work/out rw
 //! ```
 //!
 //! `DIRECTORY` is the directory the agent was built from. Each `LAYER` holds
-//! a layer's key and its digest, in the agent's order. Every other line is an
-//! instruction the Agentfile declared, with its arguments.
+//! a layer's key and its digest, shortened here, and the instruction that
+//! made it, in the agent's order. Every other line is an instruction the Agentfile declared,
+//! with its arguments.
 //!
 //! A record appears under its name complete and synced, or not at all.
 //! A record names only layers that are synced. Writers hold a lock on the
@@ -53,6 +54,9 @@ pub struct Layer {
     pub key: String,
     /// The SHA-256 of the layer's uncompressed content.
     pub digest: String,
+    /// The instruction that made the layer, as `ap build` reports it, such
+    /// as `ADD ./src /work` or `harness configuration`.
+    pub instruction: String,
 }
 
 /// An instruction that an Agentfile declared. `SYSTEM` and `PROMPT` take
@@ -289,13 +293,13 @@ fn record_text(agent: &Agent) -> io::Result<String> {
     };
     line("DIRECTORY", &[&agent.directory]);
     for layer in &agent.layers {
-        if layer.key.is_empty() {
-            return invalid("a layer's key is empty".to_string());
+        if layer.key.is_empty() || layer.instruction.is_empty() {
+            return invalid("a layer's key and instruction can't be empty".to_string());
         }
         if !is_digest(&layer.digest) {
             return invalid(format!("{:?} isn't a SHA-256 digest", layer.digest));
         }
-        line("LAYER", &[&layer.key, &layer.digest]);
+        line("LAYER", &[&layer.key, &layer.digest, &layer.instruction]);
     }
     for declared in &agent.declared {
         if !declarable(&declared.name) {
@@ -330,12 +334,23 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
                 _ => return Err(fail("`DIRECTORY` takes a canonical path".to_string())),
             },
             "LAYER" => match arguments.as_slice() {
-                [key, digest] if !key.is_empty() && is_digest(digest) => {
+                [key, digest, instruction]
+                    if !key.is_empty() && is_digest(digest) && !instruction.is_empty() =>
+                {
+                    let instruction = arguments.pop().unwrap_or_default();
                     let digest = arguments.pop().unwrap_or_default();
                     let key = arguments.pop().unwrap_or_default();
-                    layers.push(Layer { key, digest });
+                    layers.push(Layer {
+                        key,
+                        digest,
+                        instruction,
+                    });
                 }
-                _ => return Err(fail("`LAYER` takes a key and a SHA-256 digest".to_string())),
+                _ => {
+                    return Err(fail(
+                        "`LAYER` takes a key, a SHA-256 digest, and an instruction".to_string(),
+                    ));
+                }
             },
             _ if declarable(&word) => declared.push(Declared {
                 name: word,

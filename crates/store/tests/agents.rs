@@ -37,6 +37,7 @@ fn layers(root: &Path, contents: &[&str]) -> Vec<Layer> {
         .map(|content| Layer {
             key: format!("key {content}"),
             digest: store.put(content.as_bytes()).unwrap(),
+            instruction: format!("ADD ./{content}"),
         })
         .collect()
 }
@@ -128,8 +129,9 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
     let agents = Agents::new(&root);
     let mut recorded = agent("notes", "/home/me/my notes", Vec::new());
     recorded.layers = vec![Layer {
-        key: "ADD ./src /work".to_string(),
+        key: "key src".to_string(),
         digest: Layers::new(&root).put(b"src").unwrap(),
+        instruction: "ADD ./src /work".to_string(),
     }];
     recorded.declared = vec![
         declared("AGENT", &["claude"]),
@@ -144,7 +146,7 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
         fs::read_to_string(root.join("agents/notes")).unwrap(),
         format!(
             "DIRECTORY \"/home/me/my notes\"\n\
-             LAYER \"ADD ./src /work\" {digest}\n\
+             LAYER \"key src\" {digest} \"ADD ./src /work\"\n\
              AGENT claude\n\
              SHARE ./out /work/out rw\n\
              ENV TAB=a\\u{{9}}b\n"
@@ -164,7 +166,13 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
     for text in [
         "DIRECTORY /work/notes\nAGENT \"claude\n",
         "DIRECTORY /work/notes\nLAYER key\n",
-        "DIRECTORY /work/notes\nLAYER key not-a-digest\n",
+        "DIRECTORY /work/notes\nLAYER key not-a-digest ADD\n",
+        &format!("DIRECTORY /work/notes\nLAYER key {} \n", "0".repeat(64)),
+        &format!("DIRECTORY /work/notes\nLAYER key {} \"\"\n", "0".repeat(64)),
+        &format!(
+            "DIRECTORY /work/notes\nLAYER key {} ADD x\n",
+            "0".repeat(64)
+        ),
         "DIRECTORY /work/notes\nBOGUS word\n",
         "AGENT claude\n",
         "DIRECTORY /a\nDIRECTORY /b\n",
@@ -214,18 +222,20 @@ fn recording_an_agent_with_a_relative_directory_is_refused() {
 }
 
 #[test]
-fn recording_a_layer_with_a_bad_digest_or_empty_key_is_refused() {
+fn recording_a_layer_with_a_bad_digest_or_an_empty_key_or_instruction_is_refused() {
     let root = store_root("bad-layer");
     let agents = Agents::new(&root);
     let digest = Layers::new(&root).put(b"x").unwrap();
-    for (key, digest) in [
-        ("key", "abc".to_string()),
-        ("key", digest.to_uppercase()),
-        ("", digest.clone()),
+    for (key, digest, instruction) in [
+        ("key", "abc".to_string(), "ADD ."),
+        ("key", digest.to_uppercase(), "ADD ."),
+        ("", digest.clone(), "ADD ."),
+        ("key", digest.clone(), ""),
     ] {
         let layer = Layer {
             key: key.to_string(),
             digest,
+            instruction: instruction.to_string(),
         };
         let error = agents
             .record(&agent("notes", "/work/notes", vec![layer]), false)
@@ -241,6 +251,7 @@ fn recording_a_layer_the_store_does_not_have_is_not_found() {
     let layer = Layer {
         key: "key".to_string(),
         digest: "0".repeat(64),
+        instruction: "ADD .".to_string(),
     };
 
     let error = agents

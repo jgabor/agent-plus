@@ -34,3 +34,11 @@ fn a_corrupt_frame_is_an_error() {
     frame[0] ^= 0xFF;
     assert!(store::decompress(&frame).is_err());
 }
+
+#[test]
+fn a_frame_whose_content_fails_its_checksum_is_an_error() {
+    let mut frame = store::compress(b"checksum example");
+    // A raw block's literal byte, past the frame and block headers.
+    frame[9] ^= 1;
+    assert!(store::decompress(&frame).is_err());
+}

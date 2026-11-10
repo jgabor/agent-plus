@@ -13,10 +13,18 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
     compress_to_vec(data, CompressionLevel::Fastest)
 }
 
-/// Decompresses the zstd frame at the start of `frame`.
+/// Decompresses the zstd frame at the start of `frame`, and checks its content
+/// checksum if it has one.
 pub fn decompress(frame: &[u8]) -> io::Result<Vec<u8>> {
     let mut decoder = StreamingDecoder::new(frame).map_err(io::Error::other)?;
     let mut data = Vec::new();
     decoder.read_to_end(&mut data)?;
+    let stored = decoder.decoder.get_checksum_from_data();
+    if stored.is_some() && stored != decoder.decoder.get_calculated_checksum() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "zstd frame fails its content checksum",
+        ));
+    }
     Ok(data)
 }

@@ -2,12 +2,14 @@
 //!
 //! So far this covers the line rules, instruction names, arguments, and the
 //! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text. Each group
-//! of instructions checks its own arguments in its own module.
+//! of instructions checks its own arguments in its own module, and
+//! [`Settings::read`] turns the settings into typed values.
 
 mod files;
 mod network;
 mod secrets;
 mod settings;
+pub use settings::{Agent, Compression, Effort, Harness, Mode, Os, Settings};
 mod sources;
 mod text;
 

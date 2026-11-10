@@ -158,7 +158,15 @@ fn every_instruction_in_the_overview_is_known() {
         } else {
             format!("AGENT claude\n{} x\n", definition.name)
         };
-        assert!(parse(&source).is_ok(), "{}", definition.name);
+        if let Err(errors) = parse(&source) {
+            for error in errors {
+                assert!(
+                    !error.message.contains("unknown instruction"),
+                    "{}: {error}",
+                    definition.name
+                );
+            }
+        }
     }
 }
 
@@ -191,14 +199,14 @@ fn errors_come_in_line_order() {
 
 #[test]
 fn a_valid_file_returns_each_instruction_with_its_line() {
-    let source = "AGENT claude 2.1\n\n# a note\nSHARE ./out rw\nPROMPT go\n";
+    let source = "AGENT claude:2.1\n\n# a note\nSHARE ./out rw\nPROMPT go\n";
     assert_eq!(
         parse(source).unwrap(),
         [
             Instruction {
                 line: 1,
                 name: "AGENT".to_string(),
-                arguments: vec!["claude".to_string(), "2.1".to_string()],
+                arguments: vec!["claude:2.1".to_string()],
                 text: None,
             },
             Instruction {

@@ -50,6 +50,7 @@ impl Repo {
             listed(9, &closing("o/r", 7)),
         ]);
         repo.set_issue();
+        repo.set_closers(&[(9, "OPEN", "o/r")]);
         repo.set_pr("OPEN");
         repo.write_gh();
         repo
@@ -57,6 +58,28 @@ impl Repo {
 
     fn set_open_prs(&self, prs: &[String]) {
         fs::write(self.bin.join("prs.json"), format!("[{}]\n", prs.join(","))).unwrap();
+    }
+
+    /// The PRs that GitHub links to issue 7 as closing it, open or not, as
+    /// numbers, states, and repositories.
+    fn set_closers(&self, prs: &[(u64, &str, &str)]) {
+        let nodes: Vec<String> = prs
+            .iter()
+            .map(|(number, state, repository)| {
+                format!(
+                    "{{\"number\":{number},\"state\":\"{state}\",\"url\":\"https://github.com/{repository}/pull/{number}\"}}"
+                )
+            })
+            .collect();
+        fs::write(
+            self.bin.join("closers.json"),
+            format!(
+                "{{\"data\":{{\"repository\":{{\"url\":\"https://github.com/o/r\",\"issue\":{{\"closedByPullRequestsReferences\":{{\"totalCount\":{},\"nodes\":[{}]}}}}}}}}}}\n",
+                prs.len(),
+                nodes.join(",")
+            ),
+        )
+        .unwrap();
     }
 
     fn set_issue(&self) {
@@ -103,6 +126,7 @@ case "$*" in
   "api {ISSUE}/"*"/events --paginate --jq "*)
     n=${{2%/events}}; cat "{bin}/events-${{n##*/}}" 2>/dev/null || true ;;
   "api {ISSUE}/"*) cat "{bin}/item-${{2##*/}}.json" ;;
+  "api graphql "*) cat '{bin}/closers.json' ;;
   "pr view "*)
     cat '{bin}/pr.json'
     if [ -f '{bin}/pr-next.json' ]; then mv '{bin}/pr-next.json' '{bin}/pr.json'; fi ;;
@@ -221,6 +245,46 @@ fn a_label_cleared_while_an_older_run_waits_stays_cleared() {
             "run for {number}"
         );
     }
+}
+
+/// The owner cleared the label on a PR that then closed, and a new PR
+/// replaced it. A rerun of the issue's old run still sees that clear, though
+/// it writes only to the open PR. A PR in another repository counts for
+/// nothing here, and neither does a merged one, whose merge cleared the label.
+#[test]
+fn a_label_cleared_on_a_replaced_pr_stays_cleared() {
+    let repo = Repo::new("replaced");
+    repo.set_changes(7, "100 labeled\n");
+    repo.set_changes(5, "200 unlabeled\n");
+    repo.set_changes(4, "300 labeled\n");
+    repo.set_changes(3, "400 labeled\n");
+    repo.set_closers(&[
+        (5, "CLOSED", "o/r"),
+        (4, "CLOSED", "x/y"),
+        (3, "MERGED", "o/r"),
+        (9, "OPEN", "o/r"),
+    ]);
+    assert_status(&repo.mirror(&["7", "land-needed"]), 0);
+    assert_eq!(
+        repo.writes(),
+        [remove(7, "land-needed"), remove(9, "land-needed")]
+    );
+    for pr in [4, 3, 9] {
+        let events = format!("issues/{pr}/events");
+        let reads = repo.calls().matches(&events).count();
+        assert_eq!(reads, usize::from(pr == 9), "{}", repo.calls());
+    }
+}
+
+/// GitHub lists at most 100 linked PRs in one page.
+#[test]
+fn too_many_linked_prs_are_an_error_and_write_nothing() {
+    let repo = Repo::new("many-closers");
+    repo.set_changes(7, "100 labeled\n");
+    let prs: Vec<(u64, &str, &str)> = (1000..1101).map(|n| (n, "CLOSED", "o/r")).collect();
+    repo.set_closers(&prs);
+    assert_status(&repo.mirror(&["7", "land-needed"]), 2);
+    assert!(repo.writes().is_empty(), "{}", repo.calls());
 }
 
 /// Only `mirror` itself has changed the label, and the bots' events are

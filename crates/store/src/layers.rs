@@ -29,9 +29,11 @@ impl Layers {
         let digest = sha256(data);
         let path = self.dir.join(&digest);
         if path.try_exists()? {
+            // Another writer may have renamed it but not yet synced its name.
+            File::open(&self.dir)?.sync_all()?;
             return Ok(digest);
         }
-        fs::create_dir_all(&self.dir)?;
+        create_dir_synced(&self.dir)?;
         let (partial, mut file) = self.create_partial(&digest)?;
         file.write_all(&crate::compress(data))?;
         file.sync_all()?;
@@ -85,6 +87,25 @@ impl Layers {
             }
         }
     }
+}
+
+/// Creates `dir` and any missing parents, and syncs each parent that gains
+/// an entry, so that a layer written inside survives a power loss.
+fn create_dir_synced(dir: &Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() || dir.try_exists()? {
+        return Ok(());
+    }
+    // A relative path's last parent is empty, and means the current directory.
+    let parent = match dir.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    create_dir_synced(parent)?;
+    match fs::create_dir(dir) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    File::open(parent)?.sync_all()
 }
 
 fn sha256(data: &[u8]) -> String {

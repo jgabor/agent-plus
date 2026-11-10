@@ -112,7 +112,6 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
     // The line where each non-repeatable instruction first appears.
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut first_line = None;
-    let mut known_before = false;
     for (index, text) in source.split('\n').enumerate() {
         let text = text.trim();
         if text.is_empty() || text.starts_with('#') {
@@ -127,10 +126,9 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
             fail(format!("unknown instruction `{word}`"));
             continue;
         };
-        if name == "AGENT" && known_before && !seen.contains_key("AGENT") {
+        if name == "AGENT" && first_line != Some(line) && !seen.contains_key("AGENT") {
             fail("`AGENT` must be the first instruction".to_string());
         }
-        known_before = true;
         if !definition.repeatable {
             if let Some(first) = seen.get(definition.name) {
                 fail(format!(

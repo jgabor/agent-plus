@@ -105,6 +105,9 @@ fn agent_comes_first_and_appears_once() {
     assert_eq!(lines_of(&late), [3], "{late:?}");
     assert!(late[0].message.contains("AGENT"), "{}", late[0].message);
 
+    let after_unknown = errors("BOGUS\nAGENT claude\n");
+    assert_eq!(lines_of(&after_unknown), [1, 2], "{after_unknown:?}");
+
     let twice = errors("AGENT claude\nOS minimal\nAGENT codex\n");
     assert_eq!(lines_of(&twice), [3], "{twice:?}");
     assert!(twice[0].message.contains("AGENT"), "{}", twice[0].message);

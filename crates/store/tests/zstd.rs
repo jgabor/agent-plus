@@ -14,7 +14,11 @@ fn a_frame_round_trips() {
     let data = sample();
     let frame = store::compress(&data);
     assert_eq!(frame[..4], [0x28, 0xB5, 0x2F, 0xFD], "zstd frame magic");
-    assert!(frame.len() < data.len() / 4, "frame is {} bytes", frame.len());
+    assert!(
+        frame.len() < data.len() / 4,
+        "frame is {} bytes",
+        frame.len()
+    );
     assert_eq!(store::decompress(&frame).unwrap(), data);
 }
 

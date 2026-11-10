@@ -63,7 +63,7 @@ fn single_line(rest: &str) -> Text {
 }
 
 /// The content of `text`, if it's exactly one quoted string.
-fn one_quoted_string(text: &str) -> Option<String> {
+pub(crate) fn one_quoted_string(text: &str) -> Option<String> {
     let inner = text.strip_prefix('"')?;
     let mut value = String::new();
     let mut chars = inner.char_indices();

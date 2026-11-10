@@ -1,13 +1,15 @@
 //! Parses an Agentfile, as SPEC.md defines it.
 //!
 //! So far this covers the line rules, instruction names, arguments, and the
-//! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text. Each group
-//! of instructions checks its own arguments in its own module, and
-//! [`Settings::read`] turns the settings into typed values.
+//! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text in its one
+//! argument. Each group of instructions checks its own arguments in its own
+//! module, and [`Settings::read`] and [`Secrets::read`] turn them into typed
+//! values.
 
 mod files;
 mod network;
 mod secrets;
+pub use secrets::{Auth, Env, Part, Secret, Secrets};
 mod settings;
 pub use settings::{Agent, Compression, Effort, Harness, Mode, Os, Settings};
 mod sources;
@@ -189,6 +191,7 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
         }
         instructions.push(instruction);
     }
+    errors.extend(secrets::check_together(&instructions));
     if !seen.contains_key("AGENT") {
         errors.push(Error {
             line: first_line.unwrap_or(1),

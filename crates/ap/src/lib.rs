@@ -5,6 +5,7 @@ use std::io;
 pub mod boot;
 pub mod fetch;
 pub mod filter;
+pub mod paths;
 pub mod store;
 
 /// A running guest. The real implementation is the VMM, and lanes that need

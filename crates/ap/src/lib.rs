@@ -2,6 +2,7 @@
 
 use std::io;
 
+pub mod add;
 pub mod boot;
 pub mod fetch;
 pub mod filter;

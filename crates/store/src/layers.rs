@@ -35,7 +35,7 @@ impl Layers {
             return Ok(digest);
         }
         fs::create_dir_all(&self.dir)?;
-        let (partial, mut file) = self.create_partial(&digest)?;
+        let (partial, mut file) = create_partial(&self.dir, &digest)?;
         file.write_all(&crate::compress(data))?;
         file.sync_all()?;
         // Another writer may have finished first. Its file holds the same
@@ -48,8 +48,7 @@ impl Layers {
     /// The uncompressed bytes of the layer with this digest. A stored file
     /// whose bytes no longer hash to its name is an error.
     pub fn get(&self, digest: &str) -> io::Result<Vec<u8>> {
-        let lowercase_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
-        if digest.len() != 64 || !digest.bytes().all(lowercase_hex) {
+        if !is_digest(digest) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{digest:?} isn't a SHA-256 digest"),
@@ -73,28 +72,48 @@ impl Layers {
         Ok(data)
     }
 
-    /// Creates a file with a name no other writer holds. A killed writer can
-    /// leave a name behind, and its process id can come round again.
-    fn create_partial(&self, digest: &str) -> io::Result<(Partial, File)> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        loop {
-            let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            let name = format!(".{digest}.{}.{id}", std::process::id());
-            let path = self.dir.join(name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => return Ok((Partial(path), file)),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
-            }
+    /// Syncs the directory that holds the layers, and every directory above
+    /// it, so that every layer in it survives a power loss. Another writer
+    /// may have made the directory or renamed a layer into it, and been killed
+    /// before syncing.
+    pub(crate) fn sync(&self) -> io::Result<()> {
+        sync_up_from(&self.dir)
+    }
+
+    /// The file that holds the layer with this digest, which may not exist.
+    pub(crate) fn path(&self, digest: &str) -> PathBuf {
+        self.dir.join(digest)
+    }
+}
+
+/// Whether `text` is a SHA-256 digest in lowercase hex.
+pub(crate) fn is_digest(text: &str) -> bool {
+    let lowercase_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    text.len() == 64 && text.bytes().all(lowercase_hex)
+}
+
+/// Creates a file in `dir` for `stem`, with a name no other writer holds and
+/// that starts with a dot. A killed writer can leave a name behind, and its
+/// process id can come round again.
+pub(crate) fn create_partial(dir: &Path, stem: &str) -> io::Result<(Partial, File)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!(".{stem}.{}.{id}", std::process::id());
+        let path = dir.join(name);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((Partial(path), file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
         }
     }
 }
 
-/// Syncs `dir` and every directory above it, so that a layer's name and
+/// Syncs `dir` and every directory above it, so that an entry's name and
 /// each directory on its path survive a power loss. A directory that existed
 /// may have been made by a writer that was killed before syncing it. A
 /// directory above `dir` that can be passed through but not read is skipped.
-fn sync_up_from(dir: &Path) -> io::Result<()> {
+pub(crate) fn sync_up_from(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()?;
     for dir in dir.ancestors().skip(1) {
         // A relative path's last ancestor is empty, and means the current
@@ -119,8 +138,8 @@ fn sha256(data: &[u8]) -> String {
     hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Removes an unfinished file, whichever way `put` returns.
-struct Partial(PathBuf);
+/// Removes an unfinished file, whichever way its writer returns.
+pub(crate) struct Partial(pub(crate) PathBuf);
 
 impl Drop for Partial {
     fn drop(&mut self) {

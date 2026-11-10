@@ -499,7 +499,7 @@ fn set_default(name: &str, default: &mut Option<Sign>, sign: Sign) -> Result<(),
 }
 
 /// Reads the arguments on a line, and decodes the escapes in each.
-fn arguments(text: &str) -> Result<Vec<String>, String> {
+pub fn arguments(text: &str) -> Result<Vec<String>, String> {
     let mut arguments = Vec::new();
     let mut rest = text.trim_start();
     while !rest.is_empty() {
@@ -572,7 +572,7 @@ fn hidden(c: char) -> bool {
 
 /// One argument as printed: escaped, and quoted when the argument reader
 /// needs it.
-fn printed(value: &str) -> String {
+pub fn printed(value: &str) -> String {
     let mut escaped = String::new();
     for c in value.chars() {
         match c {

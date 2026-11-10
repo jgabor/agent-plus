@@ -359,6 +359,12 @@ subcommands that the milestone delivers, and it can be empty. Every step names
 one milestone, every milestone has a step, and no command is listed twice. A
 file that breaks one of these is an error.
 
+The milestones list exactly the commands that SPEC.md has for v0.1.0. A
+command is a heading under SPEC.md's Commands heading, and it is for v0.1.0
+unless its entry starts with `**Planned.**` or `*Proposed*`. The gate's `spec`
+check fails when a milestone lists a command that has no such heading or is
+marked, and when a v0.1.0 command is in no milestone.
+
 ### Budgets
 
 ```toml
@@ -646,11 +652,18 @@ change the roadmap, change what it is built from. It has three parts:
    issue whose body names it in a `Milestone:` line, and it is shown with how
    many of its sub-issues are closed. An open parent whose steps all pass is
    ready to close.
-2. What comes after v0.1.0, which is the open sub-issues of the roadmap issue.
+2. What comes after v0.1.0: the commands that SPEC.md marks as planned or
+   proposed, and the open sub-issues of the roadmap issue.
 3. What waits on the owner: open PRs and issues labeled `land-needed` or
    `answer-needed`, and open issues with no `auto:*` label and no parent in
    this repository. A listed PR stands for the issues it closes, so they are
    left out, and so are the issues that `xtask` writes.
+
+Each command is shown with how many of its promises are proven. Its promises
+are those under its own heading in SPEC.md, and under each heading that its
+entry says specifies it, as in "[Build](#build) specifies `ap build`". A
+command is built when every one is proven, so nobody ticks its box. A pointer
+that names no heading fails the gate's `spec` check.
 
 The same inputs give the same text, and the nightly job leaves a body that
 already says it alone. With no open issue titled `Roadmap`, it writes nothing,

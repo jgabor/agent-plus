@@ -1,11 +1,15 @@
 //! `cargo xtask roadmap`: the milestones, what comes after them, and what
 //! waits on the owner. Nobody types it: every line comes from the journey
-//! file, the journey's results, or GitHub.
+//! file, the journey's results, SPEC.md and the checks that prove it, or
+//! GitHub.
 
 use crate::forge::{Gh, OpenPr, RoadmapIssue};
 use crate::journey::{self, Milestone, Outcome};
+use crate::score::{self, Score, Sentence};
+use crate::spec::{self, Arrives, Command};
 use crate::work::{ANSWER_NEEDED, LAND_NEEDED, PARKED};
-use crate::{Problem, Verdict, lock, report, workspace};
+use crate::{Problem, Verdict, lock, report, testrun, workspace};
+use std::fs;
 use std::path::Path;
 
 /// The roadmap issue's title. The lowest open issue with it is the one.
@@ -20,22 +24,37 @@ pub fn run() -> Result<Verdict, Problem> {
     let (issues, prs) = (gh.roadmap_issues()?, gh.open_prs()?);
     let hold = lock::shared(&root)?;
     let outcomes = journey::outcomes(&root)?;
+    let score = score::compute(&root, &testrun::run(&root, &hold)?)?;
     drop(hold);
     let milestones = journey::milestones(&root)?;
-    print!("{}", markdown(&milestones, &outcomes, &issues, &prs));
+    let proof = (commands(&root)?, &score);
+    print!(
+        "{}",
+        markdown(&milestones, &outcomes, &proof, &issues, &prs)
+    );
     Ok(Verdict::Pass)
+}
+
+/// The commands in SPEC.md, and which of its promises are proven.
+type Proof<'a> = (Vec<Command>, &'a Score);
+
+fn commands(root: &Path) -> Result<Vec<Command>, Problem> {
+    let text = fs::read_to_string(root.join("SPEC.md"))
+        .map_err(|e| Problem(format!("couldn't read SPEC.md: {e}")))?;
+    Ok(spec::commands(&text))
 }
 
 /// Makes the roadmap the body of the open issue with the roadmap's title,
 /// unless it already is. With no such issue, there is nowhere to write.
-pub fn write(root: &Path, outcomes: &[Outcome]) -> Result<(), Problem> {
+pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Problem> {
     let gh = Gh::new(root);
     let issues = gh.roadmap_issues()?;
     let Some(issue) = roadmap_issue(&issues) else {
         return Ok(());
     };
     let milestones = journey::milestones(root)?;
-    let text = markdown(&milestones, outcomes, &issues, &gh.open_prs()?);
+    let proof = (commands(root)?, score);
+    let text = markdown(&milestones, outcomes, &proof, &issues, &gh.open_prs()?);
     // An edit on the website saves its line ends as `\r\n`.
     if issue.body.replace("\r\n", "\n").trim_end() != text.trim_end() {
         gh.edit_issue(issue.number, &text)?;
@@ -55,6 +74,7 @@ fn roadmap_issue(issues: &[RoadmapIssue]) -> Option<&RoadmapIssue> {
 fn markdown(
     milestones: &[Milestone],
     outcomes: &[Outcome],
+    (commands, score): &Proof,
     all: &[RoadmapIssue],
     prs: &[OpenPr],
 ) -> String {
@@ -66,22 +86,21 @@ fn markdown(
         let in_it = |step: &&Outcome| step.milestone == milestone.name;
         let steps: Vec<&Outcome> = outcomes.iter().filter(in_it).collect();
         let done = steps.iter().all(|step| step.state == "pass");
-        let commands: Vec<String> = milestone
-            .commands
-            .iter()
-            .map(|command| format!("`{command}`"))
-            .collect();
-        let commands = if commands.is_empty() {
-            "none.".to_string()
-        } else {
-            commands.join(", ")
-        };
         text.push_str(&format!(
-            "\n### {}. {}\n\nParent: {}\nCommands: {commands}\n\n",
+            "\n### {}. {}\n\nParent: {}\n\n",
             index + 1,
             shown(&milestone.name),
             parent(&issues, &milestone.name, done)
         ));
+        if milestone.commands.is_empty() {
+            text.push_str("Commands: none.\n");
+        } else {
+            text.push_str("Commands:\n\n");
+        }
+        for name in &milestone.commands {
+            text.push_str(&format!("- {}\n", command_line(name, commands, score)));
+        }
+        text.push_str("\nSteps:\n\n");
         for step in steps {
             let (mark, note) = match step.state {
                 "pass" => ("x", ""),
@@ -94,11 +113,19 @@ fn markdown(
     }
 
     let roadmap = roadmap_issue(all).map(|issue| issue.number);
-    let later = issues
+    let mut later: Vec<String> = commands
+        .iter()
+        .filter_map(|command| match command.arrives {
+            Arrives::V010 => None,
+            Arrives::Later => Some(format!("`{}`: later", command.name)),
+            Arrives::Proposal => Some(format!("`{}`: a proposal", command.name)),
+        })
+        .collect();
+    let gaps = issues
         .iter()
         .filter(|issue| issue.open && roadmap.is_some() && issue.parent == roadmap)
-        .map(|issue| line(issue.number, &issue.title))
-        .collect();
+        .map(|issue| line(issue.number, &issue.title));
+    later.extend(gaps);
     section(&mut text, "## After v0.1.0", later);
 
     // A parked PR is the thing to act on, so it stands for the issues it closes.
@@ -132,6 +159,26 @@ fn markdown(
         .collect();
     section(&mut text, "### To label or close", unlabeled);
     text
+}
+
+/// A command's line in its milestone. Its promises are those under its own
+/// heading in SPEC.md, and under each heading that its entry says specifies
+/// it. It is built when every one is proven.
+fn command_line(name: &str, commands: &[Command], score: &Score) -> String {
+    let Some(command) = commands.iter().find(|command| command.name == name) else {
+        return format!("[ ] `{name}`: not in SPEC.md");
+    };
+    let counts = |sentence: &&Sentence| {
+        sentence.0 == command.name || command.specified_by.contains(&sentence.0)
+    };
+    let promises = score.promises.iter().filter(counts).count();
+    let unproven = score.unproven.iter().filter(counts).count();
+    if promises == 0 {
+        return format!("[ ] `{name}`: no promises in SPEC.md");
+    }
+    let mark = if unproven == 0 { "x" } else { " " };
+    let proven = promises - unproven;
+    format!("[{mark}] `{name}`: proven {proven} of {promises}")
 }
 
 /// An issue that `xtask` writes, which the owner neither labels nor closes.

@@ -500,3 +500,78 @@ fn a_dependency_not_named_like_a_fake_earns() {
         "spec 1 of 3",
     );
 }
+
+const COMMANDS: &str = "# A\n\n## Build\n\nA rebuild is a hit.\n\n## Commands\n\n### ap one\n\n`ap one` does one thing.\n\n### ap two\n\n[Build](#build) specifies `ap two`.\n\n### ap later\n\n**Planned.** `ap later` comes later.\n\n### ap maybe\n\n*Proposed:* `ap maybe` may come.\n";
+
+/// A journey file whose only milestone lists these commands.
+fn journey(commands: &str) -> String {
+    format!(
+        "[[milestone]]\nname = \"M\"\ncommands = [{commands}]\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"M\"\nneeds = []\nscript = \"harness/journey/s.sh\"\n"
+    )
+}
+
+/// Runs the gate with this journey file, and returns its spec findings.
+fn gate_with_commands(name: &str, spec: &str, journey: &str) -> (Option<i32>, String, String) {
+    let lib = "#[test]\nfn one() {}\n";
+    let root = workspace(name, spec, lib, &[("harness/journey.toml", journey)]);
+    let output = xtask(&root, &["gate"]);
+    (output.status.code(), stdout(&output), stderr(&output))
+}
+
+#[test]
+fn the_gate_passes_when_the_milestones_list_the_spec_commands() {
+    let (code, out, err) = gate_with_commands(
+        "commands-agree",
+        COMMANDS,
+        &journey("\"ap one\", \"ap two\""),
+    );
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("pass spec"), "{out}");
+}
+
+#[test]
+fn a_milestone_command_with_no_heading_fails_the_gate() {
+    let (code, out, err) = gate_with_commands(
+        "commands-no-heading",
+        COMMANDS,
+        &journey("\"ap one\", \"ap two\", \"ap three\""),
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(out.contains("fail spec"), "{out}");
+    assert!(err.contains("`M` lists `ap three`"), "{err}");
+}
+
+#[test]
+fn a_spec_command_in_no_milestone_fails_the_gate() {
+    let (code, out, err) =
+        gate_with_commands("commands-unlisted", COMMANDS, &journey("\"ap one\""));
+    assert_eq!(code, Some(1), "{err}");
+    assert!(out.contains("fail spec"), "{out}");
+    assert!(err.contains("`ap two`"), "{err}");
+    assert!(!err.contains("`ap later`"), "{err}");
+    assert!(!err.contains("`ap maybe`"), "{err}");
+}
+
+#[test]
+fn a_milestone_that_lists_a_planned_command_fails_the_gate() {
+    let (code, _, err) = gate_with_commands(
+        "commands-planned",
+        COMMANDS,
+        &journey("\"ap one\", \"ap two\", \"ap later\""),
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("`M` lists `ap later`"), "{err}");
+}
+
+#[test]
+fn a_pointer_to_a_heading_that_isnt_there_fails_the_gate() {
+    let spec = COMMANDS.replace("[Build](#build)", "[Bild](#bild)");
+    let (code, out, err) = gate_with_commands(
+        "commands-pointer",
+        &spec,
+        &journey("\"ap one\", \"ap two\""),
+    );
+    assert_eq!(code, Some(1), "{err}");
+    assert!(out.contains("fail spec"), "{out}");
+    assert!(err.contains("`Bild`"), "{err}");
+}

@@ -25,8 +25,10 @@ pub fn run() -> Result<Verdict, Problem> {
     // on the quietest machine.
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""))))];
     let hold = lock::shared(&root)?;
-    let gated = gate::check(&root, &hold, None).map(|(verdict, _)| verdict);
-    let gated = state(gated);
+    let (gated, score) = match gate::check(&root, &hold, None) {
+        Ok((verdict, score)) => (state(Ok(verdict)), Some(score)),
+        Err(problem) => (state(Err(problem)), None),
+    };
     checks.push(("gate", gated));
     checks.push(("t2", t2(&root)));
     // No unattended run may spend money until HARNESS.md sets a limit.
@@ -56,11 +58,11 @@ pub fn run() -> Result<Verdict, Problem> {
     } else {
         Ok(())
     };
-    // The roadmap shows the journey this night ran. A journey that couldn't
-    // run has already failed its check.
-    let written = match &walked {
-        Ok(outcomes) => roadmap::write(&root, outcomes),
-        Err(_) => Ok(()),
+    // The roadmap shows the journey and the checks this night ran. One that
+    // couldn't run has already failed its check.
+    let written = match (&walked, &score) {
+        (Ok(outcomes), Some(score)) => roadmap::write(&root, outcomes, score),
+        _ => Ok(()),
     };
     posted?;
     responded?;

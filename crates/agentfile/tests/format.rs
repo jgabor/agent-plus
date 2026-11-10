@@ -1,6 +1,6 @@
 //! The line rules of an Agentfile, from SPEC.md's Format section.
 
-use agentfile::{Error, Instruction, Phase, parse};
+use agentfile::{Error, Instruction, Phase, Text, parse};
 
 fn names(source: &str) -> Vec<(usize, String)> {
     parse(source)
@@ -61,7 +61,11 @@ fn a_hash_after_the_start_is_part_of_the_argument() {
         arguments_of(source, 2),
         ["./a#b", "#", "not", "a", "comment"]
     );
-    assert_eq!(arguments_of(source, 3), ["fix #12 # now"]);
+    let prompt = &parse(source).unwrap()[2];
+    assert_eq!(
+        prompt.text,
+        Some(Text::Literal("fix #12 # now".to_string()))
+    );
 }
 
 // spec(Format): Blank lines are ignored outside fenced blocks.
@@ -195,16 +199,19 @@ fn a_valid_file_returns_each_instruction_with_its_line() {
                 line: 1,
                 name: "AGENT".to_string(),
                 arguments: vec!["claude".to_string(), "2.1".to_string()],
+                text: None,
             },
             Instruction {
                 line: 4,
                 name: "SHARE".to_string(),
                 arguments: vec!["./out".to_string(), "rw".to_string()],
+                text: None,
             },
             Instruction {
                 line: 5,
                 name: "PROMPT".to_string(),
-                arguments: vec!["go".to_string()],
+                arguments: Vec::new(),
+                text: Some(Text::Literal("go".to_string())),
             },
         ]
     );

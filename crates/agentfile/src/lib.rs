@@ -1,9 +1,8 @@
 //! Parses an Agentfile, as SPEC.md defines it.
 //!
-//! So far this covers the line rules, instruction names, and arguments. It
-//! doesn't yet read fenced blocks or apply the rules for text values, so
-//! `SYSTEM`, `PROMPT`, and `ENV` keep their raw text. Each group of
-//! instructions checks its own arguments in its own module.
+//! So far this covers the line rules, instruction names, arguments, and the
+//! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text. Each group
+//! of instructions checks its own arguments in its own module.
 
 mod files;
 mod network;
@@ -14,9 +13,6 @@ mod text;
 
 use std::collections::HashMap;
 use std::fmt;
-
-/// These take text, which doesn't split into arguments.
-const TEXT_INSTRUCTIONS: [&str; 3] = ["SYSTEM", "PROMPT", "ENV"];
 
 /// When an instruction is resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +83,18 @@ pub struct Instruction {
     /// In uppercase, whatever case the file used.
     pub name: String,
     pub arguments: Vec<String>,
+    /// The value of `SYSTEM` or `PROMPT`, which take text instead of
+    /// arguments.
+    pub text: Option<Text>,
+}
+
+/// A text value, in one of the forms in SPEC.md's Text values section.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Text {
+    /// Single-line text, or the content of a fenced block.
+    Literal(String),
+    /// A host path, with its quotes removed. The build reads the file.
+    Path(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,7 +120,12 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
     // The line where each non-repeatable instruction first appears.
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut first_line = None;
-    for (index, text) in source.split('\n').enumerate() {
+    let lines: Vec<&str> = source.split('\n').collect();
+    // The index of the next line to read. A fenced block moves it on.
+    let mut next = 0;
+    while let Some(text) = lines.get(next) {
+        let index = next;
+        next += 1;
         let text = text.trim();
         if text.is_empty() || text.starts_with('#') {
             continue;
@@ -140,7 +153,19 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
             }
         }
         let rest = rest.trim_start();
-        let arguments = if TEXT_INSTRUCTIONS.contains(&name.as_str()) {
+        let mut value = None;
+        let arguments = if name == "SYSTEM" || name == "PROMPT" {
+            match text::read(line, rest, &lines, &mut next) {
+                Ok(text) => {
+                    value = Some(text);
+                    Vec::new()
+                }
+                Err(found) => {
+                    errors.extend(found);
+                    continue;
+                }
+            }
+        } else if name == "ENV" {
             vec![rest.to_string()]
         } else {
             match split_arguments(rest) {
@@ -155,6 +180,7 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
             line,
             name,
             arguments,
+            text: value,
         };
         if let Err(message) = (definition.check)(&instruction) {
             fail(message);

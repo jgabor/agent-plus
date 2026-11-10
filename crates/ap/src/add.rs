@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, OsStr};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Cursor, Read};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -56,29 +56,13 @@ impl Layer {
                 "an `ADD` can't land at `/`",
             ));
         };
-        let file = host.open()?;
         let mut walk = Walk {
-            top: host.path(),
+            host,
             ignore: None,
+            ignores: Vec::new(),
             warnings: Vec::new(),
         };
-        let stat = fstat(&file).map_err(|error| walk.error(b"", error))?;
-        let content = match stat.st_mode & libc::S_IFMT {
-            libc::S_IFREG => {
-                let data = read_all(file, &stat).map_err(|error| walk.error(b"", error))?;
-                Some(Entry::File(permissions(&stat), data))
-            }
-            libc::S_IFDIR => {
-                // A file named explicitly is copied, so only a directory
-                // reads the `.gitignore` files.
-                walk.ignore = Some(Gitignore::load(host.path())?);
-                Some(walk.dir(&file, permissions(&stat), &mut Vec::new())?)
-            }
-            _ => {
-                walk.skip(b"");
-                None
-            }
-        };
+        let content = walk.top()?;
 
         let mut root = BTreeMap::new();
         if let Some(content) = content {
@@ -101,6 +85,11 @@ impl Layer {
         }
         field(&mut hash, guest.as_bytes());
         manifest(&mut hash, &root);
+        hash.update(&(walk.ignores.len() as u64).to_le_bytes());
+        for (dir, content) in &walk.ignores {
+            field(&mut hash, dir);
+            field(&mut hash, content);
+        }
         let key = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
 
         Ok(Layer {
@@ -175,16 +164,56 @@ fn manifest(hash: &mut Sha256Context, entries: &BTreeMap<Vec<u8>, Entry>) {
 }
 
 struct Walk<'a> {
-    /// The canonical path of the `<src>`, for messages.
-    top: &'a Path,
+    /// The `<src>`, whose canonical path is also for messages.
+    host: &'a HostPath,
     ignore: Option<Gitignore>,
+    /// Each `.gitignore` read, by the directory that holds it, so the key
+    /// covers one that ignores itself.
+    ignores: Vec<(Vec<u8>, Vec<u8>)>,
     warnings: Vec<String>,
 }
 
 impl Walk<'_> {
+    /// What the `<src>` itself holds. A special file is skipped before it is
+    /// opened, because a socket can't be, and opening a device can do
+    /// something.
+    fn top(&mut self) -> io::Result<Option<Entry>> {
+        let kind = fs::symlink_metadata(self.host.path())
+            .map_err(|error| self.error(b"", error))?
+            .file_type();
+        // A symlink here was swapped in after the check, and `open` refuses
+        // it.
+        if !kind.is_file() && !kind.is_dir() && !kind.is_symlink() {
+            self.skip(b"");
+            return Ok(None);
+        }
+        let file = self.host.open()?;
+        let stat = fstat(&file).map_err(|error| self.error(b"", error))?;
+        let content = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFREG => {
+                let data = read_all(file, &stat).map_err(|error| self.error(b"", error))?;
+                Some(Entry::File(permissions(&stat), data))
+            }
+            libc::S_IFDIR => {
+                // A file named explicitly is copied, so only a directory
+                // reads the `.gitignore` files.
+                self.ignore = Some(Gitignore::default());
+                Some(self.dir(&file, permissions(&stat), &mut Vec::new(), false)?)
+            }
+            _ => {
+                self.skip(b"");
+                None
+            }
+        };
+        Ok(content)
+    }
+
     /// The entries of the directory open as `dir`, which is `rel` below the
-    /// top.
-    fn dir(&mut self, dir: &File, mode: u16, rel: &mut Vec<u8>) -> io::Result<Entry> {
+    /// top. Like git, it reads no `.gitignore` inside a `.git`.
+    fn dir(&mut self, dir: &File, mode: u16, rel: &mut Vec<u8>, in_git: bool) -> io::Result<Entry> {
+        if !in_git && self.ignore.is_some() {
+            self.gitignore(dir, rel)?;
+        }
         let mut entries = BTreeMap::new();
         for name in list(dir).map_err(|error| self.error(rel, error))? {
             let len = rel.len();
@@ -193,7 +222,7 @@ impl Walk<'_> {
             }
             rel.extend_from_slice(name.to_bytes());
             // An error carries the path where it happened.
-            let entry = self.entry(dir, &name, rel);
+            let entry = self.entry(dir, &name, rel, in_git);
             rel.truncate(len);
             if let Some(entry) = entry? {
                 entries.insert(name.to_bytes().to_vec(), entry);
@@ -202,7 +231,13 @@ impl Walk<'_> {
         Ok(Entry::Dir(mode, entries))
     }
 
-    fn entry(&mut self, dir: &File, name: &CStr, rel: &mut Vec<u8>) -> io::Result<Option<Entry>> {
+    fn entry(
+        &mut self,
+        dir: &File,
+        name: &CStr,
+        rel: &mut Vec<u8>,
+        in_git: bool,
+    ) -> io::Result<Option<Entry>> {
         let stat = stat_at(dir, name).map_err(|error| self.error(rel, error))?;
         let kind = stat.st_mode & libc::S_IFMT;
         let is_dir = kind == libc::S_IFDIR;
@@ -216,7 +251,8 @@ impl Walk<'_> {
                 let child = open_at(dir, name, libc::O_DIRECTORY)
                     .and_then(|child| Ok((same(&child, &stat)?, child)));
                 let (stat, child) = child.map_err(|error| self.error(rel, error))?;
-                self.dir(&child, permissions(&stat), rel).map(Some)
+                let in_git = in_git || name.to_bytes() == b".git";
+                self.dir(&child, permissions(&stat), rel, in_git).map(Some)
             }
             libc::S_IFREG => {
                 let read = || {
@@ -237,6 +273,36 @@ impl Walk<'_> {
         }
     }
 
+    /// Reads the `.gitignore` in `dir`, if it is a regular file.
+    fn gitignore(&mut self, dir: &File, rel: &[u8]) -> io::Result<()> {
+        let name = c".gitignore";
+        let read = || {
+            let stat = match stat_at(dir, name) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                stat => stat?,
+            };
+            if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+                return Ok(None);
+            }
+            let file = open_at(dir, name, libc::O_NONBLOCK | libc::O_NOCTTY)?;
+            let stat = same(&file, &stat)?;
+            read_all(file, &stat).map(Some)
+        };
+        let mut path = rel.to_vec();
+        if !path.is_empty() {
+            path.push(b'/');
+        }
+        path.extend_from_slice(name.to_bytes());
+        let content = read().map_err(|error| self.error(&path, error))?;
+        if let Some(content) = content {
+            if let Some(ignore) = &mut self.ignore {
+                ignore.add(Path::new(OsStr::from_bytes(rel)), &content);
+            }
+            self.ignores.push((rel.to_vec(), content));
+        }
+        Ok(())
+    }
+
     fn skip(&mut self, rel: &[u8]) {
         self.warnings.push(format!(
             "skipped {}, which is a special file",
@@ -250,9 +316,13 @@ impl Walk<'_> {
 
     fn show(&self, rel: &[u8]) -> String {
         if rel.is_empty() {
-            self.top.display().to_string()
+            self.host.path().display().to_string()
         } else {
-            self.top.join(OsStr::from_bytes(rel)).display().to_string()
+            self.host
+                .path()
+                .join(OsStr::from_bytes(rel))
+                .display()
+                .to_string()
         }
     }
 }

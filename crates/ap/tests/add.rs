@@ -333,6 +333,15 @@ fn special_files_are_skipped_with_a_warning() {
     assert_eq!(named.warnings.len(), 1, "{:?}", named.warnings);
     let image = named.image().unwrap();
     assert!(under_home(&image).is_empty());
+
+    // So is a socket, which can't be opened at all.
+    let named = s.read("./data/sock", "/home/agent/sock");
+    assert_eq!(named.warnings.len(), 1, "{:?}", named.warnings);
+    assert!(
+        named.warnings[0].contains("data/sock"),
+        "{:?}",
+        named.warnings
+    );
 }
 
 // spec(ADD): When `<src>` is a directory, files ignored by git (according to the `.gitignore` files inside it) are skipped.
@@ -361,6 +370,33 @@ fn files_git_ignores_are_skipped_in_a_directory() {
             "data/sub",
             "data/sub/.gitignore",
             "data/sub/kept.txt",
+        ]
+    );
+}
+
+#[test]
+fn a_symlinked_gitignore_and_one_inside_git_are_not_read() {
+    let s = Scratch::new("ignored-like-git");
+    write(&s.root.join("patterns"), "*.txt\n");
+    write(&s.context.join("data/sub/a.txt"), "a");
+    symlink(
+        s.root.join("patterns"),
+        s.context.join("data/sub/.gitignore"),
+    )
+    .unwrap();
+    write(&s.context.join("data/.git/.gitignore"), "*\n");
+    write(&s.context.join("data/.git/config"), "c");
+    let image = s.read("./data", "/home/agent/data").image().unwrap();
+    assert_eq!(
+        under_home(&image).into_keys().collect::<Vec<_>>(),
+        [
+            "data",
+            "data/.git",
+            "data/.git/.gitignore",
+            "data/.git/config",
+            "data/sub",
+            "data/sub/.gitignore",
+            "data/sub/a.txt",
         ]
     );
 }
@@ -435,6 +471,20 @@ fn the_key_covers_the_instruction_its_arguments_and_every_file() {
     fs::remove_file(s.context.join("data/l")).unwrap();
     symlink("b.txt", s.context.join("data/l")).unwrap();
     assert_ne!(key("./data", Some("/opt/data"), "/opt/data"), linked);
+}
+
+#[test]
+fn the_key_covers_a_gitignore_that_ignores_itself() {
+    let s = Scratch::new("key-gitignore");
+    write(&s.context.join("data/.gitignore"), ".gitignore\n*.log\n");
+    write(&s.context.join("data/a.txt"), "a");
+    let key = || s.read("./data", "/opt/data").key;
+    let first = key();
+    write(
+        &s.context.join("data/.gitignore"),
+        ".gitignore\n*.log\n# x\n",
+    );
+    assert_ne!(key(), first);
 }
 
 #[test]

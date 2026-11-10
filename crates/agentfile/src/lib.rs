@@ -3,14 +3,16 @@
 //! So far this covers the line rules, instruction names, arguments, and the
 //! text values of `SYSTEM` and `PROMPT`. `ENV` keeps its raw text in its one
 //! argument. Each group of instructions checks its own arguments in its own
-//! module, and [`Settings::read`] and [`Secrets::read`] turn them into typed
-//! values. [`format`] rewrites an Agentfile by the rules of `ap fmt`.
+//! module, and a `read` function per group, such as [`Settings::read`] or
+//! [`Network::read`], turns them into typed values. [`format`] rewrites an
+//! Agentfile by the rules of `ap fmt`.
 
 mod files;
 pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
 mod format;
 pub use format::format;
 mod network;
+pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
 mod secrets;
 pub use secrets::{Auth, Env, Part, Secret, Secrets};
 mod settings;
@@ -196,6 +198,7 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
         instructions.push(instruction);
     }
     errors.extend(secrets::check_together(&instructions));
+    errors.extend(network::check_together(&instructions));
     if !seen.contains_key("AGENT") {
         errors.push(Error {
             line: first_line.unwrap_or(1),

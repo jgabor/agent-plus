@@ -56,7 +56,7 @@ const FIXTURES: [&str; 6] = [
     "\n\n  # top  \nAGENT claude\nSYSTEM ```md\nBe brief.  \n\n\n# not a comment\n```\nPROMPT \"/review\"\n\n\n",
     "AGENT claude\nSYSTEM\n````\nAnswer like this:\n\n```json\n{}\n```\n````  \nENV  A \"b  c\"   \n",
     "AGENT claude\rSYSTEM You are a careful reviewer.   \rsystem ./\"My Prompts\"/system.md\r",
-    "AGENT claude\n  NETWORK   github.com\n\tSHARE \"./My Notes\"\n",
+    "AGENT claude\n  NETWORK   +github.com\n\tSHARE \"./My Notes\"\n",
 ];
 
 #[test]
@@ -70,8 +70,8 @@ fn every_fixture_formats_well() {
 #[test]
 fn instruction_names_become_uppercase() {
     assert_eq!(
-        formatted("agent claude\nShare ./out\nnEtWoRk github.com\n"),
-        "AGENT claude\nSHARE ./out\nNETWORK github.com\n"
+        formatted("agent claude\nShare ./out\nnEtWoRk +github.com\n"),
+        "AGENT claude\nSHARE ./out\nNETWORK +github.com\n"
     );
 }
 
@@ -148,7 +148,7 @@ fn fmt_changes_no_argument_quote_value_content_comment_or_order() {
         "  # Keep this   comment, and its \"quotes\".\n",
         "AGENT claude\n",
         "SHARE \"./My Notes\"  ./\"a b\"/c   rw\n",
-        "  NETWORK github.com\n",
+        "  NETWORK +github.com\n",
         "ENV  GREETING \"hi  there\" $HOME\n",
         "SYSTEM Say \"hello\" first.\n",
         "system \"Be concise.\"\n",
@@ -167,7 +167,7 @@ fn fmt_changes_no_argument_quote_value_content_comment_or_order() {
         "  # Keep this   comment, and its \"quotes\".\n",
         "AGENT claude\n",
         "SHARE \"./My Notes\"  ./\"a b\"/c   rw\n",
-        "  NETWORK github.com\n",
+        "  NETWORK +github.com\n",
         "ENV GREETING \"hi  there\" $HOME\n",
         "SYSTEM Say \"hello\" first.\n",
         "SYSTEM \"Be concise.\"\n",

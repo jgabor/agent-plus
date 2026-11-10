@@ -49,6 +49,51 @@ needs = [1]
 script = "harness/journey/ok.sh"
 "#;
 
+/// `ap init` has two sentences of its own, and Build's two through its
+/// pointer. The pointer to Other only "says", so Other's don't count.
+const SPEC: &str = "# Reference
+
+## Build
+
+`ap build` writes an image. A rebuild is a hit.
+
+## Commands
+
+### ap --version
+
+`ap --version` prints the version.
+
+### ap boot
+
+`ap boot` boots a machine. It powers off.
+
+### ap init
+
+[Build](#build)
+specifies `ap init`. [Other](#other) says more.
+
+### ap push
+
+**Planned.** `ap push` shares an agent.
+
+### ap mcp
+
+*Proposed:* `ap mcp` drives a desktop.
+
+## Other
+
+Unrelated.
+";
+
+const CHECKS: &str = "// spec(ap --version): `ap --version` prints the version.
+#[test]
+fn the_version_prints() {}
+
+// spec(Build): A rebuild is a hit.
+#[test]
+fn a_rebuild_is_a_hit() {}
+";
+
 const GH: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/calls"
@@ -160,6 +205,8 @@ impl Repo {
                 "[package]\nname = \"ap\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
             ),
             ("crates/ap/src/main.rs", "fn main() {}\n"),
+            ("crates/ap/tests/checks.rs", CHECKS),
+            ("SPEC.md", SPEC),
             ("harness/journey.toml", JOURNEY),
             ("harness/journey/ok.sh", "exit 0\n"),
             ("harness/journey/bad.sh", "exit 1\n"),
@@ -364,14 +411,25 @@ journey 2 of 4
 ### 1. Boot
 
 Parent: #10, open, with 2 of 2 sub-issues closed. Every step passes, so it is ready to close.
-Commands: `ap --version`, `ap boot`
+
+Commands:
+
+- [x] `ap --version`: proven 1 of 1
+- [ ] `ap boot`: proven 0 of 2
+
+Steps:
 
 - [x] Step 1: first
 
 ### 2. Author
 
 Parent: #20, open, with 1 of 2 sub-issues closed.
-Commands: `ap init`
+
+Commands:
+
+- [ ] `ap init`: proven 1 of 4
+
+Steps:
 
 - [ ] Step 2: second (fails)
 - [ ] Step 3: third (skipped)
@@ -379,12 +437,17 @@ Commands: `ap init`
 ### 3. Run
 
 Parent: none.
+
 Commands: none.
+
+Steps:
 
 - [x] Step 4: fourth
 
 ## After v0.1.0
 
+- `ap push`: later
+- `ap mcp`: a proposal
 - #30 `ap lint` flags bloated instructions
 
 ## Waiting on the owner
@@ -448,7 +511,7 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
     assert_eq!(text.matches("Parent: none.\n").count(), 3, "{text}");
     assert!(
         text.ends_with(
-            "## After v0.1.0\n\nNothing.\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n"
+            "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n"
         ),
         "{text}"
     );
@@ -529,7 +592,8 @@ fn only_this_repositorys_sub_issues_count() {
     );
     repo.set_json(&[roadmap.json(), foreign], &[]);
     let text = repo.roadmap();
-    assert!(text.contains("## After v0.1.0\n\nNothing.\n"), "{text}");
+    let after = "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting";
+    assert!(text.contains(after), "{text}");
 }
 
 #[test]

@@ -1,5 +1,7 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
+use crate::journey::{self, JOURNEY_FILE};
+use crate::spec::Arrives;
 use crate::testrun::{self, Results};
 use crate::{Problem, Verdict, bench, ledger, lock, spec, workspace};
 use std::collections::{HashMap, HashSet};
@@ -149,6 +151,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             }
         }
     }
+    findings.extend(command_findings(root, &text)?);
     let unproven = ordered
         .into_iter()
         .filter(|sentence| promises.contains(sentence) && !proven.contains(sentence))
@@ -160,6 +163,59 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
         findings,
         unproven,
     })
+}
+
+/// The milestones must list exactly the commands that SPEC.md has for v0.1.0,
+/// so that neither file names a command the other doesn't know.
+fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
+    let commands = spec::commands(spec);
+    let headings = spec::headings(spec);
+    let mut findings = Vec::new();
+    for command in &commands {
+        for title in &command.specified_by {
+            if !headings.contains(title) {
+                findings.push(format!(
+                    "SPEC.md: `{}` says that `{title}` specifies it, and SPEC.md has no `{title}` heading. Name a heading as it is written",
+                    command.name
+                ));
+            }
+        }
+    }
+    // A journey file from before milestones lists no commands, and today's
+    // reader refuses it. The nightly bisect gates such trees, so they are left
+    // alone here, as is a workspace with no journey file.
+    let listing = fs::read_to_string(root.join(JOURNEY_FILE)).unwrap_or_default();
+    if !listing.lines().any(|line| line.trim() == "[[milestone]]") {
+        return Ok(findings);
+    }
+    let milestones = journey::milestones(root)?;
+    for milestone in &milestones {
+        for name in &milestone.commands {
+            let what = match commands.iter().find(|command| command.name == *name) {
+                None => {
+                    "which has no heading under Commands in SPEC.md. Add the heading, or fix the name"
+                }
+                Some(command) if command.arrives != Arrives::V010 => {
+                    "which SPEC.md marks as planned or proposed. Remove the mark, or take the command out of the milestone"
+                }
+                Some(_) => continue,
+            };
+            findings.push(format!(
+                "{JOURNEY_FILE}: milestone `{}` lists `{name}`, {what}",
+                milestone.name
+            ));
+        }
+    }
+    let listed = |name: &String| milestones.iter().any(|m| m.commands.contains(name));
+    for command in &commands {
+        if command.arrives == Arrives::V010 && !listed(&command.name) {
+            findings.push(format!(
+                "SPEC.md: `{}` is a v0.1.0 command, and no milestone in {JOURNEY_FILE} lists it. Add it to a milestone, or mark it `**Planned.**`",
+                command.name
+            ));
+        }
+    }
+    Ok(findings)
 }
 
 /// Each waived sentence, with its line number. A missing file waives nothing.

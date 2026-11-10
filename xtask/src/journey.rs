@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const JOURNEY_FILE: &str = "harness/journey.toml";
+pub const JOURNEY_FILE: &str = "harness/journey.toml";
 const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
 
 struct Step {

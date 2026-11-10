@@ -16,7 +16,7 @@ Commands	This section lists every `ap` command.	Introduces the section and claim
 Commands	Where another section specifies a command, its entry points there.	Says how the section is laid out and claims no behavior.
 ap init	[AUTH](#auth), [NETWORK](#network), and [POLICY](#policy) say which lines it writes.	Only points to the sections that specify this, and adds no behavior.
 ap build	[Build](#build) specifies `ap build`.	Only points to the sections that specify this, and adds no behavior.
-ap update	[Build](#build) says what it resolves.	Only points to the sections that specify this, and adds no behavior.
+ap update	[Build](#build) specifies `ap update`.	Only points to the sections that specify this, and adds no behavior.
 ap fmt	[Text values](#text-values) names a rewrite it makes.	Only points to the sections that specify this, and adds no behavior.
 ap inspect	[Grants](#grants) specifies `ap inspect --grants`, and [NETWORK](#network) names hosts that it also shows.	Only points to the sections that specify this, and adds no behavior.
 ap rm	[Build](#build) says which layers it frees, and [SHARE](#share) says when it refuses.	Only points to the sections that specify this, and adds no behavior.

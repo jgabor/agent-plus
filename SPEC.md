@@ -477,8 +477,7 @@ standalone executable.
 
 ### ap update
 
-`ap update [agent]` rewrites `Agentfile.lock` with the versions and refs it
-resolves. [Build](#build) says what it resolves.
+[Build](#build) specifies `ap update`.
 
 ### ap fmt
 

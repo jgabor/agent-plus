@@ -52,6 +52,11 @@ pub fn outcomes(root: &Path) -> Result<Vec<Outcome>, Problem> {
     walk(root, |line| eprintln!("{line}"))
 }
 
+/// The milestones, in roadmap order.
+pub fn milestones(root: &Path) -> Result<Vec<String>, Problem> {
+    Ok(read(root)?.0)
+}
+
 /// How many steps spend money, or need a step that does. None of them run.
 pub fn left_out(root: &Path) -> Result<usize, Problem> {
     let mut out = HashSet::new();
@@ -96,6 +101,11 @@ fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
 }
 
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
+    Ok(read(root)?.1)
+}
+
+/// The milestones in the file's order, and the steps in the order of their ids.
+fn read(root: &Path) -> Result<(Vec<String>, Vec<Step>), Problem> {
     let text = fs::read_to_string(root.join(JOURNEY_FILE))
         .map_err(|e| Problem(format!("couldn't read {JOURNEY_FILE}: {e}")))?;
     let tables = toml::arrays_of_tables(&text, &["milestone", "step"])
@@ -165,7 +175,7 @@ fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
             )));
         }
     }
-    Ok(steps.into_values().collect())
+    Ok((milestones, steps.into_values().collect()))
 }
 
 /// A milestone's name. Its commands are only checked here: no milestone

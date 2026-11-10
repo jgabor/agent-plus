@@ -94,6 +94,9 @@ Part of #12.
 Blocked by #34.
 ```
 
+A parent that delivers a milestone names it on a line of its own, such as
+`Milestone: Author.`.
+
 If you find other work along the way, file a new issue with no `auto:*` label
 and keep going. Don't fix it in this PR.
 

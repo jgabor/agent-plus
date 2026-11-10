@@ -421,6 +421,8 @@ reads the `Touches`, `Blocked by`, and `Part of` lines, and the `State` and
   path is a prefix of the other.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
   issue that another issue names in `Part of`.
+- A parent that delivers a milestone names it on a line of its own,
+  `Milestone: <name>.`. The planner reads that line, and `xtask` doesn't.
 - `xtask` reads status comments only from the repository owner's account.
 - When two live claims exist, the status comment with the lowest id wins.
 
@@ -433,7 +435,7 @@ is a failure, and 2 is bad usage or an environment error.
 |---|---|
 | `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and prints the result. It posts no status |
 | `cargo xtask score` | Prints the three scores |
-| `cargo xtask gaps` | Lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
+| `cargo xtask gaps` | Names the first milestone on the roadmap with a step that doesn't pass. Then lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |
@@ -498,18 +500,17 @@ claim race exits.
 
 Runs every planning period, and stops at once if the issues in progress and
 the issues `cargo xtask next` lists already fill the worker slots. The planner
-reads `cargo xtask gaps`, and files child issues under a parent: an issue the
-owner has labeled, with a `## Children` section. Each child inherits its
-parent's `auto:*` label.
+reads `cargo xtask gaps`, and files child issues under a parent. Each child
+inherits its parent's `auto:*` label.
 
-Initial order, by risk:
+The planner works on one milestone at a time: the first on the roadmap with a
+step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open
+issue that the owner has labeled, and whose body names that milestone in a
+`Milestone:` line. With no such issue, the planner says which milestone has no
+parent, and stops. A parent whose milestone passes is never chosen, so leaving
+it open holds nothing up.
 
-1. Boot a kernel in the pure-Rust VMM, within its budget.
-2. Copy-on-write shares that real harnesses run on.
-3. Egress proxy, TLS through graviola, and secret injection.
-4. A real harness started in the guest.
-5. Boot on macOS.
-6. Desktop.
+The order of the milestones in `harness/journey.toml` is the order of the work.
 
 ### Worker
 

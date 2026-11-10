@@ -24,6 +24,11 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let budgets = bench::read_budgets(&root)?;
 
     let steps: Vec<_> = outcomes.iter().filter(|o| o.state != "pass").collect();
+    // The planner works on one milestone at a time: the first in roadmap
+    // order that has a step still to pass.
+    let milestone = journey::milestones(&root)?
+        .into_iter()
+        .find(|name| steps.iter().any(|step| step.milestone == *name));
     let missed = bench::missed(&budgets, &values);
     if json {
         let steps: Vec<String> = steps
@@ -64,12 +69,16 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
             })
             .collect();
         println!(
-            "{{\"steps\":[{}],\"budgets\":[{}],\"promises\":[{}]}}",
+            "{{\"milestone\":{},\"steps\":[{}],\"budgets\":[{}],\"promises\":[{}]}}",
+            milestone.map_or("null".to_string(), |name| quoted(&name)),
             steps.join(","),
             missed.join(","),
             promises.join(",")
         );
         return Ok(verdict);
+    }
+    if let Some(name) = milestone {
+        println!("milestone {name}");
     }
     for step in steps {
         println!(

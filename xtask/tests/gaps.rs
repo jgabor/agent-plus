@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 const SPEC: &str = "# A\n\nZulu. Yankee.\n\n# B\n\nAlpha.\n";
 const CHECK_YANKEE: &str = "// spec(A): Yankee.\n#[test]\nfn yankee() {}\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"Early\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Early\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Early\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Later on\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"Early\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Early\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Later on\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Early\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n";
 const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"Version\"\ntarget = 5\n\n[[budget]]\nkey = \"run_ms\"\nname = \"Run\"\ntarget = 1000\n\n[[budget]]\nkey = \"boot_ms\"\nname = \"Boot\"\ntarget = 150\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const RECORD: &str = "issue = 3\npr = 2\ncommit = \"c\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = { proven = 0, promises = 3 }\njourney = { passing = 1, steps = 3 }\nreason = \"\"\n\n[budgets]\nrun_ms = 2000\nversion_ms = 1\n";
 
@@ -95,8 +95,9 @@ fn lists_steps_then_budgets_then_promises_in_order() {
     );
     assert_eq!(
         stdout(&output),
-        "step 2 fail Early: second\n\
-         step 3 skip Later on: third\n\
+        "milestone Early\n\
+         step 2 fail Later on: second\n\
+         step 3 skip Early: third\n\
          budget run_ms 2000 of 1000 Run\n\
          budget boot_ms none of 150 Boot\n\
          promise A: Zulu.\n\
@@ -111,12 +112,34 @@ fn json_carries_the_same_list() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         stdout(&output),
-        "{\"steps\":[{\"id\":2,\"name\":\"second\",\"milestone\":\"Early\",\"state\":\"fail\"},\
-         {\"id\":3,\"name\":\"third\",\"milestone\":\"Later on\",\"state\":\"skip\"}],\
+        "{\"milestone\":\"Early\",\
+         \"steps\":[{\"id\":2,\"name\":\"second\",\"milestone\":\"Later on\",\"state\":\"fail\"},\
+         {\"id\":3,\"name\":\"third\",\"milestone\":\"Early\",\"state\":\"skip\"}],\
          \"budgets\":[{\"key\":\"run_ms\",\"name\":\"Run\",\"target\":1000,\"value\":2000},\
          {\"key\":\"boot_ms\",\"name\":\"Boot\",\"target\":150,\"value\":null}],\
          \"promises\":[{\"heading\":\"A\",\"sentence\":\"Zulu.\"},\
          {\"heading\":\"B\",\"sentence\":\"Alpha.\"}]}\n"
+    );
+}
+
+/// The milestone to work on is the first in roadmap order with a step that
+/// doesn't pass. When every step passes, there is none.
+#[test]
+fn no_milestone_is_named_once_every_step_passes() {
+    let root = repository(
+        "all-pass",
+        &[
+            ("harness/ledger/3.toml", RECORD),
+            ("harness/journey/bad.sh", "exit 0\n"),
+        ],
+    );
+    let text = stdout(&gaps(&root, &[]));
+    assert!(!text.contains("milestone"), "{text}");
+    assert!(!text.contains("step "), "{text}");
+    let json = stdout(&gaps(&root, &["--json"]));
+    assert!(
+        json.starts_with("{\"milestone\":null,\"steps\":[],"),
+        "{json}"
     );
 }
 

@@ -73,7 +73,7 @@ impl Header {
         let u16_at = |at: usize| u16::from_le_bytes([raw[at], raw[at + 1]]);
         let u32_at =
             |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
-        let u64_at = |at: usize| u64::from(u32_at(at)) | (u64::from(u32_at(at + 4)) << 32);
+        let u64_at = |at: usize| u64::from_le_bytes(std::array::from_fn(|i| raw[at + i]));
         Self {
             src_cid: u64_at(0),
             dst_cid: u64_at(8),
@@ -136,12 +136,14 @@ impl State {
             .saturating_sub(self.tx_cnt.wrapping_sub(self.peer_fwd_cnt)) as usize
     }
 
+    /// Data waits while the host has asked for credit. Any guest packet that
+    /// gives credit clears the request, so data with credit is never stuck.
     fn has_packet(&self) -> bool {
         !self.dead
             && (self.owes_response
                 || self.owes_credit
                 || (self.outbound.is_empty() && self.host_closed && !self.shutdown_sent)
-                || (!self.outbound.is_empty() && (self.credit() > 0 || !self.asked_for_credit)))
+                || (!self.outbound.is_empty() && !self.asked_for_credit))
     }
 
     /// The next packet for the guest, with room for `room` payload bytes.
@@ -393,10 +395,8 @@ impl Vsock {
                     self.abort(connection, &header);
                 }
             }
-            OP_RST => {
-                state.dead = true;
-                state.outbound.clear();
-            }
+            // A reset, or an operation with no meaning, ends the connection.
+            // `refuse` never answers a reset.
             _ => self.abort(connection, &header),
         }
         self.forget_if_finished(connection);
@@ -864,7 +864,13 @@ mod tests {
             },
             &[],
         );
-        assert_eq!(driver.ops(), [OP_RST]);
+        let packets = driver.received();
+        let (reply, _) = packets[0];
+        assert_eq!(reply.op, OP_RST);
+        assert_eq!((reply.src_cid, reply.dst_cid), (HOST_CID, GUEST));
+        assert_eq!((reply.src_port, reply.dst_port), (PORT + 1, GUEST_PORT));
+        assert_eq!(reply.kind, TYPE_STREAM);
+        assert_eq!(reply.buf_alloc, BUFFER);
         assert!(driver.device.accept().is_none());
     }
 
@@ -912,6 +918,22 @@ mod tests {
         let len = driver.device.recv(connection, &mut buffer);
         assert_eq!(&buffer[..len], b"hello world");
         assert_eq!(driver.device.recv(connection, &mut buffer), 0);
+    }
+
+    #[test]
+    fn a_payload_may_start_in_the_header_descriptor_and_continue_in_the_next() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        driver.memory.write(TX_DATA, &data(5).encode()).unwrap();
+        driver.memory.write(TX_DATA + 44, b"he").unwrap();
+        driver.memory.write(TX_DATA + 46, b"XXXX").unwrap();
+        driver.memory.write(TX_DATA + 4096, b"lloYYYYY").unwrap();
+        driver.descriptor(TX, 0, TX_DATA, 46, NEXT, 1);
+        driver.descriptor(TX, 1, TX_DATA + 4096, 8, 0, 0);
+        driver.publish_tx(0);
+        let mut buffer = [0; 8];
+        assert_eq!(driver.device.recv(connection, &mut buffer), 5);
+        assert_eq!(&buffer[..5], b"hello");
     }
 
     #[test]
@@ -1030,6 +1052,15 @@ mod tests {
         driver.post_rx(4);
         driver.service();
         assert!(driver.ops().is_empty(), "asking once is enough");
+        // A packet that gives no credit leaves the request standing.
+        driver.send(
+            Header {
+                buf_alloc: 4,
+                ..packet(OP_CREDIT_UPDATE)
+            },
+            &[],
+        );
+        assert!(driver.ops().is_empty(), "no credit came");
         driver.send(
             Header {
                 buf_alloc: 4,
@@ -1061,6 +1092,65 @@ mod tests {
         driver.post_rx(1);
         let packets = driver.received();
         assert_eq!(packets[0].0.dst_port, GUEST_PORT + 1);
+    }
+
+    #[test]
+    fn a_credit_request_from_a_guest_with_no_room_is_only_answered() {
+        let mut driver = Driver::new();
+        driver.connected();
+        driver.send(
+            Header {
+                buf_alloc: 0,
+                ..packet(OP_CREDIT_REQUEST)
+            },
+            &[],
+        );
+        assert_eq!(driver.ops(), [OP_CREDIT_UPDATE]);
+    }
+
+    #[test]
+    fn a_request_that_claims_bytes_were_consumed_gets_no_credit() {
+        let mut driver = Driver::new();
+        driver.post_rx(4);
+        driver.send(
+            Header {
+                buf_alloc: 10,
+                fwd_cnt: 4,
+                ..packet(OP_REQUEST)
+            },
+            &[],
+        );
+        let connection = driver.device.accept().unwrap();
+        driver.device.send(connection, &[7; 25]);
+        driver.service();
+        assert_eq!(driver.ops(), [OP_RESPONSE, OP_CREDIT_REQUEST]);
+    }
+
+    #[test]
+    fn the_host_queues_no_more_than_its_limit() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        let bytes = vec![1; MAX_OUTBOUND + 1];
+        assert_eq!(driver.device.send(connection, &bytes), MAX_OUTBOUND);
+        assert_eq!(driver.device.send(connection, &bytes), 0);
+    }
+
+    #[test]
+    fn a_packet_the_guest_sends_interrupts_even_with_no_reply() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        driver.interrupted = false;
+        driver.send(data(2), b"hi");
+        assert!(driver.interrupted);
+        assert_eq!(driver.device.recv(connection, &mut [0; 2]), 2);
+    }
+
+    #[test]
+    fn writing_a_status_other_than_zero_keeps_the_connections() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        driver.set(STATUS, DRIVER_OK);
+        assert_eq!(driver.device.send(connection, b"x"), 1);
     }
 
     #[test]
@@ -1151,6 +1241,10 @@ mod tests {
         assert_eq!(driver.device.send(connection, b"x"), 0);
         driver.service();
         assert!(!driver.ops().contains(&OP_RW));
+        // The guest can still send.
+        driver.send(data(2), b"hi");
+        assert!(driver.ops().is_empty());
+        assert_eq!(driver.device.recv(connection, &mut [0; 2]), 2);
     }
 
     #[test]

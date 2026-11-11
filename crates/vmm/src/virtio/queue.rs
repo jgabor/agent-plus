@@ -587,4 +587,20 @@ mod tests {
         queue.add_used(&memory, 1, 1).unwrap();
         assert_eq!(read_u16(&memory, USED + 2), 0);
     }
+
+    #[test]
+    fn an_error_says_what_the_guest_did() {
+        assert_eq!(
+            QueueError::BadIndex(9).to_string(),
+            "descriptor 9 is outside the queue"
+        );
+        assert_eq!(
+            QueueError::OutOfBounds(OutOfBounds {
+                address: 0x10,
+                len: 2
+            })
+            .to_string(),
+            "2 bytes at guest address 0x10 are outside guest memory"
+        );
+    }
 }

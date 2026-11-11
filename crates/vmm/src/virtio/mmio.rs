@@ -76,6 +76,7 @@ impl Transport {
     }
 
     /// Handles a guest write. Returns the index of a queue the guest notified.
+    /// The configuration space is read-only, and no register lies in it.
     pub fn write(&mut self, offset: u64, data: &[u8]) -> Option<u16> {
         let register = register(offset, data.len())?;
         let value = u32::from_le_bytes(data.try_into().ok()?);
@@ -187,9 +188,10 @@ impl Transport {
     }
 }
 
-/// `offset`, if it is a whole 32-bit register access.
+/// `offset`, if it is a whole 32-bit access. Only offsets below `CONFIG` are
+/// registers.
 fn register(offset: u64, width: usize) -> Option<u64> {
-    (offset < CONFIG && width == 4 && offset.is_multiple_of(4)).then_some(offset)
+    (width == 4 && offset.is_multiple_of(4)).then_some(offset)
 }
 
 /// Half of a 64-bit feature set, or zero for a select with no half.
@@ -232,7 +234,9 @@ mod tests {
     const QUEUE_DESC_LOW: u64 = 0x080;
     const QUEUE_DESC_HIGH: u64 = 0x084;
     const QUEUE_DRIVER_LOW: u64 = 0x090;
+    const QUEUE_DRIVER_HIGH: u64 = 0x094;
     const QUEUE_DEVICE_LOW: u64 = 0x0a0;
+    const QUEUE_DEVICE_HIGH: u64 = 0x0a4;
     const CONFIG: u64 = 0x100;
     const FEATURES_OK: u32 = 8;
     const DRIVER_OK: u32 = 4;
@@ -306,6 +310,15 @@ mod tests {
     }
 
     #[test]
+    fn features_in_the_high_half_the_device_doesnt_offer_are_refused() {
+        let mut device = device();
+        set(&mut device, DRIVER_FEATURES_SELECT, 1);
+        set(&mut device, DRIVER_FEATURES, VERSION_1_HIGH | 2);
+        set(&mut device, STATUS, FEATURES_OK | 1);
+        assert_eq!(get(&device, STATUS), 1);
+    }
+
+    #[test]
     fn queue_registers_use_the_selected_queue() {
         let mut device = device();
         set(&mut device, QUEUE_SELECT, 1);
@@ -345,12 +358,14 @@ mod tests {
         set(&mut device, QUEUE_DESC_LOW, 0x1000);
         set(&mut device, QUEUE_DESC_HIGH, 0x2);
         set(&mut device, QUEUE_DRIVER_LOW, 0x3000);
+        set(&mut device, QUEUE_DRIVER_HIGH, 0x4);
         set(&mut device, QUEUE_DEVICE_LOW, 0x4000);
+        set(&mut device, QUEUE_DEVICE_HIGH, 0x6);
         set(&mut device, QUEUE_DESC_LOW, 0x5000);
         let queue = &device.queues[0];
         assert_eq!(queue.descriptors, 0x2_0000_5000);
-        assert_eq!(queue.available, 0x3000);
-        assert_eq!(queue.used, 0x4000);
+        assert_eq!(queue.available, 0x4_0000_3000);
+        assert_eq!(queue.used, 0x6_0000_4000);
     }
 
     #[test]

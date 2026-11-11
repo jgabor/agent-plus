@@ -98,8 +98,6 @@ struct Planned {
     line: usize,
     /// What `ap build` calls the layer when it reports on it.
     label: String,
-    /// What an agent records the layer under. It covers the zstd level, so
-    /// a new level is a miss, and the layer is compressed again.
     key: String,
     /// The zstd level the store keeps the layer at.
     level: i8,
@@ -286,8 +284,8 @@ fn build(args: &Args) -> Result<(), String> {
 
 const NAME_RULE: &str = "A name is 1 to 63 lowercase letters, digits, and `-`, starting and ending with a letter or digit";
 
-/// Puts each layer in the store, unless an agent already recorded its key,
-/// and returns the agent's layers with a line for each. Every image is made
+/// Puts each layer in the store, unless an agent already recorded its key
+/// and the store keeps it at the layer's level, and returns the agent's layers with a line for each. Every image is made
 /// before any is put, so a layer that can't be made leaves the store as it
 /// was, and its error names its line.
 fn store_layers(
@@ -302,10 +300,15 @@ fn store_layers(
     let mut made = Vec::new();
     let mut errors = Vec::new();
     for layer in planned {
-        let found = if use_cache {
-            agents.layer(&layer.key).map_err(io)?
-        } else {
-            None
+        let found = match use_cache {
+            true => agents.layer(&layer.key).map_err(io)?,
+            false => None,
+        };
+        // Agents at other levels can share a layer, and the last to put it
+        // set its level.
+        let found = match found {
+            Some(digest) if layers.level(&digest).map_err(io)? == Some(layer.level) => Some(digest),
+            _ => None,
         };
         let (line, label, key, level) = (
             layer.line,
@@ -451,7 +454,7 @@ fn plan(
                 planned.push(Planned {
                     line: add.line,
                     label,
-                    key: at_level(&layer.key, level),
+                    key: layer.key.clone(),
                     level,
                     content: Content::Add(layer),
                 });
@@ -474,7 +477,7 @@ fn plan(
     planned.push(Planned {
         line,
         label: "harness configuration".to_string(),
-        key: at_level(&configuration_key(&image), level),
+        key: configuration_key(&image),
         level,
         content: Content::Image(image),
     });
@@ -570,14 +573,6 @@ fn insert(root: &mut erofs::Dir, path: &str, data: Vec<u8>) {
             content: Box::new(Cursor::new(data)),
         }),
     );
-}
-
-/// A layer's key at a zstd level.
-fn at_level(key: &str, level: i8) -> String {
-    let mut hash = Sha256Context::new();
-    hash.update(format!("zstd level {level}\0").as_bytes());
-    hash.update(key.as_bytes());
-    hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The harness configuration's key. The image is a function of everything it

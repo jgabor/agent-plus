@@ -58,6 +58,18 @@ impl Layers {
         Ok(digest)
     }
 
+    /// The level that the layer with this digest is kept at, or `None` if
+    /// there is no such layer, or it was kept without its level.
+    pub fn level(&self, digest: &str) -> io::Result<Option<i8>> {
+        if !is_digest(digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{digest:?} isn't a SHA-256 digest"),
+            ));
+        }
+        stored_level(&self.dir.join(digest))
+    }
+
     /// The uncompressed bytes of the layer with this digest. A stored file
     /// whose bytes no longer hash to its name is an error.
     pub fn get(&self, digest: &str) -> io::Result<Vec<u8>> {

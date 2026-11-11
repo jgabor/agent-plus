@@ -40,6 +40,11 @@ impl Scratch {
     /// Runs `ap build` in `dir` with only `HOME` in its environment, approves
     /// the grants it asks for, and fails the test unless it exits 0.
     fn build(&self, dir: &Path) -> String {
+        self.build_as(dir, &[])
+    }
+
+    /// Runs `ap build` with `args` after it, as [`Scratch::build`] does.
+    fn build_as(&self, dir: &Path, args: &[&str]) -> String {
         let source = fs::read_to_string(dir.join("Agentfile")).unwrap();
         let instructions = agentfile::parse(&source).unwrap();
         let grants = ap::approval::grants(&instructions, |text| {
@@ -51,6 +56,7 @@ impl Scratch {
         let output: Output = Command::new(env!("CARGO_BIN_EXE_ap"))
             .arg("build")
             .arg(format!("--approve={}", approved.display()))
+            .args(args)
             .current_dir(dir)
             .env_clear()
             .env("HOME", &self.home)
@@ -68,7 +74,11 @@ impl Scratch {
     /// Each layer of the agent `notes`: its digest, its uncompressed bytes,
     /// and the file the store keeps it in.
     fn layers(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
-        let agent = Agents::new(self.store()).get("notes").unwrap().unwrap();
+        self.layers_of("notes")
+    }
+
+    fn layers_of(&self, name: &str) -> Vec<(String, Vec<u8>, Vec<u8>)> {
+        let agent = Agents::new(self.store()).get(name).unwrap().unwrap();
         let layers = Layers::new(self.store());
         agent
             .layers
@@ -156,4 +166,24 @@ fn changing_the_level_recompresses_layers_under_the_same_digests() {
     assert_ne!(after[0].2, before[0].2);
     let files = fs::read_dir(scratch.store().join("zstd-layers")).unwrap();
     assert_eq!(files.count(), before.len());
+}
+
+// spec(COMPRESSION): Layers are addressed by their uncompressed content, so changing the level recompresses layers without changing what is inside them.
+#[test]
+fn changing_back_to_a_level_another_agent_recorded_recompresses_the_layer() {
+    let scratch = Scratch::new("shared");
+    let at = |level: i8| format!("AGENT claude\nCOMPRESSION {level}\nADD ./data\n");
+    let dir = scratch.project(&at(3));
+    scratch.build_as(&dir, &["-t", "low"]);
+    fs::write(dir.join("Agentfile"), at(19)).unwrap();
+    scratch.build_as(&dir, &["-t", "high"]);
+
+    // `low` recorded the layer at level 3, but its file is at 19 now.
+    fs::write(dir.join("Agentfile"), at(3)).unwrap();
+    let out = scratch.build_as(&dir, &["-t", "high"]);
+
+    assert!(out.contains("built ADD ./data\n"), "{out}");
+    let (digest, data, file) = &scratch.layers_of("high")[0];
+    assert_eq!(scratch.layers_of("low")[0].0, *digest);
+    assert!(file.starts_with(&store::compress(data, 3)));
 }

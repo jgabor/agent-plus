@@ -320,3 +320,24 @@ fn sha256_of(data: &[u8]) -> String {
         .unwrap();
     String::from_utf8(output.stdout).unwrap()[..64].to_string()
 }
+
+#[test]
+fn a_layer_knows_its_level() {
+    let dir = empty_root("knows-level");
+    let root = store_root(&dir);
+    let layers = Layers::new(&root);
+
+    assert_eq!(layers.level(DATA_SHA256).unwrap(), None);
+    for level in [3, -7, 22] {
+        let digest = layers.put(DATA, level).unwrap();
+        assert_eq!(layers.level(&digest).unwrap(), Some(level));
+    }
+    // A file kept without its level, as an older `ap` kept it.
+    fs::write(
+        root.join("zstd-layers").join(DATA_SHA256),
+        store::compress(DATA, 3),
+    )
+    .unwrap();
+    assert_eq!(layers.level(DATA_SHA256).unwrap(), None);
+    assert_eq!(layers.get(DATA_SHA256).unwrap(), DATA);
+}

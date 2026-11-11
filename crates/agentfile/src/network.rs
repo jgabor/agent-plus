@@ -73,11 +73,12 @@ impl Network {
     }
 
     /// Whether these rules deny every request to `host`, by the evaluation
-    /// under NETWORK in SPEC.md. The address behind a name isn't known
-    /// until a run, so a name is denied only when no address could pass.
+    /// and the enforcement under NETWORK in SPEC.md. A name resolves only
+    /// when a name rule or the default allows it, and then its real address
+    /// still meets the IP rules, so a name is denied when no address it
+    /// could have passes.
     pub(crate) fn denies(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        let address = host.parse::<IpAddr>().ok();
         // Each port and path a rule names, and one that none names, so that
         // every way a request can match the rules gets tried.
         let mut ports = vec![80, 443];
@@ -96,65 +97,88 @@ impl Network {
         let longest = paths.iter().map(String::len).max().unwrap_or(0);
         paths.push(format!("/{}", "x".repeat(longest)));
         ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
+        ports.sort_unstable();
+        ports.dedup();
+        if let Ok(address) = host.parse::<IpAddr>() {
+            return refused(address)
+                || ports.iter().all(|&port| {
+                    self.address_decision(address, port).unwrap_or(self.default) == Sign::Deny
+                });
+        }
+        // Whether some address passes the IP rules, for each port an IP rule
+        // names, and under `None` for every other port.
+        let mut passes: Vec<(Option<u16>, bool)> = Vec::new();
         for &port in &ports {
-            let addresses = match address {
-                Some(address) => vec![self.address_decision(address, port)],
-                None => self.address_decisions(port),
-            };
-            for scheme in [Scheme::Https, Scheme::Http] {
-                for path in &paths {
-                    let name = match address {
-                        Some(_) => None,
-                        None => self.name_decision(&host, scheme, port, path),
-                    };
-                    let decide = |by_address: &Option<Sign>| match (name, *by_address) {
-                        (Some(one), Some(other)) if one != other => Sign::Deny,
-                        (Some(sign), _) | (None, Some(sign)) => sign,
-                        (None, None) => self.default,
-                    };
-                    if addresses
-                        .iter()
-                        .any(|by_address| decide(by_address) == Sign::Allow)
-                    {
-                        return false;
-                    }
+            let named = [Scheme::Https, Scheme::Http].iter().any(|&scheme| {
+                paths.iter().any(|path| {
+                    self.name_decision(&host, scheme, port, path)
+                        .unwrap_or(self.default)
+                        == Sign::Allow
+                })
+            });
+            if !named {
+                continue;
+            }
+            let key = self
+                .rules
+                .iter()
+                .any(|rule| {
+                    matches!(rule.destination, Destination::Address { port: Some(only), .. } if only == port)
+                })
+                .then_some(port);
+            let pass = match passes.iter().find(|(seen, _)| *seen == key) {
+                Some((_, pass)) => *pass,
+                None => {
+                    let pass = self.some_address_passes(port);
+                    passes.push((key, pass));
+                    pass
                 }
+            };
+            if pass {
+                return false;
             }
         }
         true
     }
 
-    /// Every address decision that some address gets on `port`, with `None`
-    /// for addresses that no IP rule matches. It splits the address space
-    /// only where a rule starts inside a block.
-    fn address_decisions(&self, port: u16) -> Vec<Option<Sign>> {
-        let mut found = Vec::new();
+    /// Whether some address that the proxy doesn't refuse gets no deny from
+    /// the IP rules on `port`. It splits the address space only where a
+    /// rule or a refused block starts inside a block.
+    fn some_address_passes(&self, port: u16) -> bool {
+        let starts: Vec<(IpAddr, u8)> = self
+            .rules
+            .iter()
+            .filter_map(|rule| match rule.destination {
+                Destination::Address {
+                    network,
+                    prefix,
+                    port: only,
+                } if only.is_none_or(|only| only == port) => Some((network, prefix)),
+                _ => None,
+            })
+            .chain(
+                REFUSED
+                    .iter()
+                    .map(|&(network, prefix)| (network.parse().unwrap(), prefix)),
+            )
+            .collect();
         let mut blocks = vec![(IpAddr::V4(0.into()), 0), (IpAddr::V6(0.into()), 0)];
         while let Some((network, prefix)) = blocks.pop() {
-            let mut inside = self.rules.iter().filter_map(|rule| match rule.destination {
-                Destination::Address {
-                    network: start,
-                    prefix: length,
-                    port: only,
-                } if only.is_none_or(|only| only == port) => Some((start, length)),
-                _ => None,
-            });
-            if inside
-                .any(|(start, length)| length > prefix && masked(start, prefix) == Some(network))
-            {
+            let split = starts
+                .iter()
+                .any(|&(start, length)| length > prefix && masked(start, prefix) == Some(network));
+            if split {
                 let half = match network {
                     IpAddr::V4(bits) => IpAddr::V4((u32::from(bits) | 1 << (31 - prefix)).into()),
                     IpAddr::V6(bits) => IpAddr::V6((u128::from(bits) | 1 << (127 - prefix)).into()),
                 };
                 blocks.extend([(network, prefix + 1), (half, prefix + 1)]);
-            } else {
-                let decision = self.address_decision(network, port);
-                if !found.contains(&decision) {
-                    found.push(decision);
-                }
+            } else if !refused(network) && self.address_decision(network, port) != Some(Sign::Deny)
+            {
+                return true;
             }
         }
-        found
+        false
     }
 
     /// The sign of the most specific URL or host rule that matches a
@@ -211,6 +235,30 @@ impl Network {
             }
             _ => None,
         }))
+    }
+}
+
+/// The loopback and unspecified blocks, which the proxy refuses whatever
+/// the IP rules say, including their IPv4-mapped forms.
+const REFUSED: [(&str, u8); 6] = [
+    ("127.0.0.0", 8),
+    ("0.0.0.0", 32),
+    ("::1", 128),
+    ("::", 128),
+    ("::ffff:127.0.0.0", 104),
+    ("::ffff:0.0.0.0", 128),
+];
+
+/// Whether the proxy refuses a connection to `address`.
+fn refused(address: IpAddr) -> bool {
+    let v4 = |address: std::net::Ipv4Addr| address.is_loopback() || address.is_unspecified();
+    match address {
+        IpAddr::V4(address) => v4(address),
+        IpAddr::V6(address) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.to_ipv4_mapped().is_some_and(v4)
+        }
     }
 }
 

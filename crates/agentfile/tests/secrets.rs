@@ -570,6 +570,13 @@ fn a_bound_host_that_a_deny_rule_denies_is_an_error() {
             &["a.com"],
         ),
         (
+            "SECRET T @a.com\nNETWORK +a.com\nNETWORK -0.0.0.0/0\nNETWORK -[::]/0\nNETWORK +127.0.0.1\n",
+            "T",
+            &["a.com"],
+        ),
+        ("SECRET T @127.0.0.1\n", "T", &["127.0.0.1"]),
+        ("SECRET T @0.0.0.0\n", "T", &["0.0.0.0"]),
+        (
             "SECRET T @a.com\nNETWORK -\nNETWORK +10.0.0.0/8\nNETWORK -a.com\n",
             "T",
             &["a.com"],
@@ -609,6 +616,11 @@ fn a_bound_host_that_the_closed_default_denies_is_an_error() {
             &["a.com"],
         ),
         ("SECRET T @10.0.0.1\nNETWORK -\n", "T", &["10.0.0.1"]),
+        (
+            "SECRET T @api.a.com\nNETWORK -\nNETWORK +10.0.0.0/8\n",
+            "T",
+            &["api.a.com"],
+        ),
     ] {
         assert_denied(lines, name, hosts);
     }
@@ -627,7 +639,6 @@ fn a_bound_host_that_some_request_reaches_is_allowed() {
         "SECRET T @api.a.com\nNETWORK -https://api.a.com/\n",
         "SECRET T @api.a.com\nNETWORK -https://api.a.com/v1\n",
         "SECRET T @api.a.com\nNETWORK -other.com\nNETWORK -10.0.0.0/8\n",
-        "SECRET T @api.a.com\nNETWORK -\nNETWORK +10.0.0.0/8\n",
         "SECRET T @a.com\nNETWORK +a.com\nNETWORK -0.0.0.0/0\n",
         "SECRET T @a.com\nNETWORK -0.0.0.0/0\nNETWORK -[::]/0\nNETWORK +10.1.2.3\n",
         "SECRET T @a.com\nNETWORK -0.0.0.0/0:443\nNETWORK -[::]/0:443\n",

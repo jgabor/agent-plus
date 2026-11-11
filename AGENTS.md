@@ -88,7 +88,7 @@ sections and one optional line:
 ## Goal
 What should be true afterwards, in a sentence or two.
 
-## Done when
+## Definition of done
 The checks that prove it: SPEC sentences, journey steps, or a budget.
 
 ## Touches

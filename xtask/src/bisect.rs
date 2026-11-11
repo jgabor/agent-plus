@@ -92,7 +92,7 @@ fn prepared(root: &Path, pr: u64) -> bool {
 
 fn issue_body(head: &str) -> String {
     format!(
-        "`cargo xtask nightly` found that `{head}` fails the gate.\n\n## Goal\n`main` passes the gate again.\n\n## Done when\n`cargo xtask gate` passes on `main`.\n\n## Touches\nWhatever the first bad commit touched.\n"
+        "`cargo xtask nightly` found that `{head}` fails the gate.\n\n## Goal\n`main` passes the gate again.\n\n## Definition of done\n`cargo xtask gate` passes on `main`.\n\n## Touches\nWhatever the first bad commit touched.\n"
     )
 }
 

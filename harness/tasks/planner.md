@@ -29,7 +29,7 @@ write no code. Nobody reads this thread while you run, so never ask a question.
 7. File at most 3 minus the sum from step 1, each as a sub-issue of the parent,
    with `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
-   - `Done when` names the journey step, the budget, or the exact SPEC
+   - `Definition of done` names the journey step, the budget, or the exact SPEC
      sentences that prove it.
    - `Touches` names real paths in backticks, so that the queue can tell which
      issues overlap.

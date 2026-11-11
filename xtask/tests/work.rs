@@ -31,7 +31,7 @@ fn quoted(text: &str) -> String {
 }
 
 fn body(touches: &str, extra: &str) -> String {
-    format!("## Goal\nx\n\n## Done when\ny\n\n## Touches\n{touches}\n\n{extra}")
+    format!("## Goal\nx\n\n## Definition of done\ny\n\n## Touches\n{touches}\n\n{extra}")
 }
 
 fn status(id: u64, author: &str, state: &str, branch: &str, lease: &str) -> String {
@@ -293,7 +293,7 @@ fn a_closed_issue_is_not_listed() {
 
 #[test]
 fn an_issue_with_no_touches_is_not_claimable() {
-    let text = "## Goal\nx\n\n## Done when\ny\n";
+    let text = "## Goal\nx\n\n## Definition of done\ny\n";
     let missing = issue(7, "OPEN", &["auto:merge"], text, &[]);
     assert_eq!(listed("no-touches", &[missing]), Vec::<u64>::new());
     let empty = issue(7, "OPEN", &["auto:merge"], &body("nothing", ""), &[]);

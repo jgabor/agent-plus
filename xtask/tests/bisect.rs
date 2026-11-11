@@ -301,6 +301,7 @@ fn a_planted_break_is_bisected_and_reverted() {
         calls.contains("issue create --title `main` fails the gate "),
         "{calls}"
     );
+    assert!(calls.contains("## Definition of done"), "{calls}");
     let branch = format!("78-revert-{short}");
     let create =
         format!("pr create --base main --head {branch} --title Revert \"Plant the break\" ");

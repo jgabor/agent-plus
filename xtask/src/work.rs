@@ -4,6 +4,7 @@ use crate::forge::{Comment, Forge, Gh, Issue, LISTED_COMMENTS};
 use crate::json::quoted;
 use crate::{Problem, Verdict, base, lock, workspace};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -559,6 +560,32 @@ fn claim(
     Ok(Claim::Lost(format!("another claim on #{number} won")))
 }
 
+/// Sets up a new worktree as `scripts/setup-worktree.sh` does, because a
+/// worktree that `t3_thread_launch` or `git worktree add` makes skips
+/// `t3.json`. Safe to repeat.
+fn set_up(worktree: &Path) -> Result<(), Problem> {
+    let common = base::git_text(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
+    let resolve = |path: &Path| {
+        path.canonicalize()
+            .map_err(|e| Problem(format!("couldn't resolve {}: {e}", path.display())))
+    };
+    let common = resolve(Path::new(common.trim()))?;
+    let Some(main) = common.parent() else {
+        return Ok(());
+    };
+    let here = resolve(worktree)?;
+    let notes = main.join("notes");
+    let link = here.join("notes");
+    if main == here || !notes.is_dir() || fs::symlink_metadata(&link).is_ok() {
+        return Ok(());
+    }
+    std::os::unix::fs::symlink(&notes, &link)
+        .map_err(|e| Problem(format!("couldn't link {}: {e}", link.display())))
+}
+
 pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem> {
     let parsed: u64 = number
         .parse()
@@ -571,6 +598,7 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
             "`claim` records the current branch, but this is `{branch}`. Check out the issue's branch"
         )));
     }
+    set_up(&root)?;
     let _slot = lock::claim_slot(&root)?;
     let now = now_seconds()?;
     let nanos = SystemTime::now()
@@ -595,10 +623,12 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
 
 #[cfg(test)]
 mod tests {
-    use super::{Claim, claim, overlap, seconds, stamp};
+    use super::{Claim, claim, overlap, seconds, set_up, stamp};
     use crate::Problem;
     use crate::forge::{Comment, Forge, Issue};
     use std::cell::{Cell, RefCell};
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     const OWNER: &str = "owner";
     const NOW: i64 = 60_000_000;
@@ -960,5 +990,80 @@ mod tests {
             assert!(matches!(try_claim(&forge), Claim::Lost(_)));
             assert_eq!(forge.writes(), Vec::<String>::new());
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=x", "-c", "user.email=x@x"])
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A main checkout with one commit, and a new worktree of it.
+    fn checkout(name: &str) -> (PathBuf, PathBuf) {
+        let top = std::env::temp_dir().join(format!("xtask-work-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&top);
+        let main = top.join("main");
+        fs::create_dir_all(&main).unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "x"]);
+        git(&main, &["worktree", "add", "-q", "-b", "7-x", "../7-x"]);
+        (main, top.join("7-x"))
+    }
+
+    #[test]
+    fn claim_links_notes_from_the_main_checkout_when_it_has_them() {
+        let (main, worktree) = checkout("notes");
+        fs::create_dir(main.join("notes")).unwrap();
+        set_up(&worktree).unwrap();
+        let link = worktree.join("notes");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            main.canonicalize().unwrap().join("notes")
+        );
+        set_up(&worktree).unwrap();
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            main.canonicalize().unwrap().join("notes")
+        );
+        fs::remove_dir_all(main.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn claim_links_no_notes_when_the_main_checkout_has_none() {
+        let (main, worktree) = checkout("none");
+        set_up(&worktree).unwrap();
+        set_up(&worktree).unwrap();
+        assert!(fs::symlink_metadata(worktree.join("notes")).is_err());
+        assert!(fs::symlink_metadata(main.join("notes")).is_err());
+        fs::remove_dir_all(main.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn claim_keeps_notes_that_are_already_there() {
+        let (main, worktree) = checkout("kept");
+        fs::create_dir(main.join("notes")).unwrap();
+        fs::create_dir(worktree.join("notes")).unwrap();
+        set_up(&worktree).unwrap();
+        assert!(
+            fs::symlink_metadata(worktree.join("notes"))
+                .unwrap()
+                .is_dir()
+        );
+        fs::remove_dir_all(main.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn claim_links_no_notes_in_the_main_checkout_itself() {
+        let (main, _) = checkout("itself");
+        fs::create_dir(main.join("notes")).unwrap();
+        set_up(&main).unwrap();
+        assert!(fs::symlink_metadata(main.join("notes")).unwrap().is_dir());
+        fs::remove_dir_all(main.parent().unwrap()).unwrap();
     }
 }

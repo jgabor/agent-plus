@@ -204,14 +204,20 @@ fn the_guest_gives_the_program_no_input() {
     assert_eq!(stdout(&reports), b"done\n");
 }
 
-/// A background job can hold the pipes open for as long as it likes.
+/// A background job can hold the pipes open for as long as it likes, and the
+/// program may be quiet for a while before it ends.
 #[test]
 fn a_background_job_does_not_hold_back_the_status() {
-    let started = Instant::now();
-    let reports = shell("printf out; sleep 30 & exit 3");
-    assert!(started.elapsed() < Duration::from_secs(15));
-    assert_eq!(stdout(&reports), b"out");
-    assert_eq!(status(&reports), 3);
+    for script in [
+        "printf out; sleep 30 & exit 3",
+        "printf out; sleep 30 & sleep 0.2; exit 3",
+    ] {
+        let started = Instant::now();
+        let reports = shell(script);
+        assert!(started.elapsed() < Duration::from_secs(15), "{script}");
+        assert_eq!(stdout(&reports), b"out", "{script}");
+        assert_eq!(status(&reports), 3, "{script}");
+    }
 }
 
 /// Neither a flood nor a trickle from a background job may delay the status.

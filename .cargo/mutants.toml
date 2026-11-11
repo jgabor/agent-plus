@@ -3,6 +3,7 @@ exclude_re = [
     # `|` joins bits that don't overlap here, so `^` gives the same value.
     'replace \| with \^ in (Mapping::anonymous|Mapping::map|parts|enter_protected_mode|set_low|set_high|State::next_packet)$',
     'initramfs\.rs:\d+:\d+: replace \| with \^$',
+    'crates/guest/src/lib\.rs:\d+:\d+: replace \| with \^$',
     # Linux ignores the descriptor of an anonymous mapping.
     'delete - in Mapping::anonymous$',
 ]

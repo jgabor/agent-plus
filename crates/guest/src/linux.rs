@@ -70,7 +70,7 @@ impl System for Linux {
             _ => {}
         }
         // SAFETY: every pointer comes from a `CStr` that outlives the call.
-        let result = unsafe {
+        checked(unsafe {
             mount(
                 wanted.source.as_ptr(),
                 wanted.target.as_ptr(),
@@ -78,12 +78,8 @@ impl System for Linux {
                 wanted.flags,
                 wanted.data.as_ptr().cast(),
             )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        })?;
+        Ok(())
     }
 
     fn reap(&mut self) -> io::Result<Option<i32>> {
@@ -145,9 +141,7 @@ pub fn bytes_waiting(pipe: BorrowedFd) -> io::Result<usize> {
     let mut count: c_int = 0;
     // SAFETY: `FIONREAD` writes one `int` through this pointer, which is valid
     // for the whole call.
-    if unsafe { ioctl(pipe.as_raw_fd(), FIONREAD, &mut count as *mut c_int) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    checked(unsafe { ioctl(pipe.as_raw_fd(), FIONREAD, &mut count as *mut c_int) })?;
     Ok(count as usize)
 }
 
@@ -162,10 +156,10 @@ fn waiting_on(fd: BorrowedFd) -> PollFd {
 fn poll_retrying(fds: &mut [PollFd]) -> io::Result<()> {
     loop {
         // SAFETY: the pointer and count describe `fds`, which outlives the call.
-        if unsafe { poll(fds.as_mut_ptr(), fds.len() as c_ulong, FOREVER) } >= 0 {
+        let polled = unsafe { poll(fds.as_mut_ptr(), fds.len() as c_ulong, FOREVER) };
+        let Err(error) = checked(polled) else {
             return Ok(());
-        }
-        let error = io::Error::last_os_error();
+        };
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
@@ -175,10 +169,7 @@ fn poll_retrying(fds: &mut [PollFd]) -> io::Result<()> {
 /// Connects to `port` on the host over vsock.
 pub fn connect_to_host(port: u32) -> io::Result<File> {
     // SAFETY: this call takes no pointers.
-    let fd = unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    let fd = checked(unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) })?;
     // SAFETY: `socket` returned a new descriptor that nothing else owns.
     let stream = unsafe { File::from_raw_fd(fd) };
     let address = VsockAddress {
@@ -191,10 +182,17 @@ pub fn connect_to_host(port: u32) -> io::Result<File> {
     };
     let length = size_of::<VsockAddress>() as u32;
     // SAFETY: `address` outlives the call, and `length` is its size.
-    if unsafe { connect(fd, &address, length) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+    checked(unsafe { connect(fd, &address, length) })?;
     Ok(stream)
+}
+
+/// A call's result, or its error when it returns -1, as these calls do.
+fn checked(result: c_int) -> io::Result<c_int> {
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result)
+    }
 }
 
 fn path(target: &CStr) -> &Path {

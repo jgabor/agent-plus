@@ -108,7 +108,7 @@ fn forward(
         let Ok(mut left) = bytes_waiting(pipe.as_fd()) else {
             return;
         };
-        while left > 0 {
+        while left != 0 {
             let wanted = left.min(MAX_OUTPUT);
             match send_some(&mut pipe, &mut buffer[..wanted], wrap, &updates) {
                 Some(count) => left -= count,
@@ -231,6 +231,39 @@ mod tests {
 
         assert_eq!(delivered(&received), QUEUED);
         drop(writer);
+    }
+
+    /// Fails each read with the next of these errors, then reads one byte.
+    struct Failing(Vec<io::ErrorKind>);
+
+    impl Read for Failing {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if let Some(kind) = self.0.pop() {
+                return Err(kind.into());
+            }
+            buffer[0] = b'o';
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn an_interrupted_read_is_retried() {
+        let (updates, received) = sync_channel(QUEUE);
+        let mut pipe = Failing(vec![io::ErrorKind::Interrupted]);
+        let sent = send_some(&mut pipe, &mut [0; 8], ToHost::Stdout, &updates);
+        drop(updates);
+        assert_eq!(sent, Some(1));
+        assert_eq!(delivered(&received), 1);
+    }
+
+    #[test]
+    fn a_failed_read_ends_the_output() {
+        let (updates, received) = sync_channel(QUEUE);
+        let mut pipe = Failing(vec![io::ErrorKind::Other]);
+        let sent = send_some(&mut pipe, &mut [0; 8], ToHost::Stdout, &updates);
+        drop(updates);
+        assert_eq!(sent, None);
+        assert_eq!(delivered(&received), 0);
     }
 
     fn delivered(received: &Receiver<Update>) -> usize {

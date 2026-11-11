@@ -9,8 +9,8 @@ use std::io::{self, Read, Write};
 
 /// The largest body either side reads or writes.
 pub const MAX_BODY: usize = 64 * 1024;
-/// The most output one frame carries.
-pub const MAX_OUTPUT: usize = 32 * 1024;
+/// The most output one frame carries. Half a body leaves room for the tag.
+pub const MAX_OUTPUT: usize = MAX_BODY / 2;
 /// The vsock port the init connects to on the host.
 pub const PORT: u32 = 1024;
 

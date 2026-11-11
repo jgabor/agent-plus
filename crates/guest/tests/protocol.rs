@@ -1,7 +1,7 @@
 //! The frames, and what the guest and the host refuse to read.
 
 use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;
@@ -131,6 +131,52 @@ fn the_largest_body_is_accepted() {
         panic!("not stdout");
     };
     assert_eq!(output.len(), MAX_BODY - 1);
+}
+
+#[test]
+fn the_largest_body_is_written() {
+    let mut wire = Vec::new();
+    ToHost::Stdout(vec![b'x'; MAX_BODY - 1])
+        .write(&mut wire)
+        .unwrap();
+    assert_eq!(wire.len(), 4 + MAX_BODY);
+}
+
+/// Fails the first read with `error`, then reads `bytes`.
+struct FailsFirst {
+    error: Option<io::ErrorKind>,
+    bytes: Cursor<Vec<u8>>,
+}
+
+impl Read for FailsFirst {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self.error.take() {
+            Some(kind) => Err(kind.into()),
+            None => self.bytes.read(buffer),
+        }
+    }
+}
+
+#[test]
+fn an_interrupted_read_is_retried_and_any_other_failure_is_an_error() {
+    let mut wire = Vec::new();
+    ToHost::Exited(3).write(&mut wire).unwrap();
+    let mut interrupted = FailsFirst {
+        error: Some(io::ErrorKind::Interrupted),
+        bytes: Cursor::new(wire.clone()),
+    };
+    assert_eq!(
+        ToHost::read(&mut interrupted).unwrap(),
+        Some(ToHost::Exited(3))
+    );
+    let mut reset = FailsFirst {
+        error: Some(io::ErrorKind::ConnectionReset),
+        bytes: Cursor::new(wire),
+    };
+    assert!(matches!(
+        ToHost::read(&mut reset),
+        Err(ProtocolError::Io(error)) if error.kind() == io::ErrorKind::ConnectionReset
+    ));
 }
 
 #[test]

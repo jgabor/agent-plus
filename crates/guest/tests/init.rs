@@ -2,6 +2,7 @@
 
 use guest::{Channel, Event, MOUNTS, Mount, System, run};
 use std::collections::VecDeque;
+use std::ffi::c_ulong;
 use std::io;
 
 #[derive(Default)]
@@ -76,6 +77,23 @@ fn the_four_filesystems_are_mounted() {
 fn each_filesystem_has_its_kernel_type() {
     let types: Vec<_> = MOUNTS.iter().map(|m| m.fstype.to_str().unwrap()).collect();
     assert_eq!(types, ["proc", "sysfs", "devtmpfs", "tmpfs"]);
+}
+
+#[test]
+fn each_filesystem_has_its_flags() {
+    const NOSUID: c_ulong = 2;
+    const NODEV: c_ulong = 4;
+    const NOEXEC: c_ulong = 8;
+    let flags: Vec<_> = MOUNTS.iter().map(|m| m.flags).collect();
+    assert_eq!(
+        flags,
+        [
+            NOSUID | NODEV | NOEXEC,
+            NOSUID | NODEV | NOEXEC,
+            NOSUID,
+            NOSUID | NODEV
+        ]
+    );
 }
 
 #[test]

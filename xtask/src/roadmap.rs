@@ -1,10 +1,12 @@
-//! `cargo xtask roadmap`: the milestones, what comes after them, and what
-//! waits on the owner. Nobody types it: every line comes from the journey
-//! file, the journey's results, SPEC.md and the checks that prove it, or
-//! GitHub.
+//! `cargo xtask roadmap`: the milestones and what comes after them, in words
+//! that anyone can read. `--details` prints the owner's view: each milestone's
+//! parent, steps, and proof, and what waits on the owner. Nobody types either
+//! one: every line comes from the journey file, the journey's results, the
+//! README, SPEC.md and the checks that prove it, or GitHub.
 
 use crate::forge::{Gh, OpenPr, RoadmapIssue};
 use crate::journey::{self, Milestone, Outcome};
+use crate::readme::{self, Line, README_FILE};
 use crate::score::{self, Score, Sentence};
 use crate::spec::{self, Arrives, Command};
 use crate::work::{ANSWER_NEEDED, LAND_NEEDED, PARKED};
@@ -14,29 +16,44 @@ use std::path::Path;
 
 /// The roadmap issue's title. The lowest open issue with it is the one.
 const ISSUE_TITLE: &str = "Roadmap";
-const HEADER: &str = "The nightly job writes this issue from `cargo xtask roadmap`, so don't edit it. To change it, change `harness/journey.toml` or the issues it lists.\n";
+/// The title of the issue that holds the details, found the same way.
+const DETAILS_TITLE: &str = "Roadmap details";
+const HEADER: &str = "This page shows what works in Agent+ today, and what comes next. The nightly job writes it from the project's checks, so don't edit it.\n";
+const DETAILS_HEADER: &str = "The nightly job writes this issue from `cargo xtask roadmap --details`, so don't edit it. To change it, change `harness/journey.toml` or the issues it lists.\n";
 
-/// Prints the roadmap, and writes nothing.
-pub fn run() -> Result<Verdict, Problem> {
+/// Prints the roadmap, or its details, and writes nothing.
+pub fn run(details: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     // GitHub comes first, so that a run that can't reach it stops early.
     let gh = Gh::new(&root);
     let (issues, prs) = (gh.roadmap_issues()?, gh.open_prs()?);
     let hold = lock::shared(&root)?;
     let outcomes = journey::outcomes(&root)?;
-    let score = score::compute(&root, &testrun::run(&root, &hold)?)?;
+    // Only the details count proven promises, which takes a run of the tests.
+    let score = match details {
+        true => Some(score::compute(&root, &testrun::run(&root, &hold)?)?),
+        false => None,
+    };
     drop(hold);
     let milestones = journey::milestones(&root)?;
-    let proof = (commands(&root)?, &score);
-    print!(
-        "{}",
-        markdown(&milestones, &outcomes, &proof, &issues, &prs)
-    );
+    let commands = commands(&root)?;
+    let text = match &score {
+        Some(score) => self::details(&milestones, &outcomes, &(&commands, score), &issues, &prs),
+        None => {
+            let details = titled(&issues, DETAILS_TITLE).map(|issue| issue.number);
+            let words = (commands.as_slice(), lines(&root));
+            roadmap(&milestones, &outcomes, &words, &issues, details)
+        }
+    };
+    print!("{text}");
     Ok(Verdict::Pass)
 }
 
 /// The commands in SPEC.md, and which of its promises are proven.
-type Proof<'a> = (Vec<Command>, &'a Score);
+type Proof<'a> = (&'a [Command], &'a Score);
+
+/// The commands in SPEC.md, and the README's line for each.
+type Words<'a> = (&'a [Command], Vec<Line>);
 
 fn commands(root: &Path) -> Result<Vec<Command>, Problem> {
     let text = fs::read_to_string(root.join("SPEC.md"))
@@ -44,34 +61,156 @@ fn commands(root: &Path) -> Result<Vec<Command>, Problem> {
     Ok(spec::commands(&text))
 }
 
-/// Makes the roadmap the body of the open issue with the roadmap's title,
-/// unless it already is. With no such issue, there is nowhere to write.
+/// A workspace with no README describes no command, and the gate's `spec`
+/// check is what says so.
+fn lines(root: &Path) -> Vec<Line> {
+    let text = fs::read_to_string(root.join(README_FILE)).unwrap_or_default();
+    readme::command_lines(&text)
+}
+
+/// Makes the roadmap the body of the open issue with the roadmap's title, and
+/// the details the body of the open issue with theirs, which it files when
+/// there is none. A body that already says it is left alone. With no roadmap
+/// issue, there is nowhere to write.
 pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Problem> {
     let gh = Gh::new(root);
     let issues = gh.roadmap_issues()?;
-    let Some(issue) = roadmap_issue(&issues) else {
+    let Some(issue) = titled(&issues, ISSUE_TITLE) else {
         return Ok(());
     };
     let milestones = journey::milestones(root)?;
-    let proof = (commands(root)?, score);
-    let text = markdown(&milestones, outcomes, &proof, &issues, &gh.open_prs()?);
+    let commands = commands(root)?;
+    let proof = (commands.as_slice(), score);
+    let text = details(&milestones, outcomes, &proof, &issues, &gh.open_prs()?);
+    // The roadmap links to the details, so they are written first.
+    let number = match titled(&issues, DETAILS_TITLE) {
+        Some(found) => {
+            put(&gh, found, &text)?;
+            found.number
+        }
+        None => gh.create_issue(DETAILS_TITLE, &text)?,
+    };
+    let words = (commands.as_slice(), lines(root));
+    let text = roadmap(&milestones, outcomes, &words, &issues, Some(number));
+    put(&gh, issue, &text)
+}
+
+fn put(gh: &Gh, issue: &RoadmapIssue, text: &str) -> Result<(), Problem> {
     // An edit on the website saves its line ends as `\r\n`.
     if issue.body.replace("\r\n", "\n").trim_end() != text.trim_end() {
-        gh.edit_issue(issue.number, &text)?;
+        gh.edit_issue(issue.number, text)?;
     }
     Ok(())
 }
 
-fn roadmap_issue(issues: &[RoadmapIssue]) -> Option<&RoadmapIssue> {
-    let titled = |issue: &&RoadmapIssue| issue.open && issue.title == ISSUE_TITLE;
+fn titled<'a>(issues: &'a [RoadmapIssue], title: &str) -> Option<&'a RoadmapIssue> {
+    let titled = |issue: &&RoadmapIssue| issue.open && issue.title == title;
     issues
         .iter()
         .filter(titled)
         .min_by_key(|issue| issue.number)
 }
 
-/// The same inputs give the same text, whatever order GitHub listed them in.
-fn markdown(
+/// Whether every step of this milestone passes.
+fn is_done(outcomes: &[Outcome], milestone: &Milestone) -> bool {
+    let mut steps = outcomes
+        .iter()
+        .filter(|step| step.milestone == milestone.name);
+    steps.all(|step| step.state == "pass")
+}
+
+/// The roadmap for anyone: what each milestone and command is for, and how
+/// far it is. A milestone is done when every one of its steps passes, the
+/// first one that isn't done is in progress, and a command is ticked when its
+/// milestone is done. The same inputs give the same text.
+fn roadmap(
+    milestones: &[Milestone],
+    outcomes: &[Outcome],
+    (commands, lines): &Words,
+    all: &[RoadmapIssue],
+    details: Option<u64>,
+) -> String {
+    let done: Vec<bool> = milestones
+        .iter()
+        .map(|milestone| is_done(outcomes, milestone))
+        .collect();
+    let current = done.iter().position(|done| !done);
+    let status = |index: usize| match done[index] {
+        true => "Done",
+        false if current == Some(index) => "In progress",
+        false => "Planned",
+    };
+    let mut text = format!(
+        "{HEADER}\n## First release (v0.1.0)\n\nMilestones done: {} of {}.\n\n| | Milestone | What you can do | Status |\n|---|---|---|---|\n",
+        done.iter().filter(|done| **done).count(),
+        milestones.len()
+    );
+    for (index, milestone) in milestones.iter().enumerate() {
+        text.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            index + 1,
+            cell(&milestone.name),
+            cell(&milestone.summary),
+            status(index)
+        ));
+    }
+
+    text.push_str("\n## Commands\n");
+    for (index, milestone) in milestones.iter().enumerate() {
+        if milestone.commands.is_empty() {
+            continue;
+        }
+        text.push_str(&format!(
+            "\n### {}. {} ({})\n\n",
+            index + 1,
+            shown(&milestone.name),
+            status(index).to_lowercase()
+        ));
+        let mark = if done[index] { "x" } else { " " };
+        for name in &milestone.commands {
+            let about = readme::line_for(lines, name)
+                .map_or(String::new(), |line| format!(": {}", shown(&line.about)));
+            text.push_str(&format!("- [{mark}] `{name}`{about}\n"));
+        }
+    }
+
+    // One item in the README can describe two commands, and is shown once.
+    let mut later: Vec<String> = Vec::new();
+    for command in commands.iter().filter(|c| c.arrives != Arrives::V010) {
+        let line = match readme::line_for(lines, &command.name) {
+            Some(line) => shown(&line.text),
+            None => format!("`{}`", command.name),
+        };
+        if !later.contains(&line) {
+            later.push(line);
+        }
+    }
+    later.extend(gaps(all));
+    section(&mut text, "## After the first release", later);
+    if let Some(number) = details {
+        text.push_str(&format!(
+            "\nFor each milestone's issue and checks, and for what waits on the owner, see #{number}.\n"
+        ));
+    }
+    text
+}
+
+/// The open sub-issues of the roadmap issue, lowest number first.
+fn gaps(all: &[RoadmapIssue]) -> Vec<String> {
+    let roadmap = titled(all, ISSUE_TITLE).map(|issue| issue.number);
+    let mut gaps: Vec<&RoadmapIssue> = all
+        .iter()
+        .filter(|issue| issue.open && roadmap.is_some() && issue.parent == roadmap)
+        .collect();
+    gaps.sort_by_key(|issue| issue.number);
+    gaps.iter()
+        .map(|issue| line(issue.number, &issue.title))
+        .collect()
+}
+
+/// The details for the owner and the agents. The same inputs give the same
+/// text, whatever order GitHub listed them in.
+fn details(
     milestones: &[Milestone],
     outcomes: &[Outcome],
     (commands, score): &Proof,
@@ -81,11 +220,11 @@ fn markdown(
     let mut issues: Vec<&RoadmapIssue> = all.iter().collect();
     issues.sort_by_key(|issue| issue.number);
     let (passing, steps) = journey::tally(outcomes);
-    let mut text = format!("{HEADER}\n## v0.1.0\n\njourney {passing} of {steps}\n");
+    let mut text = format!("{DETAILS_HEADER}\n## v0.1.0\n\njourney {passing} of {steps}\n");
     for (index, milestone) in milestones.iter().enumerate() {
         let in_it = |step: &&Outcome| step.milestone == milestone.name;
         let steps: Vec<&Outcome> = outcomes.iter().filter(in_it).collect();
-        let done = steps.iter().all(|step| step.state == "pass");
+        let done = is_done(outcomes, milestone);
         text.push_str(&format!(
             "\n### {}. {}\n\nParent: {}\n\n",
             index + 1,
@@ -112,7 +251,6 @@ fn markdown(
         }
     }
 
-    let roadmap = roadmap_issue(all).map(|issue| issue.number);
     let mut later: Vec<String> = commands
         .iter()
         .filter_map(|command| match command.arrives {
@@ -121,11 +259,7 @@ fn markdown(
             Arrives::Proposal => Some(format!("`{}`: a proposal", command.name)),
         })
         .collect();
-    let gaps = issues
-        .iter()
-        .filter(|issue| issue.open && roadmap.is_some() && issue.parent == roadmap)
-        .map(|issue| line(issue.number, &issue.title));
-    later.extend(gaps);
+    later.extend(gaps(all));
     section(&mut text, "## After v0.1.0", later);
 
     // A parked PR is the thing to act on, so it stands for the issues it closes.
@@ -183,7 +317,7 @@ fn command_line(name: &str, commands: &[Command], score: &Score) -> String {
 
 /// An issue that `xtask` writes, which the owner neither labels nor closes.
 fn written(title: &str) -> bool {
-    title == ISSUE_TITLE || title == report::ISSUE_TITLE
+    title == ISSUE_TITLE || title == DETAILS_TITLE || title == report::ISSUE_TITLE
 }
 
 fn line(number: u64, title: &str) -> String {
@@ -202,6 +336,11 @@ fn shown(text: &str) -> String {
         })
         .collect();
     parts.join("`")
+}
+
+/// The same in a table, where `|` would end the cell.
+fn cell(text: &str) -> String {
+    shown(text).replace('|', "\\|")
 }
 
 fn section(text: &mut String, heading: &str, lines: Vec<String>) {

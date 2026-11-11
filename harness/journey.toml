@@ -1,39 +1,50 @@
 # The milestones, in roadmap order. Each step below names the one it is in.
+# `summary` says what a user can do when the milestone is done. The roadmap
+# shows it, so write it in plain words.
 
 [[milestone]]
 name = "Boot"
+summary = "Start a small virtual machine, and run a command in it"
 commands = ["ap --version", "ap boot"]
 
 [[milestone]]
 name = "Author"
+summary = "Describe an agent in one file, and build it"
 commands = ["ap init", "ap fmt", "ap build", "ap ls", "ap inspect", "ap rm"]
 
 [[milestone]]
 name = "Run"
+summary = "Start Claude Code or Codex in the machine, from your terminal"
 commands = ["ap run", "ap update", "ap ps", "ap attach", "ap logs", "ap exec", "ap stop"]
 
 [[milestone]]
 name = "Review and land"
+summary = "See what the agent changed, then keep it or throw it away"
 commands = ["ap diff", "ap apply", "ap discard"]
 
 [[milestone]]
 name = "Network and secrets"
+summary = "Choose which sites the agent can reach, and lend it secrets it can't read"
 commands = ["ap secret"]
 
 [[milestone]]
 name = "State and extensions"
+summary = "Add plugins, skills, and MCP servers, and stay signed in between runs"
 commands = ["ap reset"]
 
 [[milestone]]
 name = "Desktop"
+summary = "Give the agent its own desktop and browser to work in"
 commands = []
 
 [[milestone]]
 name = "Integration"
+summary = "Drive an agent from your editor or your own tools, and let agents call each other"
 commands = ["ap api", "ap acp"]
 
 [[milestone]]
 name = "Release"
+summary = "Install it on Linux or macOS, and follow the quick start"
 commands = []
 
 [[step]]

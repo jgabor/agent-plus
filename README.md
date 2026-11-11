@@ -7,8 +7,10 @@ it in a Linux microVM with its own filesystem, network policy, and optional
 desktop. Your real harness configuration is never touched.
 
 > [!IMPORTANT]
-> **Status: design.** Nothing is implemented yet. This README describes the
-> intended product. The Agentfile reference is [SPEC.md](SPEC.md).
+> **Status: in development.** There is no release yet. The
+> [roadmap](https://github.com/jgabor/agent-plus/issues/158) shows what works
+> today, and what comes next. This README describes the intended product. The
+> Agentfile reference is [SPEC.md](SPEC.md).
 
 `ap` is a single binary, written in Rust. It includes:
 
@@ -164,6 +166,8 @@ desktop in a native window.
 - `ap acp <agent>`: expose an agent over the Agent Client Protocol, for
   editors such as Zed
 - `ap api`: serve the control API on a local socket
+- `ap mcp`: let apps on your host drive an agent's desktop (proposed, after
+  v0.1.0)
 
 #### Distribution
 
@@ -358,6 +362,9 @@ computer use kept inside the VM; and a control API that drives every
 harness the same way.
 
 ## Roadmap
+
+The [roadmap issue](https://github.com/jgabor/agent-plus/issues/158) shows how
+far v0.1.0 is, and it updates every night.
 
 - **v0.1.0:** Linux and macOS on Apple Silicon. Claude Code and Codex. The
   store, grant approval, copy-on-write shares, network rules, secrets,

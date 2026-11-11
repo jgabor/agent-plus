@@ -25,6 +25,8 @@ struct Step {
 /// A named group of steps, and the `ap` commands it delivers.
 pub struct Milestone {
     pub name: String,
+    /// What a user can do when it is done, in plain words.
+    pub summary: String,
     pub commands: Vec<String>,
 }
 
@@ -185,7 +187,8 @@ fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
     Ok((milestones, steps.into_values().collect()))
 }
 
-/// No milestone repeats a name, and no command is listed twice in the file.
+/// No milestone repeats a name, no command is listed twice in the file, and
+/// every milestone says what it is for.
 fn read_milestone(
     table: &toml::Table,
     milestones: &[Milestone],
@@ -208,8 +211,14 @@ fn read_milestone(
             return Err(bad(format!("the command `{command}` is listed twice")));
         }
     }
+    let summary = table
+        .str("summary")
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+        .ok_or_else(|| bad(format!("the milestone `{name}` has no `summary`")))?;
     Ok(Milestone {
         name: name.to_string(),
+        summary: summary.to_string(),
         commands: listed.into_iter().map(str::to_string).collect(),
     })
 }

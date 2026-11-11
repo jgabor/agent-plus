@@ -25,7 +25,7 @@ const BUILD_BUDGETS: &str = "[[budget]]\nkey = \"noop_build_ms\"\nname = \"build
 const BUILDS: &str = "use std::io::Write;\nfn main() -> std::process::ExitCode {\n    let args: Vec<String> = std::env::args().skip(1).collect();\n    if args.first().map(String::as_str) != Some(\"build\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    let approved = args.iter().find_map(|a| a.strip_prefix(\"--approve=\")).and_then(|f| std::fs::read_to_string(f).ok());\n    let dir = std::path::Path::new(args.last().unwrap());\n    if !approved.is_some_and(|a| a.contains(\"POLICY +\")) || !dir.join(\"Agentfile\").is_file() {\n        eprintln!(\"ap: needs approval {args:?}\");\n        return std::process::ExitCode::from(1);\n    }\n    // sleep\n    let home = std::env::var(\"HOME\").unwrap();\n    let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{home}/builds\")).unwrap();\n    writeln!(runs, \"build\").unwrap();\n    std::process::ExitCode::SUCCESS\n}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
 const RESULT: &str = "target/bench/result.toml";
 
 fn stdout(output: &Output) -> String {

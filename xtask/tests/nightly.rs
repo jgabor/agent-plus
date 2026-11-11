@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod common;
 
 const BUDGETS: &str = "[[budget]]\nkey = \"run_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
 const NO_ISSUES: &str = "[]";
 const REPORT_ISSUE: &str =
     "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
@@ -321,13 +321,23 @@ impl Repo {
 
     /// Makes this the one issue with the roadmap's title, open or closed.
     fn set_roadmap_issue(&self, state: &str, body: &str) {
-        fs::write(
-            self.bin.join("all-issues.json"),
+        self.set_roadmap_issues(state, body, None);
+    }
+
+    /// The roadmap issue, and the open issue with its details if they have a
+    /// body.
+    fn set_roadmap_issues(&self, state: &str, body: &str, details: Option<&str>) {
+        let issue = |number: u64, state: &str, title: &str, body: &str| {
             format!(
-                "[{{\"number\":158,\"state\":\"{state}\",\"title\":\"Roadmap\",\"body\":{body:?},\"labels\":[],\"url\":\"https://github.com/o/r/issues/158\",\"parent\":null}}]"
-            ),
-        )
-        .unwrap();
+                "{{\"number\":{number},\"state\":\"{state}\",\"title\":\"{title}\",\"body\":{body:?},\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null}}"
+            )
+        };
+        let mut issues = vec![issue(158, state, "Roadmap", body)];
+        if let Some(body) = details {
+            issues.push(issue(159, "OPEN", "Roadmap details", body));
+        }
+        let json = format!("[{}]", issues.join(","));
+        fs::write(self.bin.join("all-issues.json"), json).unwrap();
     }
 
     fn edits(&self) -> Vec<String> {
@@ -679,41 +689,105 @@ fn nightly_pins_a_report_issue_that_lost_its_pin() {
     );
 }
 
-/// The roadmap issue's body is what `cargo xtask roadmap` prints, from the
-/// same run of the journey that the night's check used.
+/// Each issue's body is what `cargo xtask roadmap` prints, from the same run
+/// of the journey that the night's check used.
 #[test]
-fn nightly_writes_the_roadmap_to_its_issue() {
+fn nightly_writes_the_roadmap_and_its_details_to_their_issues() {
     let repo = Repo::new("roadmap-written");
+    repo.set_roadmap_issues("OPEN", "typed by hand", Some("written last night"));
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    // The roadmap links to its details, so they are written first.
+    assert_eq!(
+        repo.edits(),
+        [
+            "issue edit 159 --body-file -",
+            "issue edit 158 --body-file -"
+        ]
+    );
+    let calls = repo.calls();
+    assert!(
+        !calls.iter().any(|call| call.contains("--title Roadmap")),
+        "{calls:?}"
+    );
+
+    let written = fs::read_to_string(repo.bin.join("edited-158")).unwrap();
+    assert!(
+        written.starts_with("This page shows what works in Agent+ today"),
+        "{written}"
+    );
+    assert!(written.contains("Milestones done: 0 of 1.\n"), "{written}");
+    assert!(
+        written.contains("| 1 | m | s | In progress |\n"),
+        "{written}"
+    );
+    assert!(written.ends_with("see #159.\n"), "{written}");
+    assert!(!written.contains("Step"), "{written}");
+    assert_eq!(stdout(&repo.xtask(&["roadmap"])), written);
+
+    let details = fs::read_to_string(repo.bin.join("edited-159")).unwrap();
+    assert!(
+        details
+            .starts_with("The nightly job writes this issue from `cargo xtask roadmap --details`"),
+        "{details}"
+    );
+    assert!(details.contains("\njourney 1 of 4\n"), "{details}");
+    assert!(
+        details.contains(
+            "- [x] Step 1: first\n- [ ] Step 2: model (skipped)\n- [ ] Step 3: after the model (skipped)\n- [ ] Step 4: last (fails)\n"
+        ),
+        "{details}"
+    );
+    assert_eq!(stdout(&repo.xtask(&["roadmap", "--details"])), details);
+}
+
+/// The first night after the roadmap issue is opened, its details have no
+/// issue yet.
+#[test]
+fn nightly_files_the_details_issue_when_there_is_none() {
+    let repo = Repo::new("roadmap-details-filed");
     repo.set_roadmap_issue("OPEN", "typed by hand");
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let calls = repo.calls();
+    let filed: Vec<&String> = calls
+        .iter()
+        .filter(|call| call.starts_with("issue create --title Roadmap details --body "))
+        .collect();
+    assert_eq!(filed.len(), 1, "{calls:?}");
+    assert!(
+        filed[0].contains("cargo xtask roadmap --details"),
+        "{calls:?}"
+    );
+    // The fake `gh` numbers every new issue 77.
     assert_eq!(repo.edits(), ["issue edit 158 --body-file -"]);
     let written = fs::read_to_string(repo.bin.join("edited-158")).unwrap();
-    assert!(
-        written.starts_with("The nightly job writes this issue from `cargo xtask roadmap`"),
-        "{written}"
-    );
-    assert!(written.contains("\njourney 1 of 4\n"), "{written}");
-    assert!(
-        written.contains(
-            "- [x] Step 1: first\n- [ ] Step 2: model (skipped)\n- [ ] Step 3: after the model (skipped)\n- [ ] Step 4: last (fails)\n"
-        ),
-        "{written}"
-    );
-    assert_eq!(stdout(&repo.xtask(&["roadmap"])), written);
+    assert!(written.ends_with("see #77.\n"), "{written}");
 }
 
 /// Writing the same roadmap again would only add an edit to the issue.
 #[test]
 fn nightly_leaves_an_unchanged_roadmap_alone() {
     let repo = Repo::new("roadmap-unchanged");
+    repo.set_roadmap_issues("OPEN", "", Some(""));
     let printed = stdout(&repo.xtask(&["roadmap"]));
-    assert!(printed.contains("journey 1 of 4"), "{printed}");
+    assert!(printed.ends_with("see #159.\n"), "{printed}");
+    let details = stdout(&repo.xtask(&["roadmap", "--details"]));
+    assert!(details.contains("journey 1 of 4"), "{details}");
     // GitHub's website saves line ends as `\r\n`, and may drop the last one.
-    repo.set_roadmap_issue("OPEN", printed.replace('\n', "\r\n").trim_end());
+    repo.set_roadmap_issues(
+        "OPEN",
+        printed.replace('\n', "\r\n").trim_end(),
+        Some(details.replace('\n', "\r\n").trim_end()),
+    );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(repo.edits(), Vec::<String>::new());
+    let calls = repo.calls();
+    assert!(
+        !calls.iter().any(|call| call.contains("--title Roadmap")),
+        "{calls:?}"
+    );
 }
 
 /// Closing the roadmap issue is how the owner turns the roadmap off.

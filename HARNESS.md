@@ -347,6 +347,7 @@ readies it for the owner.
 ```toml
 [[milestone]]
 name = "Boot"
+summary = "Start a small virtual machine, and run a command in it"
 commands = ["ap --version", "ap boot"]
 
 [[step]]
@@ -359,16 +360,24 @@ script = "harness/journey/03-boot.sh"
 
 A step can also set `floor = "floor_guest_host"`, or `spend = true`.
 
-The `[[milestone]]` tables are in roadmap order. `commands` lists the `ap`
+The `[[milestone]]` tables are in roadmap order. `summary` says what a user
+can do when the milestone is done, in words that need no knowledge of the
+harness, because the roadmap shows it to anyone. `commands` lists the `ap`
 subcommands that the milestone delivers, and it can be empty. Every step names
-one milestone, every milestone has a step, and no command is listed twice. A
-file that breaks one of these is an error.
+one milestone, every milestone has a step and a summary, and no command is
+listed twice. A file that breaks one of these is an error.
 
 The milestones list exactly the commands that SPEC.md has for v0.1.0. A
 command is a heading under SPEC.md's Commands heading, and it is for v0.1.0
 unless its entry starts with `**Planned.**` or `*Proposed*`. The gate's `spec`
 check fails when a milestone lists a command that has no such heading or is
 marked, and when a v0.1.0 command is in no milestone.
+
+The README describes every command in SPEC.md, marked or not, in an item
+under its Core commands heading. The item starts with the command in
+backticks, as in `` `ap init [dir]`: create an Agentfile ``, and one item can
+name two commands. The roadmap shows what follows the colon, so no command is
+described twice. The `spec` check fails when a command has no such item.
 
 ### Budgets
 
@@ -459,7 +468,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
-| `cargo xtask roadmap` | Prints the [roadmap](#roadmap), and writes nothing |
+| `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |
 
 `cargo xtask next` prints an array of
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
@@ -640,23 +649,42 @@ does the following on `main`:
    fails, comments how to run it. A later night leaves an issue that says how
    it ended alone.
 
-6. Write the [roadmap](#roadmap), with this run of the journey, to the open
-   issue titled `Roadmap`.
+6. Write the [roadmap](#roadmap) and its details, with this run of the
+   journey, to the open issues titled `Roadmap` and `Roadmap details`.
 
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.
 
 ### Roadmap
 
-`cargo xtask roadmap` prints the roadmap as markdown, and the nightly job makes
-it the body of the open issue titled `Roadmap`. Nobody edits that issue. To
-change the roadmap, change what it is built from. It has three parts:
+The roadmap is two issues, and each has one reader. Nobody edits either one.
+To change the roadmap, change what it is built from.
 
-1. Each milestone, in the order of `harness/journey.toml`, with its commands
-   and its steps as the journey just ran them. The milestone's parent is the
-   issue whose body names it in a `Milestone:` line, and it is shown with how
-   many of its sub-issues are closed. An open parent whose steps all pass is
-   ready to close.
+`cargo xtask roadmap` prints the roadmap for anyone, as markdown, and the
+nightly job makes it the body of the open issue titled `Roadmap`. A reader
+needs no knowledge of the harness, so it names no parent, step, or count of
+promises. It has three parts:
+
+1. A table of the milestones, in the order of `harness/journey.toml`, each
+   with its `summary` and its status. A milestone is done when every one of
+   its steps passes in the journey that just ran. The first one that isn't
+   done is in progress, and the ones after it are planned.
+2. Each milestone's commands, each with what the README's Core commands says
+   about it. A command is ticked when its milestone is done, so nobody ticks
+   its box.
+3. What comes after the first release: the README's item for each command
+   that SPEC.md marks as planned or proposed, and the open sub-issues of the
+   roadmap issue.
+
+`cargo xtask roadmap --details` prints the details for the owner and the
+agents, and the nightly job makes them the body of the open issue titled
+`Roadmap details`. It files that issue when there is none, and the roadmap
+ends with a link to it. The details have three parts:
+
+1. Each milestone, with its commands and its steps as the journey just ran
+   them. The milestone's parent is the issue whose body names it in a
+   `Milestone:` line, and it is shown with how many of its sub-issues are
+   closed. An open parent whose steps all pass is ready to close.
 2. What comes after v0.1.0: the commands that SPEC.md marks as planned or
    proposed, and the open sub-issues of the roadmap issue.
 3. What waits on the owner: open PRs and issues labeled `land-needed` or
@@ -664,15 +692,14 @@ change the roadmap, change what it is built from. It has three parts:
    this repository. A listed PR stands for the issues it closes, so they are
    left out, and so are the issues that `xtask` writes.
 
-Each command is shown with how many of its promises are proven. Its promises
-are those under its own heading in SPEC.md, and under each heading that its
-entry says specifies it, as in "[Build](#build) specifies `ap build`". A
-command is built when every one is proven, so nobody ticks its box. A pointer
-that names no heading fails the gate's `spec` check.
+The details show each command with how many of its promises are proven. Its
+promises are those under its own heading in SPEC.md, and under each heading
+that its entry says specifies it, as in "[Build](#build) specifies `ap build`".
+A pointer that names no heading fails the gate's `spec` check.
 
 The same inputs give the same text, and the nightly job leaves a body that
-already says it alone. With no open issue titled `Roadmap`, it writes nothing,
-so closing that issue turns the roadmap off.
+already says it alone. With no open issue titled `Roadmap`, it writes neither
+issue, so closing that issue turns the roadmap off.
 
 ### Release check
 

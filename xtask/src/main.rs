@@ -17,6 +17,7 @@ mod merge;
 mod mirror;
 mod mutation;
 mod nightly;
+mod readme;
 mod refresh;
 mod report;
 mod roadmap;
@@ -41,7 +42,8 @@ commands:
   bench            compare the budgets with the base build
   report [--json]  print the nightly report
   nightly          run the slow checks on main, and post the report
-  roadmap          print the milestones, and what waits on the owner
+  roadmap [--details]
+                   print the roadmap, or the owner's view of it
   next             print the issues that can be claimed, as JSON
   claim <issue> [--thread <link>]
                    claim an issue for the current branch
@@ -84,7 +86,11 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["report", "--json"] => report::run(true),
         ["report", ..] => Err(Problem(format!("`report` takes only `--json`\n\n{USAGE}"))),
         ["nightly"] => nightly::run(),
-        ["roadmap"] => roadmap::run(),
+        ["roadmap"] => roadmap::run(false),
+        ["roadmap", "--details"] => roadmap::run(true),
+        ["roadmap", ..] => Err(Problem(format!(
+            "`roadmap` takes only `--details`\n\n{USAGE}"
+        ))),
         ["next"] => work::run_next(),
         ["claim", issue] => work::run_claim(issue, None),
         ["claim", issue, "--thread", thread] => work::run_claim(issue, Some(thread)),
@@ -115,8 +121,7 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "roadmap"
-            | "refresh"),
+            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "refresh"),
             extra,
             ..,
         ] => Err(Problem(format!(

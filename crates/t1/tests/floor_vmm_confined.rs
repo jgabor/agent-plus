@@ -5,8 +5,10 @@
 //! Each attempt runs in its own process, which boots a guest through the API
 //! `ap boot` uses. The attempt runs in the callback for the guest's first
 //! report, on the vCPU thread, which is where code a guest got running in the
-//! VMM would be. A second check watches a real `ap boot` while its guest runs,
-//! and finds it under a filter of its own.
+//! VMM would be. Each attempt is one system call, which returns whether it
+//! works or fails, so only a process killed at that call passes. A second
+//! check watches a real `ap boot` while its guest runs, and finds it under a
+//! filter of its own.
 
 use ap::boot::{self, Guest, Report};
 use ap::fetch;
@@ -72,8 +74,8 @@ impl Attempt {
             .unwrap()
     }
 
-    /// Makes the attempt, and says how it went. An exec that works never
-    /// returns, and neither does a process the filter kills.
+    /// Makes the attempt, and says how the call came back. A process the
+    /// filter kills never says anything.
     fn make(self, target: &Path) -> String {
         match self {
             Attempt::Nothing => "did nothing".to_owned(),
@@ -81,19 +83,16 @@ impl Attempt {
                 // SAFETY: the child only calls `_exit`, which is safe after a
                 // fork from a process with threads.
                 match unsafe { fork() } {
-                    -1 => format!("refused: {}", std::io::Error::last_os_error()),
+                    -1 => format!("went through: {}", std::io::Error::last_os_error()),
                     0 => unsafe { _exit(0) },
                     child => format!("went through: started process {child}"),
                 }
             }
-            Attempt::Exec => {
-                let error = Command::new("/bin/true").exec();
-                format!("refused: {error}")
-            }
-            Attempt::Open => match fs::read_to_string(target) {
-                Ok(contents) => format!("went through: read {contents:?}"),
-                Err(error) => format!("refused: {error}"),
-            },
+            // The target isn't executable, so an exec the kernel runs comes
+            // back with an error, rather than becoming a program that could
+            // die on a call of its own.
+            Attempt::Exec => format!("went through: {}", Command::new(target).exec()),
+            Attempt::Open => format!("went through: {:?}", File::open(target).map(drop)),
         }
     }
 }
@@ -137,9 +136,6 @@ fn judge(attempt: Attempt, exit: ExitStatus, log: &str) -> Result<(), String> {
         };
     }
     if exit.signal() == Some(SIGSYS) && outcome.is_empty() {
-        return Ok(());
-    }
-    if outcome.starts_with("refused") {
         return Ok(());
     }
     Err(format!(
@@ -292,14 +288,6 @@ fn exited(code: i32) -> ExitStatus {
 fn the_judge_passes_a_process_killed_at_the_attempt() {
     let killed = ExitStatus::from_raw(SIGSYS);
     assert_eq!(judge(Attempt::Fork, killed, "attempting fork\n"), Ok(()));
-    assert_eq!(
-        judge(
-            Attempt::Open,
-            exited(0),
-            "attempting open\nrefused: denied\n"
-        ),
-        Ok(())
-    );
 }
 
 #[test]
@@ -309,6 +297,17 @@ fn the_judge_fails_a_process_killed_before_the_attempt() {
     assert!(error.contains("before the attempt"), "{error}");
     let error = judge(Attempt::Nothing, killed, "attempting nothing\n").unwrap_err();
     assert!(error.contains("didn't boot"), "{error}");
+}
+
+#[test]
+fn the_judge_fails_a_call_that_came_back() {
+    let refused = "attempting exec\nwent through: Permission denied\n";
+    let error = judge(Attempt::Exec, exited(0), refused).unwrap_err();
+    assert!(error.contains("went through"), "{error}");
+    let killed_later = ExitStatus::from_raw(SIGSYS);
+    let opened = "attempting open\nwent through: Ok(())\n";
+    let error = judge(Attempt::Open, killed_later, opened).unwrap_err();
+    assert!(error.contains("went through"), "{error}");
 }
 
 #[test]

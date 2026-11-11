@@ -2,9 +2,11 @@
 //! a seccomp filter on every thread. Anything else kills the process, so code
 //! a guest got running in the VMM gets no second try.
 //!
-//! What is left can't start a process or a program, or reach a host file by
-//! name: every call that takes a path is missing. Calls that could reach past
-//! this process are narrowed by their arguments, as the kernel reads them.
+//! What is left can't start a process or a program, or reach a host file:
+//! every call that takes a path is missing, and memory can be mapped only
+//! anonymously, so a file left open can't be read either. Calls that could
+//! reach past this process are narrowed by their arguments, as the kernel
+//! reads them.
 
 use std::ffi::{c_int, c_long, c_ulong};
 use std::io;
@@ -34,6 +36,7 @@ const OFFSET_ARGS: u32 = 16;
 const ENOSYS: u32 = 38;
 const CLONE_THREAD: u32 = 0x0001_0000;
 const F_GETFD: u32 = 1;
+const MAP_ANONYMOUS: u32 = 0x20;
 
 // x86_64 system call numbers.
 const WRITE: u32 = 1;
@@ -119,7 +122,7 @@ fn rules(pid: u32, tid: u32) -> Vec<Rule> {
         AllowIf(IOCTL, 1, vec![KVM_RUN as u32, KVM_IRQ_LINE as u32]),
         Allow(FUTEX),
         Allow(WRITE),
-        Allow(MMAP),
+        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
         Allow(MPROTECT),
@@ -240,6 +243,9 @@ mod tests {
     const EXECVE: u32 = 59;
     const EXECVEAT: u32 = 322;
     const F_SETOWN: u32 = 8;
+    const MAP_SHARED: u32 = 1;
+    const MAP_PRIVATE: u32 = 2;
+    const MAP_STACK: u32 = 0x2_0000;
     const CLONE_VFORK_VM: u32 = 0x4100;
     const LOAD_ARGUMENT_LIMIT: u32 = OFFSET_ARGS + 8 * 6;
 
@@ -287,7 +293,7 @@ mod tests {
 
     #[test]
     fn what_a_running_vmm_needs_is_allowed() {
-        for number in [WRITE, FUTEX, MMAP, MUNMAP, RT_SIGRETURN, EXIT_GROUP] {
+        for number in [WRITE, FUTEX, MUNMAP, RT_SIGRETURN, EXIT_GROUP] {
             assert_eq!(call(number, [0; 6]), RET_ALLOW, "{number}");
         }
         for request in [KVM_RUN, KVM_IRQ_LINE] {
@@ -297,6 +303,8 @@ mod tests {
         assert_eq!(call(TGKILL, [PID, TID, 42, 0, 0, 0]), RET_ALLOW);
         assert_eq!(call(TKILL, [TID, 42, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(call(FCNTL, [3, F_GETFD, 0, 0, 0, 0]), RET_ALLOW);
+        let anonymous = MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK;
+        assert_eq!(call(MMAP, [0, 4096, 3, anonymous, u32::MAX, 0]), RET_ALLOW);
     }
 
     #[test]
@@ -315,6 +323,13 @@ mod tests {
     fn opening_a_file_kills() {
         assert_eq!(call(OPENAT, [0; 6]), RET_KILL_PROCESS);
         assert_eq!(call(2, [0; 6]), RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn mapping_a_file_that_is_already_open_kills() {
+        for flags in [MAP_PRIVATE, MAP_SHARED] {
+            assert_eq!(call(MMAP, [0, 4096, 1, flags, 0, 0]), RET_KILL_PROCESS);
+        }
     }
 
     #[test]

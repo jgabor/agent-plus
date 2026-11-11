@@ -321,6 +321,56 @@ fn a_parent_is_not_claimable() {
     );
 }
 
+/// A milestone's parent can't be claimed even before GitHub lists a
+/// sub-issue under it, which a claim of the whole milestone would race.
+#[test]
+fn a_milestone_parent_is_not_claimable() {
+    let parent = issue(
+        1,
+        "OPEN",
+        &["auto:merge"],
+        &body(T, "Milestone: Run.\n"),
+        &[],
+    );
+    let indented = issue(
+        2,
+        "OPEN",
+        &["auto:merge"],
+        &body("`crates/c`", "  Milestone: Run.\n"),
+        &[],
+    );
+    assert_eq!(
+        listed("milestone-alone", &[parent.clone(), indented]),
+        Vec::<u64>::new()
+    );
+    let sub = sub_issue(5, "OPEN", "`crates/b`", 1);
+    assert_eq!(
+        listed("milestone-with-sub", &[parent.clone(), sub]),
+        vec![5]
+    );
+
+    let repo = Repo::new("milestone-claim", &[parent]);
+    repo.git(&["checkout", "-q", "-b", "1-x"]);
+    let output = repo.xtask(&["claim", "1"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let calls = repo.calls();
+    assert!(!calls.contains("issue edit"), "{calls}");
+    assert!(!calls.contains("issue comment"), "{calls}");
+}
+
+/// Only a line that starts with `Milestone:` names a milestone.
+#[test]
+fn a_mention_of_a_milestone_does_not_make_a_parent() {
+    let named = issue(
+        1,
+        "OPEN",
+        &["auto:merge"],
+        &body(T, "Part of the Milestone: Run.\n"),
+        &[],
+    );
+    assert_eq!(listed("milestone-mention", &[named]), vec![1]);
+}
+
 /// A parent in another repository has a number that means nothing in this one.
 #[test]
 fn a_parent_in_another_repository_is_not_a_parent_here() {

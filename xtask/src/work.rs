@@ -208,6 +208,13 @@ fn touches(body: &str) -> Vec<String> {
     paths
 }
 
+/// Whether a line starts with `Milestone:`, which makes the issue a parent
+/// even before GitHub lists a sub-issue under it.
+fn names_a_milestone(body: &str) -> bool {
+    body.lines()
+        .any(|line| line.trim().starts_with("Milestone:"))
+}
+
 /// The issue numbers on lines that start with this phrase.
 fn references(body: &str, phrase: &str) -> Vec<u64> {
     body.lines()
@@ -353,6 +360,7 @@ impl<'a> View<'a> {
         if autonomy(issue).is_none()
             || touches(&issue.body).is_empty()
             || self.parents.contains(&issue.number)
+            || names_a_milestone(&issue.body)
         {
             return Ok(State::Unavailable);
         }

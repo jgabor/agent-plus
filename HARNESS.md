@@ -438,7 +438,8 @@ a sub-issue, and the `State`, `Thread`, `Branch`, and `Lease until` fields.
 - The paths in `Touches` are its backticked words. Two issues overlap when one
   path is a prefix of the other.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
-  issue that GitHub lists another issue under, as a sub-issue.
+  issue that GitHub lists another issue under, as a sub-issue, or one with a
+  line that starts with `Milestone:`, even before it has a sub-issue.
 - A parent that delivers a milestone names it on a line of its own,
   `Milestone: <name>.`. The planner and `cargo xtask roadmap` read that line.
 - `xtask` reads status comments only from the repository owner's account.

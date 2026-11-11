@@ -2550,12 +2550,15 @@ fn a_refresh_leaves_a_green_that_its_prepare_posted() {
     repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
     repo.set_land_needed(&[7]);
     repo.git(&["checkout", "-q", "main"]);
+    let summary = repo.temp.join("summary.md");
 
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .arg("refresh")
         .env("KILL_ON", "state=success")
         .env("KILL_WHEN", "after")
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_STEP_SUMMARY", &summary)
         .output()
         .unwrap();
     assert_eq!(
@@ -2573,6 +2576,9 @@ fn a_refresh_leaves_a_green_that_its_prepare_posted() {
             "success spec 0 of 2, journey 1 of 1".to_string()
         )
     );
+    let summary = fs::read_to_string(&summary).unwrap();
+    let row = "| #9 | proven | spec 0 of 2, journey 1 of 1 | ";
+    assert!(summary.contains(row), "{summary}");
 }
 
 /// The queue position only says what is happening, as any `pending` does.

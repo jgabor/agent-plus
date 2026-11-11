@@ -65,7 +65,7 @@ pub fn run() -> Result<Verdict, Problem> {
         let place = format!("PR {} ({} of {count})", pr.number, i + 1);
         println!("refresh: proving {place}");
         if actions {
-            println!("::group::{place}: {}", pr.title);
+            println!("::group::{place}: {}", escaped(&pr.title));
         }
         let started = Instant::now();
         let proven = prepare(&root, pr.number);
@@ -77,8 +77,11 @@ pub fn run() -> Result<Verdict, Problem> {
         let proven = proven?;
         let head = current_head(&root, pr);
         let result = gh.described_status(&head, merge::GATE);
-        if let Ok(Some((_, said))) = &result {
+        if let Ok(Some((state, said))) = &result {
             row.said.clone_from(said);
+            if state == "success" {
+                row.verdict = "proven";
+            }
         }
         if proven {
             row.verdict = "proven";
@@ -144,6 +147,13 @@ fn summary(rows: &[Row]) -> String {
     table
 }
 
+/// Text that Actions reads as one workflow command's data, as written.
+fn escaped(data: &str) -> String {
+    data.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
 /// A proof's length, to the second.
 fn took(length: Duration) -> String {
     let seconds = length.as_secs();
@@ -203,7 +213,7 @@ fn prepare(root: &Path, number: u64) -> Result<bool, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Row, queued, summary, took};
+    use super::{Row, escaped, queued, summary, took};
     use std::time::Duration;
 
     #[test]
@@ -219,6 +229,11 @@ mod tests {
         assert_eq!(took(Duration::from_secs(59)), "59s");
         assert_eq!(took(Duration::from_secs(60)), "1m 00s");
         assert_eq!(took(Duration::from_secs(605)), "10m 05s");
+    }
+
+    #[test]
+    fn a_fold_title_keeps_to_its_line() {
+        assert_eq!(escaped("100% %0A\r\nx"), "100%25 %250A%0D%0Ax");
     }
 
     #[test]

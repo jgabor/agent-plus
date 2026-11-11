@@ -17,7 +17,8 @@ use std::os::fd::AsFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -474,12 +475,20 @@ fn supervised() -> Result<i32, Problem> {
         let _ = worker.wait();
         return Err(couldnt("start the merge's watcher", error));
     }
-    time_out(reports, group);
+    let seconds = env::var(TIMEOUT_OVERRIDE)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(TIMEOUT_SECONDS);
+    let timed_out = time_out(reports, group, seconds);
     let status = worker.wait().map_err(|e| couldnt("wait for the merge", e));
     stop_group(group);
     let status = status?;
     if let Some(code) = status.code() {
         return Ok(code);
+    }
+    if timed_out.load(Ordering::SeqCst) {
+        eprintln!("merge: stopped at the {seconds} second timeout. Run it again to restart");
+        return Ok(1);
     }
     // Dies as the worker did, so that a killed merge looks killed.
     let signal = status.signal().unwrap_or(9);
@@ -491,12 +500,13 @@ fn supervised() -> Result<i32, Problem> {
 }
 
 /// Stops the worker's group once the worker has held the slot for the timeout,
-/// because a stuck merge would hold it for every other merge.
-fn time_out(reports: io::PipeReader, group: u32) {
-    let seconds = env::var(TIMEOUT_OVERRIDE)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(TIMEOUT_SECONDS);
+/// because a stuck merge would hold it for every other merge. Says whether it
+/// did. Only the caller exits, once the worker is reaped, because this thread
+/// can be slow to go on after the kill lands, and the caller would then see a
+/// killed worker and die as it did.
+fn time_out(reports: io::PipeReader, group: u32, seconds: u64) -> Arc<AtomicBool> {
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let said = Arc::clone(&timed_out);
     let (slot_taken, taken) = mpsc::channel();
     thread::spawn(move || {
         let mut reports = reports;
@@ -518,10 +528,10 @@ fn time_out(reports: io::PipeReader, group: u32) {
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
+        said.store(true, Ordering::SeqCst);
         stop_group(group);
-        eprintln!("merge: stopped at the {seconds} second timeout. Run it again to restart");
-        process::exit(1);
     });
+    timed_out
 }
 
 /// Stops the group first, so that none of it runs while the kill goes through

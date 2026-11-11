@@ -1,7 +1,7 @@
 //! What the test binaries share.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Writes an executable that a test can run at once. A child process does the
@@ -19,4 +19,14 @@ pub fn write_tool(path: &Path, content: &str) {
     input.write_all(content.as_bytes()).unwrap();
     drop(input);
     assert!(child.wait().unwrap().success(), "{}", path.display());
+}
+
+/// The caller's toolchain, found where rustup would find it, for a test that
+/// gives its command a `HOME` of its own.
+#[allow(dead_code)]
+pub fn rustup_home() -> PathBuf {
+    std::env::var_os("RUSTUP_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(".rustup"),
+        PathBuf::from,
+    )
 }

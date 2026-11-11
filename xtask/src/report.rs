@@ -235,6 +235,12 @@ fn section(text: &mut String, heading: &str, lines: Vec<String>) {
 }
 
 impl Report {
+    /// How many steps that spend were left out of the run, for a caller that
+    /// ran the journey with them.
+    pub fn with_left_out(self, left_out: usize) -> Report {
+        Report { left_out, ..self }
+    }
+
     /// The nightly job passes its checks. A report on its own has none.
     pub fn markdown(&self, checks: &[(&str, &str)]) -> String {
         let mut text = format!("# Nightly report for `{}`\n\n", self.commit);

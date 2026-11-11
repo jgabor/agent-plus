@@ -150,6 +150,10 @@ impl Repo {
             .env("PATH", path)
             .env("TMPDIR", &self.temp)
             .env("CARGO_HOME", self.temp.join("cargo-home"))
+            // The nightly reads the paid checks' key from `HOME`, so a test
+            // must never see the owner's. The toolchain stays where it is.
+            .env("HOME", self.temp.join("home"))
+            .env("RUSTUP_HOME", common::rustup_home())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "t")

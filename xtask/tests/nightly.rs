@@ -62,6 +62,12 @@ struct Recorded<'a> {
     reason: &'a str,
 }
 
+const PAID_KEY: &str = ".config/agent-plus/paid-checks/anthropic-api-key";
+
+/// A journey step that records the key it was given, and passes.
+const KEY_SCRIPT: &str =
+    "#!/bin/sh\nprintf '%s' \"${ANTHROPIC_API_KEY-none}\" > \"$HOME/../key\"\n";
+
 const CLEAN: Recorded = Recorded {
     issue: 5,
     pr: 9,
@@ -173,6 +179,10 @@ impl Repo {
             .current_dir(&self.root)
             .env("PATH", path)
             .env("CARGO_HOME", self.root.parent().unwrap().join("cargo-home"))
+            // The nightly reads the paid checks' key from `HOME`, so a test
+            // must never see the owner's. The toolchain stays where it is.
+            .env("HOME", self.home())
+            .env("RUSTUP_HOME", common::rustup_home())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")
@@ -180,6 +190,22 @@ impl Repo {
             .env_remove("XTASK_FUZZ_SECONDS")
             .env_remove("XTASK_MUTATION_SECONDS");
         command
+    }
+
+    fn home(&self) -> PathBuf {
+        self.root.parent().unwrap().join("home")
+    }
+
+    /// Puts a key where the nightly looks for the paid checks' key.
+    fn set_paid_key(&self, key: &str) {
+        let path = self.home().join(PAID_KEY);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, key).unwrap();
+    }
+
+    /// What a step running `harness/journey/key.sh` saw of the key.
+    fn key_seen(&self, step: u32) -> String {
+        fs::read_to_string(self.root.join(format!("target/journey/step-{step}/key"))).unwrap()
     }
 
     fn write(&self, path: &str, content: &str) {
@@ -908,6 +934,96 @@ fn a_journey_level_with_the_ledger_passes() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
         repo.comment().contains("- pass journey\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+/// The fixture's step 2 spends. With the key, it runs and counts like any
+/// other step, and so does step 3, which needs it.
+#[test]
+fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
+    let repo = Repo::with(
+        "paid-key",
+        "fn main() {}\n",
+        &[("harness/journey/ok.sh", KEY_SCRIPT)],
+    );
+    repo.set_paid_key("sk-test\n");
+    repo.set_roadmap_issues("OPEN", "typed by hand", Some("typed by hand"));
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("journey 3 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!stdout(&output).contains("sk-test"), "{}", stdout(&output));
+    assert!(!stderr(&output).contains("sk-test"), "{}", stderr(&output));
+    // Only a step that spends gets the key.
+    assert_eq!(repo.key_seen(1), "none");
+    assert_eq!(repo.key_seen(2), "sk-test");
+    assert_eq!(repo.key_seen(3), "none");
+    let comment = repo.comment();
+    assert!(
+        comment.contains("Journey steps that spend money, and weren't run: 0\n"),
+        "{comment}"
+    );
+    let details = fs::read_to_string(repo.bin.join("edited-159")).unwrap();
+    assert!(
+        details
+            .contains("- [x] Step 1: first\n- [x] Step 2: model\n- [x] Step 3: after the model\n"),
+        "{details}"
+    );
+}
+
+#[test]
+fn nightly_without_the_paid_checks_key_runs_no_spend_step() {
+    let repo = Repo::with(
+        "no-paid-key",
+        "fn main() {}\n",
+        &[("harness/journey/ok.sh", KEY_SCRIPT)],
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("journey 1 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!repo.root.join("target/journey/step-2/key").exists());
+    assert!(
+        repo.comment()
+            .contains("Journey steps that spend money, and weren't run: 2\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+/// The ledger counts no step that spends, so a passing one can't hide a step
+/// that fell.
+#[test]
+fn a_passing_spend_step_does_not_hide_a_fall() {
+    let repo = Repo::new("paid-hides-fall");
+    repo.set_paid_key("sk-test");
+    repo.merge(
+        "Claims two (#9)",
+        30,
+        &Recorded {
+            proven: 0,
+            passing: 2,
+            ..CLEAN
+        },
+    );
+    repo.sync();
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("journey 3 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        repo.comment().contains("- fail journey\n"),
         "{}",
         repo.comment()
     );

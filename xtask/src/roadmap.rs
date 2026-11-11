@@ -28,7 +28,7 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
     let gh = Gh::new(&root);
     let (issues, prs) = (gh.roadmap_issues()?, gh.open_prs()?);
     let hold = lock::shared(&root)?;
-    let outcomes = journey::outcomes(&root)?;
+    let outcomes = journey::outcomes(&root, None)?;
     // Only the details count proven promises, which takes a run of the tests.
     let score = match details {
         true => Some(score::compute(&root, &testrun::run(&root, &hold)?)?),

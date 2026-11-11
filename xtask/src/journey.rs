@@ -36,6 +36,9 @@ pub struct Outcome {
     pub name: String,
     pub milestone: String,
     pub state: &'static str,
+    /// The step spends money, or needs a step that does, so the merge sequence
+    /// leaves it out.
+    pub spends: bool,
 }
 
 /// Prints each step and the count. It exits 0 whenever it could run, because
@@ -43,7 +46,7 @@ pub struct Outcome {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let _hold = lock::shared(&root)?;
-    let (passing, steps) = tally(&walk(&root, |line| println!("{line}"))?);
+    let (passing, steps) = tally(&walk(&root, None, |line| println!("{line}"))?);
     println!("journey {passing} of {steps}");
     Ok(Verdict::Pass)
 }
@@ -51,13 +54,15 @@ pub fn run() -> Result<Verdict, Problem> {
 /// How many steps pass, and how many there are, for a caller whose stdout is
 /// its result. The caller holds the activity lock.
 pub fn count(root: &Path) -> Result<(usize, usize), Problem> {
-    Ok(tally(&outcomes(root)?))
+    Ok(tally(&outcomes(root, None)?))
 }
 
 /// Each step's result in journey order, for a caller whose stdout is its
-/// result. The caller holds the activity lock.
-pub fn outcomes(root: &Path) -> Result<Vec<Outcome>, Problem> {
-    walk(root, |line| eprintln!("{line}"))
+/// result. The caller holds the activity lock. With a model provider's key,
+/// the steps that spend money run too, and only they see it, as
+/// `ANTHROPIC_API_KEY`.
+pub fn outcomes(root: &Path, key: Option<&str>) -> Result<Vec<Outcome>, Problem> {
+    walk(root, key, |line| eprintln!("{line}"))
 }
 
 /// The milestones, in roadmap order.
@@ -82,17 +87,25 @@ pub fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     (passing, outcomes.len())
 }
 
-fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
+fn walk(root: &Path, key: Option<&str>, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
 
     let mut passed = HashSet::new();
+    let mut spending = HashSet::new();
     let mut outcomes = Vec::new();
     for step in &steps {
-        let word = if step.spend || !step.needs.iter().all(|need| passed.contains(need)) {
+        let spends = step.spend || step.needs.iter().any(|need| spending.contains(need));
+        if spends {
+            spending.insert(step.id);
+        }
+        let given = if step.spend { key } else { None };
+        let word = if (step.spend && key.is_none())
+            || !step.needs.iter().all(|need| passed.contains(need))
+        {
             "skip"
-        } else if run_step(root, &journey, &bin, step)? {
+        } else if run_step(root, &journey, &bin, step, given)? {
             passed.insert(step.id);
             "pass"
         } else {
@@ -104,6 +117,7 @@ fn walk(root: &Path, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
             name: step.name.clone(),
             milestone: step.milestone.clone(),
             state: word,
+            spends,
         });
     }
     Ok(outcomes)
@@ -256,7 +270,13 @@ fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     Ok(bin)
 }
 
-fn run_step(root: &Path, journey: &Path, bin: &Path, step: &Step) -> Result<bool, Problem> {
+fn run_step(
+    root: &Path,
+    journey: &Path,
+    bin: &Path,
+    step: &Step,
+    key: Option<&str>,
+) -> Result<bool, Problem> {
     if let Some(floor) = &step.floor
         && !floor_check_exists(root, floor)?
     {
@@ -275,12 +295,17 @@ fn run_step(root: &Path, journey: &Path, bin: &Path, step: &Step) -> Result<bool
         fs::create_dir_all(path)
             .map_err(|e| Problem(format!("couldn't create {}: {e}", path.display())))?;
     }
-    let status = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg(&script)
         .current_dir(&work)
         .env_clear()
         .env("HOME", &home)
-        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    if let Some(key) = key {
+        command.env("ANTHROPIC_API_KEY", key);
+    }
+    let status = command
         .stdin(Stdio::null())
         .stdout(Stdio::from(io::stderr()))
         .status()

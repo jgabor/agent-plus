@@ -89,6 +89,7 @@ enum Lease {
 struct Status {
     id: u64,
     parked: bool,
+    thread: Option<String>,
     branch: Option<String>,
     lease: Lease,
 }
@@ -102,6 +103,7 @@ impl Status {
         let mut status = Status {
             id: comment.id,
             parked: false,
+            thread: None,
             branch: None,
             lease: Lease::Unreadable,
         };
@@ -115,6 +117,7 @@ impl Status {
             let value = value.trim();
             match name {
                 "State" => status.parked = value.eq_ignore_ascii_case("parked"),
+                "Thread" => status.thread = (!value.is_empty()).then(|| value.to_string()),
                 "Branch" => {
                     let branch = value.trim_matches('`');
                     status.branch = (!branch.is_empty()).then(|| branch.to_string());
@@ -137,6 +140,51 @@ impl Lease {
     fn is_after(&self, now: i64) -> bool {
         matches!(self, Lease::Until(until) if *until > now)
     }
+
+    fn order(&self) -> i64 {
+        match self {
+            Lease::Until(until) => *until,
+            Lease::Unreadable => i64::MIN,
+        }
+    }
+}
+
+/// The status comment of the last claim: the one with the latest lease,
+/// because every edit renews it.
+fn latest(statuses: &[Status]) -> Option<&Status> {
+    statuses.iter().max_by_key(|s| (s.lease.order(), s.id))
+}
+
+/// The status comment of the live claim on an issue, if it has one: the
+/// lowest live one, on an open, unparked, `in-progress` issue.
+fn live_claim<'a>(issue: &Issue, statuses: &'a [Status], now: i64) -> Option<&'a Status> {
+    if !issue.open || is_parked(issue) || !has(issue, IN_PROGRESS) {
+        return None;
+    }
+    statuses.iter().find(|status| status.is_live(now))
+}
+
+fn thread_of(status: &Status) -> &str {
+    status.thread.as_deref().unwrap_or("unknown")
+}
+
+/// Why this thread may not prepare or merge the issue's PR, if it may not. An
+/// issue with a live claim is the holder's alone. With none, anyone may.
+pub fn refusal(issue: &Issue, owner: &str, now: i64, thread: Option<&str>) -> Option<String> {
+    let statuses = statuses_by(issue, owner);
+    let holder = thread_of(live_claim(issue, &statuses, now)?);
+    if thread == Some(holder) {
+        return None;
+    }
+    let number = issue.number;
+    Some(match thread {
+        Some(thread) => format!(
+            "#{number} is held by thread `{holder}`, not `{thread}`, so only that thread can prepare or merge its PR"
+        ),
+        None => format!(
+            "#{number} is held by thread `{holder}`, so only that thread can prepare or merge its PR, with `--thread`"
+        ),
+    })
 }
 
 fn touches(body: &str) -> Vec<String> {
@@ -193,8 +241,13 @@ enum State {
     Claimed,
     Unavailable,
     Blocked,
-    Abandoned { branch: Option<String> },
-    Available,
+    Abandoned {
+        branch: Option<String>,
+    },
+    /// `branch` is where an issue that comes back from parking continues.
+    Available {
+        branch: Option<String>,
+    },
 }
 
 impl State {
@@ -206,12 +259,20 @@ impl State {
             State::Unavailable => "unavailable",
             State::Blocked => "blocked",
             State::Abandoned { .. } => "abandoned",
-            State::Available => "available",
+            State::Available { .. } => "available",
         }
     }
 
     fn claimable(&self) -> bool {
-        matches!(self, State::Abandoned { .. } | State::Available)
+        matches!(self, State::Abandoned { .. } | State::Available { .. })
+    }
+
+    /// The branch a claim must continue on.
+    fn branch(&self) -> Option<&String> {
+        match self {
+            State::Abandoned { branch } | State::Available { branch } => branch.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -300,8 +361,20 @@ impl<'a> View<'a> {
         }
         Ok(match expired {
             Some(branch) => State::Abandoned { branch },
-            None => State::Available,
+            None => State::Available {
+                branch: self.returning(issue)?,
+            },
         })
+    }
+
+    /// The branch of the last claim, if GitHub still has it, so that an issue
+    /// back from parking continues where its PR is.
+    fn returning(&self, issue: &Issue) -> Result<Option<String>, Problem> {
+        let statuses = self.statuses(issue);
+        let Some(branch) = latest(&statuses).and_then(|s| s.branch.clone()) else {
+            return Ok(None);
+        };
+        Ok(self.forge.branch_date(&branch)?.map(|_| branch))
     }
 
     /// For an `in-progress` issue: `None` if it's held, or `Some` with the
@@ -325,13 +398,7 @@ impl<'a> View<'a> {
         if statuses.iter().any(|s| s.lease.is_after(self.now)) {
             return Ok(None);
         }
-        let newest = statuses
-            .iter()
-            .max_by_key(|s| match s.lease {
-                Lease::Until(until) => until,
-                Lease::Unreadable => i64::MIN,
-            })
-            .expect("statuses isn't empty");
+        let newest = latest(&statuses).expect("statuses isn't empty");
         let Some(branch) = &newest.branch else {
             return Ok(Some(None));
         };
@@ -413,10 +480,7 @@ fn next(
         if any_overlap(&paths, &taken) {
             continue;
         }
-        let branch = match state {
-            State::Abandoned { branch } => branch.clone(),
-            _ => None,
-        };
+        let branch = state.branch().cloned();
         let worktree = branch.as_ref().and_then(|b| worktrees.get(b).cloned());
         taken.extend(paths.iter().cloned());
         entries.push(Entry {
@@ -466,7 +530,7 @@ fn worktrees(root: &Path) -> Result<HashMap<String, String>, Problem> {
     Ok(found)
 }
 
-fn now_seconds() -> Result<i64, Problem> {
+pub fn now_seconds() -> Result<i64, Problem> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| Problem(format!("the clock is before 1970: {e}")))?;
@@ -482,7 +546,11 @@ pub fn run_next() -> Result<Verdict, Problem> {
 
 #[derive(Debug, PartialEq)]
 enum Claim {
-    Won { comment: u64 },
+    /// `replaced` is the thread that held the issue last, if it isn't this one.
+    Won {
+        comment: u64,
+        replaced: Option<String>,
+    },
     Lost(String),
 }
 
@@ -513,7 +581,7 @@ fn claim(
     if !state.claimable() {
         return Ok(Claim::Lost(format!("#{number} is {}", state.word())));
     }
-    if let State::Abandoned { branch: Some(kept) } = state
+    if let Some(kept) = state.branch()
         && kept != branch
     {
         return Ok(Claim::Lost(format!(
@@ -528,8 +596,11 @@ fn claim(
     }
 
     let body = render_status(thread, branch, now + LEASE_SECONDS, nonce);
-    let earlier = view
-        .statuses(issue)
+    let statuses = view.statuses(issue);
+    let replaced = latest(&statuses)
+        .and_then(|status| status.thread.clone())
+        .filter(|last| last != thread);
+    let earlier = statuses
         .into_iter()
         .find(|status| !status.is_live(now) && status.lease != Lease::Unreadable);
     let mine = match earlier {
@@ -551,7 +622,10 @@ fn claim(
         .find(|status| status.is_live(now));
     let eligible = after.open && !is_parked(&after);
     if intact && eligible && winner.is_some_and(|status| status.id == mine) {
-        return Ok(Claim::Won { comment: mine });
+        return Ok(Claim::Won {
+            comment: mine,
+            replaced,
+        });
     }
     if intact {
         let retired = body.replace("**State:** working", "**State:** parked");
@@ -607,10 +681,11 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
     let nonce = format!("{}-{nanos}", std::process::id());
     let thread = thread.unwrap_or("unknown");
     match claim(&Gh::new(&root), parsed, branch, thread, now, &nonce)? {
-        Claim::Won { comment } => {
+        Claim::Won { comment, replaced } => {
             println!(
-                "{{\"issue\":{parsed},\"comment\":{comment},\"branch\":{}}}",
-                quoted(branch)
+                "{{\"issue\":{parsed},\"comment\":{comment},\"branch\":{},\"replaced\":{}}}",
+                quoted(branch),
+                replaced.as_deref().map_or("null".to_string(), quoted)
             );
             Ok(Verdict::Pass)
         }
@@ -621,12 +696,100 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
     }
 }
 
+/// Replaces the status comment with `body`, for the thread that holds the
+/// issue: the live claim's thread, or with none, the last claim's. It sets the
+/// `Thread` and `Lease until` lines, so every update renews the lease. Gives
+/// the comment's id, or why this thread may not.
+fn update_status(
+    forge: &dyn Forge,
+    number: u64,
+    thread: &str,
+    body: &str,
+    now: i64,
+) -> Result<Result<u64, String>, Problem> {
+    let shape = || {
+        Problem(format!(
+            "a status update is a status comment: `{STATUS_MARK}`, then a `**Thread:**` and a `**Lease until:**` line"
+        ))
+    };
+    if Status::parse(&Comment {
+        id: 0,
+        author: String::new(),
+        body: body.to_string(),
+    })
+    .is_none()
+    {
+        return Err(shape());
+    }
+    let mut thread_line = false;
+    let mut lease_line = false;
+    let lease = stamp(now + LEASE_SECONDS);
+    let mut written: String = body
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("**Thread:**") {
+                thread_line = true;
+                format!("**Thread:** {thread}")
+            } else if line.trim_start().starts_with("**Lease until:**") {
+                lease_line = true;
+                format!("**Lease until:** {lease}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    written.push('\n');
+    if !thread_line || !lease_line {
+        return Err(shape());
+    }
+
+    let issue = forge.issue(number)?;
+    let statuses = statuses_by(&issue, &forge.owner()?);
+    let Some(current) = live_claim(&issue, &statuses, now).or_else(|| latest(&statuses)) else {
+        return Ok(Err(format!(
+            "#{number} has no status comment. Claim it first"
+        )));
+    };
+    let holder = thread_of(current);
+    if holder != thread {
+        return Ok(Err(format!(
+            "#{number} is held by thread `{holder}`, not `{thread}`, so only that thread can update its status"
+        )));
+    }
+    forge.edit_comment(current.id, &written)?;
+    Ok(Ok(current.id))
+}
+
+pub fn run_status(number: &str, thread: &str) -> Result<Verdict, Problem> {
+    let parsed: u64 = number.parse().map_err(|_| {
+        Problem(format!(
+            "`status` takes an issue number, but got `{number}`"
+        ))
+    })?;
+    let mut body = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
+        .map_err(|e| Problem(format!("couldn't read the status from stdin: {e}")))?;
+    let root = workspace::root()?;
+    match update_status(&Gh::new(&root), parsed, thread, &body, now_seconds()?)? {
+        Ok(comment) => {
+            println!("{{\"issue\":{parsed},\"comment\":{comment}}}");
+            Ok(Verdict::Pass)
+        }
+        Err(reason) => {
+            eprintln!("status: {reason}");
+            Ok(Verdict::Fail)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Claim, claim, overlap, seconds, set_up, stamp};
+    use super::{Claim, claim, next, overlap, refusal, seconds, set_up, stamp, update_status};
     use crate::Problem;
     use crate::forge::{Comment, Forge, Issue};
     use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -805,7 +968,13 @@ mod tests {
     #[test]
     fn a_first_claim_labels_and_posts_a_full_status() {
         let forge = Fake::new(vec![issue(vec![])]);
-        assert_eq!(try_claim(&forge), Claim::Won { comment: 100 });
+        assert_eq!(
+            try_claim(&forge),
+            Claim::Won {
+                comment: 100,
+                replaced: None
+            }
+        );
         assert_eq!(forge.writes(), ["post 7", "label 7 in-progress"]);
         let body = forge.body_of(100);
         for line in [
@@ -828,7 +997,13 @@ mod tests {
         for (state, lease) in [("parked", NOW + 3600), ("working", NOW - 60)] {
             let earlier = comment(40, OWNER, &status(state, lease));
             let forge = Fake::new(vec![issue(vec![earlier])]);
-            assert_eq!(try_claim(&forge), Claim::Won { comment: 40 });
+            assert_eq!(
+                try_claim(&forge),
+                Claim::Won {
+                    comment: 40,
+                    replaced: None
+                }
+            );
             assert_eq!(forge.writes(), ["edit 40", "label 7 in-progress"]);
         }
     }
@@ -949,7 +1124,13 @@ mod tests {
         assert!(matches!(try_claim_on(&wrong, "7-x"), Claim::Lost(_)));
         assert_eq!(wrong.writes(), Vec::<String>::new());
         let right = taken();
-        assert_eq!(try_claim_on(&right, "b"), Claim::Won { comment: 40 });
+        assert_eq!(
+            try_claim_on(&right, "b"),
+            Claim::Won {
+                comment: 40,
+                replaced: None
+            }
+        );
     }
 
     #[test]
@@ -990,6 +1171,185 @@ mod tests {
             assert!(matches!(try_claim(&forge), Claim::Lost(_)));
             assert_eq!(forge.writes(), Vec::<String>::new());
         }
+    }
+
+    fn status_of(state: &str, lease: i64, thread: &str) -> String {
+        format!(
+            "<!-- status -->\n**State:** {state}\n**Thread:** {thread}\n**Branch:** `b`\n**Lease until:** {}\n**Done:** x\n",
+            stamp(lease)
+        )
+    }
+
+    fn held_by(thread: &str) -> Issue {
+        let mut held = issue(vec![comment(
+            40,
+            OWNER,
+            &status_of("working", NOW + 3600, thread),
+        )]);
+        held.labels.push("in-progress".to_string());
+        held
+    }
+
+    /// #121 on 2026-11-11: parked on a question, answered, and dispatched
+    /// again, which must continue on the branch its PR is on.
+    #[test]
+    fn a_returning_issue_continues_on_its_branch() {
+        let mut parked = issue(vec![comment(
+            40,
+            OWNER,
+            &status_of("parked", NOW - 3600, "old"),
+        )]);
+        parked.labels.push("answer-needed".to_string());
+        let mut forge = Fake::new(vec![parked]);
+        forge.branch_date = Some(stamp(NOW - 7200));
+        assert_eq!(next(&forge, NOW, &HashMap::new()).unwrap(), []);
+
+        forge.issues.borrow_mut()[0]
+            .labels
+            .retain(|l| l != "answer-needed");
+        let worktrees = HashMap::from([("b".to_string(), "/w/b".to_string())]);
+        let entries = next(&forge, NOW, &worktrees).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].branch.as_deref(), Some("b"));
+        assert_eq!(entries[0].worktree.as_deref(), Some("/w/b"));
+
+        assert!(matches!(try_claim_on(&forge, "7-x"), Claim::Lost(_)));
+        assert_eq!(forge.writes(), Vec::<String>::new());
+        assert_eq!(
+            try_claim_on(&forge, "b"),
+            Claim::Won {
+                comment: 40,
+                replaced: Some("old".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn a_returning_issue_whose_branch_is_gone_starts_fresh() {
+        let forge = Fake::new(vec![issue(vec![comment(
+            40,
+            OWNER,
+            &status_of("parked", NOW - 3600, "old"),
+        )])]);
+        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        assert_eq!(entries[0].branch, None);
+        assert!(matches!(try_claim_on(&forge, "7-x"), Claim::Won { .. }));
+    }
+
+    #[test]
+    fn a_claim_replaces_no_thread_when_it_is_the_first_or_the_same() {
+        let forge = Fake::new(vec![issue(vec![])]);
+        assert_eq!(
+            try_claim(&forge),
+            Claim::Won {
+                comment: 100,
+                replaced: None
+            }
+        );
+        let forge = Fake::new(vec![issue(vec![comment(
+            40,
+            OWNER,
+            &status_of("parked", NOW - 3600, "thread"),
+        )])]);
+        assert_eq!(
+            try_claim(&forge),
+            Claim::Won {
+                comment: 40,
+                replaced: None
+            }
+        );
+    }
+
+    #[test]
+    fn only_the_holder_passes_a_live_claim() {
+        let held = held_by("t");
+        assert_eq!(refusal(&held, OWNER, NOW, Some("t")), None);
+        for thread in [Some("u"), None] {
+            let why = refusal(&held, OWNER, NOW, thread).unwrap();
+            assert!(why.contains("`t`"), "{why}");
+        }
+    }
+
+    #[test]
+    fn with_no_live_claim_anyone_passes() {
+        let mut parked = held_by("t");
+        parked.labels.push("land-needed".to_string());
+        let mut unlabeled = held_by("t");
+        unlabeled.labels.clear();
+        let mut closed = held_by("t");
+        closed.open = false;
+        let mut expired = held_by("t");
+        expired.comments[0].body = status_of("working", NOW - 60, "t");
+        let mut retired = held_by("t");
+        retired.comments[0].body = status_of("parked", NOW + 3600, "t");
+        let stranger = {
+            let mut held = held_by("t");
+            held.comments[0].author = "stranger".to_string();
+            held
+        };
+        for issue in [parked, unlabeled, closed, expired, retired, stranger] {
+            for thread in [Some("t"), Some("u"), None] {
+                assert_eq!(refusal(&issue, OWNER, NOW, thread), None);
+            }
+        }
+    }
+
+    #[test]
+    fn the_lowest_live_status_holds_the_claim() {
+        let mut held = held_by("t");
+        held.comments.push(comment(
+            30,
+            OWNER,
+            &status_of("working", NOW + 3600, "first"),
+        ));
+        assert_eq!(refusal(&held, OWNER, NOW, Some("first")), None);
+        assert!(refusal(&held, OWNER, NOW, Some("t")).is_some());
+    }
+
+    fn update(forge: &Fake, thread: &str, body: &str) -> Result<u64, String> {
+        update_status(forge, 7, thread, body, NOW).unwrap()
+    }
+
+    #[test]
+    fn the_holder_updates_its_status_and_renews_the_lease() {
+        let forge = Fake::new(vec![held_by("t")]);
+        let body = status_of("working", NOW - 99_999, "t").replace("x\n", "tests pass\n");
+        assert_eq!(update(&forge, "t", &body), Ok(40));
+        assert_eq!(forge.writes(), ["edit 40"]);
+        let written = forge.body_of(40);
+        assert!(written.contains("**Done:** tests pass\n"), "{written}");
+        let lease = format!("**Lease until:** {}\n", stamp(NOW + 12 * 3600));
+        assert!(written.contains(&lease), "{written}");
+    }
+
+    #[test]
+    fn another_thread_can_not_update_the_status() {
+        let forge = Fake::new(vec![held_by("t")]);
+        let why = update(&forge, "u", &status_of("working", NOW, "u")).unwrap_err();
+        assert!(why.contains("`t`"), "{why}");
+        assert_eq!(forge.writes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_last_holder_updates_a_parked_or_closed_issue() {
+        let mut closed = held_by("t");
+        closed.open = false;
+        closed.comments[0].body = status_of("parked", NOW - 60, "t");
+        let forge = Fake::new(vec![closed]);
+        let body = status_of("parked", NOW, "t");
+        assert!(update(&forge, "u", &body).is_err());
+        assert_eq!(update(&forge, "t", &body), Ok(40));
+    }
+
+    #[test]
+    fn a_status_update_must_be_a_status_comment() {
+        let forge = Fake::new(vec![held_by("t")]);
+        for body in ["just words\n", "<!-- status -->\n**State:** working\n"] {
+            assert!(update_status(&forge, 7, "t", body, NOW).is_err(), "{body}");
+        }
+        let empty = Fake::new(vec![issue(vec![])]);
+        assert!(update(&empty, "t", &status_of("working", NOW, "t")).is_err());
+        assert_eq!(forge.writes(), Vec::<String>::new());
     }
 
     fn git(dir: &Path, args: &[&str]) {

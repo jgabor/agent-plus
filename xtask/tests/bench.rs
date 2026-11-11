@@ -19,6 +19,10 @@ const COUNTS_RUNS: &str = "use std::io::Write;\nfn main() {\n    if std::env::ar
 const NO_BOOT: &str = "fn main() -> std::process::ExitCode {\n    if std::env::args().nth(1).as_deref() == Some(\"--version\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    eprintln!(\"usage: ap --version\");\n    std::process::ExitCode::from(2)\n}\n";
 const BOOT_FAILS: &str = "fn main() -> std::process::ExitCode {\n    if std::env::args().nth(1).as_deref() == Some(\"--version\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    eprintln!(\"ap: no kvm\");\n    std::process::ExitCode::from(1)\n}\n";
 const FAST: &str = "fn main() {}\n";
+const BUILD_BUDGETS: &str = "[[budget]]\nkey = \"noop_build_ms\"\nname = \"build\"\ntarget = 100.0\nband_pct = 10.0\nband_abs = 25.0\n";
+/// An `ap build` that fails unless it has an approval file and a directory
+/// with an Agentfile, and counts its runs in its `HOME`.
+const BUILDS: &str = "use std::io::Write;\nfn main() -> std::process::ExitCode {\n    let args: Vec<String> = std::env::args().skip(1).collect();\n    if args.first().map(String::as_str) != Some(\"build\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    let approved = args.iter().find_map(|a| a.strip_prefix(\"--approve=\")).and_then(|f| std::fs::read_to_string(f).ok());\n    let dir = std::path::Path::new(args.last().unwrap());\n    if !approved.is_some_and(|a| a.contains(\"POLICY +\")) || !dir.join(\"Agentfile\").is_file() {\n        eprintln!(\"ap: needs approval {args:?}\");\n        return std::process::ExitCode::from(1);\n    }\n    // sleep\n    let home = std::env::var(\"HOME\").unwrap();\n    let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{home}/builds\")).unwrap();\n    writeln!(runs, \"build\").unwrap();\n    std::process::ExitCode::SUCCESS\n}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
 const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
@@ -307,6 +311,81 @@ fn a_base_whose_boot_fails_is_a_problem() {
     let repo = Repo::with("boot-broken", BOOT_BUDGETS, BOOT_FAILS, &[]);
     repo.plant(BOOTS);
     assert_problem(&repo.bench(), "no kvm");
+}
+
+fn slow_build() -> String {
+    BUILDS.replace(
+        "// sleep",
+        "std::thread::sleep(std::time::Duration::from_millis(150));",
+    )
+}
+
+#[test]
+fn noop_build_is_measured_for_the_base_and_the_candidate() {
+    let repo = Repo::with("build", BUILD_BUDGETS, BUILDS, &[]);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass noop_build_ms base "), "{out}");
+    assert!(!out.contains("skip noop_build_ms"), "{out}");
+    assert!(repo.record().contains("noop_build_ms = "));
+}
+
+#[test]
+fn a_planted_noop_build_slowdown_fails() {
+    let repo = Repo::with("build-slow", BUILD_BUDGETS, BUILDS, &[]);
+    repo.set_gh("echo '[]'\n");
+    repo.plant(&slow_build());
+    let output = repo.bench();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("fail noop_build_ms "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn each_binary_builds_once_to_warm_up_in_a_home_of_its_own() {
+    let repo = Repo::with("build-warm", BUILD_BUDGETS, BUILDS, &[]);
+    assert_passes(&repo.bench());
+    for binary in ["base", "candidate"] {
+        let path = repo.root.join("target/bench/noop/home").join(binary);
+        let runs = fs::read_to_string(path.join("builds")).unwrap();
+        assert_eq!(runs.lines().count(), 1 + 15, "{binary}");
+    }
+}
+
+#[test]
+fn a_base_with_no_build_command_is_no_comparison() {
+    let repo = Repo::with("build-none", BUILD_BUDGETS, NO_BOOT, &[]);
+    repo.plant(BUILDS);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("no-comparison noop_build_ms candidate "),
+        "{out}"
+    );
+    assert!(repo.record().contains("noop_build_ms = "));
+}
+
+#[test]
+fn a_candidate_with_no_build_command_is_a_problem() {
+    let repo = Repo::with("build-lost", BUILD_BUDGETS, BUILDS, &[]);
+    repo.plant(NO_BOOT);
+    assert_problem(&repo.bench(), "build");
+}
+
+#[test]
+fn a_base_whose_build_fails_is_a_problem() {
+    let broken = BUILDS.replace(
+        "// sleep",
+        "eprintln!(\"ap: broken store\");\n    return std::process::ExitCode::from(1);",
+    );
+    let repo = Repo::with("build-broken", BUILD_BUDGETS, &broken, &[]);
+    repo.plant(BUILDS);
+    assert_problem(&repo.bench(), "broken store");
 }
 
 #[test]

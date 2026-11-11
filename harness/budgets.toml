@@ -22,6 +22,8 @@ target = 64.0
 key = "noop_build_ms"
 name = "`ap build` with nothing changed"
 target = 100.0
+band_pct = 10.0
+band_abs = 5.0
 
 [[budget]]
 key = "binary_bytes"

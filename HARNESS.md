@@ -201,7 +201,7 @@ directory, and only `HOME` and `PATH` in its environment.
 | Boot to guest init | under 150 ms | 10% or 5 ms, whichever is larger |
 | `ap run` to a ready harness, with layers cached | under 1 s | to be set |
 | Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
-| `ap build` with nothing changed | under 100 ms | to be set |
+| `ap build` with nothing changed | under 100 ms | 10% or 5 ms, whichever is larger |
 | Desktop cost until first use | disk only | none |
 | Stripped release binary | to be set | to be set |
 | `ap --version` | none | 20% or 2 ms, whichever is larger |
@@ -219,6 +219,11 @@ Boot time runs from spawning `ap boot` until its ready line appears, by the
 host's clock. Each build gets one warm-up run first, and all runs share one
 `HOME`, so no download is timed. A base with no `ap boot` is reported as no
 comparison, and the candidate's value is still recorded.
+
+A build with nothing changed is timed on a fixed directory, the Agentfile of
+step 5, with its grants approved through `--approve`. Each build of `ap` has
+its own `HOME`, and builds the directory once first, so every timed run is a
+rebuild. A base with no `ap build` is reported as no comparison.
 
 ## Floors
 
@@ -774,6 +779,6 @@ The harness is built before product features.
 | Limit on model spend for workers and T3 | No unattended T3 runs |
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
-| Bands for every budget except boot and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
+| Bands for every budget except boot, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

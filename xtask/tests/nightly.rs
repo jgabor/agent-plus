@@ -68,14 +68,6 @@ const PAID_KEY: &str = ".config/agent-plus/paid-checks/anthropic-api-key";
 const KEY_SCRIPT: &str =
     "#!/bin/sh\nprintf '%s' \"${ANTHROPIC_API_KEY-none}\" > \"$HOME/../key\"\n";
 
-/// The caller's toolchain, found where rustup would find it.
-fn rustup_home() -> PathBuf {
-    env::var_os("RUSTUP_HOME").map_or_else(
-        || PathBuf::from(env::var_os("HOME").expect("HOME is set")).join(".rustup"),
-        PathBuf::from,
-    )
-}
-
 const CLEAN: Recorded = Recorded {
     issue: 5,
     pr: 9,
@@ -190,7 +182,7 @@ impl Repo {
             // The nightly reads the paid checks' key from `HOME`, so a test
             // must never see the owner's. The toolchain stays where it is.
             .env("HOME", self.home())
-            .env("RUSTUP_HOME", rustup_home())
+            .env("RUSTUP_HOME", common::rustup_home())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")

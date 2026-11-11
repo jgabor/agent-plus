@@ -153,9 +153,8 @@ comment still names your thread, and stop if it doesn't.
 ### Working in parallel
 
 - One issue gets one worktree and one branch, `<issue>-<short-slug>`, cut from
-  the latest `origin/main`. T3 Code doesn't run [`t3.json`](t3.json) for a
-  worktree that `t3_thread_launch` creates, so run
-  `sh scripts/setup-worktree.sh` once in a new worktree. It's safe to repeat.
+  the latest `origin/main`. `cargo xtask claim` sets the worktree up, as
+  [`t3.json`](t3.json) does for one that T3 Code makes.
 - Never work in the main checkout, and never touch another worktree.
 - Keep all state inside your worktree (see
   [Ways to hurt yourself](#ways-to-hurt-yourself)).

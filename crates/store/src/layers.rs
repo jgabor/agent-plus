@@ -25,7 +25,7 @@ impl Layers {
     /// Stores `data`, unless a layer with its digest is already there, and
     /// returns the digest. The layer appears under its final name complete
     /// and synced, or not at all.
-    pub fn put(&self, data: &[u8]) -> io::Result<String> {
+    pub fn put(&self, data: &[u8], level: i8) -> io::Result<String> {
         let digest = sha256(data);
         let path = self.dir.join(&digest);
         if path.try_exists()? {
@@ -36,7 +36,7 @@ impl Layers {
         }
         fs::create_dir_all(&self.dir)?;
         let (partial, mut file) = create_partial(&self.dir, &digest)?;
-        file.write_all(&crate::compress(data))?;
+        file.write_all(&crate::compress(data, level))?;
         file.sync_all()?;
         // Another writer may have finished first. Its file holds the same
         // bytes, so replacing it is harmless.

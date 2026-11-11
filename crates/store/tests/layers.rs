@@ -41,7 +41,7 @@ fn putting_a_layer_returns_the_sha256_of_its_bytes() {
     let dir = empty_root("digest");
     let layers = Layers::new(store_root(&dir));
 
-    let digest = layers.put(DATA).unwrap();
+    let digest = layers.put(DATA, 3).unwrap();
 
     assert_eq!(digest, sha256_of(DATA));
     assert_eq!(digest.len(), 64);
@@ -53,7 +53,7 @@ fn a_layer_lives_in_its_own_directory_under_the_store_root() {
     let root = store_root(&dir);
     let layers = Layers::new(&root);
 
-    let digest = layers.put(DATA).unwrap();
+    let digest = layers.put(DATA, 3).unwrap();
 
     let stored = root.join("zstd-layers").join(&digest);
     let frame = fs::read(&stored).unwrap();
@@ -68,11 +68,11 @@ fn putting_the_same_bytes_again_stores_nothing_new() {
     let dir = empty_root("again");
     let root = store_root(&dir);
     let layers = Layers::new(&root);
-    let digest = layers.put(DATA).unwrap();
+    let digest = layers.put(DATA, 3).unwrap();
     let stored = root.join("zstd-layers").join(&digest);
     let before = fs::metadata(&stored).unwrap();
 
-    assert_eq!(layers.put(DATA).unwrap(), digest);
+    assert_eq!(layers.put(DATA, 3).unwrap(), digest);
 
     let after = fs::metadata(&stored).unwrap();
     assert_eq!(files(&root.join("zstd-layers")), [digest]);
@@ -81,13 +81,34 @@ fn putting_the_same_bytes_again_stores_nothing_new() {
     assert_eq!(after.ino(), before.ino(), "the file wasn't replaced");
 }
 
+// spec(COMPRESSION): Layers are addressed by their uncompressed content, so changing the level recompresses layers without changing what is inside them.
+#[test]
+fn putting_the_same_bytes_at_another_level_recompresses_them() {
+    let dir = empty_root("level");
+    let root = store_root(&dir);
+    let layers = Layers::new(&root);
+    let data = sample();
+    let digest = layers.put(&data, 3).unwrap();
+    let stored = root.join("zstd-layers").join(&digest);
+    let at_3 = fs::read(&stored).unwrap();
+
+    assert_eq!(layers.put(&data, 19).unwrap(), digest);
+
+    let at_19 = fs::read(&stored).unwrap();
+    assert_eq!(files(&root.join("zstd-layers")), [digest.clone()]);
+    assert!(at_3.starts_with(&store::compress(&data, 3)));
+    assert!(at_19.starts_with(&store::compress(&data, 19)));
+    assert_ne!(at_3, at_19);
+    assert_eq!(layers.get(&digest).unwrap(), data);
+}
+
 #[test]
 fn a_layer_reads_back_as_the_same_bytes() {
     let dir = empty_root("read");
     let layers = Layers::new(store_root(&dir));
     let data = sample();
 
-    let digest = layers.put(&data).unwrap();
+    let digest = layers.put(&data, 3).unwrap();
 
     assert_eq!(layers.get(&digest).unwrap(), data);
 }
@@ -97,7 +118,7 @@ fn an_empty_layer_reads_back() {
     let dir = empty_root("empty");
     let layers = Layers::new(store_root(&dir));
 
-    let digest = layers.put(&[]).unwrap();
+    let digest = layers.put(&[], 3).unwrap();
 
     assert_eq!(layers.get(&digest).unwrap(), Vec::<u8>::new());
 }
@@ -107,11 +128,11 @@ fn a_stored_file_that_no_longer_matches_its_digest_is_an_error() {
     let dir = empty_root("mismatch");
     let root = store_root(&dir);
     let layers = Layers::new(&root);
-    let digest = layers.put(DATA).unwrap();
+    let digest = layers.put(DATA, 3).unwrap();
     // A valid frame, with other content, under the same name.
     fs::write(
         root.join("zstd-layers").join(&digest),
-        store::compress(b"other bytes"),
+        store::compress(b"other bytes", 3),
     )
     .unwrap();
 
@@ -126,7 +147,7 @@ fn a_stored_file_that_isnt_a_frame_is_an_error() {
     let dir = empty_root("garbage");
     let root = store_root(&dir);
     let layers = Layers::new(&root);
-    let digest = layers.put(DATA).unwrap();
+    let digest = layers.put(DATA, 3).unwrap();
     fs::write(root.join("zstd-layers").join(&digest), b"not zstd").unwrap();
 
     assert!(layers.get(&digest).is_err());
@@ -172,14 +193,14 @@ fn an_unfinished_file_is_never_taken_for_a_layer() {
         .map(|id| stored.join(format!(".{digest}.{}.{id}", std::process::id())))
         .collect();
     for path in &stale {
-        fs::write(path, &store::compress(DATA)[..8]).unwrap();
+        fs::write(path, &store::compress(DATA, 3)[..8]).unwrap();
     }
 
     assert_eq!(
         layers.get(&digest).unwrap_err().kind(),
         std::io::ErrorKind::NotFound
     );
-    assert_eq!(layers.put(DATA).unwrap(), digest);
+    assert_eq!(layers.put(DATA, 3).unwrap(), digest);
     assert_eq!(layers.get(&digest).unwrap(), DATA);
     assert!(stale.iter().all(|path| path.exists()));
 }
@@ -195,7 +216,7 @@ fn two_writers_of_the_same_layer_both_succeed() {
         .map(|_| {
             let root = root.clone();
             let data = data.clone();
-            thread::spawn(move || Layers::new(root).put(&data))
+            thread::spawn(move || Layers::new(root).put(&data, 3))
         })
         .collect();
     for writer in writers {
@@ -221,7 +242,7 @@ fn write_layers_until_killed() {
     loop {
         let mut data = base.clone();
         data.extend_from_slice(&i.to_le_bytes());
-        layers.put(&data).unwrap();
+        layers.put(&data, 3).unwrap();
         i += 1;
     }
 }

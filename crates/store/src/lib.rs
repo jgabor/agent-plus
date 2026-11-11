@@ -18,7 +18,7 @@ pub use approvals::Approvals;
 pub use layers::Layers;
 
 /// Compresses `data` into one zstd frame.
-pub fn compress(data: &[u8]) -> Vec<u8> {
+pub fn compress(data: &[u8], _level: i8) -> Vec<u8> {
     compress_to_vec(data, CompressionLevel::Fastest)
 }
 

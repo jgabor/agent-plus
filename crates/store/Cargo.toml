@@ -9,3 +9,4 @@ publish.workspace = true
 agentfile = { path = "../agentfile" }
 graviola = "0.4"
 ruzstd = "0.9"
+structured-zstd = "0.3.0"

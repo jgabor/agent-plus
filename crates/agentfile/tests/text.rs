@@ -88,6 +88,24 @@ fn anything_else_is_the_rest_of_the_line() {
     }
 }
 
+// spec(Text values): Whitespace at either end of the rest of the line isn't part of the value.
+#[test]
+fn whitespace_at_either_end_of_the_line_is_not_part_of_the_value() {
+    for (rest, value) in [
+        ("Be brief.  ", literal("Be brief.")),
+        ("  Be brief.", literal("Be brief.")),
+        ("Be brief.\t", literal("Be brief.")),
+        ("Be brief. \r", literal("Be brief.")),
+        (" Be  brief. ", literal("Be  brief.")),
+        ("./a.md ", path("./a.md")),
+        ("\"x\" ", literal("x")),
+        ("\" x \"\t", literal(" x ")),
+    ] {
+        assert_eq!(text_of(&format!("SYSTEM {rest}\n")), value, "{rest:?}");
+        assert_eq!(text_of(&format!("PROMPT {rest}\n")), value, "{rest:?}");
+    }
+}
+
 // spec(Text values): The values are `You are a careful reviewer.`, `Be concise.`, and `Say "hello" first.` In the third line, the rest of the line is not one quoted string, so the quotes are kept.
 #[test]
 fn the_single_line_examples_have_their_values() {

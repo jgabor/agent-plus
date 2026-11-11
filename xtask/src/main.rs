@@ -132,6 +132,9 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
 }
 
 fn main() -> ExitCode {
+    if let Some(code) = floors::stand_in_for_rustc() {
+        return code;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match run(&args) {

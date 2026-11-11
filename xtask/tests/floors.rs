@@ -338,9 +338,11 @@ fn a_weak_feature_on_a_package_something_enables_fails() {
 
 /// `demo` depends on `mid`, and `gate` is the platform condition on a package
 /// `win` that turns on the feature of `mid` that pulls in `cc`.
-fn feature_from_platform_workspace(name: &str, gate: &str) -> PathBuf {
+/// `demo` reaches `mid` through `edge`, and `win` turns on the feature of
+/// `mid` that pulls in `cc`, but only where `gate` holds.
+fn feature_from_platform_workspace(name: &str, edge: &str, gate: &str) -> PathBuf {
     let extra = format!(
-        "\n[dependencies]\nmid = {{ path = \"../../vendor/mid\" }}\n\n[target.'{gate}'.dependencies]\nwin = {{ path = \"../../vendor/win\" }}\n"
+        "\n[{edge}]\nmid = {{ path = \"../../vendor/mid\" }}\n\n[target.'{gate}'.{edge}]\nwin = {{ path = \"../../vendor/win\" }}\n"
     );
     let mid = package(
         "mid",
@@ -364,36 +366,58 @@ fn feature_from_platform_workspace(name: &str, gate: &str) -> PathBuf {
     )
 }
 
+#[track_caller]
+fn assert_floors_pass(output: &Output) {
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
+    assert!(stdout(output).contains("pass floors"), "{}", stdout(output));
+}
+
 #[test]
 fn a_feature_enabled_only_on_an_unsupported_platform_passes() {
-    let output = gate(&feature_from_platform_workspace(
-        "feature-windows",
-        "cfg(windows)",
-    ));
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        stdout(&output).contains("pass floors"),
-        "{}",
-        stdout(&output)
-    );
+    let root = feature_from_platform_workspace("feature-windows", "dependencies", "cfg(windows)");
+    assert_floors_pass(&gate(&root));
 }
 
 #[test]
 fn a_feature_enabled_only_on_macos_still_fails() {
-    let root = feature_from_platform_workspace("feature-macos", "cfg(target_os = \"macos\")");
+    let root = feature_from_platform_workspace(
+        "feature-macos",
+        "dependencies",
+        "cfg(target_os = \"macos\")",
+    );
     assert_floor_fails(&gate(&root), "cc");
 }
 
+#[test]
+fn a_host_side_feature_enabled_only_on_an_unsupported_platform_passes() {
+    let root = feature_from_platform_workspace(
+        "host-feature-windows",
+        "build-dependencies",
+        "cfg(windows)",
+    );
+    assert_floors_pass(&gate(&root));
+}
+
+#[test]
+fn a_host_side_feature_enabled_only_on_macos_still_fails() {
+    let root = feature_from_platform_workspace(
+        "host-feature-macos",
+        "build-dependencies",
+        "cfg(target_os = \"macos\")",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+const MACOS: &str = "'cfg(target_os = \"macos\")'";
+
 /// `demo` reaches `tool` through `edge`, and `tool` depends on `cc` only on
-/// macOS. Cargo resolves `tool` for the machine it runs on, so on Linux `cc`
-/// is invisible to `cargo tree --target`.
-fn host_side_workspace(name: &str, edge: &str, tool_extra: &str) -> PathBuf {
+/// `platform`, a macOS one. Cargo resolves `tool` for the machine it runs on,
+/// so on Linux `cc` is invisible to `cargo tree --target`.
+fn host_side_workspace(name: &str, edge: &str, platform: &str, tool_extra: &str) -> PathBuf {
     let extra = format!("\n[{edge}]\ntool = {{ path = \"../../vendor/tool\" }}\n");
     let tool = package(
         "tool",
-        &format!(
-            "{tool_extra}\n[target.'cfg(target_os = \"macos\")'.dependencies]\ncc = {{ path = \"../cc\" }}\n"
-        ),
+        &format!("{tool_extra}\n[target.{platform}.dependencies]\ncc = {{ path = \"../cc\" }}\n"),
     );
     workspace(
         name,
@@ -409,7 +433,7 @@ fn host_side_workspace(name: &str, edge: &str, tool_extra: &str) -> PathBuf {
 
 #[test]
 fn a_macos_only_dependency_of_a_build_dependency_still_fails() {
-    let root = host_side_workspace("host-build", "build-dependencies", "");
+    let root = host_side_workspace("host-build", "build-dependencies", MACOS, "");
     assert_floor_fails(&gate(&root), "cc");
 }
 
@@ -418,6 +442,29 @@ fn a_macos_only_dependency_of_a_proc_macro_still_fails() {
     let root = host_side_workspace(
         "host-proc-macro",
         "dependencies",
+        MACOS,
+        "\n[lib]\nproc-macro = true\n",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_dependency_of_a_build_dependency_named_by_a_macos_triple_still_fails() {
+    let root = host_side_workspace(
+        "host-build-triple",
+        "build-dependencies",
+        "aarch64-apple-darwin",
+        "",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_dependency_of_a_proc_macro_named_by_a_macos_triple_still_fails() {
+    let root = host_side_workspace(
+        "host-proc-macro-triple",
+        "dependencies",
+        "aarch64-apple-darwin",
         "\n[lib]\nproc-macro = true\n",
     );
     assert_floor_fails(&gate(&root), "cc");

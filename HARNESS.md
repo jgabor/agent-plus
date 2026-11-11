@@ -222,6 +222,7 @@ A failing floor blocks a merge regardless of scores.
 | A closed network stays closed | `floor_closed_network`, needed by step 10 |
 | A share can't reach outside its root | `floor_share_root`, needed by step 9 |
 | The guest can't run anything on the host | `floor_guest_host`, needed by step 4 |
+| On Linux, the process that runs a guest can't start a process or a program, or open a host file | `floor_vmm_confined`, needed by step 3 |
 | No check is removed while the sentence it quoted is still a promise | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
 

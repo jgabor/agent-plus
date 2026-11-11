@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::settings::{agent, word};
 use crate::text::one_quoted_string;
-use crate::{Error, Harness, Instruction, read_argument};
+use crate::{Error, Harness, Instruction, Network, read_argument};
 
 /// One `ENV` line.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +131,8 @@ fn together(instructions: &[Instruction], items: &[(usize, Item)]) -> Vec<Error>
         .and_then(|instruction| instruction.arguments.first())
         .and_then(|value| agent(value).ok())
         .map(|agent| agent.harness);
+    // `NETWORK` reports its own errors, and denies nothing until it has none.
+    let network = Network::read(instructions).ok();
     for (line, item) in items {
         let mut fail = |message: String| {
             errors.push(Error {
@@ -151,12 +153,24 @@ fn together(instructions: &[Instruction], items: &[(usize, Item)]) -> Vec<Error>
                 }
                 env.entry(key).or_insert(*line);
             }
-            Item::Secret(Secret { name: key, .. }) | Item::Seal(Secret { name: key, .. }) => {
+            Item::Secret(Secret {
+                name: key, hosts, ..
+            })
+            | Item::Seal(Secret {
+                name: key, hosts, ..
+            }) => {
                 let name = if matches!(item, Item::Secret(_)) {
                     "SECRET"
                 } else {
                     "SEAL"
                 };
+                for host in hosts {
+                    if network.as_ref().is_some_and(|network| network.denies(host)) {
+                        fail(format!(
+                            "`NETWORK` denies `{host}`, a bound host of `{key}`. Allow it, such as with `NETWORK +{host}`"
+                        ));
+                    }
+                }
                 if let Some(first) = env.get(key.as_str()) {
                     fail(format!(
                         "`ENV` sets `{key}` on line {first}, so it can't be a `{name}`"

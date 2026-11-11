@@ -105,20 +105,30 @@ impl Network {
                     self.address_decision(address, port).unwrap_or(self.default) == Sign::Deny
                 });
         }
-        // Whether some address passes the IP rules, for each port an IP rule
-        // names, and under `None` for every other port.
-        let mut passes: Vec<(Option<u16>, bool)> = Vec::new();
+        let mut names = Vec::new();
         for &port in &ports {
-            let named = [Scheme::Https, Scheme::Http].iter().any(|&scheme| {
-                paths.iter().any(|path| {
-                    self.name_decision(&host, scheme, port, path)
-                        .unwrap_or(self.default)
-                        == Sign::Allow
-                })
-            });
-            if !named {
-                continue;
+            for scheme in [Scheme::Https, Scheme::Http] {
+                for path in &paths {
+                    names.push((port, self.name_decision(&host, scheme, port, path)));
+                }
             }
+        }
+        // Your host is reachable only when a `+` rule names it.
+        if host == "host.ap.internal" {
+            return !names.iter().any(|(_, name)| *name == Some(Sign::Allow));
+        }
+        // The resolver answers a name only when a name rule or the default
+        // could allow a connection to it.
+        if !names
+            .iter()
+            .any(|(_, name)| name.unwrap_or(self.default) == Sign::Allow)
+        {
+            return true;
+        }
+        // The address decisions that some address gets, for each port an IP
+        // rule names, and under `None` for every other port.
+        let mut seen: Vec<(Option<u16>, Vec<Option<Sign>>)> = Vec::new();
+        for (port, name) in names {
             let key = self
                 .rules
                 .iter()
@@ -126,25 +136,33 @@ impl Network {
                     matches!(rule.destination, Destination::Address { port: Some(only), .. } if only == port)
                 })
                 .then_some(port);
-            let pass = match passes.iter().find(|(seen, _)| *seen == key) {
-                Some((_, pass)) => *pass,
+            let at = match seen.iter().position(|(other, _)| *other == key) {
+                Some(at) => at,
                 None => {
-                    let pass = self.some_address_passes(port);
-                    passes.push((key, pass));
-                    pass
+                    seen.push((key, self.address_decisions(port)));
+                    seen.len() - 1
                 }
             };
-            if pass {
+            let passes = seen[at].1.iter().any(|by_address| {
+                let decision = match (name, *by_address) {
+                    (Some(one), Some(other)) if one != other => Sign::Deny,
+                    (Some(sign), _) | (None, Some(sign)) => sign,
+                    (None, None) => self.default,
+                };
+                decision == Sign::Allow
+            });
+            if passes {
                 return false;
             }
         }
         true
     }
 
-    /// Whether some address that the proxy doesn't refuse gets no deny from
-    /// the IP rules on `port`. It splits the address space only where a
-    /// rule or a refused block starts inside a block.
-    fn some_address_passes(&self, port: u16) -> bool {
+    /// Every decision the IP rules give on `port` to some address that the
+    /// proxy doesn't refuse, with `None` where no IP rule matches. It splits
+    /// the address space only where a rule or a refused block starts inside
+    /// a block.
+    fn address_decisions(&self, port: u16) -> Vec<Option<Sign>> {
         let starts: Vec<(IpAddr, u8)> = self
             .rules
             .iter()
@@ -162,6 +180,7 @@ impl Network {
                     .map(|&(network, prefix)| (network.parse().unwrap(), prefix)),
             )
             .collect();
+        let mut found = Vec::new();
         let mut blocks = vec![(IpAddr::V4(0.into()), 0), (IpAddr::V6(0.into()), 0)];
         while let Some((network, prefix)) = blocks.pop() {
             let split = starts
@@ -173,12 +192,14 @@ impl Network {
                     IpAddr::V6(bits) => IpAddr::V6((u128::from(bits) | 1 << (127 - prefix)).into()),
                 };
                 blocks.extend([(network, prefix + 1), (half, prefix + 1)]);
-            } else if !refused(network) && self.address_decision(network, port) != Some(Sign::Deny)
-            {
-                return true;
+            } else if !refused(network) {
+                let decision = self.address_decision(network, port);
+                if !found.contains(&decision) {
+                    found.push(decision);
+                }
             }
         }
-        false
+        found
     }
 
     /// The sign of the most specific URL or host rule that matches a

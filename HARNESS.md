@@ -567,6 +567,12 @@ because xtask compiles from the checkout. If `main` is behind `origin/main`, it
 fast-forwards and starts again through `cargo`. It refuses local commits,
 changes to tracked files, and any other branch that isn't at `origin/main`.
 
+Because `land` runs `main`'s xtask, it can't measure a budget that only the PR
+teaches xtask to measure. It refuses a PR that changes `xtask/src/bench.rs`
+while `main` has a budget it doesn't measure yet. Such a PR merges by running
+`cargo xtask prepare <pr>` from a checkout of the PR's own branch, so that the
+PR's xtask measures it, and then the owner uses a merge button.
+
 1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
    `spec-change` PR. All three commands refuse a PR that comes from a fork,
    doesn't close exactly one issue, doesn't target `main`, or has changes
@@ -777,7 +783,9 @@ passes. No scheduled work runs on GitHub.
   the right tool when no refresh will prove the PR, because its issue isn't
   `land-needed` or its refresh failed, or when a budget needs a new bench. It
   stops at a PR with a comment saying what merging accepts, so the owner reads
-  that and uses a merge button.
+  that and uses a merge button. A PR that adds a budget's measurer merges by
+  `cargo xtask prepare <pr>` from its own branch instead, as the
+  [merge sequence](#merge-sequence) says.
 - Turn the scheduled tasks on.
 - Answer `answer-needed` issues. The owner can set or clear `land-needed` and
   `answer-needed` on the issue or on the open PR that closes it. A workflow

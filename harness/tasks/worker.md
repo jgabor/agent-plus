@@ -52,7 +52,10 @@ can't continue alone, park the issue as AGENTS.md says.
    and say that the PR is ready to merge. Never squash it yourself.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
-9. Remove your worktree last, because nothing can run in it afterwards:
+9. Remove your worktree and its local branch after a merge, and also after
+   you park the issue with `land-needed` because `prepare` exited 0. Don't
+   keep it until the owner merges, because nothing removes it then. Do this
+   last, because nothing can run in the worktree afterwards:
 
    ```sh
    here=$(pwd -P)
@@ -62,7 +65,9 @@ can't continue alone, park the issue as AGENTS.md says.
    ```
 
    If `git worktree remove` refuses, the worktree holds changes that didn't
-   merge. Leave it, and say so in your status comment.
+   merge. Leave it, and say so in your status comment. When you stop in any
+   other way, such as parking before `prepare` passes, keep the worktree,
+   except as step 2 says.
 
 Your checkout's `xtask` may be older than this brief. If `status`, or a command
 given `--thread`, exits 2 with a usage message, rebase your branch onto

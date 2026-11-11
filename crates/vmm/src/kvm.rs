@@ -347,7 +347,6 @@ pub struct Vm {
     fd: OwnedFd,
     vcpu_mmap_size: usize,
     memory: Rc<GuestMemory>,
-    next_vcpu: c_ulong,
 }
 
 impl Vm {
@@ -389,7 +388,6 @@ impl Vm {
             fd,
             vcpu_mmap_size,
             memory: Rc::new(memory),
-            next_vcpu: 0,
         })
     }
 
@@ -437,14 +435,14 @@ impl Vm {
         unsafe { ioctl_pointer(vcpu.fd.as_raw_fd(), KVM_SET_CPUID2, cpuid) }
     }
 
-    /// Adds a vCPU. Use it from the thread that runs it.
-    pub fn create_vcpu(&mut self) -> io::Result<Vcpu> {
+    /// Adds the VM's vCPU. A VM has only one, so a second call fails. Use it
+    /// from the thread that runs it.
+    pub fn create_vcpu(&self) -> io::Result<Vcpu> {
         // SAFETY: this request takes a vCPU id, not a pointer.
-        let fd = unsafe { ioctl_value(self.fd.as_raw_fd(), KVM_CREATE_VCPU, self.next_vcpu)? };
+        let fd = unsafe { ioctl_value(self.fd.as_raw_fd(), KVM_CREATE_VCPU, 0)? };
         // SAFETY: KVM_CREATE_VCPU returned a new descriptor that nothing owns.
         let fd = unsafe { OwnedFd::from_raw_fd(fd) };
         let run = Mapping::shared(fd.as_fd(), self.vcpu_mmap_size)?;
-        self.next_vcpu += 1;
         Ok(Vcpu {
             fd,
             run,
@@ -525,13 +523,7 @@ impl Vcpu {
     /// Runs the guest as [`Vcpu::run`] does, with `ports` answering port
     /// reads as well as taking port writes.
     pub fn run_ports(&mut self, timeout: Duration, ports: &mut impl Ports) -> io::Result<Stop> {
-        extern "C" fn ignore(_: c_int) {}
-        // SAFETY: `ignore` does nothing, so it is safe in a signal handler.
-        // It only needs to exist: the default action would kill the process.
-        if unsafe { sys::signal(KICK_SIGNAL, ignore) } == sys::SIGNAL_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-
+        ignore_kick_signal()?;
         let _mask = unblock_kick_signal()?;
         let this = &*self;
         let kick = this.immediate_exit();
@@ -556,54 +548,56 @@ impl Vcpu {
         loop {
             // SAFETY: KVM_RUN takes no argument. It writes only to the run
             // area, which this value owns, and to guest memory.
-            if let Err(error) = unsafe { ioctl_value(self.fd.as_raw_fd(), KVM_RUN, 0) } {
-                if error.raw_os_error() != Some(EINTR) {
-                    return Err(error);
-                }
-                if kick.load(Ordering::SeqCst) != 0 {
-                    return Ok(Stop::TimedOut);
-                }
-                continue;
+            let stop = match unsafe { ioctl_value(self.fd.as_raw_fd(), KVM_RUN, 0) } {
+                Ok(_) => self.handle_exit(ports)?,
+                Err(error) => interrupted(error, kick)?,
+            };
+            if let Some(stop) = stop {
+                return Ok(stop);
             }
-            let run = self.run.start().cast::<KvmRun>();
-            // SAFETY: the mapping holds at least a `KvmRun`, which `Vm::new`
-            // checked. The kernel wrote it before KVM_RUN returned.
-            let reason = unsafe { ptr::read_volatile(&raw const (*run).exit_reason) };
-            match reason {
-                KVM_EXIT_HLT => return Ok(Stop::Halted),
-                KVM_EXIT_SHUTDOWN => return Ok(Stop::Shutdown),
-                KVM_EXIT_IO => {
-                    // SAFETY: as above, and KVM_EXIT_IO selects this arm.
-                    let io = unsafe { ptr::read_volatile(&raw const (*run).exit.io) };
-                    let data = self.io_data(&io)?;
-                    let handled = match io.direction {
-                        KVM_EXIT_IO_OUT => {
-                            ports.write(io.port, data);
-                            true
-                        }
-                        KVM_EXIT_IO_IN => ports.read(io.port, data),
-                        _ => false,
-                    };
-                    if !handled {
-                        return Ok(Stop::Unhandled(reason));
+        }
+    }
+
+    /// Handles the exit that KVM wrote to the run area. Returns why the vCPU
+    /// stops, or `None` if the guest can go on.
+    fn handle_exit(&self, ports: &mut impl Ports) -> io::Result<Option<Stop>> {
+        let run = self.run.start().cast::<KvmRun>();
+        // SAFETY: the mapping holds at least a `KvmRun`, which `Vm::new`
+        // checked. The kernel wrote it before KVM_RUN returned.
+        let reason = unsafe { ptr::read_volatile(&raw const (*run).exit_reason) };
+        match reason {
+            KVM_EXIT_HLT => Ok(Some(Stop::Halted)),
+            KVM_EXIT_SHUTDOWN => Ok(Some(Stop::Shutdown)),
+            KVM_EXIT_IO => {
+                // SAFETY: as above, and KVM_EXIT_IO selects this arm.
+                let io = unsafe { ptr::read_volatile(&raw const (*run).exit.io) };
+                let data = self.io_data(&io)?;
+                let handled = match io.direction {
+                    KVM_EXIT_IO_OUT => {
+                        ports.write(io.port, data);
+                        true
                     }
-                }
-                KVM_EXIT_MMIO => {
-                    // SAFETY: as above, and KVM_EXIT_MMIO selects this arm.
-                    let mmio = unsafe { ptr::read_volatile(&raw const (*run).exit.mmio) };
-                    let mut data = mmio.data;
-                    let len = (mmio.len as usize).min(data.len());
-                    if mmio.is_write != 0 {
-                        ports.mmio_write(mmio.phys_addr, &data[..len]);
-                    } else {
-                        ports.mmio_read(mmio.phys_addr, &mut data[..len]);
-                        // SAFETY: as above. KVM reads these bytes when the
-                        // vCPU re-enters the guest.
-                        unsafe { ptr::write_volatile(&raw mut (*run).exit.mmio.data, data) };
-                    }
-                }
-                other => return Ok(Stop::Unhandled(other)),
+                    KVM_EXIT_IO_IN => ports.read(io.port, data),
+                    _ => false,
+                };
+                Ok((!handled).then_some(Stop::Unhandled(reason)))
             }
+            KVM_EXIT_MMIO => {
+                // SAFETY: as above, and KVM_EXIT_MMIO selects this arm.
+                let mmio = unsafe { ptr::read_volatile(&raw const (*run).exit.mmio) };
+                let mut data = mmio.data;
+                let len = (mmio.len as usize).min(data.len());
+                if mmio.is_write != 0 {
+                    ports.mmio_write(mmio.phys_addr, &data[..len]);
+                } else {
+                    ports.mmio_read(mmio.phys_addr, &mut data[..len]);
+                    // SAFETY: as above. KVM reads these bytes when the vCPU
+                    // re-enters the guest.
+                    unsafe { ptr::write_volatile(&raw mut (*run).exit.mmio.data, data) };
+                }
+                Ok(None)
+            }
+            other => Ok(Some(Stop::Unhandled(other))),
         }
     }
 
@@ -635,6 +629,16 @@ impl Vcpu {
     }
 }
 
+/// Why a `KVM_RUN` that failed with `error` stops the vCPU, or `None` if the
+/// guest can go on. Only the watchdog's kick ends a run that a signal
+/// interrupted.
+fn interrupted(error: io::Error, kick: &AtomicU8) -> io::Result<Option<Stop>> {
+    if error.raw_os_error() != Some(EINTR) {
+        return Err(error);
+    }
+    Ok((kick.load(Ordering::SeqCst) != 0).then_some(Stop::TimedOut))
+}
+
 /// Ends the watchdog on drop, so that a panic in the port callback doesn't
 /// wait out the timeout.
 struct CancelWatchdog<'a> {
@@ -662,6 +666,17 @@ impl Drop for RestoreSignalMask {
         // valid `how`, this call can't fail.
         unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, &raw const self.mask, ptr::null_mut()) };
     }
+}
+
+/// Gives the kick signal a handler. It only needs to exist: the default action
+/// would kill the process.
+fn ignore_kick_signal() -> io::Result<()> {
+    extern "C" fn ignore(_: c_int) {}
+    // SAFETY: `ignore` does nothing, so it is safe in a signal handler.
+    if unsafe { sys::signal(KICK_SIGNAL, ignore) } == sys::SIGNAL_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Lets the kick signal reach this thread until the guard drops. A blocked
@@ -702,4 +717,346 @@ fn watch(timeout: Duration, done: &AtomicBool, kick: &AtomicU8, vcpu_thread: usi
     // SAFETY: `Vcpu::run` keeps `vcpu_thread` alive until this thread is
     // joined, and its handler for this signal does nothing.
     unsafe { sys::pthread_kill(vcpu_thread, KICK_SIGNAL) };
+}
+
+#[cfg(test)]
+impl Vm {
+    /// A VM whose descriptors aren't KVM's, so that every ioctl fails.
+    fn fake() -> Self {
+        Self {
+            kvm: File::open("/dev/null").unwrap(),
+            fd: File::open("/dev/null").unwrap().into(),
+            vcpu_mmap_size: size_of::<KvmRun>(),
+            memory: Rc::new(GuestMemory::new(4096).unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Vcpu {
+    /// A vCPU whose descriptor isn't KVM's, so that every ioctl fails. Its run
+    /// area is `len` bytes of zeroed memory, which a test fills in as KVM
+    /// would.
+    pub(crate) fn fake(len: usize) -> Self {
+        assert!(len >= size_of::<KvmRun>());
+        Self {
+            fd: File::open("/dev/null").unwrap().into(),
+            run: Mapping::anonymous(len).unwrap(),
+            _memory: Rc::new(GuestMemory::new(4096).unwrap()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUN_SIZE: usize = 4096;
+    const DATA_OFFSET: u64 = 512;
+    const PORT: u16 = 0x3f8;
+    const ADDRESS: u64 = 0xd000_0000;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Records what the guest does, and answers port reads with `answer`.
+    #[derive(Default)]
+    struct Recorder {
+        writes: Vec<(u16, Vec<u8>)>,
+        mmio_writes: Vec<(u64, Vec<u8>)>,
+        answer: Option<u8>,
+    }
+
+    impl Ports for Recorder {
+        fn write(&mut self, port: u16, data: &[u8]) {
+            self.writes.push((port, data.to_vec()));
+        }
+
+        fn read(&mut self, _: u16, data: &mut [u8]) -> bool {
+            self.answer.map(|byte| data.fill(byte)).is_some()
+        }
+
+        fn mmio_write(&mut self, address: u64, data: &[u8]) {
+            self.mmio_writes.push((address, data.to_vec()));
+        }
+    }
+
+    fn run_area(vcpu: &Vcpu) -> *mut KvmRun {
+        vcpu.run.start().cast()
+    }
+
+    fn write_bytes(vcpu: &Vcpu, offset: u64, bytes: &[u8]) {
+        assert!(offset as usize + bytes.len() <= vcpu.run.len());
+        // SAFETY: the range is inside the mapping, and nothing else uses it.
+        unsafe {
+            let start = vcpu.run.start().add(offset as usize);
+            ptr::copy_nonoverlapping(bytes.as_ptr(), start, bytes.len());
+        }
+    }
+
+    fn read_bytes(vcpu: &Vcpu, offset: u64, len: usize) -> Vec<u8> {
+        assert!(offset as usize + len <= vcpu.run.len());
+        // SAFETY: as in `write_bytes`.
+        unsafe { std::slice::from_raw_parts(vcpu.run.start().add(offset as usize), len) }.to_vec()
+    }
+
+    /// Writes the exit KVM would leave for `reason`.
+    fn exit(vcpu: &Vcpu, reason: u32, exit: Exit) {
+        // SAFETY: the mapping holds a `KvmRun`, which `Vcpu::fake` checked.
+        unsafe {
+            (*run_area(vcpu)).exit_reason = reason;
+            (*run_area(vcpu)).exit = exit;
+        }
+    }
+
+    fn port_exit(vcpu: &Vcpu, direction: u8, count: u32) {
+        let io = IoExit {
+            direction,
+            size: 2,
+            port: PORT,
+            count,
+            data_offset: DATA_OFFSET,
+        };
+        exit(vcpu, KVM_EXIT_IO, Exit { io });
+    }
+
+    fn mmio_exit(vcpu: &Vcpu, is_write: u8) {
+        let mmio = MmioExit {
+            phys_addr: ADDRESS,
+            data: [1, 2, 3, 4, 5, 6, 7, 8],
+            len: 4,
+            is_write,
+        };
+        exit(vcpu, KVM_EXIT_MMIO, Exit { mmio });
+    }
+
+    fn mmio_data(vcpu: &Vcpu) -> [u8; 8] {
+        // SAFETY: as in `exit`.
+        unsafe { (*run_area(vcpu)).exit.mmio.data }
+    }
+
+    #[test]
+    fn a_halt_or_a_shutdown_stops_the_vcpu() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        let mut ports = Recorder::default();
+        exit(&vcpu, KVM_EXIT_HLT, Exit { io: port_io() });
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), Some(Stop::Halted));
+        exit(&vcpu, KVM_EXIT_SHUTDOWN, Exit { io: port_io() });
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), Some(Stop::Shutdown));
+        exit(&vcpu, 99, Exit { io: port_io() });
+        assert_eq!(
+            vcpu.handle_exit(&mut ports).unwrap(),
+            Some(Stop::Unhandled(99))
+        );
+    }
+
+    fn port_io() -> IoExit {
+        IoExit {
+            direction: 0,
+            size: 0,
+            port: 0,
+            count: 0,
+            data_offset: 0,
+        }
+    }
+
+    #[test]
+    fn a_port_write_reaches_the_ports_and_the_guest_goes_on() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        write_bytes(&vcpu, DATA_OFFSET, &[1, 2, 3, 4]);
+        port_exit(&vcpu, KVM_EXIT_IO_OUT, 2);
+        let mut ports = Recorder::default();
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), None);
+        assert_eq!(ports.writes, [(PORT, vec![1, 2, 3, 4])]);
+    }
+
+    #[test]
+    fn an_answered_port_read_goes_back_to_the_guest() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        port_exit(&vcpu, KVM_EXIT_IO_IN, 2);
+        let mut ports = Recorder {
+            answer: Some(7),
+            ..Recorder::default()
+        };
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), None);
+        assert_eq!(read_bytes(&vcpu, DATA_OFFSET, 5), [7, 7, 7, 7, 0]);
+    }
+
+    #[test]
+    fn an_unanswered_port_read_stops_the_vcpu() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        port_exit(&vcpu, KVM_EXIT_IO_IN, 1);
+        let stop = vcpu.handle_exit(&mut Recorder::default()).unwrap();
+        assert_eq!(stop, Some(Stop::Unhandled(KVM_EXIT_IO)));
+    }
+
+    #[test]
+    fn a_port_access_with_an_unknown_direction_stops_the_vcpu() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        port_exit(&vcpu, 2, 1);
+        let mut ports = Recorder::default();
+        let stop = vcpu.handle_exit(&mut ports).unwrap();
+        assert_eq!(stop, Some(Stop::Unhandled(KVM_EXIT_IO)));
+        assert!(ports.writes.is_empty());
+    }
+
+    #[test]
+    fn port_data_may_end_at_the_end_of_the_run_area_and_no_further() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        let io = |count| IoExit {
+            direction: KVM_EXIT_IO_OUT,
+            size: 4,
+            port: PORT,
+            count,
+            data_offset: DATA_OFFSET,
+        };
+        let fits = (RUN_SIZE as u32 - DATA_OFFSET as u32) / 4;
+        write_bytes(&vcpu, RUN_SIZE as u64 - 1, &[9]);
+        let data = vcpu.io_data(&io(fits)).unwrap();
+        assert_eq!(data.len(), RUN_SIZE - DATA_OFFSET as usize);
+        assert_eq!(data.last(), Some(&9));
+        assert!(vcpu.io_data(&io(fits + 1)).is_err());
+        assert!(vcpu.io_data(&io(u32::MAX)).is_err());
+        let wraps = IoExit {
+            data_offset: u64::MAX,
+            ..io(1)
+        };
+        assert!(vcpu.io_data(&wraps).is_err());
+    }
+
+    #[test]
+    fn port_data_outside_the_run_area_is_an_error() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        port_exit(&vcpu, KVM_EXIT_IO_OUT, RUN_SIZE as u32);
+        assert!(vcpu.handle_exit(&mut Recorder::default()).is_err());
+    }
+
+    #[test]
+    fn an_mmio_write_reaches_the_ports() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        mmio_exit(&vcpu, 1);
+        let mut ports = Recorder::default();
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), None);
+        assert_eq!(ports.mmio_writes, [(ADDRESS, vec![1, 2, 3, 4])]);
+        assert_eq!(mmio_data(&vcpu), [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn an_mmio_read_with_no_device_reads_as_all_ones() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        mmio_exit(&vcpu, 0);
+        let mut ports = Recorder::default();
+        assert_eq!(vcpu.handle_exit(&mut ports).unwrap(), None);
+        assert!(ports.mmio_writes.is_empty());
+        assert_eq!(mmio_data(&vcpu), [0xff, 0xff, 0xff, 0xff, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn writes_only_passes_writes_on_and_answers_no_read() {
+        let mut writes = Vec::new();
+        let mut ports = WritesOnly(|port, data: &[u8]| writes.push((port, data.to_vec())));
+        ports.write(PORT, &[1]);
+        assert!(!ports.read(PORT, &mut [0]));
+        assert_eq!(writes, [(PORT, vec![1])]);
+    }
+
+    #[test]
+    fn the_immediate_exit_flag_is_in_the_run_area() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        vcpu.immediate_exit().store(1, Ordering::SeqCst);
+        assert_eq!(read_bytes(&vcpu, 0, 2), [0, 1]);
+    }
+
+    #[test]
+    fn a_failed_ioctl_is_an_error() {
+        let vcpu = Vcpu::fake(RUN_SIZE);
+        assert!(vcpu.regs().is_err());
+        assert!(vcpu.set_regs(&Regs::default()).is_err());
+        assert!(vcpu.sregs().is_err());
+        assert!(vcpu.set_sregs(&Sregs::default()).is_err());
+        let kick = AtomicU8::new(1);
+        assert!(
+            vcpu.run_until_stop(&kick, &mut Recorder::default())
+                .is_err()
+        );
+
+        let vm = Vm::fake();
+        assert!(vm.add_interrupt_controllers().is_err());
+        assert!(vm.expose_cpu_features(&vcpu).is_err());
+        assert!(vm.interrupt(4).pulse().is_err());
+        assert!(vm.interrupt(4).set(0).is_err());
+        assert!(vm.create_vcpu().is_err());
+    }
+
+    #[test]
+    fn only_the_watchdog_ends_a_run_that_a_signal_interrupted() {
+        let signal = || io::Error::from_raw_os_error(EINTR);
+        let kick = AtomicU8::new(0);
+        assert_eq!(interrupted(signal(), &kick).unwrap(), None);
+        kick.store(1, Ordering::SeqCst);
+        assert_eq!(interrupted(signal(), &kick).unwrap(), Some(Stop::TimedOut));
+        let other = io::Error::from_raw_os_error(EINTR + 1);
+        assert!(interrupted(other, &kick).is_err());
+    }
+
+    /// This thread's signal mask.
+    fn signal_mask() -> sys::SignalSet {
+        let mut mask = sys::EMPTY_SIGNAL_SET;
+        // SAFETY: a null new set only reads the mask into `mask`.
+        let error = unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, ptr::null(), &raw mut mask) };
+        assert_eq!(error, 0);
+        mask
+    }
+
+    #[test]
+    fn the_kick_signal_is_unblocked_until_the_guard_drops() {
+        // A thread of its own, so that no other test sees its mask change.
+        thread::spawn(|| {
+            let all = [u64::MAX; 16];
+            // SAFETY: `all` is a full set, and a null old set is allowed.
+            let error =
+                unsafe { sys::pthread_sigmask(sys::SIG_SETMASK, &raw const all, ptr::null_mut()) };
+            assert_eq!(error, 0);
+            let blocked = signal_mask();
+            let kick_bit = 1 << (KICK_SIGNAL - 1);
+            assert_ne!(blocked[0] & kick_bit, 0);
+
+            let guard = unblock_kick_signal().unwrap();
+            let mut expected = blocked;
+            expected[0] &= !kick_bit;
+            assert_eq!(signal_mask(), expected);
+            drop(guard);
+            assert_eq!(signal_mask(), blocked);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn the_watchdog_kicks_a_vcpu_that_outlives_the_timeout() {
+        ignore_kick_signal().unwrap();
+        let done = AtomicBool::new(false);
+        let kick = AtomicU8::new(0);
+        // SAFETY: this call has no preconditions.
+        let this_thread = unsafe { sys::pthread_self() };
+        watch(Duration::from_millis(1), &done, &kick, this_thread);
+        assert_eq!(kick.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelling_the_watchdog_wakes_it_at_once() {
+        let done = AtomicBool::new(false);
+        let start = Instant::now();
+        thread::scope(|scope| {
+            let watchdog = scope.spawn(|| {
+                while !done.load(Ordering::SeqCst) && start.elapsed() < TIMEOUT {
+                    thread::park_timeout(TIMEOUT);
+                }
+            });
+            drop(CancelWatchdog {
+                done: &done,
+                watchdog: watchdog.thread(),
+            });
+        });
+        assert!(start.elapsed() < TIMEOUT);
+        assert!(done.load(Ordering::SeqCst));
+    }
 }

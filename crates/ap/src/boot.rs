@@ -287,7 +287,7 @@ pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, 
         .map_err(|error| Error::Failed(format!("can't build the initramfs: {error:?}")))?;
 
     let vm_failed = |error: io::Error| failed("can't start the VM", error);
-    let mut vm = Vm::new(GuestMemory::new(MEMORY).map_err(vm_failed)?).map_err(vm_failed)?;
+    let vm = Vm::new(GuestMemory::new(MEMORY).map_err(vm_failed)?).map_err(vm_failed)?;
     vm.add_interrupt_controllers().map_err(vm_failed)?;
     let bad_kernel = |error: loader::Error| Error::Failed(format!("bad kernel: {error:?}"));
     let entry = loader::load(vm.memory(), guest.kernel, COMMAND_LINE).map_err(bad_kernel)?;

@@ -16,7 +16,7 @@ const BANNER: &str = "Linux version 7.3.3-ap.1";
 fn the_pinned_kernel_prints_its_banner_on_the_serial_port() {
     let image = fs::read(t1::kernel::vmlinux()).unwrap();
 
-    let mut vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
+    let vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
     vm.add_interrupt_controllers().unwrap();
     let entry = boot::load(vm.memory(), &image, COMMAND_LINE).unwrap();
     let mut vcpu = vm.create_vcpu().unwrap();

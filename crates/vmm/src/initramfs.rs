@@ -230,6 +230,31 @@ mod tests {
     }
 
     #[test]
+    fn an_error_names_the_path() {
+        let cases = [
+            (
+                Error::BadPath("a/../b".into()),
+                r#"not a valid initramfs path: "a/../b""#,
+            ),
+            (
+                Error::BadTarget("link".into()),
+                r#"not a valid symlink target for "link""#,
+            ),
+            (
+                Error::Conflict("etc".into()),
+                r#"the initramfs lists "etc" twice"#,
+            ),
+            (
+                Error::TooLarge("big".into()),
+                r#"too large for an initramfs: "big""#,
+            ),
+        ];
+        for (error, text) in cases {
+            assert_eq!(error.to_string(), text);
+        }
+    }
+
+    #[test]
     fn an_empty_list_is_only_a_trailer() {
         let archive = build(&[]).unwrap();
         assert_eq!(names(&archive), [TRAILER]);

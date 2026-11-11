@@ -94,6 +94,18 @@ mod tests {
     }
 
     #[test]
+    fn an_access_outside_says_where_it_was() {
+        let error = OutOfBounds {
+            address: 0x1000,
+            len: 2,
+        };
+        assert_eq!(
+            error.to_string(),
+            "2 bytes at guest address 0x1000 are outside guest memory"
+        );
+    }
+
+    #[test]
     fn a_write_reads_back() {
         let memory = memory();
         memory.write(100, &[1, 2, 3]).unwrap();

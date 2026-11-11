@@ -150,9 +150,12 @@ impl Lease {
 }
 
 /// The status comment of the last claim: the one with the latest lease,
-/// because every edit renews it.
+/// because every edit renews it. A lease stops at the minute, so a tie goes to
+/// the lower id, which is the one that won a race.
 fn latest(statuses: &[Status]) -> Option<&Status> {
-    statuses.iter().max_by_key(|s| (s.lease.order(), s.id))
+    statuses
+        .iter()
+        .max_by_key(|s| (s.lease.order(), std::cmp::Reverse(s.id)))
 }
 
 /// The status comment of the live claim on an issue, if it has one: the
@@ -309,7 +312,7 @@ impl<'a> View<'a> {
         let owner = forge.owner()?;
         let mut issues = forge.issues()?;
         for issue in &mut issues {
-            if issue.open && has(issue, IN_PROGRESS) && issue.comments.len() >= LISTED_COMMENTS {
+            if issue.open && issue.comments.len() >= LISTED_COMMENTS {
                 *issue = forge.issue(issue.number)?;
             }
         }
@@ -771,6 +774,8 @@ pub fn run_status(number: &str, thread: &str) -> Result<Verdict, Problem> {
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut body)
         .map_err(|e| Problem(format!("couldn't read the status from stdin: {e}")))?;
     let root = workspace::root()?;
+    // So that a claim can't take the issue between the check and the write.
+    let _slot = lock::claim_slot(&root)?;
     match update_status(&Gh::new(&root), parsed, thread, &body, now_seconds()?)? {
         Ok(comment) => {
             println!("{{\"issue\":{parsed},\"comment\":{comment}}}");
@@ -787,7 +792,7 @@ pub fn run_status(number: &str, thread: &str) -> Result<Verdict, Problem> {
 mod tests {
     use super::{Claim, claim, next, overlap, refusal, seconds, set_up, stamp, update_status};
     use crate::Problem;
-    use crate::forge::{Comment, Forge, Issue};
+    use crate::forge::{Comment, Forge, Issue, LISTED_COMMENTS};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::fs;
@@ -840,8 +845,13 @@ mod tests {
             Ok(OWNER.to_string())
         }
 
+        /// As `gh issue list`, which gives only the first comments.
         fn issues(&self) -> Result<Vec<Issue>, Problem> {
-            Ok(self.issues.borrow().clone())
+            let mut issues = self.issues.borrow().clone();
+            for issue in &mut issues {
+                issue.comments.truncate(LISTED_COMMENTS);
+            }
+            Ok(issues)
         }
 
         fn issue(&self, number: u64) -> Result<Issue, Problem> {
@@ -1222,6 +1232,34 @@ mod tests {
                 replaced: Some("old".to_string())
             }
         );
+    }
+
+    #[test]
+    fn a_returning_issue_finds_its_status_past_the_listed_comments() {
+        let mut comments: Vec<Comment> = (0..LISTED_COMMENTS as u64)
+            .map(|id| comment(id + 1, "stranger", "hello"))
+            .collect();
+        comments.push(comment(500, OWNER, &status_of("parked", NOW - 60, "old")));
+        let mut forge = Fake::new(vec![issue(comments)]);
+        forge.branch_date = Some(stamp(NOW - 7200));
+        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        assert_eq!(entries[0].branch.as_deref(), Some("b"));
+    }
+
+    /// A claim that lost a race retires its comment with a lease in the same
+    /// minute as the winner's, and a higher id.
+    #[test]
+    fn a_retired_loser_is_not_the_last_claim() {
+        let winner = status_of("parked", NOW + 3600, "won");
+        let loser = status_of("parked", NOW + 3600, "lost").replace("`b`", "`gone`");
+        let mut forge = Fake::new(vec![issue(vec![
+            comment(40, OWNER, &winner),
+            comment(41, OWNER, &loser),
+        ])]);
+        forge.branch_date = Some(stamp(NOW - 7200));
+        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        assert_eq!(entries[0].branch.as_deref(), Some("b"));
+        assert_eq!(update(&forge, "won", &winner), Ok(40));
     }
 
     #[test]

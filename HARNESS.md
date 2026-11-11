@@ -444,7 +444,7 @@ a sub-issue, and the `State`, `Thread`, `Branch`, and `Lease until` fields.
 - An issue has a live claim when it is open, `in-progress`, not parked, and
   has a live status comment. The thread in the winning comment holds it.
 - The last claim is the status comment with the latest lease, because every
-  edit renews it.
+  edit renews it. A tie goes to the lower id.
 
 ## Commands
 

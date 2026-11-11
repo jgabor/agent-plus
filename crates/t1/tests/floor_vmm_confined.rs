@@ -219,8 +219,32 @@ fn status_field(status: &str, field: &str) -> Option<u32> {
         .and_then(|value| value.trim().parse().ok())
 }
 
-/// Runs a real `ap boot`, and reads its status while it runs. It must be
-/// under one more seccomp filter than this test is, and in filter mode.
+/// Whether every thread of `pid` is under one more seccomp filter than this
+/// test is, in filter mode, with `no_new_privs`. It needs more than one
+/// thread, so that a thread `ap` started before the filter is among them.
+fn every_thread_confined(pid: u32, own_filters: u32) -> bool {
+    let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
+        return false;
+    };
+    let mut threads = 0;
+    for task in tasks {
+        let Ok(status) = task.and_then(|task| fs::read_to_string(task.path().join("status")))
+        else {
+            return false;
+        };
+        if status_field(&status, "Seccomp") != Some(2)
+            || status_field(&status, "Seccomp_filters").unwrap_or(0) <= own_filters
+            || status_field(&status, "NoNewPrivs") != Some(1)
+        {
+            return false;
+        }
+        threads += 1;
+    }
+    threads > 1
+}
+
+/// Runs a real `ap boot`, and reads the status of each of its threads while
+/// it runs.
 fn check_ap_boot() -> Result<(), String> {
     let home = scratch("ap-boot");
     let store = Store::new(home.join(".local/share/ap"));
@@ -239,14 +263,9 @@ fn check_ap_boot() -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let status_path = format!("/proc/{}/status", ap.id());
     let mut confined = false;
     let exit = loop {
-        if let Ok(status) = fs::read_to_string(&status_path)
-            && status_field(&status, "Seccomp") == Some(2)
-            && status_field(&status, "Seccomp_filters").unwrap_or(0) > own_filters
-            && status_field(&status, "NoNewPrivs") == Some(1)
-        {
+        if every_thread_confined(ap.id(), own_filters) {
             confined = true;
         }
         if let Some(exit) = ap.try_wait().unwrap() {
@@ -258,7 +277,9 @@ fn check_ap_boot() -> Result<(), String> {
     match (exit.success(), confined) {
         (true, true) => Ok(()),
         (false, _) => Err(format!("ap boot failed: {exit:?}")),
-        (true, false) => Err("ap boot ran its guest without a filter of its own".to_owned()),
+        (true, false) => {
+            Err("ap boot ran its guest with a thread outside a filter of its own".to_owned())
+        }
     }
 }
 

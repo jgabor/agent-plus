@@ -3,9 +3,11 @@
 Agent+ runs coding agents in isolated, disposable microVMs. One `Agentfile`
 declares the agent, and one pure-Rust binary, `ap`, builds and runs it.
 
-**Status: design.** The harness is built, and the product has almost no code
-yet. [SPEC.md](SPEC.md) is the contract, [README.md](README.md) describes the
-product, and [HARNESS.md](HARNESS.md) is how we get to v0.1.0.
+**Status: in development.** There is no release yet. The
+[roadmap](https://github.com/jgabor/agent-plus/issues/158) shows which
+milestones are done, and what comes next. [SPEC.md](SPEC.md) is the contract,
+[README.md](README.md) describes the product, and [HARNESS.md](HARNESS.md) is
+how we get to v0.1.0.
 
 ## What we don't compromise
 

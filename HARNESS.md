@@ -534,8 +534,10 @@ claim race exits.
 
 Runs every planning period. The planner reads `cargo xtask gaps`, and files
 sub-issues under a parent. Each sub-issue inherits its parent's `auto:*`
-label. It files none if the issues in progress and the issues `cargo xtask
-next` lists already fill the worker slots.
+label, except one that needs a change to SPEC.md, a budget, a waiver, or a
+journey step. That one gets `auto:pr`, so a worker prepares its PR and the
+owner merges it. The planner files none if the issues in progress and the
+issues `cargo xtask next` lists already fill the worker slots.
 
 The planner works on one milestone at a time: the first on the roadmap with a
 step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open

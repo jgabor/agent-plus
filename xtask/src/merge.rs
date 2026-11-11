@@ -209,6 +209,11 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
         unproven();
         return refuse("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
     }
+    if mode == Mode::Land
+        && let Some(why) = needs_its_own_measurer(&tree.path, &fetched.main, number)?
+    {
+        return refuse(&why);
+    }
     let gated = head(&tree.path)?;
     let scoring = Scoring {
         number,
@@ -757,4 +762,26 @@ fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
             ]
             .contains(&path)
     }))
+}
+
+/// `land` runs `main`'s xtask, so it can't measure a budget that only the PR
+/// teaches xtask to measure. Returns why it refuses a PR that may do that.
+fn needs_its_own_measurer(tree: &Path, main: &str, number: u64) -> Result<Option<String>, Problem> {
+    let args = ["diff", "--name-only", "--no-renames", "-z", main, "HEAD"];
+    let changed = base::git_text(tree, &args)?;
+    if !changed.split('\0').any(|path| path == "xtask/src/bench.rs") {
+        return Ok(None);
+    }
+    let budgets = bench::budgets_at(tree, main)?;
+    let keys: Vec<String> = bench::not_yet_measured(&budgets)
+        .iter()
+        .map(|key| format!("`{key}`"))
+        .collect();
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "PR {number} changes how budgets are measured, and `main`'s xtask, which `land` runs, doesn't measure {} yet. Run `cargo xtask prepare {number}` from a checkout of its branch, so that its own xtask measures it, then use a merge button",
+        keys.join(" or ")
+    )))
 }

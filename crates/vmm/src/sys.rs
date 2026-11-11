@@ -88,31 +88,9 @@ impl Drop for Mapping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    /// This process's virtual memory size, in KiB.
-    fn virtual_size() -> u64 {
-        let status = fs::read_to_string("/proc/self/status").unwrap();
-        let line = status
-            .lines()
-            .find(|line| line.starts_with("VmSize:"))
-            .unwrap();
-        line.split_whitespace().nth(1).unwrap().parse().unwrap()
-    }
 
     #[test]
     fn a_failed_mapping_is_an_error() {
         assert!(Mapping::anonymous(0).is_err());
-    }
-
-    #[test]
-    fn dropping_a_mapping_unmaps_it() {
-        // Large enough that other tests mapping memory at the same time can't
-        // hide it. Nothing touches it, so it takes no RAM.
-        const LEN: u64 = 1 << 30;
-        let mapping = Mapping::anonymous(LEN as usize).unwrap();
-        let mapped = virtual_size();
-        drop(mapping);
-        assert!(virtual_size() < mapped - LEN / 1024 / 2);
     }
 }

@@ -161,9 +161,10 @@ environment. The binary is statically linked for
 A step counts only if every step in its `needs` also passes.
 
 A step marked `spend` makes a real model call. The merge sequence leaves it,
-and any step that needs it, out of the run and the score. The nightly report
-counts them. A step that names a `floor` fails while that floor's check doesn't
-exist.
+and any step that needs it, out of the run and the score. The nightly job runs
+each one once, as a [paid check](#check-tiers), and the roadmap counts it like
+any other step. The nightly report counts those it couldn't run. A step that
+names a `floor` fails while that floor's check doesn't exist.
 
 `cargo xtask journey` prints each step as `pass`, `fail`, or `skip`, then the
 count out of all steps. It exits 0 whenever it could run, because what fails a
@@ -254,6 +255,15 @@ each journey step above can't pass until its check exists.
 | T2 | Real Claude Code and Codex in the guest, with no credentials | Adapter changes, and nightly | No |
 | T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
 | Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
+
+**Paid checks (T3).** They run on a Claude Console workspace used only for
+them, whose monthly spend limit the owner sets. The provider enforces the
+limit, so no program here can pass it. The key is a service account key scoped
+to that workspace, with an expiry. The nightly job reads it from
+`~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it only to the
+steps marked `spend`, as `ANTHROPIC_API_KEY`, the way a user's `AUTH key` run
+gets it. Nothing prints it. Without the file, those steps don't run. Claude
+Code runs on Haiku 5.5, `claude-haiku-5-5`.
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
 change can affect a budget when its diff touches `crates/`, `.cargo/`,
@@ -690,7 +700,9 @@ promises. It has three parts:
 
 1. A table of the milestones, in the order of `harness/journey.toml`, each
    with its `summary` and its status. A milestone is done when every one of
-   its steps passes in the journey that just ran. The first one that isn't
+   its steps passes in the journey that just ran. Only the nightly job runs
+   the steps marked `spend`, so only its roadmap can show their milestone as
+   done. The first one that isn't
    done is in progress, and the ones after it are planned.
 2. Each milestone's commands, each with what the README's Core commands says
    about it. A command is ticked when its milestone is done, so nobody ticks
@@ -802,6 +814,11 @@ passes. No scheduled work runs on GitHub.
   `cargo xtask prepare <pr>` from its own branch instead, as the
   [merge sequence](#merge-sequence) says.
 - Turn the scheduled tasks on.
+- Set up the [paid checks](#check-tiers): create the Claude Console workspace
+  and its monthly spend limit, a service account scoped to it, and a key with
+  an expiry. Put the key in
+  `~/.config/agent-plus/paid-checks/anthropic-api-key` on the machine that
+  runs the nightly job, readable only by you. Never commit or paste it.
 - Answer `answer-needed` issues. The owner can set or clear `land-needed` and
   `answer-needed` on the issue or on the open PR that closes it. A workflow
   runs `cargo xtask mirror` to copy the change to the other side, and only the
@@ -828,7 +845,8 @@ The harness is built before product features.
 |---|---|
 | Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
 | Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
-| Limit on model spend for workers and T3 | No unattended T3 runs |
+| Limit on model spend for workers | Workers run no step marked `spend` |
+| Credential and spend limit for Codex in journey step 13 | Step 13 gets no Codex credential |
 | Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
 | Bands for every budget except boot, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |

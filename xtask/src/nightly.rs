@@ -7,13 +7,17 @@ use crate::{
     Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, lock, mutation, report,
     roadmap, workspace,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::{env, fs, io};
 
 const ISSUE_BODY: &str = "Each night's report is a comment on this issue.";
 const STATUS: &str = "xtask/nightly";
 const PASS: &str = "pass";
 const FAIL: &str = "fail";
 const SKIP: &str = "skip";
+/// Where the owner puts the key for the paid checks, under `HOME`. It belongs
+/// to a workspace whose spend limit the provider enforces.
+const PAID_KEY: &str = ".config/agent-plus/paid-checks/anthropic-api-key";
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
@@ -31,9 +35,9 @@ pub fn run() -> Result<Verdict, Problem> {
     };
     checks.push(("gate", gated));
     checks.push(("t2", t2(&root)));
-    // No unattended run may spend money until HARNESS.md sets a limit.
+    // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
-    let walked = journey::outcomes(&root);
+    let walked = paid_key().and_then(|key| journey::outcomes(&root, key.as_deref()));
     checks.push(("journey", state(journey_holds(&root, &walked))));
     checks.push((
         "fuzz",
@@ -44,7 +48,15 @@ pub fn run() -> Result<Verdict, Problem> {
     drop(hold);
 
     // A report that can't be built still leaves its result on the commit.
-    let built = report::build(&root);
+    let built = report::build(&root).map(|report| match &walked {
+        Ok(outcomes) => report.with_left_out(
+            outcomes
+                .iter()
+                .filter(|o| o.spends && o.state == SKIP)
+                .count(),
+        ),
+        Err(_) => report,
+    });
     let failed = built.is_err() || checks.iter().any(|(_, state)| *state == FAIL);
     let posted = built.and_then(|report| post(&root, &report.markdown(&checks)));
     let (verdict, status, word) = if failed {
@@ -72,6 +84,20 @@ pub fn run() -> Result<Verdict, Problem> {
     }
     println!("nightly: {word}");
     Ok(verdict)
+}
+
+/// The key for the paid checks, if the owner has put one in place. The key is
+/// never printed, so no message here quotes the file.
+fn paid_key() -> Result<Option<String>, Problem> {
+    let Some(home) = env::var_os("HOME") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(home).join(PAID_KEY);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(text.trim().to_string()).filter(|key| !key.is_empty())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Problem(format!("couldn't read {}: {e}", path.display()))),
+    }
 }
 
 /// HEAD, which has to be `main` as everyone else sees it, or the report and the
@@ -122,13 +148,18 @@ fn t2(root: &Path) -> &'static str {
 }
 
 /// A step that isn't built yet fails today, so what counts is a count lower
-/// than the ledger's.
+/// than the ledger's. The ledger leaves out the steps that spend, so the
+/// comparison does too.
 fn journey_holds(root: &Path, walked: &Result<Vec<Outcome>, Problem>) -> Result<Verdict, Problem> {
     let outcomes = walked
         .as_ref()
         .map_err(|Problem(message)| Problem(message.clone()))?;
-    let (passing, steps) = journey::tally(outcomes);
-    println!("journey {passing} of {steps}");
+    let (all, steps) = journey::tally(outcomes);
+    println!("journey {all} of {steps}");
+    let passing = outcomes
+        .iter()
+        .filter(|o| !o.spends && o.state == PASS)
+        .count();
     let floor = ledger::at_head(root)?.map_or(0, |record| record.passing);
     if passing < floor {
         eprintln!("journey: {passing} steps pass, but the ledger says {floor}");

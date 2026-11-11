@@ -3,30 +3,58 @@
 You file issues for the work between the scores and the goal, then stop. You
 write no code. Nobody reads this thread while you run, so never ask a question.
 
-1. Run `cargo xtask next` and count its entries. Then count the issues in
-   progress with `gh issue list --state open --label in-progress --json number
-   --jq length`. If the two counts add up to 3 or more, say so and stop.
-2. Run `cargo xtask gaps --json > target/gaps.json`. If it doesn't exit 0,
+Draft model: `claude-fable-5-2`, at effort `high`
+
+1. Run `cargo xtask gaps --json > target/gaps.json`. If it doesn't exit 0,
    report the error and stop. The file is large, so read only the start of it
    with `jq '{milestone, steps, budgets, promises: .promises[:40]}'
    target/gaps.json`.
-3. Take `milestone` from that output. It is the first milestone on the roadmap
+2. Take `milestone` from that output. It is the first milestone on the roadmap
    with a step that doesn't pass. If it is null, every step passes: say so and
    stop.
-4. Find the parent: the open issue that has an `auto:*` label and a line in
-   its body that reads `Milestone: <name>.`, with that milestone's name. Search
-   with `gh issue list --state open --limit 1000 --json number,labels,body
-   --search '"Milestone: <name>." in:body'`, and check the line yourself,
-   because the search is loose. If there is none, say which milestone has no
-   parent, and stop. If there are several, take the lowest number. Read its
-   goal. Never add an `auto:*` label to an issue that doesn't inherit one.
-5. Read the parent's sub-issues, open and closed, with `gh issue view <parent>
+3. Make sure that this milestone, and the one after it, each have a parent
+   written. List the milestones in order with `awk
+   '/^\[\[milestone\]\]/{m=1} m&&/^name = /{print; m=0}'
+   harness/journey.toml`, and take the one after yours, if there is one. For
+   each of the two, search every issue, open or closed, with `gh issue list
+   --state all --limit 1000 --json number,body --search '"Milestone: <name>."
+   in:body'`, and check for the line `Milestone: <name>.` yourself, because
+   the search is loose. For each milestone with no such issue, load
+   `mcp__t3-code__delegate_task` with ToolSearch, and call it with `role` set
+   to `design`, `mode` set to `wait`, and `timeoutMs` set to 1800000. Its
+   `target` uses the draft model from above:
+
+   ```json
+   {"providerInstanceId": "claudeAgent", "model": "<draft model>",
+    "options": {"effort": "<effort>"}}
+   ```
+
+   Its `task` is:
+
+   ```text
+   Draft the parent issue for the milestone `<name>`. Read your brief with
+   `git show origin/main:harness/tasks/drafter.md`, and follow it.
+   ```
+
+   Go on when it returns, or when it times out.
+4. Run `cargo xtask next` and count its entries. Then count the issues in
+   progress with `gh issue list --state open --label in-progress --json number
+   --jq length`. If the two counts add up to 3 or more, say so and stop.
+5. Find the parent: the open issue that has an `auto:*` label, no
+   `answer-needed` label, and a line in its body that reads `Milestone:
+   <name>.`, with your milestone's name. Search with `gh issue list --state
+   open --limit 1000 --json number,labels,body --search '"Milestone: <name>."
+   in:body'`, and check the line yourself. If there is none, say which
+   milestone waits on the owner for its parent, and stop. If there are
+   several, take the lowest number. Read its goal. Never add an `auto:*` label
+   to an issue that doesn't inherit one.
+6. Read the parent's sub-issues, open and closed, with `gh issue view <parent>
    --json subIssues`. Leave out any gap that an open sub-issue already covers.
-6. Choose the next work, only from gaps within the parent's goal and its
+7. Choose the next work, only from gaps within the parent's goal and its
    milestone. If none are, say so and stop. The milestone's failing steps come
    first, in journey order, then the budgets and promises that the parent's
    goal names.
-7. File at most 3 minus the sum from step 1, each as a sub-issue of the parent,
+8. File at most 3 minus the sum from step 4, each as a sub-issue of the parent,
    with `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
    - `Definition of done` names the journey step, the budget, or the exact SPEC
@@ -36,4 +64,4 @@ write no code. Nobody reads this thread while you run, so never ask a question.
    - End with `Blocked by #<n>.` when one issue needs another first.
    - Add the parent's `auto:*` label. If the work needs a change to SPEC.md, a
      budget, a waiver, or a journey step, add no `auto:*` label.
-8. List the issues you filed, then stop.
+9. List the drafts and the issues you filed, then stop.

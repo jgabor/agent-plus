@@ -69,6 +69,7 @@ clean machine:
 ## Architecture
 
 ```
+drafter: milestone -> draft parent issue
 owner -> labeled parent issue
 planner: score gaps -> sub-issues
 dispatcher: claimable issues -> one worker per free slot
@@ -82,6 +83,7 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | `xtask` | Program | None | Scoring, gating, measuring, selection, and merging |
 | Dispatcher | T3 Code scheduled task | Sonnet | Starts workers for claimable issues |
 | Planner | T3 Code scheduled task | Opus | Files issues from score gaps |
+| Drafter | Delegated agent, from the planner | Fable | Drafts the parent of a milestone that has none |
 | Worker | T3 Code thread, one per issue | Opus | Takes one issue from claim to merge |
 | Reviewer | Delegated agent, one per round | Another provider | Reviews a diff, and changes nothing |
 | Nightly job | T3 Code scheduled task | Sonnet | Runs `cargo xtask nightly` on `main`, and files an issue on failure |
@@ -530,17 +532,28 @@ claim race exits.
 
 ### Planning
 
-Runs every planning period, and stops at once if the issues in progress and
-the issues `cargo xtask next` lists already fill the worker slots. The planner
-reads `cargo xtask gaps`, and files sub-issues under a parent. Each sub-issue
-inherits its parent's `auto:*` label.
+Runs every planning period. The planner reads `cargo xtask gaps`, and files
+sub-issues under a parent. Each sub-issue inherits its parent's `auto:*`
+label. It files none if the issues in progress and the issues `cargo xtask
+next` lists already fill the worker slots.
 
 The planner works on one milestone at a time: the first on the roadmap with a
 step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open
 issue that the owner has labeled, and whose body names that milestone in a
-`Milestone:` line. With no such issue, the planner says which milestone has no
-parent, and stops. A parent whose milestone passes is never chosen, so leaving
+`Milestone:` line. A parent whose milestone passes is never chosen, so leaving
 it open holds nothing up.
+
+A milestone never waits for its parent to be written. When that milestone, or
+the one after it, has no issue that names it in a `Milestone:` line, open or
+closed, the planner has a drafter write one, before it checks the worker slots.
+The drafter runs on the stronger model that the planner's brief names, because
+every sub-issue builds on the parent. A draft has `answer-needed` and no
+`auto:*` label, so nothing claims it or plans under it, and the roadmap lists
+it under what waits on the owner. Its decisions separate what it chose from
+what needs the owner's answer. Once the owner labels it and removes
+`answer-needed`, the planner files sub-issues under it. Until then, the planner
+says which milestone waits on the owner, and stops. No program closes a parent,
+because closing it is the owner's acceptance of the milestone.
 
 The order of the milestones in `harness/journey.toml` is the order of the work.
 

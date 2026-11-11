@@ -52,12 +52,27 @@ Draft model: `claude-fable-5-2`, at effort `high`
    to an issue that doesn't inherit one.
 6. Read the parent's sub-issues, open and closed, with `gh issue view <parent>
    --json subIssues`. Leave out any gap that an open sub-issue already covers.
+   Then count the open ones without `land-needed`, blocked or not:
+
+   ```sh
+   gh api graphql -F owner='{owner}' -F name='{repo}' -F n=<parent> -f query='
+     query($owner: String!, $name: String!, $n: Int!) {
+       repository(owner: $owner, name: $name) { issue(number: $n) {
+         subIssues(first: 100) { nodes { state labels(first: 100) {
+           nodes { name } } } } } } }' --jq '[.data.repository.issue
+     .subIssues.nodes[] | select(.state == "OPEN") | select([.labels.nodes[]
+     .name] | index("land-needed") | not)] | length'
+   ```
+
+   If the count is 3 or more, say that the parent has that many sub-issues
+   ahead of what is prepared, and stop.
 7. Choose the next work, only from gaps within the parent's goal and its
    milestone. If none are, say so and stop. The milestone's failing steps come
    first, in journey order, then the budgets and promises that the parent's
    goal names.
-8. File at most 3 minus the sum from step 4, each as a sub-issue of the parent,
-   with `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
+8. File at most 3 minus the larger of the sum from step 4 and the count from
+   step 6, each as a sub-issue of the parent, with `gh issue create --parent
+   <parent>`. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
    - `Definition of done` names the journey step, the budget, or the exact SPEC
      sentences that prove it.

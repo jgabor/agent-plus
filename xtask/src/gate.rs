@@ -36,51 +36,68 @@ pub struct Merging<'a> {
     pub labels: &'a [String],
     /// `prepare` leaves these to the owner, who decides by merging.
     pub prepare: bool,
+    /// Hears the name of a slow check as it starts.
+    pub starting: &'a dyn Fn(&str),
+}
+
+/// The checks that failed, in the order they ran.
+pub type Failed = Vec<&'static str>;
+
+pub fn verdict(failed: &Failed) -> Verdict {
+    if failed.is_empty() {
+        Verdict::Pass
+    } else {
+        Verdict::Fail
+    }
 }
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::shared(&root)?;
-    let (verdict, _) = check(&root, &hold, None)?;
-    Ok(verdict)
+    let (failed, _) = check(&root, &hold, None)?;
+    Ok(verdict(&failed))
 }
 
-/// Runs every check, and returns the verdict and the spec score it earned.
+/// Runs every check, and returns those that failed and the spec score that
+/// the tests earned.
 pub fn check(
     root: &Path,
     hold: &Hold,
     merging: Option<&Merging>,
-) -> Result<(Verdict, score::Score), Problem> {
+) -> Result<(Failed, score::Score), Problem> {
     require_tools(root)?;
-    let mut verdict = Verdict::Pass;
+    let mut failed = Failed::new();
     let findings = floors::check(root)?;
     for finding in &findings {
         eprintln!("floor: {finding}");
     }
-    record("floors", findings.is_empty(), &mut verdict);
+    record("floors", findings.is_empty(), &mut failed);
     for check in CHECKS {
         let passed = cargo_passes(root, check.args)?;
-        record(check.name, passed, &mut verdict);
+        record(check.name, passed, &mut failed);
+    }
+    if let Some(merging) = merging {
+        (merging.starting)("tests");
     }
     let results = testrun::run(root, hold)?;
-    record("tests", results.all_passed(), &mut verdict);
+    record("tests", results.all_passed(), &mut failed);
     let score = score::compute(root, &results)?;
     score::report_findings(&score);
-    record("spec", score.findings.is_empty(), &mut verdict);
-    compare_with_base(root, &score, merging, &mut verdict)?;
-    let word = match verdict {
+    record("spec", score.findings.is_empty(), &mut failed);
+    compare_with_base(root, &score, merging, &mut failed)?;
+    let word = match verdict(&failed) {
         Verdict::Pass => "pass",
         Verdict::Fail => "fail",
     };
     println!("gate: {word}");
-    Ok((verdict, score))
+    Ok((failed, score))
 }
 
 fn compare_with_base(
     root: &Path,
     score: &score::Score,
     merging: Option<&Merging>,
-    verdict: &mut Verdict,
+    failed: &mut Failed,
 ) -> Result<(), Problem> {
     let Some(commit) = base::find(root)? else {
         println!("skip base");
@@ -96,7 +113,7 @@ fn compare_with_base(
     for finding in &findings {
         eprintln!("floor: {finding}");
     }
-    record("checks-kept", findings.is_empty(), verdict);
+    record("checks-kept", findings.is_empty(), failed);
     let floor = ledger::newest(root, &commit)?.map_or(0, |base| base.proven);
     if score.proven < floor {
         eprintln!(
@@ -104,7 +121,7 @@ fn compare_with_base(
             score.proven
         );
     }
-    record("hills", score.proven >= floor || allowed, verdict);
+    record("hills", score.proven >= floor || allowed, failed);
     let missing = match merging {
         Some(merging) => Some(base::missing_label_on(root, &commit, merging.labels)?),
         None => base::missing_label(root, &commit)?,
@@ -114,7 +131,7 @@ fn compare_with_base(
             for finding in &findings {
                 eprintln!("labels: {finding}");
             }
-            record("labels", findings.is_empty(), verdict);
+            record("labels", findings.is_empty(), failed);
         }
         None => {
             println!("skip labels");
@@ -124,10 +141,10 @@ fn compare_with_base(
     Ok(())
 }
 
-pub fn record(name: &str, passed: bool, verdict: &mut Verdict) {
+pub fn record(name: &'static str, passed: bool, failed: &mut Failed) {
     println!("{} {name}", if passed { "pass" } else { "fail" });
     if !passed {
-        *verdict = Verdict::Fail;
+        failed.push(name);
     }
 }
 

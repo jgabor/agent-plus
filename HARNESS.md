@@ -582,11 +582,12 @@ PR's xtask measures it, and then the owner uses a merge button.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
-4. Run the gate on the rebased head, the journey without `spend` steps, and the
-   bench if a budget can be affected. A lowered count fails `merge`, and passes
-   `prepare`. An exact revert under `prepare` skips the bench, because its base
-   may be what doesn't build. If the rebase or this proof fails, `prepare`
-   posts `failure` on the branch's current head and pushes nothing.
+4. Post `pending` on the branch's current head. Run the gate on the rebased
+   head, the journey without `spend` steps, and the bench if a budget can be
+   affected. A lowered count fails `merge`, and passes `prepare`. An exact
+   revert under `prepare` skips the bench, because its base may be what doesn't
+   build. If the rebase or this proof fails, the command posts `failure` on
+   the branch's current head and pushes nothing.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
    Commit the ledger record, whose `commit` is the gated head and whose `base`
    is the `main` it was tested on, and push with `--force-with-lease`.
@@ -597,10 +598,30 @@ PR's xtask measures it, and then the owner uses a merge button.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
+The description of `xtask/gate` says what the proof is doing, and then how it
+ended:
+
+| When | State | Description |
+|---|---|---|
+| The proof starts | `pending` | `Proving: lint` |
+| The tests, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: journey`, `Proving: bench` |
+| The PR is proven | `success` | The counts, as `spec 417 of 812, journey 7 of 19` |
+| A check failed | `failure` | The checks that failed, as `Failed: lint, tests` |
+| The branch doesn't rebase, or the PR or `main` changed during the proof | `failure` | Why, in its first 140 characters |
+| An error stopped the proof | `failure` | `Stopped by an error` |
+
+The status goes on the head that GitHub shows for the PR: the fetched head
+until the push, and the new head after it. So proving a green PR again turns
+it yellow until the proof ends. `land` posts nothing when it sends a PR to
+`prepare` on its own branch, because that PR may be green already. In a GitHub
+Actions run, each status links to the run. A `pending` or `failure` that can't
+be posted is reported, and changes nothing else.
+
 A merge past the merge timeout stops, with every command it started, and
 releases the slot. So does a merge whose caller stops, as on Ctrl-C. Running it
 again starts over from the fetch, and so does running it after a kill at any
-step.
+step. A merge that stops this way can leave `pending` on the PR until the
+next proof.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 
@@ -629,13 +650,16 @@ VMM, once a udev rule opens KVM and a systemd user session is started.
 
 1. Find each open PR whose issue has `land-needed` and that is behind `main`,
    oldest first. A PR that isn't behind is left alone.
-2. Post `pending` as `xtask/gate` on each.
+2. Post `pending` as `xtask/gate` on each, saying how many PRs are proven
+   before it: `Queued, next`, `Queued, 1 PR ahead`, or `Queued, 2 PRs ahead`.
 3. Run `cargo xtask prepare <pr> --keep-budgets` for each as its own process.
    It runs no bench, because a shared runner can't measure a budget. The new
    record keeps the budget values and reason of the record at the tip of the
    branch, and `prepare` fails if the tip has none.
-4. Try every PR. A PR that fails gets `failure` and stays `land-needed`, and
-   the command exits 1.
+4. Try every PR. A PR that fails stays `land-needed`, and the command exits
+   1. Its `prepare` posts `failure` and says why. If its `prepare` ended with
+   neither a `success` nor a `failure` on the PR's head, as at the merge
+   timeout, `refresh` posts `failure` as `Not proven`.
 
 If `main` moves during a run, `prepare --keep-budgets` refuses the rest,
 because `xtask` was built from the older `main`. Those PRs go red until the

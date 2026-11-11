@@ -32,14 +32,12 @@ pub fn run() -> Result<Verdict, Problem> {
     let mut stale = Vec::new();
     // Every stale PR goes yellow first, because the proofs run one at a time.
     for pr in prs {
-        let posted = stale_head(&root, &pr).and_then(|head| {
-            let Some(head) = head else { return Ok(None) };
-            gh.post_status(&head, "xtask/gate", "pending")?;
-            Ok(Some(head))
-        });
-        match posted {
+        match stale_head(&root, &pr) {
             Ok(None) => println!("refresh: PR {} is up to date", pr.number),
-            Ok(Some(_)) => stale.push(pr),
+            Ok(Some(head)) => {
+                merge::post_gate(&gh, &head, "pending", &queued(stale.len()));
+                stale.push(pr);
+            }
             Err(Problem(message)) => {
                 eprintln!("refresh: PR {}: {message}", pr.number);
                 verdict = Verdict::Fail;
@@ -49,11 +47,28 @@ pub fn run() -> Result<Verdict, Problem> {
     for pr in &stale {
         if !prepare(&root, pr.number)? {
             eprintln!("refresh: PR {} wasn't proven", pr.number);
-            merge::post_failure(&gh, &current_head(&root, pr));
+            let head = current_head(&root, pr);
+            // A `prepare` that fails a PR says why on its head, and one that
+            // was stopped after its green did prove the PR. One that was
+            // stopped earlier, or that refused the PR before the fetch, left
+            // no result.
+            let result = gh.status(&head, merge::GATE);
+            if !matches!(result, Ok(Some(state)) if state == "failure" || state == "success") {
+                merge::post_gate(&gh, &head, "failure", "Not proven");
+            }
             verdict = Verdict::Fail;
         }
     }
     Ok(verdict)
+}
+
+/// Where a PR stands, by how many are proven before it.
+fn queued(ahead: usize) -> String {
+    match ahead {
+        0 => "Queued, next".to_string(),
+        1 => "Queued, 1 PR ahead".to_string(),
+        more => format!("Queued, {more} PRs ahead"),
+    }
 }
 
 /// The head to mark, if this PR isn't on the newest `main`. A fork's branch
@@ -93,4 +108,16 @@ fn prepare(root: &Path, number: u64) -> Result<bool, Problem> {
         .status()
         .map_err(|e| Problem(format!("couldn't start `prepare`: {e}")))?;
     Ok(status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queued;
+
+    #[test]
+    fn a_queue_position_counts_the_prs_ahead() {
+        assert_eq!(queued(0), "Queued, next");
+        assert_eq!(queued(1), "Queued, 1 PR ahead");
+        assert_eq!(queued(2), "Queued, 2 PRs ahead");
+    }
 }

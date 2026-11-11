@@ -17,6 +17,8 @@ const PR_LIMIT: usize = 1000;
 /// GitHub gives at most this many items in one GraphQL page.
 const LINKED_LIMIT: usize = 100;
 const ISSUES: &str = "repos/{owner}/{repo}/issues";
+/// How much of a status's description GitHub takes, in characters.
+const DESCRIPTION_LIMIT: usize = 140;
 
 #[derive(Clone, Debug)]
 pub struct Comment {
@@ -314,15 +316,30 @@ impl Gh {
         Ok(())
     }
 
-    /// Sets a status on a commit.
-    pub fn post_status(&self, commit: &str, context: &str, state: &str) -> Result<(), Problem> {
+    /// Sets a status on a commit. `said` is its description, of which GitHub
+    /// takes 140 characters, and `link` is the page it leads to.
+    pub fn post_status(
+        &self,
+        commit: &str,
+        context: &str,
+        state: &str,
+        said: Option<&str>,
+        link: Option<&str>,
+    ) -> Result<(), Problem> {
         let path = format!("repos/{{owner}}/{{repo}}/statuses/{commit}");
-        let state = format!("state={state}");
-        let context = format!("context={context}");
-        self.text(
-            &["api", "-X", "POST", &path, "-f", &state, "-f", &context],
-            None,
-        )?;
+        let mut fields = vec![format!("state={state}"), format!("context={context}")];
+        if let Some(said) = said {
+            let kept: String = said.chars().take(DESCRIPTION_LIMIT).collect();
+            fields.push(format!("description={kept}"));
+        }
+        if let Some(link) = link {
+            fields.push(format!("target_url={link}"));
+        }
+        let mut args = vec!["api", "-X", "POST", &path];
+        for field in &fields {
+            args.extend(["-f", field]);
+        }
+        self.text(&args, None)?;
         Ok(())
     }
 
@@ -384,6 +401,11 @@ impl Gh {
 
     /// Whether this status is a success on this commit.
     pub fn status_passed(&self, commit: &str, context: &str) -> Result<bool, Problem> {
+        Ok(self.status(commit, context)?.as_deref() == Some("success"))
+    }
+
+    /// The newest state of this status on this commit, if it has one.
+    pub fn status(&self, commit: &str, context: &str) -> Result<Option<String>, Problem> {
         let value = self.json(&[
             "api",
             &format!("repos/{{owner}}/{{repo}}/commits/{commit}/status"),
@@ -392,10 +414,11 @@ impl Gh {
             .get("statuses")
             .and_then(Json::as_arr)
             .ok_or_else(|| unexpected("gh api"))?;
-        Ok(statuses.iter().any(|status| {
-            status.get("context").and_then(Json::as_str) == Some(context)
-                && status.get("state").and_then(Json::as_str) == Some("success")
-        }))
+        Ok(statuses
+            .iter()
+            .find(|status| status.get("context").and_then(Json::as_str) == Some(context))
+            .and_then(|status| status.get("state").and_then(Json::as_str))
+            .map(str::to_string))
     }
 
     pub fn pin_issue(&self, number: u64) -> Result<(), Problem> {

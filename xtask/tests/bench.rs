@@ -278,6 +278,23 @@ fn a_base_that_exits_with_the_usage_status_is_no_comparison_whatever_it_says() {
     );
 }
 
+/// An `ap boot` that only runs with no arguments, as if `--timeout` were
+/// renamed.
+const BOOT_WITHOUT_TIMEOUT: &str = "fn main() -> std::process::ExitCode {\n    let args: Vec<String> = std::env::args().skip(1).collect();\n    if args == [\"boot\"] {\n        println!(\"7.3.3-ap.1\");\n    } else if args != [\"--version\"] {\n        eprintln!(\"usage: ap boot\");\n        return std::process::ExitCode::from(2);\n    }\n    std::process::ExitCode::SUCCESS\n}\n";
+
+#[test]
+fn a_base_whose_boot_rejects_the_timeout_is_a_problem() {
+    let repo = Repo::with("boot-renamed", BOOT_BUDGETS, BOOT_WITHOUT_TIMEOUT, &[]);
+    repo.plant(BOOTS);
+    let output = repo.bench();
+    assert!(
+        !stdout(&output).contains("no-comparison boot_ms"),
+        "{}",
+        stdout(&output)
+    );
+    assert_problem(&output, "--timeout");
+}
+
 #[test]
 fn a_failed_boot_that_prints_usage_text_is_a_problem() {
     let confused = BOOT_FAILS
@@ -368,6 +385,25 @@ fn a_base_with_no_build_command_is_no_comparison() {
         "{out}"
     );
     assert!(repo.record().contains("noop_build_ms = "));
+}
+
+/// A base from before `--approve`, which builds without approving anything.
+/// It can't do the work the candidate is timed on, so it isn't compared.
+#[test]
+fn a_base_whose_build_rejects_approve_is_no_comparison() {
+    let old = BUILDS.replace(
+        "    let approved",
+        "    if args.iter().any(|a| a.starts_with(\"--approve\")) {\n        return std::process::ExitCode::from(2);\n    }\n    let approved",
+    );
+    let repo = Repo::with("build-old", BUILD_BUDGETS, &old, &[]);
+    repo.plant(BUILDS);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(
+        out.contains("no-comparison noop_build_ms candidate "),
+        "{out}"
+    );
 }
 
 #[test]

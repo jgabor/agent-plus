@@ -441,6 +441,12 @@ fn boots(base: &Path, candidate: &Path, home: &Path) -> Result<(Option<f64>, f64
         .map_err(|e| Problem(format!("couldn't create {}: {e}", home.display())))?;
     let timed = |binary: &Path| boot_once(binary, home)?.ok_or_else(|| no_boot(binary));
     let base_boots = boot_once(base, home)?.is_some();
+    if !base_boots && has_boot(base, home)? {
+        return Err(Problem(format!(
+            "`{} boot` rejects `--timeout {BOOT_TIMEOUT_SECONDS}`",
+            base.display()
+        )));
+    }
     timed(candidate)?;
     if base_boots {
         let (before, after) = interleaved(base, candidate, timed)?;
@@ -450,6 +456,23 @@ fn boots(base: &Path, candidate: &Path, home: &Path) -> Result<(Option<f64>, f64
         .map(|_| timed(candidate))
         .collect::<Result<_, _>>()?;
     Ok((None, median(after)))
+}
+
+/// Whether `ap boot` with no arguments is a command. Every build that has
+/// `ap boot` also has `--timeout`, so a build that rejects it changed the flag,
+/// and its comparison isn't lost without a word. The bare boot stops at its
+/// own default timeout.
+fn has_boot(binary: &Path, home: &Path) -> Result<bool, Problem> {
+    let status = Command::new(binary)
+        .arg("boot")
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| Problem(format!("couldn't run `{} boot`: {e}", binary.display())))?;
+    Ok(status.code() != Some(USAGE_STATUS))
 }
 
 fn no_boot(binary: &Path) -> Problem {
@@ -507,7 +530,9 @@ fn no_build(binary: &Path) -> Problem {
 
 /// Milliseconds that `ap build` takes on the fixed directory, with its grants
 /// approved, or `None` if this build exits with its usage status, because it
-/// has no such command.
+/// has no such command, or has no `--approve`. `--approve` came after `ap
+/// build`, so a base without it is an old build, as one without `ap build` is,
+/// and it can't do the work the candidate is timed on.
 fn build_once(binary: &Path, directory: &Path, home: &Path) -> Result<Option<f64>, Problem> {
     let shown = binary.display();
     let mut approve = std::ffi::OsString::from("--approve=");

@@ -218,12 +218,14 @@ reason given that day.
 Boot time runs from spawning `ap boot` until its ready line appears, by the
 host's clock. Each build gets one warm-up run first, and all runs share one
 `HOME`, so no download is timed. A base with no `ap boot` is reported as no
-comparison, and the candidate's value is still recorded.
+comparison, and the candidate's value is still recorded. A base whose `ap boot`
+rejects `--timeout` is a problem.
 
 A build with nothing changed is timed on a fixed directory, the Agentfile of
 step 5, with its grants approved through `--approve`. Each build of `ap` has
 its own `HOME`, and builds the directory once first, so every timed run is a
-rebuild. A base with no `ap build` is reported as no comparison.
+rebuild. A base with no `ap build`, or one from before `--approve`, is
+reported as no comparison.
 
 ## Floors
 

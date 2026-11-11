@@ -95,7 +95,10 @@ fn putting_the_same_bytes_at_another_level_recompresses_them() {
     assert_eq!(layers.put(&data, 19).unwrap(), digest);
 
     let at_19 = fs::read(&stored).unwrap();
-    assert_eq!(files(&root.join("zstd-layers")), [digest.clone()]);
+    assert_eq!(
+        files(&root.join("zstd-layers")),
+        std::slice::from_ref(&digest)
+    );
     assert!(at_3.starts_with(&store::compress(&data, 3)));
     assert!(at_19.starts_with(&store::compress(&data, 19)));
     assert_ne!(at_3, at_19);

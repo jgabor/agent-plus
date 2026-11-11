@@ -78,8 +78,12 @@ fn varied() -> Vec<u8> {
         state ^= state >> 7;
         state ^= state << 17;
         data.extend_from_slice(WORDS[(state % 16) as usize].as_bytes());
-        data.push(if state % 11 == 0 { b'\n' } else { b' ' });
-        if state % 5 == 0 {
+        data.push(if state.is_multiple_of(11) {
+            b'\n'
+        } else {
+            b' '
+        });
+        if state.is_multiple_of(5) {
             data.extend_from_slice(format!("{}", state % 1000).as_bytes());
         }
     }

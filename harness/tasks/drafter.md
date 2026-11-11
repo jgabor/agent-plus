@@ -7,10 +7,12 @@ this thread while you run, so never ask a question.
 A draft authorizes nothing. It waits for the owner to answer its open
 decisions and label it. Only the owner adds an `auto:*` label.
 
-1. Search every issue, open or closed, with `gh issue list --state all --limit
-   1000 --json number,body --search '"Milestone: <name>." in:body'`, and check
-   for the line `Milestone: <name>.` yourself, because the search is loose. If
-   one has it, say so and stop.
+1. List every issue, open or closed, that mentions the milestone, with `gh
+   issue list --state all --limit 1000 --json number,body --jq '.[] |
+   select(.body | contains("Milestone: <name>.")) | .number'`, and check for
+   the line `Milestone: <name>.` yourself. Don't use `--search`, because
+   GitHub's search can miss a new issue for minutes. If one has the line, say
+   so and stop.
 2. Read what the milestone has to deliver:
    - its `summary` and `commands` in `harness/journey.toml`, and the steps
      that name it, with their scripts

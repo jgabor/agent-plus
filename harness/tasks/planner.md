@@ -16,10 +16,12 @@ Draft model: `claude-fable-5-2`, at effort `high`
    written. List the milestones in order with `awk
    '/^\[\[milestone\]\]/{m=1} m&&/^name = /{print; m=0}'
    harness/journey.toml`, and take the one after yours, if there is one. For
-   each of the two, search every issue, open or closed, with `gh issue list
-   --state all --limit 1000 --json number,body --search '"Milestone: <name>."
-   in:body'`, and check for the line `Milestone: <name>.` yourself, because
-   the search is loose. For each milestone with no such issue, load
+   each of the two, list every issue, open or closed, that mentions it, with
+   `gh issue list --state all --limit 1000 --json number,body --jq '.[] |
+   select(.body | contains("Milestone: <name>.")) | .number'`, and check for
+   the line `Milestone: <name>.` yourself. Don't use `--search` here, because
+   GitHub's search can miss a new issue for minutes, and a missed draft is
+   drafted twice. For each milestone with no such issue, load
    `mcp__t3-code__delegate_task` with ToolSearch, and call it with `role` set
    to `design`, `mode` set to `wait`, and `timeoutMs` set to 1800000. Its
    `target` uses the draft model from above:

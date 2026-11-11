@@ -29,8 +29,9 @@ const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 /// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
 /// reaches only the supervisor's process group. Only the supervisor holds the
-/// other end of its input, so the input ends when the supervisor does.
-const WATCHER: &str = "read _; kill -STOP -- -$1; kill -KILL -- -$1";
+/// other end of its input, so the input ends when the supervisor does. It runs
+/// the same `kill` as `stop_group`, because dash's builtin refuses `--`.
+const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
 
 enum Decision {
     Merged,

@@ -5,6 +5,7 @@ use crate::Problem;
 use crate::json::{self, Json};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{env, fs};
@@ -174,8 +175,9 @@ fn packages_cargo_builds(
 }
 
 /// Runs rustc for Cargo when `packages_cargo_builds` asks this program to
-/// stand in for it. Cargo asks rustc about the host with no `--target`, so
-/// this adds the host it was given. Returns `None` when it wasn't asked.
+/// stand in for it. Cargo learns the host's name from `rustc -vV`, and its
+/// `cfg` values from a `--print` with no `--target`, so this answers both for
+/// the host it was given. Returns `None` when it wasn't asked.
 pub fn stand_in_for_rustc() -> Option<ExitCode> {
     let host = env::var_os(HOST_VAR)?;
     let rustc = env::var_os(RUSTC_VAR).unwrap_or_else(|| "rustc".into());
@@ -187,16 +189,38 @@ pub fn stand_in_for_rustc() -> Option<ExitCode> {
         .iter()
         .any(|arg| arg == "--target" || arg.to_string_lossy().starts_with("--target="));
     if asks_about_a_target && !names_a_target {
-        args.extend(["--target".into(), host]);
+        args.extend(["--target".into(), host.clone()]);
     }
-    let status = Command::new(rustc).args(args).env_remove(HOST_VAR).status();
-    Some(match status {
-        Ok(status) if status.success() => ExitCode::SUCCESS,
-        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
+    let asks_for_the_version = args.iter().any(|arg| arg == "-vV");
+    let output = match Command::new(rustc).args(args).env_remove(HOST_VAR).output() {
+        Ok(output) => output,
         Err(e) => {
             eprintln!("error: couldn't run rustc: {e}");
-            ExitCode::from(2)
+            return Some(ExitCode::from(2));
         }
+    };
+    let mut stdout = output.stdout;
+    if asks_for_the_version {
+        let host = format!("host: {}", host.to_string_lossy());
+        let text = String::from_utf8_lossy(&stdout)
+            .lines()
+            .map(|line| {
+                if line.starts_with("host: ") {
+                    &host
+                } else {
+                    line
+                }
+            })
+            .fold(String::new(), |text, line| text + line + "\n");
+        stdout = text.into_bytes();
+    }
+    let written = std::io::stdout()
+        .write_all(&stdout)
+        .and_then(|()| std::io::stderr().write_all(&output.stderr));
+    Some(match (written, output.status.code()) {
+        (Ok(()), Some(0)) => ExitCode::SUCCESS,
+        (Ok(()), Some(code)) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        _ => ExitCode::from(1),
     })
 }
 

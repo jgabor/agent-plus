@@ -408,16 +408,16 @@ fn a_host_side_feature_enabled_only_on_macos_still_fails() {
     assert_floor_fails(&gate(&root), "cc");
 }
 
+const MACOS: &str = "'cfg(target_os = \"macos\")'";
+
 /// `demo` reaches `tool` through `edge`, and `tool` depends on `cc` only on
-/// macOS. Cargo resolves `tool` for the machine it runs on, so on Linux `cc`
-/// is invisible to `cargo tree --target`.
-fn host_side_workspace(name: &str, edge: &str, tool_extra: &str) -> PathBuf {
+/// `platform`, a macOS one. Cargo resolves `tool` for the machine it runs on,
+/// so on Linux `cc` is invisible to `cargo tree --target`.
+fn host_side_workspace(name: &str, edge: &str, platform: &str, tool_extra: &str) -> PathBuf {
     let extra = format!("\n[{edge}]\ntool = {{ path = \"../../vendor/tool\" }}\n");
     let tool = package(
         "tool",
-        &format!(
-            "{tool_extra}\n[target.'cfg(target_os = \"macos\")'.dependencies]\ncc = {{ path = \"../cc\" }}\n"
-        ),
+        &format!("{tool_extra}\n[target.{platform}.dependencies]\ncc = {{ path = \"../cc\" }}\n"),
     );
     workspace(
         name,
@@ -433,7 +433,7 @@ fn host_side_workspace(name: &str, edge: &str, tool_extra: &str) -> PathBuf {
 
 #[test]
 fn a_macos_only_dependency_of_a_build_dependency_still_fails() {
-    let root = host_side_workspace("host-build", "build-dependencies", "");
+    let root = host_side_workspace("host-build", "build-dependencies", MACOS, "");
     assert_floor_fails(&gate(&root), "cc");
 }
 
@@ -442,6 +442,29 @@ fn a_macos_only_dependency_of_a_proc_macro_still_fails() {
     let root = host_side_workspace(
         "host-proc-macro",
         "dependencies",
+        MACOS,
+        "\n[lib]\nproc-macro = true\n",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_dependency_of_a_build_dependency_named_by_a_macos_triple_still_fails() {
+    let root = host_side_workspace(
+        "host-build-triple",
+        "build-dependencies",
+        "aarch64-apple-darwin",
+        "",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_dependency_of_a_proc_macro_named_by_a_macos_triple_still_fails() {
+    let root = host_side_workspace(
+        "host-proc-macro-triple",
+        "dependencies",
+        "aarch64-apple-darwin",
         "\n[lib]\nproc-macro = true\n",
     );
     assert_floor_fails(&gate(&root), "cc");

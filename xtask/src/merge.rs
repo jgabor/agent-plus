@@ -25,7 +25,8 @@ const MAIN: &str = "refs/remotes/origin/main";
 const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
-/// Set in the worker that a merge runs in, to the id of the worker's parent.
+/// Set in the worker that a merge runs in, to the id of the worker's parent,
+/// or of the worker itself once `land` restarts.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 /// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
 /// reaches only the supervisor's process group. Only the supervisor holds the
@@ -301,7 +302,8 @@ fn use_the_newest_checks(root: &Path, number: u64) -> Result<Option<Verdict>, Pr
         .args(["xtask", "land", &number.to_string()])
         .current_dir(root)
         .env_remove("RUSTUP_TOOLCHAIN")
-        // `cargo` keeps this process's id, and is the new worker's parent.
+        // `cargo` keeps this process's id, and runs the new worker either as
+        // its child or, on Unix, in its place.
         .env(WORKER_OF, process::id().to_string())
         .exec();
     Err(Problem(format!(
@@ -339,11 +341,11 @@ fn acceptance(head: &str, accepted: &[String]) -> String {
 }
 
 /// Whether this process is the worker that a supervisor started. The variable
-/// names the worker's parent, so it means nothing to a merge that the worker's
-/// own tests start.
+/// names the worker's parent, or the worker itself after `land` restarts, so
+/// it means nothing to a merge that the worker's own tests start.
 fn is_worker() -> bool {
-    env::var(WORKER_OF)
-        .is_ok_and(|parent| parent == std::os::unix::process::parent_id().to_string())
+    let ids = [std::os::unix::process::parent_id(), process::id()];
+    env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))
 }
 
 /// Tells the supervisor that the worker holds the slot, so that the timeout

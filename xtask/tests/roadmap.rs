@@ -10,14 +10,17 @@ mod common;
 
 const JOURNEY: &str = r#"[[milestone]]
 name = "Boot"
+summary = "Start a machine"
 commands = ["ap --version", "ap boot"]
 
 [[milestone]]
 name = "Author"
+summary = "Describe an agent"
 commands = ["ap init"]
 
 [[milestone]]
 name = "Run"
+summary = "Run <agent> | watch it"
 commands = []
 
 [[step]]
@@ -85,6 +88,27 @@ specifies `ap init`. [Other](#other) says more.
 Unrelated.
 ";
 
+/// `ap mcp` has no item under Core commands, and `ap pull` isn't in SPEC.md.
+const README: &str = "# Demo
+
+## Core commands
+
+#### About
+
+- `ap --version`: print the version
+
+#### Agents
+
+- `ap boot [--timeout N]`: boot a bare machine,
+  then power off
+- `ap init [dir]`: create an Agentfile from <dir>
+- `ap push` and `ap pull`: share agents (after v0.1.0)
+
+## Why
+
+- `ap mcp`: outside Core commands, so it describes nothing
+";
+
 const CHECKS: &str = "// spec(ap --version): `ap --version` prints the version.
 #[test]
 fn the_version_prints() {}
@@ -104,7 +128,8 @@ case "$1 $2" in
 esac
 "#;
 
-const HEADER: &str = "The nightly job writes this issue from `cargo xtask roadmap`, so don't edit it. To change it, change `harness/journey.toml` or the issues it lists.\n";
+const HEADER: &str = "This page shows what works in Agent+ today, and what comes next. The nightly job writes it from the project's checks, so don't edit it.\n";
+const DETAILS_HEADER: &str = "The nightly job writes this issue from `cargo xtask roadmap --details`, so don't edit it. To change it, change `harness/journey.toml` or the issues it lists.\n";
 
 fn quoted(text: &str) -> String {
     format!(
@@ -207,6 +232,7 @@ impl Repo {
             ("crates/ap/src/main.rs", "fn main() {}\n"),
             ("crates/ap/tests/checks.rs", CHECKS),
             ("SPEC.md", SPEC),
+            ("README.md", README),
             ("harness/journey.toml", JOURNEY),
             ("harness/journey/ok.sh", "exit 0\n"),
             ("harness/journey/bad.sh", "exit 1\n"),
@@ -266,7 +292,15 @@ impl Repo {
     }
 
     fn roadmap(&self) -> String {
-        let output = self.xtask(&["roadmap"]);
+        self.printed(&["roadmap"])
+    }
+
+    fn details(&self) -> String {
+        self.printed(&["roadmap", "--details"])
+    }
+
+    fn printed(&self, args: &[&str]) -> String {
+        let output = self.xtask(args);
         assert_eq!(
             output.status.code(),
             Some(0),
@@ -289,6 +323,12 @@ fn full() -> (Vec<Issue<'static>>, Vec<String>) {
         Issue {
             number: 2,
             title: "Nightly report",
+            ..PLAIN
+        },
+        Issue {
+            number: 3,
+            title: "Roadmap details",
+            body: "written last night",
             ..PLAIN
         },
         Issue {
@@ -403,7 +443,39 @@ fn full() -> (Vec<Issue<'static>>, Vec<String>) {
     (issues, prs)
 }
 
+/// What anyone can read: no parents, no steps, and no counts of promises.
 const FULL: &str = "
+## First release (v0.1.0)
+
+Milestones done: 2 of 3.
+
+| | Milestone | What you can do | Status |
+|---|---|---|---|
+| 1 | Boot | Start a machine | Done |
+| 2 | Author | Describe an agent | In progress |
+| 3 | Run | Run \\<agent> \\| watch it | Done |
+
+## Commands
+
+### 1. Boot (done)
+
+- [x] `ap --version`: print the version
+- [x] `ap boot`: boot a bare machine, then power off
+
+### 2. Author (in progress)
+
+- [ ] `ap init`: create an Agentfile from \\<dir>
+
+## After the first release
+
+- `ap push` and `ap pull`: share agents (after v0.1.0)
+- `ap mcp`
+- #30 `ap lint` flags bloated instructions
+
+For each milestone's issue and checks, and for what waits on the owner, see #3.
+";
+
+const FULL_DETAILS: &str = "
 ## v0.1.0
 
 journey 2 of 4
@@ -470,11 +542,91 @@ Steps:
 ";
 
 #[test]
-fn the_roadmap_shows_milestones_gaps_and_what_waits_on_the_owner() {
+fn the_roadmap_shows_each_milestone_and_command_in_plain_words() {
     let repo = Repo::new("full");
     let (issues, prs) = full();
     repo.set(&issues, &prs);
     assert_eq!(repo.roadmap(), format!("{HEADER}{FULL}"));
+}
+
+#[test]
+fn the_details_show_parents_steps_proof_and_what_waits_on_the_owner() {
+    let repo = Repo::new("full-details");
+    let (issues, prs) = full();
+    repo.set(&issues, &prs);
+    assert_eq!(repo.details(), format!("{DETAILS_HEADER}{FULL_DETAILS}"));
+}
+
+/// The words a reader of the roadmap would have to look up stay in the details.
+#[test]
+fn the_roadmap_leaves_the_harness_out() {
+    for word in [
+        "Parent",
+        "Step",
+        "proven",
+        "sub-issue",
+        "journey",
+        "Waiting",
+    ] {
+        assert!(!FULL.contains(word), "{word}");
+        assert!(FULL_DETAILS.contains(word), "{word}");
+    }
+}
+
+/// A milestone is done when every one of its steps passes, and the first one
+/// that isn't done is the one in progress.
+#[test]
+fn a_roadmap_with_every_step_passing_has_nothing_in_progress() {
+    let repo = Repo::new("all-done");
+    fs::write(repo.root.join("harness/journey/bad.sh"), "exit 0\n").unwrap();
+    let text = repo.roadmap();
+    assert!(text.contains("Milestones done: 3 of 3.\n"), "{text}");
+    assert!(
+        text.contains("### 2. Author (done)\n\n- [x] `ap init`"),
+        "{text}"
+    );
+    assert!(!text.contains("In progress"), "{text}");
+    assert!(!text.contains("Planned"), "{text}");
+}
+
+#[test]
+fn a_milestone_after_the_one_in_progress_is_planned() {
+    let repo = Repo::new("planned");
+    fs::write(repo.root.join("harness/journey/ok.sh"), "exit 1\n").unwrap();
+    let text = repo.roadmap();
+    assert!(text.contains("Milestones done: 0 of 3.\n"), "{text}");
+    assert!(
+        text.contains("| 1 | Boot | Start a machine | In progress |\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("| 2 | Author | Describe an agent | Planned |\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("### 1. Boot (in progress)\n\n- [ ] `ap --version`"),
+        "{text}"
+    );
+    assert!(
+        text.contains("### 2. Author (planned)\n\n- [ ] `ap init`"),
+        "{text}"
+    );
+}
+
+/// The gate's `spec` check is what asks for the item. The roadmap still prints.
+#[test]
+fn a_command_the_readme_doesnt_describe_is_shown_by_name() {
+    let repo = Repo::new("no-readme");
+    fs::remove_file(repo.root.join("README.md")).unwrap();
+    let text = repo.roadmap();
+    assert!(
+        text.contains("- [x] `ap --version`\n- [x] `ap boot`\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("## After the first release\n\n- `ap push`\n- `ap mcp`\n"),
+        "{text}"
+    );
 }
 
 /// The command only prints. Writing the issue is the nightly job's.
@@ -501,6 +653,7 @@ fn the_same_inputs_give_the_same_bytes_in_any_order() {
     repo.set(&issues, &prs);
     assert_eq!(repo.roadmap(), format!("{HEADER}{FULL}"));
     assert_eq!(repo.roadmap(), format!("{HEADER}{FULL}"));
+    assert_eq!(repo.details(), format!("{DETAILS_HEADER}{FULL_DETAILS}"));
 }
 
 #[test]
@@ -508,6 +661,15 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
     let repo = Repo::new("empty");
     let text = repo.roadmap();
     assert!(text.starts_with(HEADER), "{text}");
+    // With no details issue, there is nothing to point at.
+    assert!(
+        text.ends_with(
+            "## After the first release\n\n- `ap push` and `ap pull`: share agents (after v0.1.0)\n- `ap mcp`\n"
+        ),
+        "{text}"
+    );
+    let text = repo.details();
+    assert!(text.starts_with(DETAILS_HEADER), "{text}");
     assert_eq!(text.matches("Parent: none.\n").count(), 3, "{text}");
     assert!(
         text.ends_with(
@@ -519,7 +681,7 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
 
 fn parent_line(repo: &Repo, issues: &[Issue]) -> String {
     repo.set(issues, &[]);
-    let text = repo.roadmap();
+    let text = repo.details();
     let line = text.lines().find(|line| line.starts_with("Parent: "));
     line.unwrap().to_string()
 }
@@ -591,18 +753,23 @@ fn only_this_repositorys_sub_issues_count() {
         "\"parent\":{\"number\":1,\"url\":\"https://github.com/o/other/issues/1\"}",
     );
     repo.set_json(&[roadmap.json(), foreign], &[]);
-    let text = repo.roadmap();
+    let text = repo.details();
     let after = "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting";
     assert!(text.contains(after), "{text}");
+    let text = repo.roadmap();
+    assert!(text.ends_with("- `ap mcp`\n"), "{text}");
 }
 
 #[test]
-fn the_roadmap_takes_no_arguments() {
+fn the_roadmap_takes_only_details() {
     let repo = Repo::new("arguments");
     let output = repo.xtask(&["roadmap", "--write"]);
     assert_eq!(output.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("`roadmap` takes no arguments"), "{stderr}");
+    assert!(
+        stderr.contains("`roadmap` takes only `--details`"),
+        "{stderr}"
+    );
     assert_eq!(repo.calls(), Vec::<String>::new());
 }
 

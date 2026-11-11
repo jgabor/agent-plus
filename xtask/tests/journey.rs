@@ -8,7 +8,7 @@ const AP: &str = "fn main() {\n    println!(\"ap test\");\n}\n";
 const PASS: &str = "#!/bin/sh\nexit 0\n";
 const FAIL: &str = "#!/bin/sh\nexit 1\n";
 /// The milestone that every step from `step` is in.
-const MILESTONE: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n";
+const MILESTONE: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n";
 
 fn manifest() -> String {
     "[package]\nname = \"ap\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".to_string()
@@ -332,7 +332,9 @@ fn a_comment_is_not_a_floor_check() {
 }
 
 fn milestone(name: &str, commands: &str) -> String {
-    format!("[[milestone]]\nname = \"{name}\"\ncommands = [{commands}]\n\n")
+    format!(
+        "[[milestone]]\nname = \"{name}\"\nsummary = \"What {name} is for\"\ncommands = [{commands}]\n\n"
+    )
 }
 
 fn step_in(id: u32, milestone: &str) -> String {
@@ -482,6 +484,22 @@ fn mistyped_commands_are_a_problem() {
         &toml,
         "the milestone `Boot` has no string array `commands`",
     );
+}
+
+/// The roadmap shows the summary, so a milestone can't leave it out or blank.
+#[test]
+fn a_milestone_without_a_summary_is_a_problem() {
+    for (name, summary) in [
+        ("no-summary", ""),
+        ("blank-summary", "summary = \" \"\n"),
+        ("summary-type", "summary = 1\n"),
+    ] {
+        let toml = format!(
+            "[[milestone]]\nname = \"Boot\"\n{summary}commands = []\n\n{}",
+            step_in(1, "Boot")
+        );
+        assert_problem(name, &toml, "the milestone `Boot` has no `summary`");
+    }
 }
 
 #[test]

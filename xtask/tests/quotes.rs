@@ -506,7 +506,7 @@ const COMMANDS: &str = "# A\n\n## Build\n\nA rebuild is a hit.\n\n## Commands\n\
 /// A journey file whose only milestone lists these commands.
 fn journey(commands: &str) -> String {
     format!(
-        "[[milestone]]\nname = \"M\"\ncommands = [{commands}]\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"M\"\nneeds = []\nscript = \"harness/journey/s.sh\"\n"
+        "[[milestone]]\nname = \"M\"\nsummary = \"s\"\ncommands = [{commands}]\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"M\"\nneeds = []\nscript = \"harness/journey/s.sh\"\n"
     )
 }
 
@@ -574,6 +574,60 @@ fn a_pointer_to_a_heading_that_isnt_there_fails_the_gate() {
     assert_eq!(code, Some(1), "{err}");
     assert!(out.contains("fail spec"), "{out}");
     assert!(err.contains("`Bild`"), "{err}");
+}
+
+const README: &str = "# Demo\n\n## Core commands\n\n- `ap one [dir]`: do one thing\n- `ap two`: do another\n- `ap later` and `ap maybe`: come later\n";
+
+fn gate_with_readme(name: &str, readme: &str) -> (Option<i32>, String, String) {
+    let lib = "#[test]\nfn one() {}\n";
+    let journey = journey("\"ap one\", \"ap two\"");
+    let files = [
+        ("harness/journey.toml", journey.as_str()),
+        ("README.md", readme),
+    ];
+    let root = workspace(name, COMMANDS, lib, &files);
+    let output = xtask(&root, &["gate"]);
+    (output.status.code(), stdout(&output), stderr(&output))
+}
+
+/// The roadmap describes each command with its item in the README.
+#[test]
+fn the_gate_passes_when_the_readme_describes_every_command() {
+    let (code, out, err) = gate_with_readme("readme-agrees", README);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("pass spec"), "{out}");
+}
+
+#[test]
+fn a_spec_command_with_no_item_in_the_readme_fails_the_gate() {
+    let readme = README.replace("- `ap two`: do another\n", "");
+    let (code, out, err) = gate_with_readme("readme-missing", &readme);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(out.contains("fail spec"), "{out}");
+    assert!(err.contains("README.md: `ap two` is a command"), "{err}");
+    assert!(!err.contains("README.md: `ap one`"), "{err}");
+    // A planned or proposed command is on the roadmap too.
+    let readme = README.replace(" and `ap maybe`", "");
+    let (code, _, err) = gate_with_readme("readme-missing-later", &readme);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("README.md: `ap maybe` is a command"), "{err}");
+}
+
+/// The nightly bisect gates trees from before summaries. Today's reader
+/// refuses their journey files, and the gate must not. Their READMEs don't
+/// describe every command either.
+#[test]
+fn a_journey_file_from_before_summaries_is_not_compared() {
+    let journey = journey("\"ap one\", \"ap three\"").replace("summary = \"s\"\n", "");
+    let lib = "#[test]\nfn one() {}\n";
+    let files = [
+        ("harness/journey.toml", journey.as_str()),
+        ("README.md", "# Demo\n"),
+    ];
+    let root = workspace("commands-before-summaries", COMMANDS, lib, &files);
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(stdout(&output).contains("pass spec"), "{}", stdout(&output));
 }
 
 /// The nightly bisect gates trees from before milestones. Today's reader

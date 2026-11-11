@@ -10,7 +10,7 @@ mod common;
 
 const FAST: &str = "fn main() {}\n";
 const BROKEN: &str = "fn main() {}\n\n#[test]\nfn broken() {\n    panic!();\n}\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"m\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
 const BUDGETS: &str = "[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const RECORD: &str = "issue = 5\npr = 9\ncommit = \"c\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = { proven = 0, promises = 1 }\njourney = { passing = 1, steps = 1 }\nreason = \"\"\n\n[budgets]\n";
 const NO_ISSUES: &str = "[]";

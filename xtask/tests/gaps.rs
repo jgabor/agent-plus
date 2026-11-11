@@ -6,7 +6,7 @@ use std::process::{Command, Output};
 
 const SPEC: &str = "# A\n\nZulu. Yankee.\n\n# B\n\nAlpha.\n";
 const CHECK_YANKEE: &str = "// spec(A): Yankee.\n#[test]\nfn yankee() {}\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"Early\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Early\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Later on\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Early\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"Early\"\nsummary = \"s\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Early\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Later on\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Early\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n";
 const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"Version\"\ntarget = 5\n\n[[budget]]\nkey = \"run_ms\"\nname = \"Run\"\ntarget = 1000\n\n[[budget]]\nkey = \"boot_ms\"\nname = \"Boot\"\ntarget = 150\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const RECORD: &str = "issue = 3\npr = 2\ncommit = \"c\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = { proven = 0, promises = 3 }\njourney = { passing = 1, steps = 3 }\nreason = \"\"\n\n[budgets]\nrun_ms = 2000\nversion_ms = 1\n";
 

@@ -1,6 +1,7 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
 use crate::journey::{self, JOURNEY_FILE};
+use crate::readme::{self, README_FILE};
 use crate::spec::Arrives;
 use crate::testrun::{self, Results};
 use crate::{Problem, Verdict, bench, ledger, lock, spec, workspace};
@@ -166,7 +167,8 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
 }
 
 /// The milestones must list exactly the commands that SPEC.md has for v0.1.0,
-/// so that neither file names a command the other doesn't know.
+/// so that neither file names a command the other doesn't know. The README
+/// must describe every command, so that the roadmap can.
 fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
     let commands = spec::commands(spec);
     let headings = spec::headings(spec);
@@ -181,11 +183,15 @@ fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
             }
         }
     }
-    // A journey file from before milestones lists no commands, and today's
-    // reader refuses it. The nightly bisect gates such trees, so they are left
-    // alone here, as is a workspace with no journey file.
+    // A journey file from before milestones lists no commands, and one from
+    // before summaries has none. Today's reader refuses both. The nightly
+    // bisect gates such trees, so they are left alone here, as is a workspace
+    // with no journey file.
     let listing = fs::read_to_string(root.join(JOURNEY_FILE)).unwrap_or_default();
-    if !listing.lines().any(|line| line.trim() == "[[milestone]]") {
+    let has_milestones = listing.lines().any(|line| line.trim() == "[[milestone]]");
+    let key = |line: &str| line.split_once('=').map(|(key, _)| key.trim() == "summary");
+    let has_summaries = listing.lines().any(|line| key(line) == Some(true));
+    if !has_milestones || !has_summaries {
         return Ok(findings);
     }
     let milestones = journey::milestones(root)?;
@@ -213,6 +219,19 @@ fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
                 "SPEC.md: `{}` is a v0.1.0 command, and no milestone in {JOURNEY_FILE} lists it. Add it to a milestone, or mark it `**Planned.**`",
                 command.name
             ));
+        }
+    }
+    // The roadmap describes each command with its line in the README. A
+    // workspace with no README describes none.
+    if let Ok(text) = fs::read_to_string(root.join(README_FILE)) {
+        let lines = readme::command_lines(&text);
+        for command in &commands {
+            if readme::line_for(&lines, &command.name).is_none() {
+                findings.push(format!(
+                    "{README_FILE}: `{}` is a command in SPEC.md, and no item under Core commands describes it. Add an item that starts with the command in backticks, then a colon and what it does",
+                    command.name
+                ));
+            }
         }
     }
     Ok(findings)

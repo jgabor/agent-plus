@@ -137,7 +137,7 @@ pub struct Command {
 }
 
 /// Whether each line is a fence or inside one.
-fn fenced(lines: &[&str]) -> Vec<bool> {
+pub fn fenced(lines: &[&str]) -> Vec<bool> {
     let mut fence: Option<(u8, usize)> = None;
     let inside = |line: &&str| {
         let trimmed = line.trim_start();
@@ -153,7 +153,7 @@ fn fenced(lines: &[&str]) -> Vec<bool> {
 }
 
 /// Every heading, with its depth and its line, in document order.
-fn headings_of<'a>(lines: &[&'a str], fenced: &[bool]) -> Vec<(usize, &'a str, usize)> {
+pub fn headings_of<'a>(lines: &[&'a str], fenced: &[bool]) -> Vec<(usize, &'a str, usize)> {
     let mut found = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !fenced[index]

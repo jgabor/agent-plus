@@ -72,6 +72,10 @@ work starts from this label, so treat it as the owner's written permission.
 - Neither label lets you merge a `spec-change` PR the owner hasn't approved,
   change repository settings, publish a release, install software on the
   machine, or touch another agent's branch while its lease is live.
+- The one release you may publish is a guest artifact. Copy its build inputs
+  to `jgabor/agent-plus-guest` and push its tag, and that repository's
+  workflow publishes it. Never upload one any other way. Its pin still lands
+  here in a gated PR.
 
 ### Issues
 

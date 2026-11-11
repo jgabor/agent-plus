@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 
 use agentfile::{Add, GuestPath};
@@ -55,6 +56,22 @@ fn add(source: &str, destination: Option<&str>) -> Add {
         source: source.to_string(),
         destination: destination.map(str::to_string),
     }
+}
+
+/// Binds a Unix socket at `path`, however long the checkout's path is.
+///
+/// A socket address holds about 104 bytes, fewer than a deep checkout's
+/// target directory needs, so this binds through a short link in `/tmp` to the
+/// socket's directory, and removes the link afterwards.
+fn bind(path: &Path) -> UnixListener {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let link = PathBuf::from(format!("/tmp/ap-add-{}-{n}", std::process::id()));
+    let _ = fs::remove_file(&link);
+    symlink(path.parent().unwrap(), &link).unwrap();
+    let socket = UnixListener::bind(link.join(path.file_name().unwrap()));
+    fs::remove_file(&link).unwrap();
+    socket.unwrap()
 }
 
 fn write(path: &Path, text: &str) {
@@ -314,7 +331,7 @@ fn special_files_are_skipped_with_a_warning() {
     let s = Scratch::new("special");
     write(&s.context.join("data/a.txt"), "a");
     mkfifo(&s.context.join("data/pipe"));
-    let _socket = UnixListener::bind(s.context.join("data/sock")).unwrap();
+    let _socket = bind(&s.context.join("data/sock"));
 
     let layer = s.read("./data", "/home/agent/data");
     let mut warnings = layer.warnings.clone();
@@ -557,7 +574,7 @@ fn a_socket_behind_a_swapped_directory_is_an_error() {
     let s = Scratch::new("swapped-socket");
     write(&s.context.join("data/sock"), "placeholder");
     fs::create_dir_all(s.root.join("elsewhere")).unwrap();
-    let _socket = UnixListener::bind(s.root.join("elsewhere/sock")).unwrap();
+    let _socket = bind(&s.root.join("elsewhere/sock"));
     let host = s.host("./data/sock");
     fs::rename(s.context.join("data"), s.context.join("old")).unwrap();
     symlink(s.root.join("elsewhere"), s.context.join("data")).unwrap();

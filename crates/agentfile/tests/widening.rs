@@ -47,7 +47,7 @@ fn host(sign: Sign, name: &str) -> NetworkRule {
 #[test]
 fn the_same_grants_widen_nothing() {
     let lines = "SHARE ~/notes /notes rw\nENV USER $USER\nSECRET T @a.com\n\
-                 AUTH key\nNETWORK -\nNETWORK +github.com\nPOLICY +reviewer\n";
+                 AUTH key\nNETWORK -\nNETWORK +a.com\nPOLICY +reviewer\n";
     assert_eq!(widened(lines, lines), []);
 }
 
@@ -341,7 +341,7 @@ fn each_widening_is_listed() {
 #[test]
 fn each_widening_shows_as_one_line() {
     let approved = "SHARE ~/a /a\nSECRET T @a.com\nSECRET S @s.com\n\
-                    NETWORK -\nNETWORK -evil.com\nPOLICY -\n";
+                    NETWORK -\nNETWORK +a.com\nNETWORK +s.com\nNETWORK -evil.com\nPOLICY -\n";
     let now = "SHARE ~/a /a rw\nSHARE ~/b /b\nENV USER $USER\nSECRET T @a.com @b.com visible\n\
                SEAL S @s.com\nSEAL N @n.com\nAUTH token\nNETWORK +\nNETWORK +github.com\n\
                POLICY +\nPOLICY -writer\n";

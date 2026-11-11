@@ -71,6 +71,137 @@ impl Network {
             rules,
         })
     }
+
+    /// Whether these rules deny every request to `host`, by the evaluation
+    /// under NETWORK in SPEC.md. An address is judged by IP rules. A name
+    /// is judged by host and URL rules alone, since the address it resolves
+    /// to isn't known until a run.
+    pub(crate) fn denies(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        let address = host.parse::<IpAddr>().ok();
+        // Each port and path a rule names, and one that none names, so that
+        // every way a request can match the rules gets tried.
+        let mut ports = vec![80, 443];
+        let mut paths = Vec::new();
+        for rule in &self.rules {
+            match &rule.destination {
+                Destination::Host { port, .. } | Destination::Address { port, .. } => {
+                    ports.extend(*port)
+                }
+                Destination::Url { port, path, .. } => {
+                    ports.extend(*port);
+                    paths.push(path.clone());
+                }
+            }
+        }
+        let longest = paths.iter().map(String::len).max().unwrap_or(0);
+        paths.push(format!("/{}", "x".repeat(longest)));
+        ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
+        for scheme in [Scheme::Https, Scheme::Http] {
+            for &port in &ports {
+                for path in &paths {
+                    let decision = match address {
+                        Some(address) => self.address_decision(address, port),
+                        None => self.name_decision(&host, scheme, port, path),
+                    };
+                    if decision.unwrap_or(self.default) == Sign::Allow {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// The sign of the most specific URL or host rule that matches a
+    /// request to `host`, if any matches.
+    fn name_decision(&self, host: &str, scheme: Scheme, port: u16, path: &str) -> Option<Sign> {
+        most_specific(self.rules.iter().filter_map(|rule| {
+            let key = match &rule.destination {
+                Destination::Host { name, port: only } => {
+                    let matches = host == name
+                        || host
+                            .strip_suffix(name.as_str())
+                            .is_some_and(|start| start.ends_with('.'));
+                    (matches && only.is_none_or(|only| only == port))
+                        .then(|| (false, name.split('.').count(), only.is_some()))
+                }
+                Destination::Url {
+                    scheme: only,
+                    host: name,
+                    port: only_port,
+                    path: prefix,
+                } => {
+                    let default = match only {
+                        Scheme::Https => 443,
+                        Scheme::Http => 80,
+                    };
+                    let under = path == prefix
+                        || path
+                            .strip_prefix(prefix.as_str())
+                            .is_some_and(|rest| prefix.ends_with('/') || rest.starts_with('/'));
+                    (host == name
+                        && *only == scheme
+                        && only_port.unwrap_or(default) == port
+                        && under)
+                        .then(|| (true, prefix.len(), only_port.is_some()))
+                }
+                Destination::Address { .. } => None,
+            };
+            key.map(|key| (key, rule.sign))
+        }))
+    }
+
+    /// The sign of the IP rule with the longest prefix that matches a
+    /// connection to `address`, if any matches.
+    fn address_decision(&self, address: IpAddr, port: u16) -> Option<Sign> {
+        most_specific(self.rules.iter().filter_map(|rule| match rule.destination {
+            Destination::Address {
+                network,
+                prefix,
+                port: only,
+            } if masked(address, prefix) == Some(network)
+                && only.is_none_or(|only| only == port) =>
+            {
+                Some(((prefix, only.is_some()), rule.sign))
+            }
+            _ => None,
+        }))
+    }
+}
+
+/// The sign of the matches with the highest key. Equally specific matches
+/// with opposite signs deny.
+fn most_specific<K: Ord>(matches: impl Iterator<Item = (K, Sign)>) -> Option<Sign> {
+    let mut best: Option<(K, Sign)> = None;
+    for (key, sign) in matches {
+        match &mut best {
+            Some((top, top_sign)) if key == *top => {
+                if sign == Sign::Deny {
+                    *top_sign = Sign::Deny;
+                }
+            }
+            Some((top, _)) if key < *top => {}
+            _ => best = Some((key, sign)),
+        }
+    }
+    best.map(|(_, sign)| sign)
+}
+
+/// `address` with the bits past `prefix` cleared, or `None` when the prefix
+/// is longer than the address.
+fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
+    match address {
+        IpAddr::V4(address) if prefix <= 32 => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+            Some(IpAddr::V4((u32::from(address) & mask).into()))
+        }
+        IpAddr::V6(address) if prefix <= 128 => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+            Some(IpAddr::V6((u128::from(address) & mask).into()))
+        }
+        _ => None,
+    }
 }
 
 /// The `POLICY` rules of an Agentfile: which agents this one may call.
@@ -274,18 +405,7 @@ fn destination(text: &str) -> Result<Destination, String> {
 
 /// Checks that `network` has no bits set past `prefix`.
 fn address(network: IpAddr, prefix: u8, port: Option<u16>) -> Result<Destination, String> {
-    let masked = match network {
-        IpAddr::V4(address) => {
-            let bits = u32::from(address);
-            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
-            IpAddr::V4((bits & mask).into())
-        }
-        IpAddr::V6(address) => {
-            let bits = u128::from(address);
-            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
-            IpAddr::V6((bits & mask).into())
-        }
-    };
+    let masked = masked(network, prefix).unwrap_or(network);
     if masked != network {
         let shown = match masked {
             IpAddr::V4(_) => format!("{masked}/{prefix}"),

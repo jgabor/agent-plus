@@ -261,6 +261,8 @@ fn the_text_form_uses_agentfile_lines() {
          NETWORK -10.1.0.0/16\n\
          NETWORK +[2606:4700::]/32:443\n\
          NETWORK +https://codeberg.org/forgejo\n\
+         NETWORK +stripe.com\n\
+         NETWORK +registry.npmjs.org\n\
          POLICY +reviewer",
     );
     assert_eq!(
@@ -275,6 +277,8 @@ fn the_text_form_uses_agentfile_lines() {
          NETWORK +[2606:4700::]/32:443\n\
          NETWORK +github.com:22\n\
          NETWORK +https://codeberg.org/forgejo\n\
+         NETWORK +registry.npmjs.org\n\
+         NETWORK +stripe.com\n\
          NETWORK -10.1.0.0/16\n\
          POLICY -\n\
          POLICY +reviewer\n",

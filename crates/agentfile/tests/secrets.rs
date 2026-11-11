@@ -490,3 +490,153 @@ fn one_bad_instruction_does_not_hide_the_next() {
     );
     assert_eq!(lines_of(&errors), [2, 3, 4, 5, 6], "{errors:?}");
 }
+
+/// Asserts that `lines` fail on line 2 alone, once for each of `hosts`, and
+/// that each error names its host and its secret.
+fn assert_denied(lines: &str, name: &str, hosts: &[&str]) {
+    let errors = errors_after_agent(lines);
+    assert_eq!(
+        lines_of(&errors),
+        vec![2; hosts.len()],
+        "{lines:?}: {errors:?}"
+    );
+    for (error, host) in errors.iter().zip(hosts) {
+        assert!(error.message.contains(&format!("`{host}`")), "{error:?}");
+        assert!(error.message.contains(&format!("`{name}`")), "{error:?}");
+        assert!(error.message.contains("NETWORK"), "{error:?}");
+    }
+}
+
+/// Asserts that `lines` parse, and that `Secrets::read` accepts them.
+fn assert_allowed(lines: &str) {
+    let instructions = parse(&format!("AGENT claude\n{lines}"))
+        .unwrap_or_else(|errors| panic!("{lines:?}: {errors:?}"));
+    Secrets::read(&instructions).unwrap_or_else(|errors| panic!("{lines:?}: {errors:?}"));
+}
+
+// spec(SECRET): A bound host that `NETWORK` denies is an error.
+#[test]
+fn a_bound_host_that_a_deny_rule_denies_is_an_error() {
+    for (lines, name, hosts) in [
+        (
+            "SECRET STRIPE_API_KEY @api.stripe.com\nNETWORK -api.stripe.com\n",
+            "STRIPE_API_KEY",
+            &["api.stripe.com"][..],
+        ),
+        (
+            "SECRET STRIPE_API_KEY @api.stripe.com\nNETWORK -stripe.com\n",
+            "STRIPE_API_KEY",
+            &["api.stripe.com"],
+        ),
+        (
+            "SECRET T @a.example.com @b.example.com\nNETWORK -example.com\n",
+            "T",
+            &["a.example.com", "b.example.com"],
+        ),
+        (
+            "SECRET T @API.Example.com\nNETWORK -api.example.com\n",
+            "T",
+            &["API.Example.com"],
+        ),
+        (
+            "SEAL DEPLOY @deploy.example.com\nNETWORK -deploy.example.com\n",
+            "DEPLOY",
+            &["deploy.example.com"],
+        ),
+        (
+            "SECRET GITHUB_TOKEN\nNETWORK -api.github.com\n",
+            "GITHUB_TOKEN",
+            &["api.github.com"],
+        ),
+        (
+            "SECRET T @a.com\nNETWORK +a.com\nNETWORK -a.com\n",
+            "T",
+            &["a.com"],
+        ),
+        ("SECRET T @a.com visible\nNETWORK -a.com\n", "T", &["a.com"]),
+        (
+            "SECRET T @10.0.0.1\nNETWORK -10.0.0.0/8\n",
+            "T",
+            &["10.0.0.1"],
+        ),
+    ] {
+        assert_denied(lines, name, hosts);
+    }
+}
+
+// spec(SECRET): A bound host that `NETWORK` denies is an error.
+#[test]
+fn a_bound_host_that_the_closed_default_denies_is_an_error() {
+    for (lines, name, hosts) in [
+        (
+            "SECRET STRIPE_API_KEY @api.stripe.com\nNETWORK -\n",
+            "STRIPE_API_KEY",
+            &["api.stripe.com"][..],
+        ),
+        (
+            "SECRET GITHUB_TOKEN\nNETWORK -\n",
+            "GITHUB_TOKEN",
+            &["github.com", "api.github.com"],
+        ),
+        (
+            "SEAL T @a.com\nNETWORK no\nNETWORK +b.com\n",
+            "T",
+            &["a.com"],
+        ),
+        (
+            "SECRET T @api.a.com\nNETWORK -\nNETWORK +b.api.a.com\n",
+            "T",
+            &["api.a.com"],
+        ),
+        (
+            "SECRET T @a.com\nNETWORK -\nNETWORK +https://a.com.evil.net/\n",
+            "T",
+            &["a.com"],
+        ),
+        ("SECRET T @10.0.0.1\nNETWORK -\n", "T", &["10.0.0.1"]),
+    ] {
+        assert_denied(lines, name, hosts);
+    }
+}
+
+#[test]
+fn a_bound_host_that_some_request_reaches_is_allowed() {
+    for lines in [
+        "SECRET T @api.a.com\n",
+        "SECRET T @api.a.com\nNETWORK -\nNETWORK +a.com\n",
+        "SECRET T @api.a.com\nNETWORK -\nNETWORK +api.a.com:443\n",
+        "SECRET T @api.a.com\nNETWORK -\nNETWORK +https://api.a.com/v1\n",
+        "SECRET T @api.a.com\nNETWORK -a.com\nNETWORK +api.a.com\n",
+        "SECRET T @api.a.com\nNETWORK -api.a.com\nNETWORK +https://api.a.com/v1\n",
+        "SECRET T @api.a.com\nNETWORK -api.a.com:443\n",
+        "SECRET T @api.a.com\nNETWORK -https://api.a.com/\n",
+        "SECRET T @api.a.com\nNETWORK -https://api.a.com/v1\n",
+        "SECRET T @api.a.com\nNETWORK -other.com\nNETWORK -10.0.0.0/8\n",
+        "SECRET T @10.0.0.1\nNETWORK -\nNETWORK +10.0.0.0/8\n",
+        "SECRET T @10.0.0.1\nNETWORK -10.0.0.0/8\nNETWORK +10.0.0.1\n",
+        "SECRET GITHUB_TOKEN\nNETWORK -\nNETWORK +github.com\n",
+        "SECRET T visible\nNETWORK -\n",
+    ] {
+        assert_allowed(lines);
+    }
+}
+
+#[test]
+fn a_denied_bound_host_fails_secrets_read_too() {
+    let instructions = vec![
+        agentfile::Instruction {
+            line: 1,
+            name: "SECRET".to_string(),
+            arguments: vec!["T".to_string(), "@a.com".to_string()],
+            text: None,
+        },
+        agentfile::Instruction {
+            line: 2,
+            name: "NETWORK".to_string(),
+            arguments: vec!["-".to_string()],
+            text: None,
+        },
+    ];
+    let errors = Secrets::read(&instructions).unwrap_err();
+    assert_eq!(lines_of(&errors), [1], "{errors:?}");
+}

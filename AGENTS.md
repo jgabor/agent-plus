@@ -130,7 +130,9 @@ left a status comment that is parked or has an expired lease, edit that one
 instead. Then read the issue again. If someone else's live status comment has
 a lower comment id than yours, it wins: back out and pick something else.
 
-Keep editing that one comment. Don't post a new one for each update.
+Keep editing that one comment. Don't post a new one for each update. Update
+it with `cargo xtask status <issue> --thread <link>`, which reads the comment
+from stdin, renews the lease, and refuses a thread that doesn't hold the issue.
 
 ```markdown
 <!-- status -->
@@ -143,12 +145,13 @@ Keep editing that one comment. Don't post a new one for each update.
 **Decisions:** what you chose, and anything still open
 ```
 
-A lease lasts 12 hours, and every edit renews it. If a lease has expired and
-the branch has had no new commits since, anyone may take the issue over.
-Continue on the same branch, keep the earlier commits and their credit, and
-treat what you inherit as context, not proof. Taking over is safe even if the
-first worker was only waiting: whenever you wake, check that the status
-comment still names your thread, and stop if it doesn't.
+A lease lasts 12 hours, and every edit renews it. If a lease has expired and the
+branch has had no new commits since, anyone may take the issue over. Continue on
+the same branch, keep the earlier commits and their credit, and treat what you
+inherit as context, not proof. An issue back from parking also continues on the
+branch its status comment names. Taking over is safe even if the first worker
+was only waiting: whenever you wake, check that the status comment still names
+your thread, and stop if it doesn't.
 
 ### Working in parallel
 
@@ -291,11 +294,13 @@ All of these must be true on the latest commit:
 - The branch is up to date with `main`, and you hold the merge slot.
 - The PR isn't labeled `spec-change`, unless the owner has approved it.
 
-Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass.
-On any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
-everything but the squash, which is the owner's. `cargo xtask land` is the
-owner's too, and agents never run it. After a merge, close the loop: remove
-`in-progress`, remove your worktree, and make sure the issue closed.
+Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass. On
+any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
+everything but the squash, which is the owner's. While you hold the issue, pass
+`--thread <link>` to both, because they refuse any other thread. `cargo xtask
+land` is the owner's too, and agents never run it. After a merge, close the
+loop: remove `in-progress`, remove your worktree, and make sure the issue
+closed.
 
 ### Untrusted input
 

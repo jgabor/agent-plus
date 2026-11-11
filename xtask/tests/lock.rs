@@ -1,7 +1,9 @@
 //! Runs `xtask run`, and plays the part of a bench by locking the same files.
 
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
@@ -209,6 +211,28 @@ fn a_script_whose_interpreter_is_missing_is_a_problem() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("/no/such/interpreter"));
+}
+
+/// The kernel ends the interpreter's name at a NUL, takes it as bytes, and
+/// runs a script whose name is cut off at 256 bytes with `sh` instead.
+#[test]
+fn a_script_the_kernel_can_start_is_left_alone() {
+    let root = workspace("odd-interpreters");
+    let odd = root.join(OsStr::from_bytes(b"true-\xff"));
+    std::os::unix::fs::symlink("/bin/true", &odd).unwrap();
+    let long = format!("#!/{}\nexit 0\n", "x".repeat(300));
+    let cases: [(&str, Vec<u8>); 3] = [
+        ("nul", b"#!/bin/true\0ignored\n".to_vec()),
+        ("bytes", [b"#!", odd.as_os_str().as_bytes(), b"\n"].concat()),
+        ("long", long.into_bytes()),
+    ];
+    for (name, body) in cases {
+        let script = root.join(name);
+        fs::write(&script, body).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = run(&root, &[&format!("./{name}")]);
+        assert_eq!(output.status.code(), Some(0), "{name}: {output:?}");
+    }
 }
 
 #[test]

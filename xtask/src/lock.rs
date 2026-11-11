@@ -2,8 +2,10 @@
 
 use crate::{Problem, Verdict, limit, workspace};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -133,19 +135,26 @@ fn find(program: &str) -> Option<PathBuf> {
 }
 
 /// The interpreter a script's `#!` line names, if it can't be run. The kernel
-/// takes it as a path, with no `PATH` lookup, up to the first blank.
+/// reads the first 256 bytes, and takes the first word as a path, with no
+/// `PATH` lookup. A word cut off by that limit doesn't run as a script at all,
+/// so it is left to `exec`.
 fn missing_interpreter(script: &Path) -> Option<String> {
-    let mut start = [0; 256];
-    let read = File::open(script)
-        .and_then(|mut f| f.read(&mut start))
+    const LIMIT: usize = 256;
+    let mut start = Vec::with_capacity(LIMIT);
+    File::open(script)
+        .and_then(|f| f.take(LIMIT as u64).read_to_end(&mut start))
         .ok()?;
-    let line = start[..read].strip_prefix(b"#!")?;
-    let line = line.split(|&b| b == b'\n').next()?;
-    let interpreter = String::from_utf8_lossy(line);
-    let interpreter = interpreter
-        .split([' ', '\t'])
-        .find(|word| !word.is_empty())?;
-    (!is_executable(Path::new(interpreter))).then(|| interpreter.to_string())
+    let line = start.strip_prefix(b"#!")?;
+    let blank = |b: &u8| matches!(b, b' ' | b'\t');
+    let begin = line.iter().position(|b| !blank(b))?;
+    let word = &line[begin..];
+    let length = word.iter().position(|b| blank(b) || matches!(b, b'\n' | 0));
+    if length.is_none() && start.len() == LIMIT {
+        return None;
+    }
+    let word = &word[..length.unwrap_or(word.len())];
+    let path = Path::new(OsStr::from_bytes(word));
+    (!word.is_empty() && !is_executable(path)).then(|| path.display().to_string())
 }
 
 fn is_executable(path: &Path) -> bool {

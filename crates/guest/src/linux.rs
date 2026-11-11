@@ -6,7 +6,9 @@ use std::fs::File;
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
+use std::process::ExitStatus;
 use std::{fs, io, ptr};
 
 const WNOHANG: c_int = 1;
@@ -107,6 +109,26 @@ impl System for Linux {
             reboot(RB_AUTOBOOT);
         }
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Reaps children until `pid` ends, and returns its status. Any other child
+/// that ends first is reaped too, which is how orphans go while a program runs.
+pub fn reap_until(pid: u32) -> io::Result<ExitStatus> {
+    loop {
+        let mut status: c_int = 0;
+        // SAFETY: `waitpid` writes one `int` through this pointer, which is
+        // valid for the whole call.
+        match unsafe { waitpid(-1, &mut status, 0) } {
+            -1 => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+            reaped if reaped as u32 == pid => return Ok(ExitStatus::from_raw(status)),
+            _ => {}
+        }
     }
 }
 

@@ -18,7 +18,8 @@ unsafe extern "C" {
 }
 
 /// Leaves two jobs that exit only once their parent has, so both are always
-/// orphans. Then waits for them to go, for up to 5 seconds, and exits 5.
+/// orphans. Then waits for them to go, for up to 5 seconds. Exits 5 if they
+/// went while it ran, and 9 if either was left.
 const SCRIPT: &str = r#"
 pids=$(sh -c '
     for _ in 1 2; do
@@ -30,6 +31,7 @@ echo $pids
 for pid in $pids; do
     n=0
     while [ -e /proc/$pid ] && [ $n -lt 500 ]; do sleep 0.01; n=$((n + 1)); done
+    [ -e /proc/$pid ] && exit 9
 done
 exit 5
 "#;

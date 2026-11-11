@@ -1,7 +1,7 @@
 issue = 219
 pr = 282
-commit = "111c5427dbc6df6839da9ff6b6d0f79b19cb61b6"
-base = "9d18146d97ac5a4294328728d8c22c02b9370fb6"
+commit = "b63ea4eef8b8f85b5f6f71dc9bfa7b546a87d632"
+base = "60211a6a35ed9701b5c8932d9410a0423650be5d"
 date = "2026-11-11"
 host = "linux-x86_64"
 spec = { proven = 185, promises = 772 }
@@ -9,7 +9,7 @@ journey = { passing = 6, steps = 19 }
 reason = ""
 
 [budgets]
-binary_bytes = 5309288
-boot_ms = 91.36
-noop_build_ms = 0.39
-version_ms = 0.07
+binary_bytes = 5325672
+boot_ms = 93.39
+noop_build_ms = 0.41
+version_ms = 0.08

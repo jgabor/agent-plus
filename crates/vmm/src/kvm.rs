@@ -34,7 +34,7 @@ const KVM_SET_TSS_ADDR: c_ulong = 0xAE47;
 // _IO(0xAE, 0x60)
 const KVM_CREATE_IRQCHIP: c_ulong = 0xAE60;
 // _IOW(0xAE, 0x61, struct kvm_irq_level)
-const KVM_IRQ_LINE: c_ulong = 0x4008_AE61;
+pub(crate) const KVM_IRQ_LINE: c_ulong = 0x4008_AE61;
 // _IOW(0xAE, 0x77, struct kvm_pit_config)
 const KVM_CREATE_PIT2: c_ulong = 0x4040_AE77;
 // _IOW(0xAE, 0x90, struct kvm_cpuid2)
@@ -42,7 +42,7 @@ const KVM_SET_CPUID2: c_ulong = 0x4008_AE90;
 // _IOW(0xAE, 0x46, struct kvm_userspace_memory_region)
 const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_AE46;
 // _IO(0xAE, 0x80)
-const KVM_RUN: c_ulong = 0xAE80;
+pub(crate) const KVM_RUN: c_ulong = 0xAE80;
 // _IOR(0xAE, 0x81, struct kvm_regs)
 const KVM_GET_REGS: c_ulong = 0x8090_AE81;
 // _IOW(0xAE, 0x82, struct kvm_regs)

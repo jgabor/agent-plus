@@ -64,6 +64,10 @@ pub struct Guest<'a> {
     pub command: Option<&'a [Vec<u8>]>,
     /// How long the guest may run, from entry to power-off.
     pub timeout: Duration,
+    /// Whether this process confines itself before the guest's first
+    /// instruction. It stays confined for the rest of its life, so only a
+    /// process that has done all its host work may ask.
+    pub confine: bool,
 }
 
 /// Why a machine didn't boot and power off cleanly.
@@ -172,6 +176,7 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         files: &files,
         command: (!command.is_empty()).then_some(command),
         timeout,
+        confine: true,
     };
     let mut relay = Relay::start(Instant::now() + timeout);
     let result = boot(&guest, |report| match report {
@@ -310,6 +315,9 @@ pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, 
         failure: None,
         on_report,
     };
+    if guest.confine {
+        vmm::confine::confine().map_err(|error| failed("can't confine ap", error))?;
+    }
     let stop = vcpu
         .run_ports(guest.timeout, &mut machine)
         .map_err(vm_failed)?;

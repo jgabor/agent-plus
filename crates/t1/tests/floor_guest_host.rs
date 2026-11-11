@@ -1105,6 +1105,9 @@ fn vm_owner_process() {
         } else {
             TIMEOUT
         },
+        // The product's own filter stays off, so that it isn't its own evidence.
+        // `floor_vmm_confined` checks it.
+        confine: false,
     };
 
     forbid_new_processes();

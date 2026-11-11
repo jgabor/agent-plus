@@ -2,6 +2,7 @@
 //! dependencies.
 
 pub mod boot;
+pub mod confine;
 pub mod initramfs;
 pub mod serial;
 pub mod virtio;

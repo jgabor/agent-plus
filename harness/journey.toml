@@ -67,6 +67,7 @@ name = "The VMM boots a kernel to guest init"
 milestone = "Boot"
 needs = [1]
 script = "harness/journey/03-boot.sh"
+floor = "floor_vmm_confined"
 
 [[step]]
 id = 4

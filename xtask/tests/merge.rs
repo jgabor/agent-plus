@@ -64,6 +64,17 @@ fn real(program: &str) -> String {
     stdout(&output).trim().to_string()
 }
 
+/// The program on `PATH`, not a shell builtin of the same name.
+fn external(program: &str) -> String {
+    let path = env::var("PATH").expect("PATH is set");
+    env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|file| file.is_file())
+        .unwrap_or_else(|| panic!("no `{program}` on PATH"))
+        .display()
+        .to_string()
+}
+
 struct Pr<'a> {
     state: &'a str,
     body: &'a str,
@@ -1275,12 +1286,14 @@ fn a_record_commit_that_changes_more_is_not_merged() {
 fn a_merge_past_its_timeout_stops_and_can_restart() {
     let repo = Repo::new("timeout");
     // On a loaded machine, whatever stops the merge at its timeout can be slow
-    // to go on after the kill lands. This `kill` is that slow, once.
+    // to go on after the kill lands. This `kill` is that slow, once. It runs
+    // the real one, because dash's builtin refuses `--`.
     let bin = repo.bin.display();
+    let kill = external("kill");
     common::write_tool(
         &repo.bin.join("kill"),
         &format!(
-            "#!/bin/sh\nkill \"$@\"\ncode=$?\nif [ \"$1\" = -KILL ] && [ ! -f '{bin}/slowed' ]; then : > '{bin}/slowed'; sleep 2; fi\nexit $code\n"
+            "#!/bin/sh\n'{kill}' \"$@\"\ncode=$?\nif [ \"$1\" = -KILL ] && [ ! -f '{bin}/slowed' ]; then : > '{bin}/slowed'; sleep 2; fi\nexit $code\n"
         ),
     );
     let output = repo

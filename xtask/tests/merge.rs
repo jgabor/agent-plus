@@ -1286,6 +1286,11 @@ fn a_merge_past_its_timeout_stops_what_it_started() {
         .env("RUN_ON", "cargo fmt")
         .env("RUN_COMMAND", format!("{}; sleep 3", stray(&repo)))
         .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+        // As a merge that a merge's own tests start inherits it.
+        .env(
+            "XTASK_MERGE_WORKER_OF",
+            std::os::unix::process::parent_id().to_string(),
+        )
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));

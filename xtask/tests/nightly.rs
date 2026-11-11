@@ -960,7 +960,11 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
     repo.set_roadmap_issues("OPEN", "typed by hand", Some("typed by hand"));
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(stdout(&output).contains("journey 3 of 4\n"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("journey 3 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
     assert!(!stdout(&output).contains("sk-test"), "{}", stdout(&output));
     assert!(!stderr(&output).contains("sk-test"), "{}", stderr(&output));
     // Only a step that spends gets the key.
@@ -974,7 +978,8 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
     );
     let details = fs::read_to_string(repo.bin.join("edited-159")).unwrap();
     assert!(
-        details.contains("- [x] Step 1: first\n- [x] Step 2: model\n- [x] Step 3: after the model\n"),
+        details
+            .contains("- [x] Step 1: first\n- [x] Step 2: model\n- [x] Step 3: after the model\n"),
         "{details}"
     );
 }
@@ -988,7 +993,11 @@ fn nightly_without_the_paid_checks_key_runs_no_spend_step() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(stdout(&output).contains("journey 1 of 4\n"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("journey 1 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
     assert!(!repo.root.join("target/journey/step-2/key").exists());
     assert!(
         repo.comment()
@@ -1016,7 +1025,11 @@ fn a_passing_spend_step_does_not_hide_a_fall() {
     repo.sync();
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(stdout(&output).contains("journey 3 of 4\n"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("journey 3 of 4\n"),
+        "{}",
+        stdout(&output)
+    );
     assert!(
         repo.comment().contains("- fail journey\n"),
         "{}",

@@ -87,11 +87,7 @@ pub fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     (passing, outcomes.len())
 }
 
-fn walk(
-    root: &Path,
-    key: Option<&str>,
-    report: impl Fn(&str),
-) -> Result<Vec<Outcome>, Problem> {
+fn walk(root: &Path, key: Option<&str>, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;

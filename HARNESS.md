@@ -782,7 +782,7 @@ passes. No scheduled work runs on GitHub.
 | Resource | Rule |
 |---|---|
 | `ap` state | `HOME` is a directory inside the worktree |
-| Build output | One target directory per worktree, deleted at merge |
+| Build output | One target directory per worktree, deleted when its worker is done: at the merge, or when it parks a prepared PR |
 | Ports | Assigned by the OS |
 | VMs | Each has a timeout and a recorded PID |
 | Builds and VM runs | Shared hold of the activity lock, through `xtask` |

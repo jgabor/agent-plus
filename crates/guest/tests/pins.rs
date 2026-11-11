@@ -5,19 +5,13 @@
 
 use guest::agent::serve;
 use guest::protocol::{ToGuest, ToHost};
-use std::ffi::c_int;
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const SIGKILL: c_int = 9;
-
-unsafe extern "C" {
-    fn kill(pid: c_int, signal: c_int) -> c_int;
-}
-
-/// Leaves a job that holds both pipes open, and says its PID.
-const SCRIPT: &str = "sleep 30 & echo $!";
+/// Leaves a job that holds both pipes open until the file `$1` exists.
+const SCRIPT: &str = "(while [ ! -e \"$1\" ]; do sleep 0.05; done) & echo started";
 const COMMANDS: usize = 8;
 /// How long a finished command's threads may take to exit.
 const SETTLE: Duration = Duration::from_secs(5);
@@ -43,13 +37,26 @@ impl Write for FakeChannel {
     }
 }
 
-/// Runs the script once, and returns the PID of the job it left.
-fn run_once() -> c_int {
+/// Ends the jobs when dropped, even if the test fails first.
+struct Stop(PathBuf);
+
+impl Drop for Stop {
+    fn drop(&mut self) {
+        fs::write(&self.0, "").unwrap();
+    }
+}
+
+/// Runs the script once, and leaves its job waiting for `stop`.
+fn run_once(stop: &Path) {
     let mut wire = Vec::new();
     ToGuest::Run {
-        argv: [b"sh".as_slice(), b"-c", SCRIPT.as_bytes()]
-            .map(<[u8]>::to_vec)
-            .to_vec(),
+        argv: vec![
+            b"sh".to_vec(),
+            b"-c".to_vec(),
+            SCRIPT.as_bytes().to_vec(),
+            b"sh".to_vec(),
+            stop.to_str().unwrap().as_bytes().to_vec(),
+        ],
     }
     .write(&mut wire)
     .unwrap();
@@ -68,7 +75,7 @@ fn run_once() -> c_int {
             other => panic!("unexpected report {other:?}"),
         }
     }
-    String::from_utf8(stdout).unwrap().trim().parse().unwrap()
+    assert_eq!(stdout, b"started\n");
 }
 
 fn entries(dir: &str) -> usize {
@@ -94,19 +101,16 @@ fn settled(wanted: (usize, usize)) -> (usize, usize) {
 
 #[test]
 fn background_jobs_of_finished_commands_pin_no_threads_or_descriptors() {
-    let before = counts();
-    let jobs: Vec<c_int> = (0..COMMANDS).map(|_| run_once()).collect();
-    let after = settled(before);
-    let live = jobs
-        .iter()
-        .filter(|&&pid| fs::exists(format!("/proc/{pid}")).unwrap())
-        .count();
-    for pid in jobs {
-        // SAFETY: this call takes no pointers. Each PID is a job this test
-        // started, and still holds unless the job already ended.
-        unsafe { kill(pid, SIGKILL) };
-    }
+    // Each run gets its own file, so a rerun can't strand the last one's jobs.
+    let name = format!("pins-stop-{}", std::process::id());
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = fs::remove_file(&path);
+    let stop = Stop(path);
 
-    assert_eq!(live, COMMANDS, "every job outlived its command");
+    let before = counts();
+    for _ in 0..COMMANDS {
+        run_once(&stop.0);
+    }
+    let after = settled(before);
     assert_eq!(after, before, "(threads, descriptors)");
 }

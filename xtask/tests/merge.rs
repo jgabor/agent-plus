@@ -24,6 +24,7 @@ const BUDGETS: &str =
     "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
 const BRANCH: &str = "7-x";
 const HILL_NONE: &str = "Closes #7.\n\nHill: none, tooling.\n";
+const NO_REBASE: &str = "the branch doesn't rebase onto `main`. Rebase it by hand, and push it";
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -211,7 +212,8 @@ impl Repo {
     /// `KILL_ON` kills `xtask` at the first call containing it, `KILL_WHEN`
     /// says whether before or after doing the call, `HANG_ON` makes a matching
     /// call sleep, and `RUN_ON` runs `RUN_COMMAND` just before the first
-    /// matching call.
+    /// matching call. The fake `gh` keeps the newest state posted on each
+    /// commit, and gives it back when asked for that commit's status.
     fn write_tools(&self) {
         let bin = self.bin.display();
         let prelude = format!(
@@ -248,7 +250,11 @@ maybe_kill before
   "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
   "issue view") cat '{bin}/issue.json' ;;
-  "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi ;;
+  "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
+    if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
+    printf '{{"statuses":[{{"context":"xtask/gate","state":"%s"}}]}}\n' "${{6#state=}}" > "{bin}/status-${{4##*/}}" ;;
+  "api repos/"*) posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
+    if [ -f "$posted" ]; then cat "$posted"; else echo '{{"statuses":[]}}'; fi ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 code=$?
@@ -299,6 +305,11 @@ exit $code
             .env("GIT_COMMITTER_EMAIL", "t@example.com")
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("XTASK_ACTIVITY_HELD");
+        // The gate runs these tests inside a GitHub Actions run, whose page a
+        // status would otherwise link to.
+        for name in ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"] {
+            command.env_remove(name);
+        }
         command
     }
 
@@ -807,6 +818,7 @@ fn a_lowered_spec_count_needs_the_owner() {
         stdout(&output)
     );
     assert!(!repo.calls().contains("git push"));
+    assert_eq!(last_post(&repo), "failure Failed: hills");
     assert_prepared(&repo, &repo.prepare());
 }
 
@@ -814,6 +826,7 @@ fn a_lowered_spec_count_needs_the_owner() {
 fn a_lowered_journey_count_needs_the_owner() {
     let repo = with_base("lower-journey", 0, 2);
     assert_refused(&repo, &repo.merge(), "journey");
+    assert_eq!(last_post(&repo), "failure Failed: journey");
     assert_prepared(&repo, &repo.prepare());
 }
 
@@ -842,6 +855,7 @@ fn a_change_that_raises_nothing_needs_a_hill_none_line() {
             ..Pr::default()
         });
         assert_refused(&repo, &repo.merge(), "Hill: none");
+        assert_eq!(last_post(&repo), "failure Failed: hill-line");
     }
 }
 
@@ -942,6 +956,7 @@ fn a_slowdown_needs_a_reason_in_the_pr_body() {
         stdout(&output)
     );
     assert!(!repo.calls().contains("git push"));
+    assert_eq!(last_post(&repo), "failure Failed: bench");
 
     repo.set_pr(&Pr {
         body: "Closes #7.\n\nHill: none, tooling.\n\nBudget reason: worth it\n",
@@ -964,7 +979,8 @@ fn a_kill_at_each_step_resumes() {
         ("commit", "git commit", "after"),
         ("push-before", "git push", "before"),
         ("push-after", "git push", "after"),
-        ("status", "gh api -X POST", "before"),
+        ("pending", "state=pending", "before"),
+        ("status", "state=success", "before"),
         ("merge-before", "gh pr merge", "before"),
         ("merge-after", "gh pr merge", "after"),
     ];
@@ -1100,6 +1116,10 @@ fn a_main_that_moved_during_the_proof_stops_the_merge() {
         &repo.update_ref("refs/heads/main", "refs/heads/7-x"),
     );
     assert_refused(&repo, &output, "`main` moved");
+    assert_eq!(
+        last_post(&repo),
+        "failure `main` moved during the merge, so this head wasn't tested on it. Run it again"
+    );
 }
 
 #[test]
@@ -1129,6 +1149,22 @@ fn a_pr_that_changed_during_the_proof_is_refused() {
         let output = repo.merge_running("cargo build --release", &swap);
         assert_refused(&repo, &output, message);
     }
+}
+
+#[test]
+fn a_long_reason_is_cut_to_what_github_keeps() {
+    let repo = Repo::new("long-reason");
+    let base = "b".repeat(150);
+    repo.set_next_pr(&Pr {
+        base: &base,
+        ..Pr::default()
+    });
+    let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
+    let output = repo.merge_running("cargo build --release", &swap);
+    let why = format!("PR 9 targets `{base}`, and only `main` is merged here");
+    assert_refused(&repo, &output, &why);
+    let cut: String = why.chars().take(140).collect();
+    assert_eq!(last_post(&repo), format!("failure {cut}"));
 }
 
 /// The checks read only `spec-change`, and a person can park or unpark the
@@ -1222,7 +1258,10 @@ fn a_record_commit_that_changes_more_is_not_merged() {
         stderr(&output)
     );
     assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
-    assert!(!repo.calls().contains("statuses"), "{}", repo.calls());
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (repo.head(), "failure Stopped by an error".to_string())
+    );
 }
 
 #[test]
@@ -1333,11 +1372,26 @@ fn a_merge_whose_caller_is_killed_stops_what_it_started() {
     assert_merged(&repo, &repo.merge());
 }
 
-fn status_call(repo: &Repo) -> Option<String> {
+/// Each status that was posted, in order: its commit, and then its state and
+/// description as `failure Failed: format`.
+fn posts(repo: &Repo) -> Vec<(String, String)> {
+    let prefix = "gh api -X POST repos/{owner}/{repo}/statuses/";
     repo.calls()
         .lines()
-        .find(|line| line.starts_with("gh api -X POST"))
-        .map(str::to_string)
+        .filter_map(|line| line.strip_prefix(prefix))
+        .map(|post| {
+            let (commit, fields) = post.split_once(" -f state=").expect(post);
+            let (state, rest) = fields.split_once(" -f context=xtask/gate").expect(post);
+            let said = rest.strip_prefix(" -f description=").unwrap_or(rest);
+            let said = said.split(" -f target_url=").next().unwrap();
+            (commit.to_string(), format!("{state} {said}"))
+        })
+        .collect()
+}
+
+/// What the newest status says.
+fn last_post(repo: &Repo) -> String {
+    posts(repo).pop().expect("a status was posted").1
 }
 
 #[test]
@@ -1345,11 +1399,11 @@ fn the_gate_posts_no_status() {
     let repo = Repo::new("gate-status");
     let output = repo.xtask(&["gate"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(status_call(&repo), None);
+    assert_eq!(posts(&repo), []);
 
     repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
     assert_eq!(repo.xtask(&["gate"]).status.code(), Some(1));
-    assert_eq!(status_call(&repo), None);
+    assert_eq!(posts(&repo), []);
 }
 
 #[test]
@@ -1361,6 +1415,99 @@ fn prepare_records_pushes_posts_and_never_squashes() {
     assert_eq!(repo.commits_on_branch(), 2);
     assert!(stdout(&output).contains("ready"), "{}", stdout(&output));
     assert_eq!(repo.pr_comments(), "");
+}
+
+/// The phases go on the head that GitHub shows, and the score on the new one.
+#[test]
+fn a_proof_says_which_phase_it_is_in_and_then_the_score() {
+    for command in ["merge", "prepare", "land"] {
+        let repo = Repo::new(&format!("phases-{command}"));
+        let repo = if command == "land" {
+            repo.on_main()
+        } else {
+            repo
+        };
+        let before = repo.head();
+        let output = repo.xtask(&[command, "9"]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let after = if command == "prepare" {
+            repo.head()
+        } else {
+            repo.origin(&["rev-parse", "refs/heads/main^2"])
+        };
+        let said = |commit: &String, text: &str| (commit.clone(), text.to_string());
+        assert_eq!(
+            posts(&repo),
+            [
+                said(&before, "pending Proving: lint"),
+                said(&before, "pending Proving: tests"),
+                said(&before, "pending Proving: journey"),
+                said(&after, "success spec 0 of 2, journey 1 of 1"),
+            ],
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn a_proof_names_the_bench_only_when_it_runs() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "phases-bench",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
+    );
+    assert_prepared(&repo, &repo.prepare());
+    let said: Vec<String> = posts(&repo).into_iter().map(|(_, said)| said).collect();
+    assert_eq!(
+        said[..4],
+        [
+            "pending Proving: lint",
+            "pending Proving: tests",
+            "pending Proving: journey",
+            "pending Proving: bench"
+        ]
+    );
+    assert_eq!(said.len(), 5, "{said:?}");
+}
+
+#[test]
+fn a_status_links_to_its_run_only_inside_one() {
+    let run = [
+        ("GITHUB_SERVER_URL", "https://github.com"),
+        ("GITHUB_REPOSITORY", "o/r"),
+        ("GITHUB_RUN_ID", "5"),
+    ];
+    let link = " -f target_url=https://github.com/o/r/actions/runs/5";
+    for (name, known, linked) in [("linked", &run[..], 4), ("unlinked", &run[..2], 0)] {
+        let repo = Repo::new(&format!("status-{name}"));
+        let output = repo
+            .command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["prepare", "9"])
+            .envs(known.iter().copied())
+            .output()
+            .unwrap();
+        assert_prepared(&repo, &output);
+        let calls = repo.calls();
+        let ending = calls.lines().filter(|line| line.ends_with(link)).count();
+        assert_eq!(ending, linked, "{name}: {calls}");
+        assert_eq!(calls.matches("target_url").count(), linked, "{name}");
+    }
+}
+
+/// A `pending` only says what is happening, so losing one loses nothing else.
+#[test]
+fn a_pending_that_can_not_be_posted_changes_nothing() {
+    let repo = Repo::new("prepare-no-pending");
+    fs::write(repo.bin.join("pending-fails"), "").unwrap();
+    let output = repo.prepare();
+    assert_prepared(&repo, &output);
+    assert!(
+        stderr(&output).contains("no pending"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
 }
 
 #[test]
@@ -1403,7 +1550,7 @@ fn a_killed_prepare_is_not_green_and_resumes() {
     let killed = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .args(["prepare", "9"])
-        .env("KILL_ON", "gh api -X POST")
+        .env("KILL_ON", "state=success")
         .env("KILL_WHEN", "before")
         .output()
         .unwrap();
@@ -1442,14 +1589,13 @@ fn a_prepared_branch_reads_its_own_record() {
     );
 }
 
+/// The branch's head, which nothing replaced, is red and says why.
 #[track_caller]
-fn assert_failure_posted(repo: &Repo, output: &Output, head: &str) {
+fn assert_failure_posted(repo: &Repo, output: &Output, head: &str, why: &str) {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
     assert_eq!(
-        status_call(repo).unwrap(),
-        format!(
-            "gh api -X POST repos/{{owner}}/{{repo}}/statuses/{head} -f state=failure -f context=xtask/gate"
-        )
+        posts(repo).pop().unwrap(),
+        (head.to_string(), format!("failure {why}"))
     );
     assert_eq!(repo.head(), head);
     assert!(!repo.calls().contains("git push"), "{}", repo.calls());
@@ -1462,7 +1608,7 @@ fn a_failed_proof_posts_failure_on_the_current_head() {
     repo.advance_main("other.txt", "y\n");
     repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
     let head = repo.head();
-    assert_failure_posted(&repo, &repo.prepare(), &head);
+    assert_failure_posted(&repo, &repo.prepare(), &head, "Failed: format");
 }
 
 #[test]
@@ -1470,7 +1616,7 @@ fn a_branch_that_does_not_rebase_posts_failure() {
     let repo = Repo::new("prepare-conflict");
     repo.advance_main("docs.txt", "from main\n");
     let head = repo.head();
-    assert_failure_posted(&repo, &repo.prepare(), &head);
+    assert_failure_posted(&repo, &repo.prepare(), &head, NO_REBASE);
 }
 
 #[test]
@@ -1483,12 +1629,15 @@ fn a_failure_that_can_not_be_posted_is_still_a_failure() {
     assert!(stderr(&output).contains("no status"), "{}", stderr(&output));
 }
 
+/// An agent's `merge` leaves the reason on the PR too, with every check that
+/// failed, in the order they ran.
 #[test]
-fn a_failed_merge_posts_no_status() {
-    let repo = Repo::new("merge-no-failure");
-    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
-    assert_eq!(repo.merge().status.code(), Some(1));
-    assert_eq!(status_call(&repo), None);
+fn a_failed_merge_posts_failure() {
+    let repo = Repo::new("merge-failure");
+    let unused = "pub  fn f( ) {\n    let x = 1;\n}\n";
+    repo.change_branch("crates/demo/src/lib.rs", unused);
+    let head = repo.head();
+    assert_failure_posted(&repo, &repo.merge(), &head, "Failed: format, lint");
 }
 
 fn based(proven: u32, base: &str) -> String {
@@ -1698,7 +1847,7 @@ fn a_change_that_only_looks_like_a_revert_is_benched() {
     let output = repo.prepare();
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("build"), "{}", stderr(&output));
-    assert!(status_call(&repo).unwrap().contains("state=failure"));
+    assert_eq!(last_post(&repo), "failure Stopped by an error");
     assert!(!repo.calls().contains("git push"), "{}", repo.calls());
 }
 
@@ -1841,7 +1990,7 @@ fn land_merges_nothing_when_the_gate_fails() {
     repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
     let repo = repo.on_main();
     let head = repo.head();
-    assert_failure_posted(&repo, &repo.land(), &head);
+    assert_failure_posted(&repo, &repo.land(), &head, "Failed: format");
 }
 
 #[test]
@@ -1850,7 +1999,7 @@ fn land_merges_nothing_when_the_branch_does_not_rebase() {
     repo.advance_main("docs.txt", "from main\n");
     let repo = repo.on_main();
     let head = repo.head();
-    assert_failure_posted(&repo, &repo.land(), &head);
+    assert_failure_posted(&repo, &repo.land(), &head, NO_REBASE);
 }
 
 #[test]
@@ -2108,6 +2257,14 @@ fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
     let green_five = at(&status(&repo.head_of("8-y"), "success"));
     let green_nine = at(&status(&repo.head_of(BRANCH), "success"));
     assert!(at(&status(&before[1], "pending")) < at(&status(&before[0], "pending")));
+    at(&format!(
+        "{} -f description=Queued, next\n",
+        status(&before[1], "pending")
+    ));
+    at(&format!(
+        "{} -f description=Queued, 1 PR ahead\n",
+        status(&before[0], "pending")
+    ));
     assert!(at(&status(&before[0], "pending")) < green_five, "{calls}");
     assert!(green_five < green_nine, "{calls}");
     for (branch, head) in [("2-z", &before[2]), ("6-up", &before[3])] {
@@ -2147,7 +2304,9 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
         stderr(&output)
     );
     let calls = repo.calls();
-    assert!(calls.contains(&status(&five, "failure")), "{calls}");
+    // Its `prepare` refused it before the fetch, and so said nothing.
+    let unproven = format!("{} -f description=Not proven\n", status(&five, "failure"));
+    assert!(calls.contains(&unproven), "{calls}");
     assert_eq!(repo.head_of("8-y"), five);
     assert!(
         calls.contains(&status(&repo.head_of(BRANCH), "success")),
@@ -2178,7 +2337,8 @@ fn a_refresh_runs_nothing_from_a_fork() {
     );
     let calls = repo.calls();
     assert!(calls.contains(&status(&head, "pending")), "{calls}");
-    assert!(calls.contains(&status(&head, "failure")), "{calls}");
+    let unproven = format!("{} -f description=Not proven\n", status(&head, "failure"));
+    assert!(calls.contains(&unproven), "{calls}");
     assert!(!calls.contains("worktree add"), "{calls}");
 }
 
@@ -2236,11 +2396,34 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
         stderr(&output)
     );
     assert_eq!(repo.head(), head);
-    assert!(
-        repo.calls().contains(&status(&head, "failure")),
-        "{}",
-        repo.calls()
+    // `prepare` said why, and `refresh` leaves that standing.
+    let failures: Vec<(String, String)> = posts(&repo)
+        .into_iter()
+        .filter(|(_, said)| said.starts_with("failure"))
+        .collect();
+    let why = "failure the tip of PR 9 has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare 9`";
+    assert_eq!(failures, [(head, why.to_string())]);
+}
+
+/// The queue position only says what is happening, as any `pending` does.
+#[test]
+fn a_refresh_proves_a_pr_whose_queue_position_can_not_be_posted() {
+    let repo = Repo::new("refresh-no-pending");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    fs::write(repo.bin.join("pending-fails"), "").unwrap();
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
     );
+    assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
 }
 
 #[test]
@@ -2289,10 +2472,13 @@ fn a_refresh_built_from_an_older_main_proves_nothing() {
         stderr(&output)
     );
     assert_eq!(repo.head(), head);
-    assert!(
-        repo.calls().contains(&status(&head, "failure")),
-        "{}",
-        repo.calls()
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (
+            head,
+            "failure these checks were built from an older `main`, so they can't prove PR 9 on the newest one"
+                .to_string()
+        )
     );
 }
 
@@ -2325,7 +2511,7 @@ fn land_sends_a_pr_that_may_add_a_measurer_to_prepare_on_its_branch() {
         "{said}"
     );
     assert!(!said.contains("Hill: none"), "{said}");
-    assert!(status_call(&repo).is_none(), "{}", repo.calls());
+    assert_eq!(posts(&repo), [], "{}", repo.calls());
 }
 
 #[test]

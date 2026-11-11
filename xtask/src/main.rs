@@ -47,10 +47,13 @@ commands:
   next             print the issues that can be claimed, as JSON
   claim <issue> [--thread <link>]
                    claim an issue for the current branch
+  status <issue> --thread <link>
+                   replace the status comment with stdin, and renew the lease
   record --issue <n> --pr <n>
                    write the ledger record for the current head
-  merge <pr>       rebase, gate, record, and squash-merge a PR
-  prepare <pr> [--keep-budgets]
+  merge <pr> [--thread <link>]
+                   rebase, gate, record, and squash-merge a PR
+  prepare <pr> [--keep-budgets] [--thread <link>]
                    rebase, gate, and record a PR, for the owner to merge
   refresh          prove each land-needed PR again that is behind main
   land <pr>        run prepare, then squash-merge the PR, for the owner
@@ -97,16 +100,28 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["claim", ..] => Err(Problem(format!(
             "`claim` takes `<issue> [--thread <link>]`\n\n{USAGE}"
         ))),
+        ["status", issue, "--thread", thread] => work::run_status(issue, thread),
+        ["status", ..] => Err(Problem(format!(
+            "`status` takes `<issue> --thread <link>`\n\n{USAGE}"
+        ))),
         ["record", "--issue", issue, "--pr", pr] => ledger::record(issue, pr),
         ["record", ..] => Err(Problem(format!(
             "`record` takes `--issue <n> --pr <n>`\n\n{USAGE}"
         ))),
-        ["merge", pr] => merge::run(pr),
-        ["merge", ..] => Err(Problem(format!("`merge` takes `<pr>`\n\n{USAGE}"))),
-        ["prepare", pr] => merge::prepare(pr, false),
-        ["prepare", pr, "--keep-budgets"] => merge::prepare(pr, true),
+        ["merge", pr] => merge::run(pr, None),
+        ["merge", pr, "--thread", thread] => merge::run(pr, Some(thread)),
+        ["merge", ..] => Err(Problem(format!(
+            "`merge` takes `<pr> [--thread <link>]`\n\n{USAGE}"
+        ))),
+        ["prepare", pr] => merge::prepare(pr, false, None),
+        ["prepare", pr, "--keep-budgets"] => merge::prepare(pr, true, None),
+        ["prepare", pr, "--thread", thread] => merge::prepare(pr, false, Some(thread)),
+        ["prepare", pr, "--keep-budgets", "--thread", thread]
+        | ["prepare", pr, "--thread", thread, "--keep-budgets"] => {
+            merge::prepare(pr, true, Some(thread))
+        }
         ["prepare", ..] => Err(Problem(format!(
-            "`prepare` takes `<pr> [--keep-budgets]`\n\n{USAGE}"
+            "`prepare` takes `<pr> [--keep-budgets] [--thread <link>]`\n\n{USAGE}"
         ))),
         ["refresh"] => refresh::run(),
         ["land", pr] => merge::land(pr),

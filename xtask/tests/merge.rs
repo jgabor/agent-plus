@@ -254,7 +254,7 @@ maybe_kill before
         }
         let gh = format!(
             r#"{prelude}case "$1 $2" in
-  "repo view") echo '{{"nameWithOwner":"o/r"}}' ;;
+  "repo view") echo '{{"nameWithOwner":"o/r","owner":{{"login":"o"}}}}' ;;
   "pr view") if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
@@ -293,6 +293,22 @@ exit $code
             format!(
                 "{{\"number\":7,\"state\":\"OPEN\",\"body\":\"\",\"labels\":{},\"comments\":[]}}\n",
                 labels_json(labels)
+            ),
+        )
+        .unwrap();
+    }
+
+    /// An issue that `thread` claimed, with a lease that ends at `lease`.
+    fn set_held_issue(&self, labels: &[&str], thread: &str, lease: &str) {
+        let body = format!(
+            "<!-- status -->\n**State:** working\n**Thread:** {thread}\n**Branch:** `7-x`\n**Lease until:** {lease}\n"
+        );
+        fs::write(
+            self.bin.join("issue.json"),
+            format!(
+                "{{\"number\":7,\"state\":\"OPEN\",\"body\":\"\",\"labels\":{},\"comments\":[{{\"url\":\"https://github.com/o/r/issues/7#issuecomment-40\",\"author\":{{\"login\":\"o\"}},\"body\":{}}}]}}\n",
+                labels_json(labels),
+                quoted(&body)
             ),
         )
         .unwrap();
@@ -1569,6 +1585,56 @@ fn a_pending_that_can_not_be_posted_changes_nothing() {
         stderr(&output)
     );
     assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
+}
+
+const LIVE: &str = "2999-01-01T00:00Z";
+
+#[test]
+fn a_thread_that_does_not_hold_the_issue_can_not_merge_or_prepare() {
+    for args in [
+        &["merge", "9"][..],
+        &["merge", "9", "--thread", "other"],
+        &["prepare", "9"],
+        &["prepare", "9", "--thread", "other"],
+        &["prepare", "9", "--keep-budgets", "--thread", "other"],
+    ] {
+        let repo = Repo::new("not-holder");
+        repo.set_held_issue(&["auto:merge", "in-progress"], "holder", LIVE);
+        let output = repo.xtask(args);
+        assert_refused(&repo, &output, "held by thread `holder`");
+        assert!(
+            !repo.calls().contains("api -X"),
+            "{args:?}: {}",
+            repo.calls()
+        );
+    }
+}
+
+#[test]
+fn the_thread_that_holds_the_issue_merges_and_prepares() {
+    let repo = Repo::new("holder-merges");
+    repo.set_held_issue(&["auto:merge", "in-progress"], "holder", LIVE);
+    let output = repo.xtask(&["merge", "9", "--thread", "holder"]);
+    assert_merged(&repo, &output);
+
+    let repo = Repo::new("holder-prepares");
+    repo.set_held_issue(&["auto:merge", "in-progress"], "holder", LIVE);
+    let output = repo.xtask(&["prepare", "9", "--thread", "holder"]);
+    assert_prepared(&repo, &output);
+}
+
+#[test]
+fn with_no_live_claim_any_thread_prepares() {
+    for (labels, lease) in [
+        (&["auto:pr", "land-needed", "in-progress"][..], LIVE),
+        (&["auto:pr", "in-progress"], "2000-01-01T00:00Z"),
+        (&["auto:pr"], LIVE),
+    ] {
+        let repo = Repo::new("no-claim");
+        repo.set_held_issue(labels, "holder", lease);
+        let output = repo.prepare();
+        assert_prepared(&repo, &output);
+    }
 }
 
 #[test]

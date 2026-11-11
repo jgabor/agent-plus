@@ -21,7 +21,10 @@ Worker model: `claude-opus-5-5`
    {"instanceId": "claudeAgent", "model": "<worker model>"}
    ```
 
-   `workspaceStrategy` depends on the entry. If `worktree` is set:
+   `workspaceStrategy` depends on the entry. If `worktree` is set, run `git
+   worktree remove <worktree>`, which refuses a worktree with changes. If it
+   succeeds, go on as if `worktree` were null, so that the new worker has a
+   directory of its own. If it refuses:
 
    ```json
    {"type": "existing_worktree", "worktreePath": "<worktree>"}

@@ -7,7 +7,7 @@
 use crate::forge::{Forge, Gh, PullRequest};
 use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
-use crate::{Problem, Verdict, base, bench, journey, lock, workspace};
+use crate::{Problem, Verdict, base, bench, journey, lock, work, workspace};
 use std::cell::Cell;
 use std::env;
 use std::fs;
@@ -50,7 +50,9 @@ fn has_spec_change(pr: &PullRequest) -> bool {
 }
 
 /// Whether this PR may merge, from what GitHub says now. It writes nothing.
-fn decide(gh: &Gh, number: u64, prepare: bool) -> Result<Decision, Problem> {
+/// `merge` and `prepare` refuse a thread that doesn't hold the PR's issue.
+fn decide(gh: &Gh, number: u64, mode: Mode, thread: Option<&str>) -> Result<Decision, Problem> {
+    let prepare = mode != Mode::Merge;
     let pr = gh.pull_request(number)?;
     match pr.state.as_str() {
         "MERGED" => return Ok(Decision::Merged),
@@ -82,6 +84,16 @@ fn decide(gh: &Gh, number: u64, prepare: bool) -> Result<Decision, Problem> {
         return refused(format!(
             "a review of PR {number} requested changes. Address it, or dismiss it on GitHub"
         ));
+    }
+    if mode != Mode::Land
+        && let Some(why) = work::refusal(
+            &gh.issue(issue)?,
+            &gh.owner()?,
+            work::now_seconds()?,
+            thread,
+        )
+    {
+        return refused(why);
     }
     if !prepare {
         if has_spec_change(&pr) {
@@ -126,29 +138,33 @@ impl Mode {
 }
 
 /// The whole sequence, under the rules for an agent.
-pub fn run(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Merge, false)
+pub fn run(pr: &str, thread: Option<&str>) -> Result<Verdict, Problem> {
+    sequence(pr, Mode::Merge, false, thread)
 }
 
 /// The sequence up to the squash, which is the owner's. It also takes what
 /// only the owner can accept, and says so on the PR. With `keep_budgets` it
 /// runs no bench, and the new record keeps what the branch's record measured.
-pub fn prepare(pr: &str, keep_budgets: bool) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Prepare, keep_budgets)
+pub fn prepare(pr: &str, keep_budgets: bool, thread: Option<&str>) -> Result<Verdict, Problem> {
+    sequence(pr, Mode::Prepare, keep_budgets, thread)
 }
 
 /// `prepare`, then the squash, in one hold of the merge slot. It stops short
 /// of the squash if merging would accept something, so the owner reads it.
 pub fn land(pr: &str) -> Result<Verdict, Problem> {
-    sequence(pr, Mode::Land, false)
+    sequence(pr, Mode::Land, false, None)
 }
 
-fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem> {
+fn sequence(
+    pr: &str,
+    mode: Mode,
+    keep_budgets: bool,
+    thread: Option<&str>,
+) -> Result<Verdict, Problem> {
     if !is_worker() {
         supervise();
     }
     let command = mode.command();
-    let prepare = mode != Mode::Merge;
     let number: u64 = pr
         .parse()
         .map_err(|_| Problem(format!("`{command}` takes a PR number, but got `{pr}`")))?;
@@ -160,7 +176,7 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
     }
     let gh = Gh::new(&root);
     if mode != Mode::Land
-        && let Decision::Refused(why) = decide(&gh, number, prepare)?
+        && let Decision::Refused(why) = decide(&gh, number, mode, thread)?
     {
         return refuse(&why);
     }
@@ -172,7 +188,7 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
     {
         return Ok(verdict);
     }
-    let (pr, issue) = match decide(&gh, number, prepare)? {
+    let (pr, issue) = match decide(&gh, number, mode, thread)? {
         Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
             println!("merge: PR {number} is already merged");
@@ -218,7 +234,8 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
     let scoring = Scoring {
         number,
         issue,
-        prepare,
+        mode,
+        thread,
         pr: &pr,
         gated: &gated,
         kept: kept.as_ref(),
@@ -592,7 +609,7 @@ fn changed_during_proof(
     main: &str,
 ) -> Result<Option<String>, Problem> {
     let number = scoring.number;
-    match decide(gh, number, scoring.prepare)? {
+    match decide(gh, number, scoring.mode, scoring.thread)? {
         Decision::Refused(why) => return Ok(Some(why)),
         Decision::Merged => {
             return Ok(Some(format!(
@@ -706,7 +723,8 @@ fn rebase(tree: &Path, main: &str) -> Result<bool, Problem> {
 struct Scoring<'a> {
     number: u64,
     issue: u64,
-    prepare: bool,
+    mode: Mode,
+    thread: Option<&'a str>,
     pr: &'a PullRequest,
     gated: &'a str,
     /// The record whose budgets stand in for a bench.
@@ -727,7 +745,8 @@ fn prove(
     scoring: &Scoring,
     status: &Status,
 ) -> Result<Result<Proof, Failed>, Problem> {
-    let Scoring { prepare, pr, .. } = *scoring;
+    let Scoring { mode, pr, .. } = *scoring;
+    let prepare = mode != Mode::Merge;
     let hold = lock::shared(tree)?;
     let merging = Merging {
         labels: &pr.labels,
@@ -814,7 +833,11 @@ fn compare_counts(
             );
             accepted.push(format!("{name} fell from {before} to {after}"));
         }
-        gate::record(name, after >= before || scoring.prepare, &mut failed);
+        gate::record(
+            name,
+            after >= before || scoring.mode != Mode::Merge,
+            &mut failed,
+        );
     }
     let rose = record.proven > proven || record.passing > passing || met_now > budgets_met;
     if !rose && !declares_no_hill(&scoring.pr.body) {

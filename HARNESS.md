@@ -431,7 +431,7 @@ base, or zero if there is none.
 
 The issue body and status comment follow [AGENTS.md](AGENTS.md#issues). `xtask`
 reads the `Touches` and `Blocked by` lines, the parent that GitHub records for
-a sub-issue, and the `State` and `Lease until` fields.
+a sub-issue, and the `State`, `Thread`, `Branch`, and `Lease until` fields.
 
 - The paths in `Touches` are its backticked words. Two issues overlap when one
   path is a prefix of the other.
@@ -441,6 +441,10 @@ a sub-issue, and the `State` and `Lease until` fields.
   `Milestone: <name>.`. The planner and `cargo xtask roadmap` read that line.
 - `xtask` reads status comments only from the repository owner's account.
 - When two live claims exist, the status comment with the lowest id wins.
+- An issue has a live claim when it is open, `in-progress`, not parked, and
+  has a live status comment. The thread in the winning comment holds it.
+- The last claim is the status comment with the latest lease, because every
+  edit renews it. A tie goes to the lower id.
 
 ## Commands
 
@@ -455,10 +459,11 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |
-| `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id as JSON, and exits 1 if another claim wins |
+| `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id and the thread it replaced as JSON, and exits 1 if another claim wins |
+| `cargo xtask status <issue> --thread <link>` | Replaces the holder's status comment with stdin, sets its `Thread` and renews its `Lease until`, and exits 1 for any other thread |
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
-| `cargo xtask merge <pr>` | Runs the [merge sequence](#merge-sequence) |
-| `cargo xtask prepare <pr> [--keep-budgets]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
+| `cargo xtask merge <pr> [--thread <link>]` | Runs the [merge sequence](#merge-sequence) |
+| `cargo xtask prepare <pr> [--keep-budgets] [--thread <link>]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
 | `cargo xtask refresh` | Runs the [refresh](#refresh) of `land-needed` PRs that are behind `main` |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
@@ -471,9 +476,19 @@ is a failure, and 2 is bad usage or an environment error.
 first, with
 at most one entry per free worker slot. When two issues overlap, the lower
 number stays. Any issue that overlaps a live claim is left out, and an abandoned
-issue is included. `branch` names the existing branch of an abandoned issue, and
+issue is included. `branch` names the existing branch of an abandoned issue,
+or the branch of the last claim on an available issue, if GitHub still has it.
 `worktree` names where that branch is still checked out. Both are otherwise
 null.
+
+`claim` prints `{"issue", "comment", "branch", "replaced"}`. `replaced` is the
+thread of the last claim, or null if there was none or it was this thread.
+
+While an issue has a live claim, `merge` and `prepare` refuse its PR with exit
+1, and name the holder, unless `--thread` names it. They check again after the
+proof. With no live claim, they take any thread or none. `status` takes only
+the holder, or with no live claim, the thread of the last claim. To `xtask`, a
+thread is only a string.
 
 `score`, `gaps`, and `report` take `--json`. Results go to stdout, and
 diagnostics go to stderr.
@@ -487,7 +502,7 @@ diagnostics go to stderr.
 | Available | Claimable under AGENTS.md | Claimed |
 | Claimed | `in-progress`, with a live lease | Parked, Abandoned, or Closed |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
-| Parked | `land-needed` or `answer-needed` | Available, when the owner removes the label |
+| Parked | `land-needed` or `answer-needed` | Available on its branch, when the owner removes the label |
 | Closed | Its PR merged | |
 
 ## Processes
@@ -506,9 +521,9 @@ Runs every dispatch period.
 
 1. Stop if free disk is below the minimum.
 2. Run `cargo xtask next`.
-3. For each entry, start one worker with a brief naming the issue: in its
-   `worktree` if it has one, otherwise in a new worktree on its `branch`, or
-   from `origin/main` if it has neither.
+3. For each entry, start one worker with a brief naming the issue: in a new
+   worktree on its `branch`, or from `origin/main` if it has none. A clean
+   `worktree` is removed first. One with changes is reused as it is.
 
 Dispatch is idempotent, because all state is on GitHub. A worker that loses a
 claim race exits.
@@ -572,7 +587,8 @@ PR's xtask measures it, and then the owner uses a merge button.
 1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
    `spec-change` PR. All three commands refuse a PR that comes from a fork,
    doesn't close exactly one issue, doesn't target `main`, or has changes
-   requested.
+   requested. `merge` and `prepare` refuse a thread that doesn't hold the
+   issue's live claim.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.

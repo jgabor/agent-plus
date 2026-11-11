@@ -133,6 +133,19 @@ fn the_largest_body_is_accepted() {
     assert_eq!(output.len(), MAX_BODY - 1);
 }
 
+/// The limit is part of the format, so it is spelled out in bytes here.
+#[test]
+fn a_body_holds_at_most_64_kib() {
+    let mut body = vec![STDOUT];
+    body.resize(65_536, b'x');
+    assert!(to_host(frame(&body)).is_ok());
+    body.push(b'x');
+    assert!(matches!(
+        to_host(frame(&body)),
+        Err(ProtocolError::TooLarge(65_537))
+    ));
+}
+
 #[test]
 fn the_largest_body_is_written() {
     let mut wire = Vec::new();

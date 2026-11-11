@@ -338,9 +338,11 @@ fn a_weak_feature_on_a_package_something_enables_fails() {
 
 /// `demo` depends on `mid`, and `gate` is the platform condition on a package
 /// `win` that turns on the feature of `mid` that pulls in `cc`.
-fn feature_from_platform_workspace(name: &str, gate: &str) -> PathBuf {
+/// `demo` reaches `mid` through `edge`, and `win` turns on the feature of
+/// `mid` that pulls in `cc`, but only where `gate` holds.
+fn feature_from_platform_workspace(name: &str, edge: &str, gate: &str) -> PathBuf {
     let extra = format!(
-        "\n[dependencies]\nmid = {{ path = \"../../vendor/mid\" }}\n\n[target.'{gate}'.dependencies]\nwin = {{ path = \"../../vendor/win\" }}\n"
+        "\n[{edge}]\nmid = {{ path = \"../../vendor/mid\" }}\n\n[target.'{gate}'.{edge}]\nwin = {{ path = \"../../vendor/win\" }}\n"
     );
     let mid = package(
         "mid",
@@ -364,23 +366,45 @@ fn feature_from_platform_workspace(name: &str, gate: &str) -> PathBuf {
     )
 }
 
+#[track_caller]
+fn assert_floors_pass(output: &Output) {
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
+    assert!(stdout(output).contains("pass floors"), "{}", stdout(output));
+}
+
 #[test]
 fn a_feature_enabled_only_on_an_unsupported_platform_passes() {
-    let output = gate(&feature_from_platform_workspace(
-        "feature-windows",
-        "cfg(windows)",
-    ));
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        stdout(&output).contains("pass floors"),
-        "{}",
-        stdout(&output)
-    );
+    let root = feature_from_platform_workspace("feature-windows", "dependencies", "cfg(windows)");
+    assert_floors_pass(&gate(&root));
 }
 
 #[test]
 fn a_feature_enabled_only_on_macos_still_fails() {
-    let root = feature_from_platform_workspace("feature-macos", "cfg(target_os = \"macos\")");
+    let root = feature_from_platform_workspace(
+        "feature-macos",
+        "dependencies",
+        "cfg(target_os = \"macos\")",
+    );
+    assert_floor_fails(&gate(&root), "cc");
+}
+
+#[test]
+fn a_host_side_feature_enabled_only_on_an_unsupported_platform_passes() {
+    let root = feature_from_platform_workspace(
+        "host-feature-windows",
+        "build-dependencies",
+        "cfg(windows)",
+    );
+    assert_floors_pass(&gate(&root));
+}
+
+#[test]
+fn a_host_side_feature_enabled_only_on_macos_still_fails() {
+    let root = feature_from_platform_workspace(
+        "host-feature-macos",
+        "build-dependencies",
+        "cfg(target_os = \"macos\")",
+    );
     assert_floor_fails(&gate(&root), "cc");
 }
 

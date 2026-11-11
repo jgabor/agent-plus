@@ -4,9 +4,10 @@
 use crate::Problem;
 use crate::json::{self, Json};
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fs;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitCode};
+use std::{env, fs};
 
 /// The hosts this floor covers, including Linux arm64 ahead of its release,
 /// and the static build the journey and the bench run. Each one resolves a
@@ -27,6 +28,13 @@ const FOREIGN_EXTENSIONS: &[&str] = &[
 
 const AUDIT_FILE: &str = "harness/build-scripts.txt";
 
+/// Set when Cargo runs this program in place of rustc, to the host it stands
+/// in for.
+const HOST_VAR: &str = "XTASK_FLOOR_HOST";
+
+/// The rustc this program runs when it stands in for one.
+const RUSTC_VAR: &str = "XTASK_FLOOR_RUSTC";
+
 /// Returns one message for each broken rule. An empty list means the floors
 /// hold.
 pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
@@ -40,11 +48,14 @@ pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
     for package in list(&read_metadata(root, None)?, "packages").map_err(unexpected)? {
         known.insert(package_key(package).map_err(unexpected)?);
     }
-    let host_side = packages_cargo_builds(root, "all")?;
+    let mut host_side = HashSet::new();
+    for host in TARGETS {
+        host_side.extend(packages_cargo_builds(root, &TARGETS, Some(host))?);
+    }
     check_known(&host_side, &known)?;
     let mut findings = BTreeSet::new();
     for (target, metadata) in TARGETS.iter().zip(&metadata) {
-        let target_side = packages_cargo_builds(root, target)?;
+        let target_side = packages_cargo_builds(root, &[target], None)?;
         check_known(&target_side, &known)?;
         let built = Built {
             target_side: &target_side,
@@ -60,8 +71,10 @@ pub fn check(root: &Path) -> Result<Vec<String>, Problem> {
 ///
 /// `cargo tree --target <triple>` settles features for that platform, but it
 /// matches build scripts, proc macros, and their dependencies against this
-/// machine instead of the target. So the host side falls back on `--target
-/// all`, which keeps every platform and can only reject too much.
+/// machine instead of the target. So the host side runs `cargo tree` once for
+/// each host, with this program standing in for rustc and telling Cargo it
+/// runs on that host. It joins what every host builds, for every target, so
+/// it can only reject too much.
 #[derive(Clone, Copy)]
 struct Built<'a> {
     target_side: &'a HashSet<String>,
@@ -106,24 +119,44 @@ fn read_metadata(root: &Path, target: Option<&str>) -> Result<Json, Problem> {
         .map_err(|e| Problem(format!("couldn't read `cargo metadata` output: {e}")))
 }
 
-/// Returns the key of every package Cargo builds for `target`, which is a
-/// triple or `all`.
-fn packages_cargo_builds(root: &Path, target: &str) -> Result<HashSet<String>, Problem> {
-    let output = Command::new("cargo")
-        .args([
-            "tree",
-            "--locked",
-            "--workspace",
-            "--all-features",
-            "--edges",
-            "normal,build,dev",
-            "--target",
-            target,
-            "--prefix",
-            "none",
-            "--format",
-            "{p}",
-        ])
+/// Returns the key of every package Cargo builds for `targets`, on `host` if
+/// one is given, or else on this machine.
+fn packages_cargo_builds(
+    root: &Path,
+    targets: &[&str],
+    host: Option<&str>,
+) -> Result<HashSet<String>, Problem> {
+    let mut command = Command::new("cargo");
+    command.args([
+        "tree",
+        "--locked",
+        "--workspace",
+        "--all-features",
+        "--edges",
+        "normal,build,dev",
+        "--prefix",
+        "none",
+        "--format",
+        "{p}",
+    ]);
+    for target in targets {
+        command.args(["--target", target]);
+    }
+    if let Some(host) = host {
+        let this =
+            env::current_exe().map_err(|e| Problem(format!("couldn't find this program: {e}")))?;
+        let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        command
+            .env("RUSTC", this)
+            .env(RUSTC_VAR, rustc)
+            .env(HOST_VAR, host)
+            // Cargo caches what rustc says by its path and arguments, which
+            // don't change with the host.
+            .env("CARGO_CACHE_RUSTC_INFO", "0")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER");
+    }
+    let output = command
         .current_dir(root)
         .output()
         .map_err(|e| Problem(format!("couldn't run `cargo tree`: {e}")))?;
@@ -138,6 +171,33 @@ fn packages_cargo_builds(root: &Path, target: &str) -> Result<HashSet<String>, P
         .filter(|line| !line.is_empty())
         .map(tree_line_key)
         .collect()
+}
+
+/// Runs rustc for Cargo when `packages_cargo_builds` asks this program to
+/// stand in for it. Cargo asks rustc about the host with no `--target`, so
+/// this adds the host it was given. Returns `None` when it wasn't asked.
+pub fn stand_in_for_rustc() -> Option<ExitCode> {
+    let host = env::var_os(HOST_VAR)?;
+    let rustc = env::var_os(RUSTC_VAR).unwrap_or_else(|| "rustc".into());
+    let mut args: Vec<OsString> = env::args_os().skip(1).collect();
+    let asks_about_a_target = args
+        .iter()
+        .any(|arg| arg.to_string_lossy().starts_with("--print"));
+    let names_a_target = args
+        .iter()
+        .any(|arg| arg == "--target" || arg.to_string_lossy().starts_with("--target="));
+    if asks_about_a_target && !names_a_target {
+        args.extend(["--target".into(), host]);
+    }
+    let status = Command::new(rustc).args(args).env_remove(HOST_VAR).status();
+    Some(match status {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => ExitCode::from(u8::try_from(status.code().unwrap_or(1)).unwrap_or(1)),
+        Err(e) => {
+            eprintln!("error: couldn't run rustc: {e}");
+            ExitCode::from(2)
+        }
+    })
 }
 
 /// Turns `name v1.0.0 (proc-macro) (source) (*)` into the key `package_key`

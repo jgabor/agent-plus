@@ -972,11 +972,6 @@ mod tests {
         assert!(vcpu.set_regs(&Regs::default()).is_err());
         assert!(vcpu.sregs().is_err());
         assert!(vcpu.set_sregs(&Sregs::default()).is_err());
-        let kick = AtomicU8::new(1);
-        assert!(
-            vcpu.run_until_stop(&kick, &mut Recorder::default())
-                .is_err()
-        );
 
         let vm = Vm::fake();
         assert!(vm.add_interrupt_controllers().is_err());

@@ -200,6 +200,16 @@ dependencies = [
  "agentfile",
  "graviola",
  "ruzstd",
+ "structured-zstd",
+]
+
+[[package]]
+name = "structured-zstd"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6cb50e4c8b14fa51e7e494dbe0a4a308fd881676b89a9c738dd9d41b2fca8c9"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]

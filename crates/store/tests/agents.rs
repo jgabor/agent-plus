@@ -36,7 +36,7 @@ fn layers(root: &Path, contents: &[&str]) -> Vec<Layer> {
         .iter()
         .map(|content| Layer {
             key: format!("key {content}"),
-            digest: store.put(content.as_bytes()).unwrap(),
+            digest: store.put(content.as_bytes(), 3).unwrap(),
             instruction: format!("ADD ./{content}"),
         })
         .collect()
@@ -131,7 +131,7 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
     let mut recorded = agent("notes", "/home/me/my notes", Vec::new());
     recorded.layers = vec![Layer {
         key: "key src".to_string(),
-        digest: Layers::new(&root).put(b"src").unwrap(),
+        digest: Layers::new(&root).put(b"src", 3).unwrap(),
         instruction: "ADD ./src /work".to_string(),
     }];
     recorded.declared = vec![
@@ -236,7 +236,7 @@ fn recording_an_agent_with_a_relative_directory_is_refused() {
 fn recording_a_layer_with_a_bad_digest_or_an_empty_key_or_instruction_is_refused() {
     let root = store_root("bad-layer");
     let agents = Agents::new(&root);
-    let digest = Layers::new(&root).put(b"x").unwrap();
+    let digest = Layers::new(&root).put(b"x", 3).unwrap();
     for (key, digest, instruction) in [
         ("key", "abc".to_string(), "ADD ."),
         ("key", digest.to_uppercase(), "ADD ."),

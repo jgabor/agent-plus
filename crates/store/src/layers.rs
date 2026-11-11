@@ -1,8 +1,11 @@
 //! Layers, each stored once as zstd frames under the SHA-256 of its
 //! uncompressed bytes.
+//!
+//! A layer's file is its zstd frame, then a skippable frame that holds the
+//! level it was compressed at. Any zstd decoder skips that frame.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -22,27 +25,49 @@ impl Layers {
         }
     }
 
-    /// Stores `data`, unless a layer with its digest is already there, and
-    /// returns the digest. The layer appears under its final name complete
-    /// and synced, or not at all.
-    pub fn put(&self, data: &[u8]) -> io::Result<String> {
+    /// Stores `data` at a zstd level, unless a layer with its digest is
+    /// already there at that level, and returns the digest. A layer at
+    /// another level is compressed again. The layer appears under its final
+    /// name complete and synced, or not at all.
+    pub fn put(&self, data: &[u8], level: i8) -> io::Result<String> {
         let digest = sha256(data);
         let path = self.dir.join(&digest);
-        if path.try_exists()? {
+        if stored_level(&path)? == Some(level) {
             // Another writer may have renamed it, or made a directory above
             // it, and been killed before syncing.
             sync_up_from(&self.dir)?;
             return Ok(digest);
         }
+        let frame = crate::compress(data, level);
+        // The encoder and the decoder are different crates. A frame that
+        // doesn't read back never reaches the store.
+        if crate::decompress(&frame)? != data {
+            return Err(io::Error::other(format!(
+                "layer {digest} doesn't read back after compressing it at level {level}"
+            )));
+        }
         fs::create_dir_all(&self.dir)?;
         let (partial, mut file) = create_partial(&self.dir, &digest)?;
-        file.write_all(&crate::compress(data))?;
+        file.write_all(&frame)?;
+        file.write_all(&level_frame(level))?;
         file.sync_all()?;
         // Another writer may have finished first. Its file holds the same
         // bytes, so replacing it is harmless.
         fs::rename(&partial.0, &path)?;
         sync_up_from(&self.dir)?;
         Ok(digest)
+    }
+
+    /// The level that the layer with this digest is kept at, or `None` if
+    /// there is no such layer, or it was kept without its level.
+    pub fn level(&self, digest: &str) -> io::Result<Option<i8>> {
+        if !is_digest(digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{digest:?} isn't a SHA-256 digest"),
+            ));
+        }
+        stored_level(&self.dir.join(digest))
     }
 
     /// The uncompressed bytes of the layer with this digest. A stored file
@@ -107,6 +132,36 @@ pub(crate) fn create_partial(dir: &Path, stem: &str) -> io::Result<(Partial, Fil
             Err(error) => return Err(error),
         }
     }
+}
+
+/// The magic number of the skippable frame that records a layer's level.
+const LEVEL_MAGIC: [u8; 4] = 0x184D_2A5A_u32.to_le_bytes();
+
+/// A skippable frame that holds `level`.
+fn level_frame(level: i8) -> [u8; 9] {
+    let mut frame = [0; 9];
+    frame[..4].copy_from_slice(&LEVEL_MAGIC);
+    frame[4..8].copy_from_slice(&1u32.to_le_bytes());
+    frame[8] = level as u8;
+    frame
+}
+
+/// The level that the layer at `path` was compressed at, or `None` if there
+/// is no layer there, or it doesn't end in a level frame.
+fn stored_level(path: &Path) -> io::Result<Option<i8>> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut tail = [0; 9];
+    if file.metadata()?.len() < tail.len() as u64 {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::End(-(tail.len() as i64)))?;
+    file.read_exact(&mut tail)?;
+    let level = tail[8] as i8;
+    Ok((tail == level_frame(level)).then_some(level))
 }
 
 /// Syncs `dir` and every directory above it, so that an entry's name and

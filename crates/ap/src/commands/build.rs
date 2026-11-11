@@ -99,6 +99,8 @@ struct Planned {
     /// What `ap build` calls the layer when it reports on it.
     label: String,
     key: String,
+    /// The zstd level the store keeps the layer at.
+    level: i8,
     content: Content,
 }
 
@@ -282,8 +284,8 @@ fn build(args: &Args) -> Result<(), String> {
 
 const NAME_RULE: &str = "A name is 1 to 63 lowercase letters, digits, and `-`, starting and ending with a letter or digit";
 
-/// Puts each layer in the store, unless an agent already recorded its key,
-/// and returns the agent's layers with a line for each. Every image is made
+/// Puts each layer in the store, unless an agent already recorded its key
+/// and the store keeps it at the layer's level, and returns the agent's layers with a line for each. Every image is made
 /// before any is put, so a layer that can't be made leaves the store as it
 /// was, and its error names its line.
 fn store_layers(
@@ -298,16 +300,26 @@ fn store_layers(
     let mut made = Vec::new();
     let mut errors = Vec::new();
     for layer in planned {
-        let found = if use_cache {
-            agents.layer(&layer.key).map_err(io)?
-        } else {
-            None
+        let found = match use_cache {
+            true => agents.layer(&layer.key).map_err(io)?,
+            false => None,
         };
-        let (line, label, key) = (layer.line, layer.label.clone(), layer.key.clone());
+        // Agents at other levels can share a layer, and the last to put it
+        // set its level.
+        let found = match found {
+            Some(digest) if layers.level(&digest).map_err(io)? == Some(layer.level) => Some(digest),
+            _ => None,
+        };
+        let (line, label, key, level) = (
+            layer.line,
+            layer.label.clone(),
+            layer.key.clone(),
+            layer.level,
+        );
         let content = match found {
             Some(digest) => Ok(digest),
             None => match layer.image() {
-                Ok(image) => Err(image),
+                Ok(image) => Err((image, level)),
                 Err(error) => {
                     errors.push(Error {
                         line,
@@ -327,7 +339,7 @@ fn store_layers(
     for (key, label, content) in made {
         let (status, digest) = match content {
             Ok(digest) => ("hit", digest),
-            Err(image) => ("built", layers.put(&image).map_err(io)?),
+            Err((image, level)) => ("built", layers.put(&image, level).map_err(io)?),
         };
         lines.push(format!("{status} {label}"));
         built.push(::store::Layer {
@@ -421,6 +433,7 @@ fn plan(
         errors.dedup();
         return Err(errors);
     };
+    let level = settings.compression.level();
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
@@ -442,6 +455,7 @@ fn plan(
                     line: add.line,
                     label,
                     key: layer.key.clone(),
+                    level,
                     content: Content::Add(layer),
                 });
             }
@@ -464,6 +478,7 @@ fn plan(
         line,
         label: "harness configuration".to_string(),
         key: configuration_key(&image),
+        level,
         content: Content::Image(image),
     });
     warnings.sort_by_key(|warning| warning.line);

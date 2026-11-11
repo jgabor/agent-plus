@@ -2,6 +2,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::thread;
@@ -196,6 +197,18 @@ fn a_program_that_is_not_executable_is_a_problem() {
     let output = run(&root, &["./plain"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("./plain"));
+}
+
+#[test]
+fn a_script_whose_interpreter_is_missing_is_a_problem() {
+    let root = workspace("missing-interpreter");
+    let script = root.join("script");
+    fs::write(&script, "#!/no/such/interpreter\necho ran\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = run(&root, &["./script"]);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("/no/such/interpreter"));
 }
 
 #[test]

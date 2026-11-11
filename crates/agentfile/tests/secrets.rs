@@ -576,6 +576,11 @@ fn a_bound_host_that_a_deny_rule_denies_is_an_error() {
         ),
         ("SECRET T @127.0.0.1\n", "T", &["127.0.0.1"]),
         ("SECRET T @host.ap.internal\n", "T", &["host.ap.internal"]),
+        (
+            "SECRET T @host.ap.internal\nNETWORK +host.ap.internal\nNETWORK -0.0.0.0/0\nNETWORK -[::]/0\n",
+            "T",
+            &["host.ap.internal"],
+        ),
         ("SECRET T @0.0.0.0\n", "T", &["0.0.0.0"]),
         (
             "SECRET T @a.com\nNETWORK -\nNETWORK +10.0.0.0/8\nNETWORK -a.com\n",
@@ -647,6 +652,7 @@ fn a_bound_host_that_some_request_reaches_is_allowed() {
         "SECRET T @a.com\nNETWORK -\nNETWORK +a.com:443\nNETWORK -0.0.0.0/0:443\n\
          NETWORK -[::]/0:443\nNETWORK +10.0.0.1:22\n",
         "SECRET T @host.ap.internal\nNETWORK +host.ap.internal\n",
+        "SECRET T @host.ap.internal\nNETWORK +host.ap.internal\nNETWORK -0.0.0.0/0\n",
         "SECRET T @HOST.ap.internal\nNETWORK -\nNETWORK +host.ap.internal:8080\n",
         "SECRET T @10.0.0.1\nNETWORK -\nNETWORK +10.0.0.0/8\n",
         "SECRET T @10.0.0.1\nNETWORK -10.0.0.0/8\nNETWORK +10.0.0.1\n",

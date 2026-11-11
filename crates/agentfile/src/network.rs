@@ -113,9 +113,22 @@ impl Network {
                 }
             }
         }
-        // Your host is reachable only when a `+` rule names it.
+        // Step 3 of the evaluation.
+        let decide = |name: Option<Sign>, by_address: Option<Sign>| match (name, by_address) {
+            (Some(one), Some(other)) if one != other => Sign::Deny,
+            (Some(sign), _) | (None, Some(sign)) => sign,
+            (None, None) => self.default,
+        };
+        // Your host is reachable only when a `+` rule names it, and IP rules
+        // still check its real address, your host's loopback.
         if host == "host.ap.internal" {
-            return !names.iter().any(|(_, name)| *name == Some(Sign::Allow));
+            return !names.iter().any(|&(port, name)| {
+                name == Some(Sign::Allow)
+                    && ["127.0.0.1", "::1"].iter().any(|address| {
+                        let by_address = self.address_decision(address.parse().unwrap(), port);
+                        decide(name, by_address) == Sign::Allow
+                    })
+            });
         }
         // The resolver answers a name only when a name rule or the default
         // could allow a connection to it.
@@ -143,15 +156,11 @@ impl Network {
                     seen.len() - 1
                 }
             };
-            let passes = seen[at].1.iter().any(|by_address| {
-                let decision = match (name, *by_address) {
-                    (Some(one), Some(other)) if one != other => Sign::Deny,
-                    (Some(sign), _) | (None, Some(sign)) => sign,
-                    (None, None) => self.default,
-                };
-                decision == Sign::Allow
-            });
-            if passes {
+            if seen[at]
+                .1
+                .iter()
+                .any(|&by_address| decide(name, by_address) == Sign::Allow)
+            {
                 return false;
             }
         }

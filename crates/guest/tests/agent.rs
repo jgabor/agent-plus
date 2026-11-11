@@ -1,12 +1,21 @@
 //! The guest agent against a fake channel, running real programs.
 
-use guest::agent::serve;
+use guest::agent;
 use guest::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Tests run on threads of one process, and a running `serve` reaps any child
+/// of it, so they take turns.
+fn serve(channel: &mut (impl Read + Write)) -> Result<(), ProtocolError> {
+    static TURN: Mutex<()> = Mutex::new(());
+    let _turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    agent::serve(channel)
+}
 
 /// Fails the test instead of the machine when a program floods the channel.
 const MAX_RECORDED: usize = 16 * 1024 * 1024;

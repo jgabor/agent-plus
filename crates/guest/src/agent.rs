@@ -1,18 +1,18 @@
 //! Runs what the host asks for, and streams back what happens.
 //!
-//! [`serve`] waits for each program before it reads the next request. The
-//! init must call it from its own loop, and not reap while it runs, because
-//! `waitpid(-1)` would take the status this module is waiting for. Orphans
-//! wait until it returns.
+//! [`serve`] waits for each program before it reads the next request. While
+//! a program runs, it reaps every child of the process, so orphans don't stay
+//! zombies. A process runs one `serve` at a time, and nothing else in it may
+//! wait for a child meanwhile.
 
-use crate::linux::{bytes_waiting, program_has_ended};
+use crate::linux::{bytes_waiting, program_has_ended, reap_until};
 use crate::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::ffi::OsStr;
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
 
@@ -63,7 +63,7 @@ fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> 
         forward(stderr, ToHost::Stderr, updates.clone(), ended.try_clone()?);
     }
     drop(ended);
-    wait(child, updates, ended_writer);
+    wait(child.id(), updates, ended_writer);
 
     let status = loop {
         match received.recv() {
@@ -141,9 +141,9 @@ fn send_some(
 
 /// Reports the program's end, and closes `ended` to tell the forwarding
 /// threads.
-fn wait(mut child: Child, updates: SyncSender<Update>, ended: PipeWriter) {
+fn wait(pid: u32, updates: SyncSender<Update>, ended: PipeWriter) {
     thread::spawn(move || {
-        let status = child.wait();
+        let status = reap_until(pid);
         drop(ended);
         let _ = updates.send(Update::Ended(status));
     });

@@ -503,6 +503,8 @@ fn a_dependency_not_named_like_a_fake_earns() {
 
 const COMMANDS: &str = "# A\n\n## Build\n\nA rebuild is a hit.\n\n## Commands\n\n### ap one\n\n`ap one` does one thing.\n\n### ap two\n\n[Build](#build) specifies `ap two`.\n\n### ap later\n\n**Planned.** `ap later` comes later.\n\n### ap maybe\n\n*Proposed:* `ap maybe` may come.\n";
 
+const README: &str = "# Demo\n\n## Core commands\n\n- `ap one [dir]`: do one thing\n- `ap two`: do another\n- `ap later` and `ap maybe`: come later\n";
+
 /// A journey file whose only milestone lists these commands.
 fn journey(commands: &str) -> String {
     format!(
@@ -513,7 +515,8 @@ fn journey(commands: &str) -> String {
 /// Runs the gate with this journey file, and returns its spec findings.
 fn gate_with_commands(name: &str, spec: &str, journey: &str) -> (Option<i32>, String, String) {
     let lib = "#[test]\nfn one() {}\n";
-    let root = workspace(name, spec, lib, &[("harness/journey.toml", journey)]);
+    let files = [("harness/journey.toml", journey), ("README.md", README)];
+    let root = workspace(name, spec, lib, &files);
     let output = xtask(&root, &["gate"]);
     (output.status.code(), stdout(&output), stderr(&output))
 }
@@ -576,15 +579,12 @@ fn a_pointer_to_a_heading_that_isnt_there_fails_the_gate() {
     assert!(err.contains("`Bild`"), "{err}");
 }
 
-const README: &str = "# Demo\n\n## Core commands\n\n- `ap one [dir]`: do one thing\n- `ap two`: do another\n- `ap later` and `ap maybe`: come later\n";
-
-fn gate_with_readme(name: &str, readme: &str) -> (Option<i32>, String, String) {
+/// Runs the gate with this README, or with none.
+fn gate_with_readme(name: &str, readme: Option<&str>) -> (Option<i32>, String, String) {
     let lib = "#[test]\nfn one() {}\n";
     let journey = journey("\"ap one\", \"ap two\"");
-    let files = [
-        ("harness/journey.toml", journey.as_str()),
-        ("README.md", readme),
-    ];
+    let mut files = vec![("harness/journey.toml", journey.as_str())];
+    files.extend(readme.map(|readme| ("README.md", readme)));
     let root = workspace(name, COMMANDS, lib, &files);
     let output = xtask(&root, &["gate"]);
     (output.status.code(), stdout(&output), stderr(&output))
@@ -593,7 +593,7 @@ fn gate_with_readme(name: &str, readme: &str) -> (Option<i32>, String, String) {
 /// The roadmap describes each command with its item in the README.
 #[test]
 fn the_gate_passes_when_the_readme_describes_every_command() {
-    let (code, out, err) = gate_with_readme("readme-agrees", README);
+    let (code, out, err) = gate_with_readme("readme-agrees", Some(README));
     assert_eq!(code, Some(0), "{err}");
     assert!(out.contains("pass spec"), "{out}");
 }
@@ -601,16 +601,28 @@ fn the_gate_passes_when_the_readme_describes_every_command() {
 #[test]
 fn a_spec_command_with_no_item_in_the_readme_fails_the_gate() {
     let readme = README.replace("- `ap two`: do another\n", "");
-    let (code, out, err) = gate_with_readme("readme-missing", &readme);
+    let (code, out, err) = gate_with_readme("readme-missing", Some(&readme));
     assert_eq!(code, Some(1), "{err}");
     assert!(out.contains("fail spec"), "{out}");
     assert!(err.contains("README.md: `ap two` is a command"), "{err}");
     assert!(!err.contains("README.md: `ap one`"), "{err}");
     // A planned or proposed command is on the roadmap too.
     let readme = README.replace(" and `ap maybe`", "");
-    let (code, _, err) = gate_with_readme("readme-missing-later", &readme);
+    let (code, _, err) = gate_with_readme("readme-missing-later", Some(&readme));
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("README.md: `ap maybe` is a command"), "{err}");
+}
+
+/// A README that isn't there describes no command.
+#[test]
+fn a_missing_readme_fails_the_gate() {
+    let (code, out, err) = gate_with_readme("readme-absent", None);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(out.contains("fail spec"), "{out}");
+    for command in ["ap one", "ap two", "ap later", "ap maybe"] {
+        let finding = format!("README.md: `{command}` is a command");
+        assert!(err.contains(&finding), "{err}");
+    }
 }
 
 /// The nightly bisect gates trees from before summaries. Today's reader

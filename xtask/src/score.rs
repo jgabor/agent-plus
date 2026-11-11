@@ -221,17 +221,20 @@ fn command_findings(root: &Path, spec: &str) -> Result<Vec<String>, Problem> {
             ));
         }
     }
-    // The roadmap describes each command with its line in the README. A
-    // workspace with no README describes none.
-    if let Ok(text) = fs::read_to_string(root.join(README_FILE)) {
-        let lines = readme::command_lines(&text);
-        for command in &commands {
-            if readme::line_for(&lines, &command.name).is_none() {
-                findings.push(format!(
-                    "{README_FILE}: `{}` is a command in SPEC.md, and no item under Core commands describes it. Add an item that starts with the command in backticks, then a colon and what it does",
-                    command.name
-                ));
-            }
+    // The roadmap describes each command with its item in the README. A
+    // README that is missing describes none.
+    let text = match fs::read_to_string(root.join(README_FILE)) {
+        Ok(text) => text,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(Problem(format!("couldn't read {README_FILE}: {e}"))),
+    };
+    let lines = readme::command_lines(&text);
+    for command in &commands {
+        if readme::line_for(&lines, &command.name).is_none() {
+            findings.push(format!(
+                "{README_FILE}: `{}` is a command in SPEC.md, and no item under Core commands describes it. Add an item that starts with the command in backticks, then a colon and what it does",
+                command.name
+            ));
         }
     }
     Ok(findings)

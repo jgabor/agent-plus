@@ -10,7 +10,6 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// With no init to run the kernel panics, and `panic=-1` ends the VM at once
 /// instead of leaving it to the timeout.
 const COMMAND_LINE: &str = "console=ttyS0 panic=-1 reboot=t";
-const BANNER: &str = "Linux version 7.3.3-ap.1";
 
 #[test]
 fn the_pinned_kernel_prints_its_banner_on_the_serial_port() {
@@ -27,8 +26,9 @@ fn the_pinned_kernel_prints_its_banner_on_the_serial_port() {
     let stop = vcpu.run_ports(TIMEOUT, &mut serial).unwrap();
 
     let output = String::from_utf8_lossy(serial.output());
+    let banner = format!("Linux version {}", t1::kernel::release());
     assert!(
-        output.contains(BANNER),
+        output.contains(&banner),
         "stopped with {stop:?} and printed:\n{output}"
     );
 }

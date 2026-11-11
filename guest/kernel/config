@@ -1,8 +1,8 @@
-# What the guest kernel needs for boot and exec. build.sh applies this over
-# allnoconfig, then fails if Kconfig dropped any line.
+# What the guest kernel needs for boot, exec, and runs. build.sh applies this
+# over allnoconfig, then fails if Kconfig dropped any line.
 
 CONFIG_64BIT=y
-CONFIG_LOCALVERSION="-ap.1"
+CONFIG_LOCALVERSION="-ap.2"
 # CONFIG_LOCALVERSION_AUTO is not set
 # CONFIG_MODULES is not set
 # CONFIG_ACPI is not set
@@ -31,10 +31,20 @@ CONFIG_TMPFS=y
 CONFIG_PROC_FS=y
 CONFIG_SYSFS=y
 
+# A run's root: read-only EROFS layers under a tmpfs upper layer, and PTYs for
+# an interactive harness.
+CONFIG_MISC_FILESYSTEMS=y
+CONFIG_EROFS_FS=y
+CONFIG_OVERLAY_FS=y
+CONFIG_UNIX98_PTYS=y
+
 # Devices declared on the command line, and the channel to the host.
 CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO_MMIO=y
 CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+CONFIG_BLOCK=y
+CONFIG_BLK_DEV=y
+CONFIG_VIRTIO_BLK=y
 CONFIG_NET=y
 CONFIG_VSOCKETS=y
 CONFIG_VIRTIO_VSOCKETS=y

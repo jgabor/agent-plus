@@ -620,8 +620,8 @@ be posted is reported, and changes nothing else.
 A merge past the merge timeout stops, with every command it started, and
 releases the slot. So does a merge whose caller stops, as on Ctrl-C. Running it
 again starts over from the fetch, and so does running it after a kill at any
-step. A merge that stops this way leaves `pending` on the PR until the next
-proof.
+step. A merge that stops this way can leave `pending` on the PR until the
+next proof.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 
@@ -657,9 +657,9 @@ VMM, once a udev rule opens KVM and a systemd user session is started.
    record keeps the budget values and reason of the record at the tip of the
    branch, and `prepare` fails if the tip has none.
 4. Try every PR. A PR that fails stays `land-needed`, and the command exits
-   1. Its `prepare` posts `failure` and says why. If its `prepare` ended
-   without doing that, as at the merge timeout, `refresh` posts `failure` as
-   `Not proven`.
+   1. Its `prepare` posts `failure` and says why. If its `prepare` ended with
+   neither a `success` nor a `failure` on the PR's head, as at the merge
+   timeout, `refresh` posts `failure` as `Not proven`.
 
 If `main` moves during a run, `prepare --keep-budgets` refuses the rest,
 because `xtask` was built from the older `main`. Those PRs go red until the

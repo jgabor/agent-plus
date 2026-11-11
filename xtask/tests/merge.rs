@@ -248,7 +248,8 @@ maybe_kill before
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
   "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
-  "pr merge") echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
+  "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
+    echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
@@ -1466,6 +1467,41 @@ fn a_proof_names_the_bench_only_when_it_runs() {
         ]
     );
     assert_eq!(said.len(), 5, "{said:?}");
+
+    // Each is posted just before the work it names. The journey and the bench
+    // both build a release.
+    let calls = repo.calls();
+    let order = [
+        calls.find("Proving: lint"),
+        calls.find("cargo fmt --all"),
+        calls.find("cargo clippy --workspace"),
+        calls.find("Proving: tests"),
+        calls.find("cargo test"),
+        calls.find("Proving: journey"),
+        calls.find("cargo build --release"),
+        calls.find("Proving: bench"),
+        calls.rfind("cargo build --release"),
+        calls.find("state=success"),
+    ];
+    assert!(order.iter().all(Option::is_some), "{calls}");
+    assert!(order.is_sorted(), "{order:?}: {calls}");
+}
+
+/// The proof is complete once it is green, whatever the squash does.
+#[test]
+fn a_squash_that_fails_leaves_the_proof_green() {
+    let repo = Repo::new("squash-fails");
+    fs::write(repo.bin.join("merge-fails"), "").unwrap();
+    let output = repo.merge();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("no merge"), "{}", stderr(&output));
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (
+            repo.head(),
+            "success spec 0 of 2, journey 1 of 1".to_string()
+        )
+    );
 }
 
 #[test]
@@ -2400,6 +2436,40 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
         .collect();
     let why = "failure the tip of PR 9 has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare 9`";
     assert_eq!(failures, [(head, why.to_string())]);
+}
+
+/// A `prepare` that was stopped after it posted the green did prove the PR.
+#[test]
+fn a_refresh_leaves_a_green_that_its_prepare_posted() {
+    let repo = Repo::new("refresh-green");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.git(&["checkout", "-q", "main"]);
+
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("KILL_ON", "state=success")
+        .env("KILL_WHEN", "after")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(repo.bin.join("killed").exists());
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (
+            repo.head(),
+            "success spec 0 of 2, journey 1 of 1".to_string()
+        )
+    );
 }
 
 /// The queue position only says what is happening, as any `pending` does.

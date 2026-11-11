@@ -48,10 +48,12 @@ pub fn run() -> Result<Verdict, Problem> {
         if !prepare(&root, pr.number)? {
             eprintln!("refresh: PR {} wasn't proven", pr.number);
             let head = current_head(&root, pr);
-            // A `prepare` that fails a PR says why on its head. One that was
-            // stopped, or that refused the PR before the fetch, says nothing.
-            let said = gh.status(&head, merge::GATE);
-            if !matches!(said, Ok(Some(state)) if state == "failure") {
+            // A `prepare` that fails a PR says why on its head, and one that
+            // was stopped after its green did prove the PR. One that was
+            // stopped earlier, or that refused the PR before the fetch, left
+            // no result.
+            let result = gh.status(&head, merge::GATE);
+            if !matches!(result, Ok(Some(state)) if state == "failure" || state == "success") {
                 merge::post_gate(&gh, &head, "failure", "Not proven");
             }
             verdict = Verdict::Fail;

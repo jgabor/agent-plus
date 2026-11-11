@@ -170,10 +170,22 @@ mod tests {
     }
 
     #[test]
+    fn no_interrupt_is_pending_and_the_modem_is_ready() {
+        let mut serial = Serial::new();
+        assert_eq!(read(&mut serial, BASE + INTERRUPT_ID), NO_INTERRUPT);
+        assert_eq!(read(&mut serial, BASE + MODEM_STATUS), MODEM_READY);
+    }
+
+    #[test]
     fn a_port_with_no_device_reads_as_all_ones() {
         let mut data = [0; 2];
         assert!(Serial::new().read(0x60, &mut data));
         assert_eq!(data, [0xff; 2]);
+    }
+
+    #[test]
+    fn the_port_after_the_last_register_has_no_device() {
+        assert_eq!(read(&mut Serial::new(), BASE + REGISTERS), 0xff);
     }
 
     #[test]

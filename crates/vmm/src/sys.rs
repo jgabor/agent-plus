@@ -84,3 +84,13 @@ impl Drop for Mapping {
         unsafe { munmap(self.start.cast(), self.len) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_mapping_is_an_error() {
+        assert!(Mapping::anonymous(0).is_err());
+    }
+}

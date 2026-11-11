@@ -20,7 +20,7 @@ const HLT: u8 = 0xf4;
 
 /// Starts `code` in real mode at `ENTRY`.
 fn guest(code: &[u8]) -> (Vm, Vcpu) {
-    let mut vm = Vm::new(GuestMemory::new(4 * PAGE).unwrap()).unwrap();
+    let vm = Vm::new(GuestMemory::new(4 * PAGE).unwrap()).unwrap();
     vm.memory().write(ENTRY, code).unwrap();
     let vcpu = vm.create_vcpu().unwrap();
 

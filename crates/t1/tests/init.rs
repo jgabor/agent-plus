@@ -25,7 +25,7 @@ fn the_kernel_runs_init_from_the_initramfs_and_powers_off() {
     }])
     .unwrap();
 
-    let mut vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
+    let vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
     vm.add_interrupt_controllers().unwrap();
     let entry = boot::load(vm.memory(), &image, COMMAND_LINE).unwrap();
     boot::load_initramfs(vm.memory(), &entry, &initramfs).unwrap();

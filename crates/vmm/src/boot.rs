@@ -1,6 +1,6 @@
 //! Loads an uncompressed `vmlinux` and enters it through PVH.
 
-use crate::{GuestMemory, OutOfBounds, Regs, Segment, Vcpu};
+use crate::{GuestMemory, OutOfBounds, Regs, Segment, Sregs, Vcpu};
 use std::fmt;
 use std::io;
 
@@ -311,9 +311,9 @@ pub fn load_initramfs(memory: &GuestMemory, entry: &Entry, image: &[u8]) -> Resu
     Ok(())
 }
 
+/// A segment that spans all 4 GiB from base 0.
 fn flat_segment(selector: u16, type_: u8) -> Segment {
     Segment {
-        base: 0,
         limit: u32::MAX,
         selector,
         type_,
@@ -329,6 +329,12 @@ fn flat_segment(selector: u16, type_: u8) -> Segment {
 /// protected mode, paging off, flat segments, and the start info in `rbx`.
 pub fn enter(vcpu: &Vcpu, entry: &Entry) -> io::Result<()> {
     let mut sregs = vcpu.sregs()?;
+    enter_protected_mode(&mut sregs);
+    vcpu.set_sregs(&sregs)?;
+    vcpu.set_regs(&start_regs(entry))
+}
+
+fn enter_protected_mode(sregs: &mut Sregs) {
     let data = flat_segment(DATA_SELECTOR, 0x3);
     sregs.cs = flat_segment(CODE_SELECTOR, 0xb);
     sregs.ds = data;
@@ -351,14 +357,15 @@ pub fn enter(vcpu: &Vcpu, entry: &Entry) -> io::Result<()> {
     sregs.cr3 = 0;
     sregs.cr4 = 0;
     sregs.efer = 0;
-    vcpu.set_sregs(&sregs)?;
+}
 
-    vcpu.set_regs(&Regs {
+fn start_regs(entry: &Entry) -> Regs {
+    Regs {
         rip: entry.address,
         rbx: START_INFO_ADDRESS,
         rflags: RFLAGS_RESERVED,
         ..Regs::default()
-    })
+    }
 }
 
 #[cfg(test)]
@@ -577,7 +584,11 @@ mod tests {
 
     #[test]
     fn a_wrong_header_field_is_refused() {
-        for (at, value) in [(0, 0), (4, 1), (5, 2), (16, 3), (18, 3), (54, 57)] {
+        let high_bytes = [(17, 1), (19, 1), (55, 1)];
+        for (at, value) in [(0, 0), (4, 1), (5, 2), (16, 3), (18, 3), (54, 57)]
+            .into_iter()
+            .chain(high_bytes)
+        {
             let mut file = valid();
             file[at] = value;
             assert_malformed(load_with(&file));
@@ -640,7 +651,117 @@ mod tests {
 
     #[test]
     fn a_segment_over_the_boot_data_is_refused() {
-        assert_malformed(load_with(&with_segment(|s| s.address = HIGH_MEMORY - 1)));
+        assert_eq!(
+            load_with(&with_segment(|s| s.address = HIGH_MEMORY - 1)),
+            Err(Error::Malformed("a segment overlaps the boot data"))
+        );
+    }
+
+    #[test]
+    fn a_segment_may_start_right_after_the_boot_data() {
+        let notes = entry_note(HIGH_MEMORY);
+        let mut segment = code_segment();
+        segment.address = HIGH_MEMORY;
+        let file = elf(&[segment, note_segment(notes.len())], &notes);
+        assert_eq!(load_with(&file).unwrap().address, HIGH_MEMORY);
+    }
+
+    #[test]
+    fn a_segment_may_hold_no_zeroed_tail() {
+        let file = with_segment(|s| s.memory_size = s.file_size);
+        assert_eq!(
+            load_with(&file).unwrap().kernel_end,
+            ADDRESS + CODE.len() as u64
+        );
+    }
+
+    #[test]
+    fn the_first_entry_note_wins() {
+        let first = entry_note(ENTRY);
+        let second = entry_note(ENTRY + 1);
+        let mut later = note_segment(second.len());
+        later.offset += first.len() as u64;
+        let notes = [first.as_slice(), &second].concat();
+        let file = elf(&[code_segment(), note_segment(first.len()), later], &notes);
+        assert_eq!(load_with(&file), Ok(entry_at(ENTRY)));
+    }
+
+    #[test]
+    fn notes_without_an_entry_have_none() {
+        assert_eq!(pvh_entry(&[]), Ok(None));
+        assert_eq!(pvh_entry(&note(b"GNU\0", 3, b"abcd")), Ok(None));
+    }
+
+    #[test]
+    fn an_error_says_what_is_wrong() {
+        assert_eq!(
+            Error::Malformed("no ELF magic").to_string(),
+            "not a bootable vmlinux: no ELF magic"
+        );
+        assert_eq!(
+            Error::CommandLine.to_string(),
+            "the kernel command line is not valid"
+        );
+        let outside = OutOfBounds {
+            address: 0x10,
+            len: 2,
+        };
+        assert_eq!(
+            Error::Memory(outside).to_string(),
+            "2 bytes at guest address 0x10 are outside guest memory"
+        );
+    }
+
+    type SegmentFields = (u64, u32, u16, u8, u8, u8, u8, u8);
+
+    fn fields(segment: Segment) -> SegmentFields {
+        let Segment {
+            base,
+            limit,
+            selector,
+            type_,
+            present,
+            s,
+            db,
+            g,
+            ..
+        } = segment;
+        (base, limit, selector, type_, present, s, db, g)
+    }
+
+    #[test]
+    fn the_kernel_starts_in_flat_32_bit_protected_mode() {
+        let mut sregs = Sregs::default();
+        // What KVM resets a vCPU to, which has to be overwritten.
+        sregs.cs.base = 0xffff_0000;
+        sregs.cs.limit = 0xffff;
+        sregs.cr4 = 1;
+        sregs.efer = 1;
+        enter_protected_mode(&mut sregs);
+
+        let flat = |selector, type_| (0, u32::MAX, selector, type_, 1, 1, 1, 1);
+        assert_eq!(fields(sregs.cs), flat(CODE_SELECTOR, 0xb));
+        for data in [sregs.ds, sregs.es, sregs.fs, sregs.gs, sregs.ss] {
+            assert_eq!(fields(data), flat(DATA_SELECTOR, 0x3));
+        }
+        assert_eq!(fields(sregs.tr), (0, 0x67, TSS_SELECTOR, 0xb, 1, 0, 0, 0));
+        assert_eq!((sregs.gdt.base, sregs.gdt.limit), (GDT_ADDRESS, 31));
+        assert_eq!((sregs.idt.base, sregs.idt.limit), (0, 0));
+        assert_eq!(sregs.cr0, 0x11);
+        assert_eq!((sregs.cr3, sregs.cr4, sregs.efer), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_kernel_starts_at_its_entry_with_the_start_info_in_rbx() {
+        let regs = start_regs(&entry_at(ENTRY));
+        assert_eq!(regs.rip, ENTRY);
+        assert_eq!(regs.rbx, START_INFO_ADDRESS);
+        assert_eq!(regs.rflags, 2);
+    }
+
+    #[test]
+    fn entering_reports_a_vcpu_that_fails() {
+        assert!(enter(&Vcpu::fake(PAGE_SIZE as usize), &entry_at(ENTRY)).is_err());
     }
 
     #[test]

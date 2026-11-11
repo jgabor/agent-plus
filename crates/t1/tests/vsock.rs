@@ -102,7 +102,7 @@ fn bytes_echo_through_a_real_guest_over_vsock() {
     }])
     .unwrap();
 
-    let mut vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
+    let vm = Vm::new(GuestMemory::new(MEMORY).unwrap()).unwrap();
     vm.add_interrupt_controllers().unwrap();
     let entry = boot::load(vm.memory(), &image, COMMAND_LINE).unwrap();
     boot::load_initramfs(vm.memory(), &entry, &initramfs).unwrap();

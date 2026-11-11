@@ -100,6 +100,10 @@ Blocked by #34.
 A parent that delivers a milestone names it on a line of its own, such as
 `Milestone: Author.`.
 
+A parent can record what its sub-issues build on in a `## Decisions` section.
+Fold it, and any long list, as a [pull request](#pull-requests) folds its
+proof, and keep the fold above `## Touches`.
+
 If you find other work along the way, file a new issue with no parent and no
 `auto:*` label, and keep going. It isn't a sub-issue, because it wasn't part of
 the parent's plan. Don't fix it in this PR.
@@ -226,20 +230,32 @@ One or two sentences.
 ## Change
 How this solves it.
 
-## Proof
-What you ran, what you saw, and what you couldn't check.
-
 ## Score
 spec 412 -> 417 of 812, journey 7 of 19, budgets level
 
 ## Decisions
 Anything the owner may want to overrule.
 
+<details>
+<summary>Proof and review</summary>
+
+## Proof
+What you ran, what you saw, and what you couldn't check.
+
+## Review
+Who reviewed, each finding, and its outcome.
+
+</details>
+
 Closes #123.
 
 Created with <model> in <harness>.
 ```
 
+- The fold keeps the body short for the owner, with the evidence one click
+  away. Leave a blank line after `<summary>`, or GitHub shows the Markdown
+  inside as plain text. Keep the lines a program reads outside the fold:
+  `Closes`, `Hill: none`, and `Budget reason`.
 - Solve one problem per PR. Open a real PR, not a draft, so checks and
   reviewers run.
 - Check the title, body, and attachments for secrets and private details.

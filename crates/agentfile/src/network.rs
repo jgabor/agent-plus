@@ -73,9 +73,8 @@ impl Network {
     }
 
     /// Whether these rules deny every request to `host`, by the evaluation
-    /// under NETWORK in SPEC.md. An address is judged by IP rules. A name
-    /// is judged by host and URL rules alone, since the address it resolves
-    /// to isn't known until a run.
+    /// under NETWORK in SPEC.md. The address behind a name isn't known
+    /// until a run, so a name is denied only when no address could pass.
     pub(crate) fn denies(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         let address = host.parse::<IpAddr>().ok();
@@ -97,20 +96,65 @@ impl Network {
         let longest = paths.iter().map(String::len).max().unwrap_or(0);
         paths.push(format!("/{}", "x".repeat(longest)));
         ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
-        for scheme in [Scheme::Https, Scheme::Http] {
-            for &port in &ports {
+        for &port in &ports {
+            let addresses = match address {
+                Some(address) => vec![self.address_decision(address, port)],
+                None => self.address_decisions(port),
+            };
+            for scheme in [Scheme::Https, Scheme::Http] {
                 for path in &paths {
-                    let decision = match address {
-                        Some(address) => self.address_decision(address, port),
+                    let name = match address {
+                        Some(_) => None,
                         None => self.name_decision(&host, scheme, port, path),
                     };
-                    if decision.unwrap_or(self.default) == Sign::Allow {
+                    let decide = |by_address: &Option<Sign>| match (name, *by_address) {
+                        (Some(one), Some(other)) if one != other => Sign::Deny,
+                        (Some(sign), _) | (None, Some(sign)) => sign,
+                        (None, None) => self.default,
+                    };
+                    if addresses
+                        .iter()
+                        .any(|by_address| decide(by_address) == Sign::Allow)
+                    {
                         return false;
                     }
                 }
             }
         }
         true
+    }
+
+    /// Every address decision that some address gets on `port`, with `None`
+    /// for addresses that no IP rule matches. It splits the address space
+    /// only where a rule starts inside a block.
+    fn address_decisions(&self, port: u16) -> Vec<Option<Sign>> {
+        let mut found = Vec::new();
+        let mut blocks = vec![(IpAddr::V4(0.into()), 0), (IpAddr::V6(0.into()), 0)];
+        while let Some((network, prefix)) = blocks.pop() {
+            let mut inside = self.rules.iter().filter_map(|rule| match rule.destination {
+                Destination::Address {
+                    network: start,
+                    prefix: length,
+                    port: only,
+                } if only.is_none_or(|only| only == port) => Some((start, length)),
+                _ => None,
+            });
+            if inside
+                .any(|(start, length)| length > prefix && masked(start, prefix) == Some(network))
+            {
+                let half = match network {
+                    IpAddr::V4(bits) => IpAddr::V4((u32::from(bits) | 1 << (31 - prefix)).into()),
+                    IpAddr::V6(bits) => IpAddr::V6((u128::from(bits) | 1 << (127 - prefix)).into()),
+                };
+                blocks.extend([(network, prefix + 1), (half, prefix + 1)]);
+            } else {
+                let decision = self.address_decision(network, port);
+                if !found.contains(&decision) {
+                    found.push(decision);
+                }
+            }
+        }
+        found
     }
 
     /// The sign of the most specific URL or host rule that matches a

@@ -559,6 +559,21 @@ fn a_bound_host_that_a_deny_rule_denies_is_an_error() {
             "T",
             &["10.0.0.1"],
         ),
+        (
+            "SECRET T @a.com\nNETWORK +a.com\nNETWORK -0.0.0.0/0\nNETWORK -[::]/0\n",
+            "T",
+            &["a.com"],
+        ),
+        (
+            "SECRET T @a.com\nNETWORK -0.0.0.0/1\nNETWORK -128.0.0.0/1\nNETWORK -[::]/0\n",
+            "T",
+            &["a.com"],
+        ),
+        (
+            "SECRET T @a.com\nNETWORK -\nNETWORK +10.0.0.0/8\nNETWORK -a.com\n",
+            "T",
+            &["a.com"],
+        ),
     ] {
         assert_denied(lines, name, hosts);
     }
@@ -612,6 +627,11 @@ fn a_bound_host_that_some_request_reaches_is_allowed() {
         "SECRET T @api.a.com\nNETWORK -https://api.a.com/\n",
         "SECRET T @api.a.com\nNETWORK -https://api.a.com/v1\n",
         "SECRET T @api.a.com\nNETWORK -other.com\nNETWORK -10.0.0.0/8\n",
+        "SECRET T @api.a.com\nNETWORK -\nNETWORK +10.0.0.0/8\n",
+        "SECRET T @a.com\nNETWORK +a.com\nNETWORK -0.0.0.0/0\n",
+        "SECRET T @a.com\nNETWORK -0.0.0.0/0\nNETWORK -[::]/0\nNETWORK +10.1.2.3\n",
+        "SECRET T @a.com\nNETWORK -0.0.0.0/0:443\nNETWORK -[::]/0:443\n",
+        "SECRET T @a.com\nNETWORK -0.0.0.0/1\nNETWORK -[::]/0\n",
         "SECRET T @10.0.0.1\nNETWORK -\nNETWORK +10.0.0.0/8\n",
         "SECRET T @10.0.0.1\nNETWORK -10.0.0.0/8\nNETWORK +10.0.0.1\n",
         "SECRET GITHUB_TOKEN\nNETWORK -\nNETWORK +github.com\n",

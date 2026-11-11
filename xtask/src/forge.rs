@@ -406,6 +406,17 @@ impl Gh {
 
     /// The newest state of this status on this commit, if it has one.
     pub fn status(&self, commit: &str, context: &str) -> Result<Option<String>, Problem> {
+        Ok(self
+            .described_status(commit, context)?
+            .map(|(state, _)| state))
+    }
+
+    /// The newest state of this status on this commit, and what it says.
+    pub fn described_status(
+        &self,
+        commit: &str,
+        context: &str,
+    ) -> Result<Option<(String, String)>, Problem> {
         let value = self.json(&[
             "api",
             &format!("repos/{{owner}}/{{repo}}/commits/{commit}/status"),
@@ -414,11 +425,14 @@ impl Gh {
             .get("statuses")
             .and_then(Json::as_arr)
             .ok_or_else(|| unexpected("gh api"))?;
-        Ok(statuses
+        let Some(status) = statuses
             .iter()
             .find(|status| status.get("context").and_then(Json::as_str) == Some(context))
-            .and_then(|status| status.get("state").and_then(Json::as_str))
-            .map(str::to_string))
+        else {
+            return Ok(None);
+        };
+        let text = |field: &str| status.get(field).and_then(Json::as_str).map(str::to_string);
+        Ok(text("state").map(|state| (state, text("description").unwrap_or_default())))
     }
 
     pub fn pin_issue(&self, number: u64) -> Result<(), Problem> {

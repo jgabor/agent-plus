@@ -253,7 +253,7 @@ maybe_kill before
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
-    printf '{{"statuses":[{{"context":"xtask/gate","state":"%s"}}]}}\n' "${{6#state=}}" > "{bin}/status-${{4##*/}}" ;;
+    printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
   "api repos/"*) posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
     if [ -f "$posted" ]; then cat "$posted"; else echo '{{"statuses":[]}}'; fi ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
@@ -308,7 +308,13 @@ exit $code
             .env_remove("XTASK_ACTIVITY_HELD");
         // The gate runs these tests inside a GitHub Actions run, whose page a
         // status would otherwise link to.
-        for name in ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"] {
+        for name in [
+            "GITHUB_ACTIONS",
+            "GITHUB_SERVER_URL",
+            "GITHUB_REPOSITORY",
+            "GITHUB_RUN_ID",
+            "GITHUB_STEP_SUMMARY",
+        ] {
             command.env_remove(name);
         }
         command
@@ -2304,6 +2310,103 @@ fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
         assert_eq!(&repo.head_of(branch), head);
         assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
     }
+    let out = stdout(&output);
+    let line = |text: &str| {
+        out.find(&format!("{text}\n"))
+            .unwrap_or_else(|| panic!("no `{text}` in:\n{out}"))
+    };
+    assert!(line("refresh: proving PR 5 (1 of 2)") < line("refresh: proving PR 9 (2 of 2)"));
+    // Outside Actions, a fold marker is noise.
+    assert!(!out.contains("::"), "{out}");
+}
+
+/// In Actions, each proof folds under its PR, and the run's page sums them up.
+#[test]
+fn a_refresh_in_actions_folds_each_proof_and_sums_them_up() {
+    let repo = Repo::new("refresh-actions");
+    repo.other_pr(
+        5,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            reviews: &[("a", "CHANGES_REQUESTED")],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    repo.prepared("8-y", 8, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.other_pr(
+        4,
+        "6-up",
+        &Pr {
+            closes: &[6],
+            ..Pr::default()
+        },
+    );
+    let (nine, five, four) = (
+        repo.head_of(BRANCH),
+        repo.head_of("8-y"),
+        repo.head_of("6-up"),
+    );
+    repo.set_open_prs(&[
+        listed(5, "8-y", &five, 8, false),
+        listed(9, BRANCH, &nine, 7, false).replace("\"title\":\"t\"", "\"title\":\"Nine\""),
+        listed(4, "6-up", &four, 6, false),
+    ]);
+    repo.set_land_needed(&[6, 7, 8]);
+    let summary = repo.temp.join("summary.md");
+    fs::write(&summary, "earlier\n").unwrap();
+    repo.git(&["checkout", "-q", "main"]);
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    let line = |text: &str| {
+        out.find(&format!("{text}\n"))
+            .unwrap_or_else(|| panic!("no `{text}` in:\n{out}"))
+    };
+    let proving = line("refresh: proving PR 9 (2 of 2)");
+    let opened = line("::group::PR 9 (2 of 2): Nine");
+    let proved = out.find("prepare: PR 9 is ready to merge").expect(&out);
+    assert!(line("::group::PR 5 (1 of 2): t") < proving, "{out}");
+    assert!(proving < opened && opened < proved, "{out}");
+    assert!(proved < out.rfind("::endgroup::\n").unwrap(), "{out}");
+    assert_eq!(out.matches("::group::").count(), 2, "{out}");
+    assert_eq!(out.matches("::endgroup::").count(), 2, "{out}");
+
+    let summary = fs::read_to_string(&summary).unwrap();
+    let rows: Vec<&str> = summary.lines().collect();
+    assert_eq!(
+        rows[..4],
+        [
+            "earlier",
+            "",
+            "| PR | Verdict | Status | Took |",
+            "|---|---|---|---|"
+        ]
+    );
+    assert_eq!(rows[4], "| #4 | up to date | | |", "{summary}");
+    assert!(
+        rows[5].starts_with("| #5 | not proven | Not proven | "),
+        "{summary}"
+    );
+    assert!(rows[6].starts_with("| #9 | proven | spec "), "{summary}");
+    for row in &rows[5..] {
+        assert!(row.ends_with("s |"), "{summary}");
+    }
+    assert_eq!(rows.len(), 7, "{summary}");
 }
 
 #[test]
@@ -2447,12 +2550,15 @@ fn a_refresh_leaves_a_green_that_its_prepare_posted() {
     repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
     repo.set_land_needed(&[7]);
     repo.git(&["checkout", "-q", "main"]);
+    let summary = repo.temp.join("summary.md");
 
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .arg("refresh")
         .env("KILL_ON", "state=success")
         .env("KILL_WHEN", "after")
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_STEP_SUMMARY", &summary)
         .output()
         .unwrap();
     assert_eq!(
@@ -2470,6 +2576,9 @@ fn a_refresh_leaves_a_green_that_its_prepare_posted() {
             "success spec 0 of 2, journey 1 of 1".to_string()
         )
     );
+    let summary = fs::read_to_string(&summary).unwrap();
+    let row = "| #9 | proven | spec 0 of 2, journey 1 of 1 | ";
+    assert!(summary.contains(row), "{summary}");
 }
 
 /// The queue position only says what is happening, as any `pending` does.

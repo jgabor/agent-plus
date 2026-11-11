@@ -1361,7 +1361,7 @@ fn a_surviving_mutant_opens_an_issue() {
         "{calls}"
     );
     assert!(calls.contains(MISSED.trim()), "{calls}");
-    assert!(calls.contains("## Done when"), "{calls}");
+    assert!(calls.contains("## Definition of done"), "{calls}");
     assert!(!calls.contains("--label"), "{calls}");
 }
 

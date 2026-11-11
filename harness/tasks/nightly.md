@@ -54,7 +54,7 @@ edit those issues.
    ## Goal
    The nightly `<step>` step passes on `main`.
 
-   ## Done when
+   ## Definition of done
    `cargo xtask nightly` prints `pass <step>`.
 
    ## Touches

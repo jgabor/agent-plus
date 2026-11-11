@@ -1250,6 +1250,40 @@ fn a_surviving_mutant_opens_an_issue() {
 }
 
 #[test]
+fn a_mutants_issue_folds_its_list() {
+    let repo = Repo::new("folded-survivors");
+    repo.set_survivors(&format!(
+        "{MISSED}crates/ap/src/main.rs:2:1: replace main with ()\n"
+    ));
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.calls().join("\n");
+    // The blank line after the summary is what makes GitHub render the list.
+    let fold = "no longer reports these as missed:\n\n\
+        <details>\n<summary>2 missed mutants</summary>\n\n\
+        - `crates/ap/src/main.rs:1:1: replace main with ()`\n\
+        - `crates/ap/src/main.rs:2:1: replace main with ()`\n\n\
+        </details>\n\n\
+        ## Touches\n`crates/ap`";
+    assert!(calls.contains(fold), "{calls}");
+}
+
+#[test]
+fn one_missed_mutant_is_counted_as_one() {
+    let repo = Repo::new("one-survivor");
+    repo.set_survivors(MISSED);
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let calls = repo.calls().join("\n");
+    assert!(
+        calls.contains("<summary>1 missed mutant</summary>"),
+        "{calls}"
+    );
+}
+
+#[test]
 fn mutants_run_as_one_contained_job() {
     let repo = Repo::new("memory");
     repo.set_mutants("exit 0\n");
@@ -1385,6 +1419,11 @@ fn a_long_list_of_survivors_is_cut_short() {
     assert!(calls.contains("main.rs:99:1"), "{calls}");
     assert!(!calls.contains("main.rs:100:1"), "{calls}");
     assert!(calls.contains("and 50 more"), "{calls}");
+    // The summary counts every survivor, and not only the ones listed.
+    assert!(
+        calls.contains("<summary>150 missed mutants</summary>"),
+        "{calls}"
+    );
 }
 
 #[test]

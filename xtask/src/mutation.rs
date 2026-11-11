@@ -129,8 +129,12 @@ fn file_issue(
     if survivors.len() > MAX_LISTED {
         list.push_str(&format!("- and {} more\n", survivors.len() - MAX_LISTED));
     }
+    let count = survivors.len();
+    let noun = if count == 1 { "mutant" } else { "mutants" };
+    // The list sits in a fold, so the issue is short for a person to read.
+    // GitHub renders the list only with the blank line after the summary.
     let body = format!(
-        "## Goal\nA check notices each of these changes to `{name}`, or the code they change is gone.\n\n## Done when\n`cargo mutants -p {name}` no longer reports these as missed:\n\n{list}\n## Touches\n`{directory}`\n"
+        "## Goal\nA check notices each of these changes to `{name}`, or the code they change is gone.\n\n## Done when\n`cargo mutants -p {name}` no longer reports these as missed:\n\n<details>\n<summary>{count} missed {noun}</summary>\n\n{list}\n</details>\n\n## Touches\n`{directory}`\n"
     );
     gh.create_issue(&title, &body)?;
     Ok(())

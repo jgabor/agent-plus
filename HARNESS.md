@@ -589,8 +589,10 @@ changes to tracked files, and any other branch that isn't at `origin/main`.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
-A merge past the merge timeout stops and releases the slot. Running it again
-starts over from the fetch, and so does running it after a kill at any step.
+A merge past the merge timeout stops, with every command it started, and
+releases the slot. So does a merge whose caller stops, as on Ctrl-C. Running it
+again starts over from the fetch, and so does running it after a kill at any
+step.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 

@@ -5,6 +5,7 @@ use crate::json::{self, Json};
 use crate::lock::Hold;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -438,7 +439,15 @@ impl Gh {
             "--match-head-commit",
             head,
         ];
-        self.checked(&args, self.spawned(&args, slot.as_stdin()?, None)?)?;
+        // A group of its own, so that stopping the merge's group spares it.
+        let output = Command::new("gh")
+            .args(args)
+            .current_dir(&self.root)
+            .stdin(slot.as_stdin()?)
+            .process_group(0)
+            .output()
+            .map_err(|e| Problem(format!("couldn't run `gh`: {e}")))?;
+        self.checked(&args, output)?;
         Ok(())
     }
 }

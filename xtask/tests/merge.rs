@@ -1241,6 +1241,98 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     assert_merged(&repo, &repo.merge());
 }
 
+/// A command that a merge starts, and that outlives its parent: it ignores
+/// hangups, and nothing waits for it. It writes its process id to `stray`.
+fn stray(repo: &Repo) -> String {
+    format!(
+        "(trap '' HUP; exec sleep 30) </dev/null >/dev/null 2>&1 & echo $! > '{}/stray'",
+        repo.bin.display()
+    )
+}
+
+fn stray_pid(repo: &Repo) -> Option<String> {
+    let text = fs::read_to_string(repo.bin.join("stray")).ok()?;
+    text.ends_with('\n').then(|| text.trim().to_string())
+}
+
+/// A zombie counts as stopped, because only its reaping is left.
+fn running(pid: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+    })
+}
+
+/// A killed process needs a moment to die, so this waits a little for it.
+#[track_caller]
+fn assert_stray_stopped(repo: &Repo) {
+    let pid = stray_pid(repo).expect("the stray command never started");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(&pid) {
+        if Instant::now() > deadline {
+            let _ = Command::new("kill").args(["-KILL", &pid]).status();
+            panic!("the stray command, process {pid}, kept running");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_merge_past_its_timeout_stops_what_it_started() {
+    let repo = Repo::new("timeout-stray");
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "cargo fmt")
+        .env("RUN_COMMAND", format!("{}; sleep 3", stray(&repo)))
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+        // As a merge that a merge's own tests start inherits it.
+        .env(
+            "XTASK_MERGE_WORKER_OF",
+            std::os::unix::process::parent_id().to_string(),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
+    assert_stray_stopped(&repo);
+}
+
+#[test]
+fn a_merge_that_ends_stops_what_it_started() {
+    let repo = Repo::new("ended-stray");
+    let output = repo.merge_running("cargo fmt", &stray(&repo));
+    assert_merged(&repo, &output);
+    assert_stray_stopped(&repo);
+}
+
+/// As on Ctrl-C, which reaches the caller's process group but not the merge's.
+#[test]
+fn a_merge_whose_caller_is_killed_stops_what_it_started() {
+    let repo = Repo::new("caller-killed");
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "cargo fmt")
+        .env("RUN_COMMAND", format!("{}; sleep 30", stray(&repo)))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while stray_pid(&repo).is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the merge never reached `cargo fmt`"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    merge.kill().unwrap();
+    merge.wait().unwrap();
+    assert_stray_stopped(&repo);
+    assert_merged(&repo, &repo.merge());
+}
+
 fn status_call(repo: &Repo) -> Option<String> {
     repo.calls()
         .lines()

@@ -11,9 +11,12 @@ use crate::{Problem, Verdict, base, bench, journey, lock, workspace};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::os::unix::process::CommandExt;
+use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -22,6 +25,14 @@ const MAIN: &str = "refs/remotes/origin/main";
 const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
+/// Set in the worker that a merge runs in, to the id of the worker's parent,
+/// or of the worker itself once `land` restarts.
+const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
+/// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
+/// reaches only the supervisor's process group. Only the supervisor holds the
+/// other end of its input, so the input ends when the supervisor does. It runs
+/// the same `kill` as `stop_group`, because dash's builtin refuses `--`.
+const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
 
 enum Decision {
     Merged,
@@ -129,6 +140,9 @@ pub fn land(pr: &str) -> Result<Verdict, Problem> {
 }
 
 fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem> {
+    if !is_worker() {
+        supervise();
+    }
     let command = mode.command();
     let prepare = mode != Mode::Merge;
     let number: u64 = pr
@@ -147,7 +161,7 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
         return refuse(&why);
     }
     let slot = lock::merge_slot(&root)?;
-    start_timeout();
+    report_slot()?;
     // After the slot, because a merge during the wait can change the checks.
     if mode == Mode::Land
         && let Some(verdict) = use_the_newest_checks(&root, number)?
@@ -288,6 +302,9 @@ fn use_the_newest_checks(root: &Path, number: u64) -> Result<Option<Verdict>, Pr
         .args(["xtask", "land", &number.to_string()])
         .current_dir(root)
         .env_remove("RUSTUP_TOOLCHAIN")
+        // `cargo` keeps this process's id, and runs the new worker either as
+        // its child or, on Unix, in its place.
+        .env(WORKER_OF, process::id().to_string())
         .exec();
     Err(Problem(format!(
         "couldn't restart `cargo xtask land`: {problem}"
@@ -323,18 +340,129 @@ fn acceptance(head: &str, accepted: &[String]) -> String {
     )
 }
 
-/// Stops a stuck merge, because it would hold the slot for every other merge.
-/// The kernel releases the slot when the process exits.
-fn start_timeout() {
+/// Whether this process is the worker that a supervisor started. The variable
+/// names the worker's parent, or the worker itself after `land` restarts, so
+/// it means nothing to a merge that the worker's own tests start.
+fn is_worker() -> bool {
+    let ids = [std::os::unix::process::parent_id(), process::id()];
+    env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))
+}
+
+/// Tells the supervisor that the worker holds the slot, so that the timeout
+/// starts. A `land` that restarts says so again, and gets a new timeout.
+fn report_slot() -> Result<(), Problem> {
+    let couldnt = |e: io::Error| Problem(format!("couldn't tell the supervisor: {e}"));
+    let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
+    fs::File::from(fd).write_all(b"s").map_err(couldnt)
+}
+
+/// Runs this merge again as a worker in a process group of its own, which
+/// everything the merge starts joins, and stops the group when the worker
+/// ends, however it ends. So nothing the merge started outlives it, even a
+/// command that ignores its parent's exit. Only `gh pr merge` leaves the
+/// group, so that it keeps the slot until it finishes.
+fn supervise() -> ! {
+    match supervised() {
+        Ok(code) => process::exit(code),
+        Err(Problem(message)) => {
+            eprintln!("error: {message}");
+            process::exit(2);
+        }
+    }
+}
+
+fn supervised() -> Result<i32, Problem> {
+    let couldnt = |what: &str, e: io::Error| Problem(format!("couldn't {what}: {e}"));
+    let (reports, report) = io::pipe().map_err(|e| couldnt("make a pipe", e))?;
+    let program = env::current_exe().map_err(|e| couldnt("find this program", e))?;
+    let mut worker = process::Command::new(program)
+        .args(env::args_os().skip(1))
+        .env(WORKER_OF, process::id().to_string())
+        .stdin(report)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| couldnt("start the merge", e))?;
+    let group = worker.id();
+    // Until the worker is reaped, its group exists, even if it has exited.
+    let (watched, _alive) = io::pipe().map_err(|e| couldnt("make a pipe", e))?;
+    let watcher = process::Command::new("sh")
+        .args(["-c", WATCHER, "sh", &group.to_string()])
+        .stdin(watched)
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(error) = watcher {
+        stop_group(group);
+        let _ = worker.wait();
+        return Err(couldnt("start the merge's watcher", error));
+    }
+    time_out(reports, group);
+    let status = worker.wait().map_err(|e| couldnt("wait for the merge", e));
+    stop_group(group);
+    let status = status?;
+    if let Some(code) = status.code() {
+        return Ok(code);
+    }
+    // Dies as the worker did, so that a killed merge looks killed.
+    let signal = status.signal().unwrap_or(9);
+    let _ = process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(process::id().to_string())
+        .status();
+    Ok(128 + signal)
+}
+
+/// Stops the worker's group once the worker has held the slot for the timeout,
+/// because a stuck merge would hold it for every other merge.
+fn time_out(reports: io::PipeReader, group: u32) {
     let seconds = env::var(TIMEOUT_OVERRIDE)
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(TIMEOUT_SECONDS);
+    let (slot_taken, taken) = mpsc::channel();
     thread::spawn(move || {
-        thread::sleep(Duration::from_secs(seconds));
+        let mut reports = reports;
+        let mut report = [0; 1];
+        while reports.read(&mut report).is_ok_and(|read| read > 0) {
+            if slot_taken.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    thread::spawn(move || {
+        if taken.recv().is_err() {
+            return;
+        }
+        loop {
+            match taken.recv_timeout(Duration::from_secs(seconds)) {
+                Ok(()) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+            }
+        }
+        stop_group(group);
         eprintln!("merge: stopped at the {seconds} second timeout. Run it again to restart");
         process::exit(1);
     });
+}
+
+/// Stops the group first, so that none of it runs while the kill goes through
+/// it. The worker holds the slot, and frees it only as it dies. `xtask` has no
+/// dependencies, so `kill` sends the signals. An empty group is already
+/// stopped, so `kill` failing on one is no problem.
+fn stop_group(group: u32) {
+    let target = format!("-{group}");
+    for signal in ["-STOP", "-KILL"] {
+        let sent = process::Command::new("kill")
+            .args([signal, "--", &target])
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null())
+            .status();
+        if let Err(error) = sent {
+            eprintln!("merge: couldn't stop process group {group}: {error}");
+        }
+    }
 }
 
 /// The commits the merge started from.

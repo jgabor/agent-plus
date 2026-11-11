@@ -58,7 +58,7 @@ Draft model: `claude-fable-5-2`, at effort `high`
    gh api graphql -F owner='{owner}' -F name='{repo}' -F n=<parent> -f query='
      query($owner: String!, $name: String!, $n: Int!) {
        repository(owner: $owner, name: $name) { issue(number: $n) {
-         subIssues(first: 100) { nodes { state labels(first: 20) {
+         subIssues(first: 100) { nodes { state labels(first: 100) {
            nodes { name } } } } } } }' --jq '[.data.repository.issue
      .subIssues.nodes[] | select(.state == "OPEN") | select([.labels.nodes[]
      .name] | index("land-needed") | not)] | length'

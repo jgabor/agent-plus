@@ -26,7 +26,7 @@ pub fn run() -> Result<Verdict, Problem> {
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""))))];
     let hold = lock::shared(&root)?;
     let (gated, score) = match gate::check(&root, &hold, None) {
-        Ok((verdict, score)) => (state(Ok(verdict)), Some(score)),
+        Ok((failed, score)) => (state(Ok(gate::verdict(&failed))), Some(score)),
         Err(problem) => (state(Err(problem)), None),
     };
     checks.push(("gate", gated));
@@ -52,7 +52,7 @@ pub fn run() -> Result<Verdict, Problem> {
     } else {
         (Verdict::Pass, "success", PASS)
     };
-    Gh::new(&root).post_status(&commit, STATUS, status)?;
+    Gh::new(&root).post_status(&commit, STATUS, status, None, None)?;
     let responded = if gated == FAIL {
         bisect::respond(&root, &commit, STATUS)
     } else {

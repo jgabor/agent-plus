@@ -1430,11 +1430,8 @@ fn a_proof_says_which_phase_it_is_in_and_then_the_score() {
         let before = repo.head();
         let output = repo.xtask(&[command, "9"]);
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-        let after = if command == "prepare" {
-            repo.head()
-        } else {
-            repo.origin(&["rev-parse", "refs/heads/main^2"])
-        };
+        let after = repo.head();
+        assert_ne!(before, after, "{command}");
         let said = |commit: &String, text: &str| (commit.clone(), text.to_string());
         assert_eq!(
             posts(&repo),

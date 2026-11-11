@@ -5,9 +5,10 @@
 //! earlier attempt pushed is dropped and written again.
 
 use crate::forge::{Forge, Gh, PullRequest};
-use crate::gate::{self, Merging};
+use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
 use crate::{Problem, Verdict, base, bench, journey, lock, workspace};
+use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -21,6 +22,8 @@ use std::thread;
 use std::time::Duration;
 
 const AUTO_MERGE: &str = "auto:merge";
+/// The one status that `main` requires.
+pub const GATE: &str = "xtask/gate";
 const MAIN: &str = "refs/remotes/origin/main";
 const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
@@ -180,34 +183,30 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
 
     let fetched = fetch(&root, &pr.head_ref)?;
     let tree = Tree::create(&root, number, &fetched.branch)?;
-    // Nothing was pushed, so this is the head that an earlier green would be on.
-    let unproven = || {
-        if prepare {
-            post_failure(&gh, &fetched.branch);
-        }
+    // Nothing was pushed, so this is the head that the PR shows.
+    let unproven = |why: &str| {
+        post_gate(&gh, &fetched.branch, "failure", why);
+        refuse(why)
     };
     let kept = if keep_budgets {
         // xtask compiled from this checkout, so these checks are for its `main`.
         if head(&root)? != fetched.main {
-            unproven();
-            return refuse(&format!(
+            return unproven(&format!(
                 "these checks were built from an older `main`, so they can't prove PR {number} on the newest one"
             ));
         }
         if !record_at_tip(&tree.path, issue)? {
-            unproven();
-            return refuse(&format!(
+            return unproven(&format!(
                 "the tip of PR {number} has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare {number}`"
             ));
         }
-        Some(ledger::read(&tree.path, issue as usize).inspect_err(|_| unproven())?)
+        Some(ledger::read(&tree.path, issue as usize)?)
     } else {
         None
     };
     drop_earlier_record(&tree.path, issue)?;
     if !rebase(&tree.path, &fetched.main)? {
-        unproven();
-        return refuse("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
+        return unproven("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
     }
     if mode == Mode::Land
         && let Some(why) = needs_its_own_measurer(&tree.path, &fetched.main, number)?
@@ -223,13 +222,17 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
         gated: &gated,
         kept: kept.as_ref(),
     };
-    let proof = prove(&tree.path, &scoring).inspect_err(|_| unproven())?;
-    let Some(Proof { record, accepted }) = proof else {
-        unproven();
-        return Ok(Verdict::Fail);
+    let mut status = Status::begin(&gh, &fetched.branch);
+    let Proof { record, accepted } = match prove(&tree.path, &scoring, &status)? {
+        Ok(proof) => proof,
+        Err(failed) => {
+            status.failed(&format!("Failed: {}", failed.join(", ")));
+            return Ok(Verdict::Fail);
+        }
     };
 
     if let Some(why) = changed_during_proof(&gh, &root, &scoring, &fetched.main)? {
+        status.failed(&why);
         return refuse(&why);
     }
 
@@ -244,6 +247,7 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
     );
     let target = format!("HEAD:refs/heads/{}", pr.head_ref);
     base::git_text(&tree.path, &["push", "-q", &lease, "origin", &target])?;
+    status.head = recorded.clone();
     let changed = base::git_text(&tree.path, &["diff", "--name-only", &gated, &recorded])?;
     if changed.trim() != path {
         return Err(Problem(format!(
@@ -255,7 +259,10 @@ fn sequence(pr: &str, mode: Mode, keep_budgets: bool) -> Result<Verdict, Problem
     if !accepted.is_empty() {
         gh.comment_on_pr(number, &acceptance(&recorded, &accepted))?;
     }
-    gh.post_status(&recorded, "xtask/gate", "success")?;
+    status.passed(&format!(
+        "spec {} of {}, journey {} of {}",
+        record.proven, record.promises, record.passing, record.steps
+    ))?;
     if mode == Mode::Prepare {
         println!("prepare: PR {number} is ready to merge at {recorded}");
         return Ok(Verdict::Pass);
@@ -330,10 +337,75 @@ pub fn exit_code(root: &Path, args: &[&str]) -> Result<i32, Problem> {
     }
 }
 
-/// A status that can't be posted leaves the verdict as it is.
-pub fn post_failure(gh: &Gh, commit: &str) {
-    if let Err(Problem(message)) = gh.post_status(commit, "xtask/gate", "failure") {
-        eprintln!("merge: couldn't post `xtask/gate` on {commit}: {message}");
+/// The page of the GitHub Actions run that this is part of, if it is in one.
+fn run_url() -> Option<String> {
+    let set = |name: &str| env::var(name).ok().filter(|value| !value.is_empty());
+    Some(format!(
+        "{}/{}/actions/runs/{}",
+        set("GITHUB_SERVER_URL")?,
+        set("GITHUB_REPOSITORY")?,
+        set("GITHUB_RUN_ID")?
+    ))
+}
+
+/// Posts `xtask/gate`, saying what is happening or why a proof failed. One
+/// that can't be posted leaves the verdict as it is.
+pub fn post_gate(gh: &Gh, commit: &str, state: &str, said: &str) {
+    let posted = gh.post_status(commit, GATE, state, Some(said), run_url().as_deref());
+    if let Err(Problem(message)) = posted {
+        eprintln!("merge: couldn't post `{GATE}` on {commit}: {message}");
+    }
+}
+
+/// The `xtask/gate` of one proof: what the proof is doing, and then how it
+/// ended. A proof that ends without saying how was stopped by an error.
+struct Status<'a> {
+    gh: &'a Gh,
+    /// The head that the PR shows, which the push replaces.
+    head: String,
+    ended: Cell<bool>,
+}
+
+impl<'a> Status<'a> {
+    /// The lint is the first check that takes long.
+    fn begin(gh: &'a Gh, head: &str) -> Status<'a> {
+        let status = Status {
+            gh,
+            head: head.to_string(),
+            ended: Cell::new(false),
+        };
+        status.proving("lint");
+        status
+    }
+
+    fn proving(&self, phase: &str) {
+        post_gate(self.gh, &self.head, "pending", &format!("Proving: {phase}"));
+    }
+
+    fn failed(&self, why: &str) {
+        self.ended.set(true);
+        post_gate(self.gh, &self.head, "failure", why);
+    }
+
+    /// A green that can't be posted is a problem, because the PR can't merge.
+    fn passed(&self, score: &str) -> Result<(), Problem> {
+        self.gh.post_status(
+            &self.head,
+            GATE,
+            "success",
+            Some(score),
+            run_url().as_deref(),
+        )?;
+        self.ended.set(true);
+        Ok(())
+    }
+}
+
+impl Drop for Status<'_> {
+    fn drop(&mut self) {
+        if !self.ended.get() {
+            self.failed("Stopped by an error");
+        }
     }
 }
 
@@ -637,20 +709,26 @@ struct Proof {
     accepted: Vec<String>,
 }
 
-/// Runs the gate, the journey, and any bench on the rebased head, and returns
-/// the record they earn. `None` means the merge must stop, and the reasons
-/// have been printed.
-fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
+/// Runs the gate, the journey, and any bench on the rebased head, saying which
+/// it is on, and returns the record they earn. If any check failed, the merge
+/// must stop, and the reasons have been printed.
+fn prove(
+    tree: &Path,
+    scoring: &Scoring,
+    status: &Status,
+) -> Result<Result<Proof, Failed>, Problem> {
     let Scoring { prepare, pr, .. } = *scoring;
     let hold = lock::shared(tree)?;
     let merging = Merging {
         labels: &pr.labels,
         prepare,
+        starting: &|check| status.proving(check),
     };
-    let (verdict, score) = gate::check(tree, &hold, Some(&merging))?;
-    if verdict == Verdict::Fail {
-        return Ok(None);
+    let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
+    if !failed.is_empty() {
+        return Ok(Err(failed));
     }
+    status.proving("journey");
     let (passing, steps) = journey::count(tree)?;
     drop(hold);
 
@@ -659,12 +737,11 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
     // The base of a revert may be what doesn't build, and a revert puts back a
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
-    if !revert
-        && scoring.kept.is_none()
-        && budget_can_change(tree, &commit)?
-        && bench::compare(tree, Some(&pr.body))? == Verdict::Fail
-    {
-        return Ok(None);
+    if !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)? {
+        status.proving("bench");
+        if bench::compare(tree, Some(&pr.body))? == Verdict::Fail {
+            return Ok(Err(vec!["bench"]));
+        }
     }
     let scores = Scores {
         proven: score.proven,
@@ -684,25 +761,26 @@ fn prove(tree: &Path, scoring: &Scoring) -> Result<Option<Proof>, Problem> {
         record.budgets.extend(kept.budgets.clone());
         record.reason = kept.reason.clone();
     }
-    let Some(mut accepted) = compare_counts(tree, &commit, &record, scoring)? else {
-        return Ok(None);
+    let mut accepted = match compare_counts(tree, &commit, &record, scoring)? {
+        Ok(accepted) => accepted,
+        Err(failed) => return Ok(Err(failed)),
     };
     if revert {
         accepted
             .push("an exact revert, so it can remove checks, and the bench didn't run".to_string());
     }
-    Ok(Some(Proof { record, accepted }))
+    Ok(Ok(Proof { record, accepted }))
 }
 
 /// The spec count is compared by the gate. This compares the two that need the
 /// journey and the bench, and then asks whether anything rose. Returns the
-/// counts that fell and are allowed to, or `None` if the PR fails here.
+/// counts that fell and are allowed to, or the checks that the PR fails here.
 fn compare_counts(
     tree: &Path,
     commit: &str,
     record: &Record,
     scoring: &Scoring,
-) -> Result<Option<Vec<String>>, Problem> {
+) -> Result<Result<Vec<String>, Failed>, Problem> {
     let budgets = bench::read_budgets(tree)?;
     let before = ledger::newest(tree, commit)?;
     let (proven, passing, budgets_met) = before.map_or((0, 0, 0), |base| {
@@ -711,7 +789,7 @@ fn compare_counts(
     });
     let met_now = bench::met(&budgets, &record.budgets).0;
 
-    let mut verdict = Verdict::Pass;
+    let mut failed = Failed::new();
     let mut accepted = Vec::new();
     if record.proven < proven {
         accepted.push(format!("spec fell from {proven} to {}", record.proven));
@@ -726,16 +804,20 @@ fn compare_counts(
             );
             accepted.push(format!("{name} fell from {before} to {after}"));
         }
-        gate::record(name, after >= before || scoring.prepare, &mut verdict);
+        gate::record(name, after >= before || scoring.prepare, &mut failed);
     }
     let rose = record.proven > proven || record.passing > passing || met_now > budgets_met;
     if !rose && !declares_no_hill(&scoring.pr.body) {
         eprintln!(
             "hills: no count rose, so the PR body needs a `Hill: none, <reason>` line, or a change that raises one"
         );
-        gate::record("hill-line", false, &mut verdict);
+        gate::record("hill-line", false, &mut failed);
     }
-    Ok((verdict == Verdict::Pass).then_some(accepted))
+    Ok(if failed.is_empty() {
+        Ok(accepted)
+    } else {
+        Err(failed)
+    })
 }
 
 fn declares_no_hill(body: &str) -> bool {

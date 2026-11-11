@@ -2,7 +2,10 @@
 
 use crate::{Problem, Verdict, limit, workspace};
 use std::env;
+use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -100,9 +103,11 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
         .ok_or_else(|| Problem("`run` needs a command to run".to_string()))?;
     let root = workspace::root()?;
     let hold = shared(&root)?;
-    if !can_start(program) {
+    let path = find(program)
+        .ok_or_else(|| Problem(format!("couldn't run `{program}`: no such executable")))?;
+    if let Some(interpreter) = missing_interpreter(&path) {
         return Err(Problem(format!(
-            "couldn't run `{program}`: no such executable"
+            "couldn't run `{program}`: no such interpreter `{interpreter}`"
         )));
     }
     let mut child = limit::scope(program, arguments, None)?;
@@ -119,12 +124,37 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
 
 /// `systemd-run` exits 1 for a program it can't start, which would look like a
 /// failed check. A name without a slash is looked up on `PATH`, as `exec` does.
-fn can_start(program: &str) -> bool {
+fn find(program: &str) -> Option<PathBuf> {
     if program.contains('/') {
-        return is_executable(Path::new(program));
+        let path = PathBuf::from(program);
+        return is_executable(&path).then_some(path);
     }
-    env::var_os("PATH")
-        .is_some_and(|path| env::split_paths(&path).any(|d| is_executable(&d.join(program))))
+    env::split_paths(&env::var_os("PATH")?)
+        .map(|directory| directory.join(program))
+        .find(|path| is_executable(path))
+}
+
+/// The interpreter a script's `#!` line names, if it can't be run. The kernel
+/// reads the first 256 bytes, and takes the first word as a path, with no
+/// `PATH` lookup. A word cut off by that limit doesn't run as a script at all,
+/// so it is left to `exec`.
+fn missing_interpreter(script: &Path) -> Option<String> {
+    const LIMIT: usize = 256;
+    let mut start = Vec::with_capacity(LIMIT);
+    File::open(script)
+        .and_then(|f| f.take(LIMIT as u64).read_to_end(&mut start))
+        .ok()?;
+    let line = start.strip_prefix(b"#!")?;
+    let blank = |b: &u8| matches!(b, b' ' | b'\t');
+    let begin = line.iter().position(|b| !blank(b))?;
+    let word = &line[begin..];
+    let length = word.iter().position(|b| blank(b) || matches!(b, b'\n' | 0));
+    if length.is_none() && start.len() == LIMIT {
+        return None;
+    }
+    let word = &word[..length.unwrap_or(word.len())];
+    let path = Path::new(OsStr::from_bytes(word));
+    (!word.is_empty() && !is_executable(path)).then(|| path.display().to_string())
 }
 
 fn is_executable(path: &Path) -> bool {

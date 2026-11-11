@@ -170,27 +170,10 @@ count out of all steps. It exits 0 whenever it could run, because what fails a
 merge is a count lower than the base's. Each step gets a new `HOME` and working
 directory, and only `HOME` and `PATH` in its environment.
 
-| # | Step | Needs |
-|---|---|---|
-| 1 | `ap --version` runs from a release build | |
-| 2 | `ap fmt` and parse errors work on a real Agentfile | 1 |
-| 3 | The VMM boots a kernel to guest init | 1 |
-| 4 | A command runs in the guest and returns its exit code | 3 |
-| 5 | `ap build` writes layers, and a rebuild with no changes is a hit | 2 |
-| 6 | The first build lists grants, and a wider grant asks again | 5 |
-| 7 | `ap run` starts the fake harness in the guest | 4, 5 |
-| 8 | Claude Code and Codex start in the guest with no credentials | 7 |
-| 9 | A share is copy-on-write, and `ap diff` and `ap apply` work | 7 |
-| 10 | `NETWORK` rules hold, and a closed network stays closed | 7 |
-| 11 | A hidden secret reaches only its host, and the agent can't read it | 10 |
-| 12 | A real headless prompt edits a share and lands on a branch | 8, 9, 11 |
-| 13 | The same Agentfile works with one line changed to the other harness | 12 |
-| 14 | A plugin, skill, and MCP server install and translate | 8 |
-| 15 | `AUTH login` and `PERSIST` survive a restart | 8 |
-| 16 | The desktop starts on demand, and computer-use tools work | 7 |
-| 17 | The control API, ACP bridge, and agents calling agents work | 8 |
-| 18 | Every other v0.1.0 host passes the steps above | all |
-| 19 | Installed from a release, the README's quick start works as written | 18 |
+The steps, with their `needs` and milestones, are listed only in
+`harness/journey.toml`, in the format under
+[Journey definition](#journey-definition). The `Roadmap details` issue shows
+each step as the last journey ran it.
 
 ### Budgets
 

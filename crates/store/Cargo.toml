@@ -9,4 +9,4 @@ publish.workspace = true
 agentfile = { path = "../agentfile" }
 graviola = "0.4"
 ruzstd = "0.9"
-structured-zstd = { version = "0.3", default-features = false, features = ["std", "hash", "kernel-sse", "kernel-bmi2", "kernel-avx2", "kernel-neon"] }
+structured-zstd = { version = "0.3", default-features = false, features = ["std", "hash"] }

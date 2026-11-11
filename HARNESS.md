@@ -644,6 +644,12 @@ VMM, once a udev rule opens KVM and a systemd user session is started.
    neither a `success` nor a `failure` on the PR's head, as at the merge
    timeout, `refresh` posts `failure` as `Not proven`.
 
+Before each proof, `refresh` prints `refresh: proving PR 5 (1 of 2)`. In
+Actions, each proof sits in a `::group::PR 5 (1 of 2): <title>` fold, and
+`refresh` appends a table to `$GITHUB_STEP_SUMMARY`, with a row per PR: the
+PR, the verdict, the status description, and how long the proof took.
+Elsewhere it prints no fold markers and writes no summary.
+
 If `main` moves during a run, `prepare --keep-budgets` refuses the rest,
 because `xtask` was built from the older `main`. Those PRs go red until the
 run that the new push started proves them again.

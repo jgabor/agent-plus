@@ -21,7 +21,9 @@ decisions and label it. Only the owner adds an `auto:*` label.
      --json` lists for them
    - the parents of the milestones before it, found the same way as in step
      1, so that you build on their decisions and don't repeat their work
-3. File one issue with `gh issue create --label answer-needed`, and no other
+3. Run the check from step 1 again, because another drafter may have filed
+   while you read. If an issue has the line now, say so and stop.
+4. File one issue with `gh issue create --label answer-needed`, and no other
    label. Its title states the outcome, as Issues in AGENTS.md says. Its body
    has these parts, in this order:
    - `## Goal`: what a user can do once the milestone is done, and on which
@@ -38,4 +40,4 @@ decisions and label it. Only the owner adds an `auto:*` label.
      change SPEC.md and so need the owner's merge first.
    - `## Touches`: the paths in backticks that the sub-issues will change.
    - The line `Milestone: <name>.`, on its own, last.
-4. Say the number of the issue you filed, then stop.
+5. Say the number of the issue you filed, then stop.

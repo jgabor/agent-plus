@@ -1,13 +1,14 @@
 //! The local store's layers, the zstd frames they're kept in, the agents
 //! built from them, and the grants you approved, in pure Rust.
 //!
-//! The encoder is `ruzstd`'s, which only has a mode close to zstd's level 1.
-//! A frame it writes is a standard zstd frame, and any zstd decoder reads it.
+//! The encoder is `structured-zstd`'s, which follows zstd's levels, and the
+//! decoder is `ruzstd`'s. A frame is a standard zstd frame, and any zstd
+//! decoder reads it.
 
 use std::io::{self, Read};
 
 use ruzstd::decoding::StreamingDecoder;
-use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+use structured_zstd::encoding::{CompressionLevel, FrameCompressor};
 
 mod agents;
 mod approvals;
@@ -17,9 +18,12 @@ pub use agents::{Agent, Agents, Declared, Layer, valid_name};
 pub use approvals::Approvals;
 pub use layers::Layers;
 
-/// Compresses `data` into one zstd frame.
-pub fn compress(data: &[u8], _level: i8) -> Vec<u8> {
-    compress_to_vec(data, CompressionLevel::Fastest)
+/// Compresses `data` into one zstd frame at a zstd level: `1` to `22`, or a
+/// fast mode from `-1` to `-7`. The frame carries a content checksum.
+pub fn compress(data: &[u8], level: i8) -> Vec<u8> {
+    let mut encoder: FrameCompressor = FrameCompressor::new(CompressionLevel::Level(level.into()));
+    encoder.set_content_checksum(true);
+    encoder.compress_independent_frame(data)
 }
 
 /// Decompresses the zstd frame at the start of `frame`, and checks its content

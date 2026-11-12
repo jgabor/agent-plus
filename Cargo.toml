@@ -9,3 +9,6 @@ publish = false
 
 [profile.release]
 strip = true
+
+[profile.dev]
+debug = false

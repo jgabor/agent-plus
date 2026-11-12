@@ -6,10 +6,13 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-ap = { path = "../ap" }
 vmm = { path = "../vmm" }
 guest = { path = "../guest" }
 
 [dev-dependencies]
+ap = { path = "../ap" }
 erofs = { path = "../erofs" }
 store = { path = "../store" }
+
+[lints.cargo]
+unused_dependencies = "deny"

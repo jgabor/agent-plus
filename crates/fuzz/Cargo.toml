@@ -8,3 +8,6 @@ publish.workspace = true
 [dependencies]
 agentfile = { path = "../agentfile" }
 vmm = { path = "../vmm" }
+
+[lints.cargo]
+unused_dependencies = "deny"

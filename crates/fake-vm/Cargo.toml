@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 ap = { path = "../ap" }
+
+[lints.cargo]
+unused_dependencies = "deny"

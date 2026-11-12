@@ -28,7 +28,7 @@ pub fn order(command_line: &str) -> Vec<&str> {
     command_line
         .split_ascii_whitespace()
         .filter_map(|word| word.strip_prefix(PARAMETER))
-        .last()
+        .next_back()
         .map(|list| list.split(',').filter(|name| !name.is_empty()).collect())
         .unwrap_or_default()
 }

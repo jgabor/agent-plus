@@ -5,6 +5,8 @@
 //! An agent has no persisted state, runs, kept repositories, or pending
 //! changes yet, so there's nothing else to remove and nothing to refuse for.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -23,6 +25,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -98,13 +101,13 @@ fn stderr(output: &Output) -> String {
 
 /// One layer from `ADD`, and the harness configuration, which agents with
 /// the same harness settings share.
-const SIMPLE: &str = "AGENT claude\nADD ./data\nNETWORK -\nPOLICY -\n";
+const SIMPLE: &str = "AGENT claude\nOS minimal\nADD ./data\nNETWORK -\nPOLICY -\n";
 
 /// The grants that `SIMPLE` asks for.
 const SIMPLE_GRANTS: &str = "NETWORK -\nPOLICY -\n";
 
 /// An Agentfile that asks for a host variable too, and its grants.
-const NOTES: &str = "AGENT claude\nENV NAME $USER\nNETWORK -\nPOLICY -\n";
+const NOTES: &str = "AGENT claude\nOS minimal\nENV NAME $USER\nNETWORK -\nPOLICY -\n";
 const NOTES_GRANTS: &str = "VARIABLE USER\nNETWORK -\nPOLICY -\n";
 
 // spec(ap rm): `ap rm <agent>` removes an agent and its persisted state.
@@ -118,9 +121,11 @@ fn rm_removes_the_agent_and_frees_only_its_own_layers() {
     scratch.build(&two, SIMPLE_GRANTS);
     let ones = scratch.digests("one");
     let twos = scratch.digests("two");
-    assert_eq!(ones.len(), 2);
-    assert_ne!(ones[0], twos[0]);
-    assert_eq!(ones[1], twos[1]);
+    // The OS, the `ADD` layer, and the harness configuration.
+    assert_eq!(ones.len(), 3);
+    assert_eq!(ones[0], twos[0]);
+    assert_ne!(ones[1], twos[1]);
+    assert_eq!(ones[2], twos[2]);
 
     let output = scratch.ap(&["rm", "one"]);
 
@@ -130,9 +135,10 @@ fn rm_removes_the_agent_and_frees_only_its_own_layers() {
     let listed = scratch.ok_in(&scratch.root, &["ls"]);
     assert_eq!(listed, format!("two {}\n", two.display()));
     // The layer only it used is freed, and the one it shared stays.
-    assert!(!scratch.has_layer(&ones[0]));
-    assert!(scratch.has_layer(&ones[1]));
-    assert!(scratch.has_layer(&twos[0]));
+    assert!(scratch.has_layer(&ones[0]));
+    assert!(!scratch.has_layer(&ones[1]));
+    assert!(scratch.has_layer(&ones[2]));
+    assert!(scratch.has_layer(&twos[1]));
     assert_eq!(scratch.digests("two"), twos);
 }
 

@@ -81,10 +81,7 @@ impl Store {
 
         let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
         if actual != sha256 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("the download has digest {actual}, not the pinned {sha256}"),
-            ));
+            return Err(crate::fetch::wrong_digest(&actual, sha256));
         }
         file.sync_all()?;
         fs::rename(&partial.0, &path)?;

@@ -117,9 +117,10 @@ fn init_writes_policy_closed() {
     assert_eq!(policy, ["POLICY -"]);
 }
 
-/// The file is formatted, and builds with no errors or warnings.
+/// The file is formatted, and its build finds no error or warning but the
+/// default OS tier, which isn't built yet.
 #[test]
-fn init_writes_a_formatted_agentfile_that_builds() {
+fn init_writes_a_formatted_agentfile_that_builds_but_for_its_os() {
     let scratch = Scratch::new("valid");
     let dir = scratch.root.join("project");
     scratch.init(&["project"], &dir);
@@ -137,7 +138,11 @@ fn init_writes_a_formatted_agentfile_that_builds() {
     fs::write(&file, grants.to_string()).unwrap();
     let approve = format!("--approve={}", file.display());
     let output = scratch.ap(&dir, &["build", "--strict", &approve]);
-    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "Agentfile:1: `OS desktop`, the default, is not built yet\n"
+    );
 }
 
 #[test]

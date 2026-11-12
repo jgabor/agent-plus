@@ -2,6 +2,8 @@
 //! the store, the errors it reports, and what it records. What a layer holds
 //! is `ap::add`'s, and its tests check it.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, symlink};
@@ -25,6 +27,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -196,7 +199,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, u64, i64, i64)> {
     found
 }
 
-const SIMPLE: &str = "AGENT claude\nADD ./data\n";
+const SIMPLE: &str = "AGENT claude\nOS minimal\nADD ./data\n";
 
 // spec(Build): `ap build [path]` reads the Agentfile in `path` (default: the current directory) and writes an image into the local store.
 #[test]
@@ -208,9 +211,9 @@ fn build_reads_the_agentfile_in_path() {
     assert!(out.ends_with("agent notes\n"), "{out}");
     let agent = scratch.agent("notes");
     assert_eq!(agent.directory, dir.to_str().unwrap());
-    // The `ADD` layer, and the harness configuration.
-    assert_eq!(agent.layers.len(), 2);
-    assert_eq!(scratch.layer_files().len(), 2);
+    // The OS, the `ADD` layer, and the harness configuration.
+    assert_eq!(agent.layers.len(), 3);
+    assert_eq!(scratch.layer_files().len(), 3);
 }
 
 // spec(Build): `ap build [path]` reads the Agentfile in `path` (default: the current directory) and writes an image into the local store.
@@ -241,7 +244,7 @@ fn build_without_an_agentfile_fails() {
 #[test]
 fn the_name_comes_from_the_directory_or_t() {
     let scratch = Scratch::new("name");
-    let dir = scratch.project("notes", "AGENT claude\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
     scratch.build(&dir, &[]);
     scratch.build(&dir, &["-t", "reviewer"]);
     let names: Vec<String> = scratch
@@ -258,7 +261,7 @@ fn the_name_comes_from_the_directory_or_t() {
 #[test]
 fn a_directory_name_that_does_not_fit_needs_t() {
     let scratch = Scratch::new("bad-name");
-    let dir = scratch.project("My Notes", "AGENT claude\n");
+    let dir = scratch.project("My Notes", "AGENT claude\nOS minimal\n");
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("-t"), "{}", stderr(&output));
@@ -271,7 +274,7 @@ fn a_directory_name_that_does_not_fit_needs_t() {
 #[test]
 fn an_invalid_t_name_fails() {
     let scratch = Scratch::new("bad-t");
-    let dir = scratch.project("notes", "AGENT claude\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
     let output = scratch.ap(&dir, &["build", "-t", "Notes"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("Notes"), "{}", stderr(&output));
@@ -281,7 +284,7 @@ fn an_invalid_t_name_fails() {
 #[test]
 fn bad_usage_exits_2() {
     let scratch = Scratch::new("usage");
-    let dir = scratch.project("notes", "AGENT claude\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
     for args in [
         &["build", "--nope"][..],
         &["build", "-t"],
@@ -312,8 +315,8 @@ fn the_usage_message_lists_build() {
 #[test]
 fn another_directory_under_a_name_fails() {
     let scratch = Scratch::new("taken");
-    let first = scratch.project("one", "AGENT claude\n");
-    let second = scratch.project("two", "AGENT codex\n");
+    let first = scratch.project("one", "AGENT claude\nOS minimal\n");
+    let second = scratch.project("two", "AGENT codex\nOS minimal\n");
     scratch.build(&first, &["-t", "agent"]);
     let output = scratch.ap(&second, &["build", "-t", "agent"]);
     assert_eq!(output.status.code(), Some(1));
@@ -325,12 +328,12 @@ fn another_directory_under_a_name_fails() {
 #[test]
 fn replace_takes_over_a_name_from_a_moved_directory() {
     let scratch = Scratch::new("replace");
-    let old = scratch.project("old", "AGENT claude\nSYSTEM \"before\"\n");
+    let old = scratch.project("old", "AGENT claude\nOS minimal\nSYSTEM \"before\"\n");
     scratch.build(&old, &["-t", "agent"]);
     let before = scratch.agent("agent");
     let moved = scratch.root.join("moved");
     fs::rename(&old, &moved).unwrap();
-    fs::write(moved.join("Agentfile"), "AGENT claude\nSYSTEM \"after\"\n").unwrap();
+    fs::write(moved.join("Agentfile"), "AGENT claude\nOS minimal\nSYSTEM \"after\"\n").unwrap();
 
     let output = scratch.ap(&moved, &["build", "-t", "agent"]);
     assert_eq!(output.status.code(), Some(1));
@@ -356,7 +359,7 @@ fn replace_takes_over_a_name_from_a_moved_directory() {
 #[test]
 fn replace_on_a_new_name_just_builds() {
     let scratch = Scratch::new("replace-new");
-    let dir = scratch.project("notes", "AGENT claude\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
     scratch.build(&dir, &["--replace"]);
     assert_eq!(scratch.agent("notes").directory, dir.to_str().unwrap());
 }
@@ -366,7 +369,7 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
     let scratch = Scratch::new("hit");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nSYSTEM ./system.md\nADD ./data\nADD ./src /work\nSHARE ./out\n",
+        "AGENT claude\nOS minimal\nSYSTEM ./system.md\nADD ./data\nADD ./src /work\nSHARE ./out\n",
     );
     fs::write(dir.join("system.md"), "Be careful.\n").unwrap();
     fs::write(dir.join("data"), "one").unwrap();
@@ -375,9 +378,11 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
     fs::create_dir(dir.join("out")).unwrap();
 
     let first = layer_lines(&scratch.build(&dir, &[]));
-    assert_eq!(first.len(), 3, "{first:?}");
+    assert_eq!(first.len(), 4, "{first:?}");
+    // The store already has the OS layer.
+    assert_eq!(first[0], ("hit".to_string(), "OS minimal".to_string()));
     assert!(
-        first.iter().all(|(status, _)| status == "built"),
+        first[1..].iter().all(|(status, _)| status == "built"),
         "{first:?}"
     );
     let before = snapshot(&scratch.store());
@@ -398,7 +403,7 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
 #[test]
 fn changing_one_added_file_rebuilds_only_its_layer() {
     let scratch = Scratch::new("one-layer");
-    let dir = scratch.project("notes", "AGENT claude\nADD ./a\nADD ./b\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nADD ./a\nADD ./b\n");
     fs::write(dir.join("a"), "one").unwrap();
     fs::write(dir.join("b"), "two").unwrap();
     scratch.build(&dir, &[]);
@@ -407,13 +412,14 @@ fn changing_one_added_file_rebuilds_only_its_layer() {
     fs::write(dir.join("b"), "three").unwrap();
     let lines = layer_lines(&scratch.build(&dir, &[]));
     let statuses: Vec<&str> = lines.iter().map(|(status, _)| status.as_str()).collect();
-    assert_eq!(statuses, ["hit", "built", "hit"], "{lines:?}");
+    assert_eq!(statuses, ["hit", "hit", "built", "hit"], "{lines:?}");
     let after = scratch.agent("notes").layers;
     assert_eq!(after[0], before[0]);
-    assert_ne!(after[1], before[1]);
-    assert_eq!(after[2], before[2]);
+    assert_eq!(after[1], before[1]);
+    assert_ne!(after[2], before[2]);
+    assert_eq!(after[3], before[3]);
     // The layer nothing uses any more is freed.
-    assert_eq!(scratch.layer_files().len(), 3);
+    assert_eq!(scratch.layer_files().len(), 4);
 }
 
 // spec(Build): **Store.** Layers are stored by the digest of their uncompressed content and shared across every agent in the store.
@@ -428,7 +434,7 @@ fn agents_share_their_layers() {
     let lines = layer_lines(&scratch.build(&two, &[]));
     assert!(lines.iter().all(|(status, _)| status == "hit"), "{lines:?}");
     assert_eq!(scratch.agent("one").layers, scratch.agent("two").layers);
-    assert_eq!(scratch.layer_files().len(), 2);
+    assert_eq!(scratch.layer_files().len(), 3);
 }
 
 // spec(Text values): The file is read at build time on the host and its content is captured into the image.
@@ -437,7 +443,7 @@ fn a_text_path_is_read_at_build_time() {
     let scratch = Scratch::new("text-path");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nSYSTEM ./system.md\nPROMPT ./prompt.md\nADD ./data\n",
+        "AGENT claude\nOS minimal\nSYSTEM ./system.md\nPROMPT ./prompt.md\nADD ./data\n",
     );
     fs::write(dir.join("system.md"), "Be careful.\n").unwrap();
     fs::write(dir.join("prompt.md"), "Review the notes.\n").unwrap();
@@ -452,11 +458,11 @@ fn a_text_path_is_read_at_build_time() {
         fs::write(dir.join(file), "Something else.\n").unwrap();
         let lines = layer_lines(&scratch.build(&dir, &[]));
         let statuses: Vec<&str> = lines.iter().map(|(status, _)| status.as_str()).collect();
-        assert_eq!(statuses, ["hit", "built"], "{file}: {lines:?}");
+        assert_eq!(statuses, ["hit", "hit", "built"], "{file}: {lines:?}");
     }
     let after = scratch.agent("notes").layers;
-    assert_eq!(after[0], before[0]);
-    assert_ne!(after[1], before[1]);
+    assert_eq!(after[..2], before[..2]);
+    assert_ne!(after[2], before[2]);
 }
 
 // spec(SYSTEM): The values concatenate in file order, separated by a blank line.
@@ -465,7 +471,7 @@ fn system_values_concatenate_with_a_blank_line() {
     let scratch = Scratch::new("system-join");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nSYSTEM One.\nSYSTEM ./two.md\nSYSTEM\n```\nThree.\n```\n",
+        "AGENT claude\nOS minimal\nSYSTEM One.\nSYSTEM ./two.md\nSYSTEM\n```\nThree.\n```\n",
     );
     // A value's own blank lines are kept.
     fs::write(dir.join("two.md"), "Two.\n\n").unwrap();
@@ -478,10 +484,10 @@ fn system_values_concatenate_with_a_blank_line() {
 #[test]
 fn literal_text_is_captured_too() {
     let scratch = Scratch::new("text-literal");
-    let dir = scratch.project("notes", "AGENT claude\nSYSTEM Be careful.\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSYSTEM Be careful.\n");
     scratch.build(&dir, &[]);
     let before = scratch.agent("notes").layers;
-    fs::write(dir.join("Agentfile"), "AGENT claude\nSYSTEM Be bold.\n").unwrap();
+    fs::write(dir.join("Agentfile"), "AGENT claude\nOS minimal\nSYSTEM Be bold.\n").unwrap();
     scratch.build(&dir, &[]);
     assert_ne!(scratch.agent("notes").layers, before);
 }
@@ -490,9 +496,9 @@ fn literal_text_is_captured_too() {
 #[test]
 fn a_missing_text_file_is_an_error() {
     let scratch = Scratch::new("text-missing");
-    for (instruction, line) in [("SYSTEM", 2), ("PROMPT", 3)] {
+    for (instruction, line) in [("SYSTEM", 3), ("PROMPT", 3)] {
         let agentfile = match instruction {
-            "SYSTEM" => "AGENT claude\nSYSTEM ./missing.md\n",
+            "SYSTEM" => "AGENT claude\nOS minimal\nSYSTEM ./missing.md\n",
             _ => "AGENT claude\nOS minimal\nPROMPT ./missing.md\n",
         };
         let dir = scratch.project(instruction, agentfile);
@@ -512,12 +518,12 @@ fn a_missing_text_file_is_an_error() {
 #[test]
 fn a_missing_share_source_is_an_error() {
     let scratch = Scratch::new("share-missing");
-    let dir = scratch.project("notes", "AGENT claude\nSHARE ./here\nSHARE ./gone\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSHARE ./here\nSHARE ./gone\n");
     fs::create_dir(dir.join("here")).unwrap();
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.starts_with("Agentfile:4: "), "{message}");
     assert!(message.contains("gone"), "{message}");
     assert_eq!(message.lines().count(), 1, "{message}");
     assert!(scratch.agents().list().unwrap().is_empty());
@@ -526,11 +532,11 @@ fn a_missing_share_source_is_an_error() {
 #[test]
 fn a_missing_add_source_is_an_error() {
     let scratch = Scratch::new("add-missing");
-    let dir = scratch.project("notes", "AGENT claude\nADD ./gone\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nADD ./gone\n");
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:2: "), "{message}");
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
     assert!(message.contains("gone"), "{message}");
 }
 
@@ -539,7 +545,7 @@ fn instructions_that_are_not_built_yet_fail() {
     let scratch = Scratch::new("not-yet");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\n\
+        "AGENT claude\nOS minimal\n\
          REPO jgabor/agent-plus\n\
          PLUGIN anthropics/claude-plugins-official/external_plugins/context7\n\
          SKILL anthropics/skills/skills/algorithmic-art\n\
@@ -552,7 +558,7 @@ fn instructions_that_are_not_built_yet_fail() {
     let lines: Vec<&str> = message.lines().collect();
     assert_eq!(lines.len(), 5, "{message}");
     let names = ["REPO", "PLUGIN", "SKILL", "MCP", "SEAL"];
-    for ((line, name), number) in lines.iter().zip(names).zip(2..) {
+    for ((line, name), number) in lines.iter().zip(names).zip(3..) {
         assert!(line.starts_with(&format!("Agentfile:{number}: ")), "{line}");
         assert!(line.contains(&format!("`{name}`")), "{line}");
         assert!(line.contains("not built yet"), "{line}");
@@ -564,19 +570,19 @@ fn instructions_that_are_not_built_yet_fail() {
 #[test]
 fn build_reports_every_error() {
     let scratch = Scratch::new("every-error");
-    let dir = scratch.project("notes", "AGENT claude\nNOPE x\nMODEL opus\nMODEL sonnet\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nNOPE x\nMODEL opus\nMODEL sonnet\n");
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
     let lines: Vec<&str> = message.lines().collect();
     assert_eq!(lines.len(), 2, "{message}");
-    assert!(lines[0].starts_with("Agentfile:2: "), "{message}");
-    assert!(lines[1].starts_with("Agentfile:4: "), "{message}");
+    assert!(lines[0].starts_with("Agentfile:3: "), "{message}");
+    assert!(lines[1].starts_with("Agentfile:5: "), "{message}");
 
     // Errors that need the host are reported together, in line order.
     fs::write(
         dir.join("Agentfile"),
-        "AGENT claude\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO jgabor/agent-plus\n",
+        "AGENT claude\nOS minimal\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO jgabor/agent-plus\n",
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -584,7 +590,7 @@ fn build_reports_every_error() {
     let message = stderr(&output);
     let lines: Vec<&str> = message.lines().collect();
     assert_eq!(lines.len(), 4, "{message}");
-    for (line, number) in lines.iter().zip(2..) {
+    for (line, number) in lines.iter().zip(3..) {
         assert!(
             line.starts_with(&format!("Agentfile:{number}: ")),
             "{message}"
@@ -598,7 +604,7 @@ fn a_destination_error_does_not_hide_other_errors() {
     let scratch = Scratch::new("destination-and-more");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nADD ./data /etc/data\nREPO jgabor/agent-plus\nSYSTEM ./missing.md\n",
+        "AGENT claude\nOS minimal\nADD ./data /etc/data\nREPO jgabor/agent-plus\nSYSTEM ./missing.md\n",
     );
     fs::write(dir.join("data"), "one").unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -606,7 +612,7 @@ fn a_destination_error_does_not_hide_other_errors() {
     let message = stderr(&output);
     let lines: Vec<&str> = message.lines().collect();
     assert_eq!(lines.len(), 3, "{message}");
-    for (line, number) in lines.iter().zip(2..) {
+    for (line, number) in lines.iter().zip(3..) {
         assert!(
             line.starts_with(&format!("Agentfile:{number}: ")),
             "{message}"
@@ -620,26 +626,26 @@ fn a_layer_that_can_not_be_made_writes_nothing() {
     let long = "x".repeat(256);
     let dir = scratch.project(
         "notes",
-        &format!("AGENT claude\nADD ./a\nADD ./b /work/{long}\n"),
+        &format!("AGENT claude\nOS minimal\nADD ./a\nADD ./b /work/{long}\n"),
     );
     fs::write(dir.join("a"), "one").unwrap();
     fs::write(dir.join("b"), "two").unwrap();
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:3: "), "{message}");
-    assert!(scratch.layer_files().is_empty());
+    assert!(message.starts_with("Agentfile:4: "), "{message}");
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
 #[test]
 fn errors_name_the_agentfile_by_its_path() {
     let scratch = Scratch::new("error-path");
-    scratch.project("notes", "AGENT claude\nNOPE x\n");
+    scratch.project("notes", "AGENT claude\nOS minimal\nNOPE x\n");
     let output = scratch.ap(&scratch.root, &["build", "notes"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).starts_with("notes/Agentfile:2: "),
+        stderr(&output).starts_with("notes/Agentfile:3: "),
         "{}",
         stderr(&output)
     );
@@ -649,23 +655,23 @@ fn errors_name_the_agentfile_by_its_path() {
 #[test]
 fn strict_turns_a_warning_into_an_error() {
     let scratch = Scratch::new("strict");
-    let dir = scratch.project("notes", "AGENT claude\nADD ./data\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nADD ./data\n");
     fs::create_dir(dir.join("data")).unwrap();
     let _socket = bind(&dir.join("data/socket"));
 
     let output = scratch.ap(&dir, &["build", "--strict"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:2: "), "{message}");
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
     assert!(!message.contains("warning"), "{message}");
     assert!(message.contains("socket"), "{message}");
     assert!(scratch.agents().list().unwrap().is_empty());
-    assert!(scratch.layer_files().is_empty());
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
 
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:2: warning: "), "{message}");
+    assert!(message.starts_with("Agentfile:3: warning: "), "{message}");
     assert!(message.contains("socket"), "{message}");
     scratch.agent("notes");
 }
@@ -714,4 +720,50 @@ fn settings_and_run_instructions_are_recorded() {
         .collect();
     names.sort();
     assert_eq!(names, ["Agentfile", "data", "out"]);
+}
+
+/// Only `OS minimal` is built. Any other tier fails before anything is
+/// downloaded, and the error names the tier.
+#[test]
+fn other_os_tiers_fail_before_any_download() {
+    let scratch = Scratch::new("os-tiers");
+    // With no OS layer in the store, a build that got as far as the OS
+    // would download it.
+    fs::remove_dir_all(scratch.store()).unwrap();
+    for (agentfile, error) in [
+        (
+            "AGENT claude\nOS standard\n",
+            "Agentfile:2: `OS standard` is not built yet\n",
+        ),
+        (
+            "AGENT claude\nOS desktop\n",
+            "Agentfile:2: `OS desktop` is not built yet\n",
+        ),
+        (
+            "AGENT claude\n",
+            "Agentfile:1: `OS desktop`, the default, is not built yet\n",
+        ),
+    ] {
+        let dir = scratch.project("notes", agentfile);
+        let output = scratch.ap(&dir, &["build"]);
+        assert_eq!(output.status.code(), Some(1), "{agentfile}");
+        assert_eq!(stderr(&output), error);
+        assert_eq!(stdout(&output), "");
+        assert!(!scratch.store().join("zstd-layers").exists());
+        assert!(scratch.agents().list().unwrap().is_empty());
+    }
+}
+
+/// The pinned OS layer is every agent's bottom layer, which a build finds in
+/// the store and doesn't download again.
+#[test]
+fn the_os_layer_is_the_bottom_layer() {
+    let scratch = Scratch::new("os-bottom");
+    let dir = scratch.project("notes", SIMPLE);
+    fs::write(dir.join("data"), "one").unwrap();
+    let lines = layer_lines(&scratch.build(&dir, &[]));
+    assert_eq!(lines[0], ("hit".to_string(), "OS minimal".to_string()));
+    let bottom = &scratch.agent("notes").layers[0];
+    assert_eq!(bottom.digest, ap::fetch::os().sha256);
+    assert_eq!(bottom.instruction, "OS minimal");
 }

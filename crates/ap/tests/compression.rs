@@ -2,6 +2,8 @@
 //! Agentfile's layers at. Which levels parse is `agentfile`'s, and what a
 //! level does to a frame is `store`'s.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -22,6 +24,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -71,8 +74,8 @@ impl Scratch {
         self.home.join(".local/share/ap")
     }
 
-    /// Each layer of the agent `notes`: its digest, its uncompressed bytes,
-    /// and the file the store keeps it in.
+    /// Each layer the agent `notes` built: its digest, its uncompressed bytes,
+    /// and the file the store keeps it in. The OS layer isn't built.
     fn layers(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
         self.layers_of("notes")
     }
@@ -83,6 +86,7 @@ impl Scratch {
         agent
             .layers
             .iter()
+            .filter(|layer| layer.instruction != "OS minimal")
             .map(|layer| {
                 let data = layers.get(&layer.digest).unwrap();
                 let path = self.store().join("zstd-layers").join(&layer.digest);
@@ -123,7 +127,7 @@ fn data() -> Vec<u8> {
 fn compression_sets_the_level_of_the_layers_a_build_makes() {
     let scratch = Scratch::new("sets");
     for level in [19, -3] {
-        let dir = scratch.project(&format!("AGENT claude\nCOMPRESSION {level}\nADD ./data\n"));
+        let dir = scratch.project(&format!("AGENT claude\nOS minimal\nCOMPRESSION {level}\nADD ./data\n"));
         scratch.build(&dir);
         scratch.assert_level(level);
     }
@@ -133,7 +137,7 @@ fn compression_sets_the_level_of_the_layers_a_build_makes() {
 #[test]
 fn a_build_without_compression_uses_level_3() {
     let scratch = Scratch::new("default");
-    let dir = scratch.project("AGENT claude\nADD ./data\n");
+    let dir = scratch.project("AGENT claude\nOS minimal\nADD ./data\n");
 
     scratch.build(&dir);
 
@@ -144,13 +148,13 @@ fn a_build_without_compression_uses_level_3() {
 #[test]
 fn changing_the_level_recompresses_layers_under_the_same_digests() {
     let scratch = Scratch::new("change");
-    let dir = scratch.project("AGENT claude\nADD ./data\n");
+    let dir = scratch.project("AGENT claude\nOS minimal\nADD ./data\n");
     scratch.build(&dir);
     let before = scratch.layers();
 
     fs::write(
         dir.join("Agentfile"),
-        "AGENT claude\nCOMPRESSION 19\nADD ./data\n",
+        "AGENT claude\nOS minimal\nCOMPRESSION 19\nADD ./data\n",
     )
     .unwrap();
     let out = scratch.build(&dir);
@@ -165,14 +169,14 @@ fn changing_the_level_recompresses_layers_under_the_same_digests() {
     // The added data compresses differently at the new level.
     assert_ne!(after[0].2, before[0].2);
     let files = fs::read_dir(scratch.store().join("zstd-layers")).unwrap();
-    assert_eq!(files.count(), before.len());
+    assert_eq!(files.count(), before.len() + 1);
 }
 
 // spec(COMPRESSION): Layers are addressed by their uncompressed content, so changing the level recompresses layers without changing what is inside them.
 #[test]
 fn changing_back_to_a_level_another_agent_recorded_recompresses_the_layer() {
     let scratch = Scratch::new("shared");
-    let at = |level: i8| format!("AGENT claude\nCOMPRESSION {level}\nADD ./data\n");
+    let at = |level: i8| format!("AGENT claude\nOS minimal\nCOMPRESSION {level}\nADD ./data\n");
     let dir = scratch.project(&at(3));
     scratch.build_as(&dir, &["-t", "low"]);
     fs::write(dir.join("Agentfile"), at(19)).unwrap();
@@ -186,4 +190,20 @@ fn changing_back_to_a_level_another_agent_recorded_recompresses_the_layer() {
     let (digest, data, file) = &scratch.layers_of("high")[0];
     assert_eq!(scratch.layers_of("low")[0].0, *digest);
     assert!(file.starts_with(&store::compress(data, 3)));
+}
+
+// spec(COMPRESSION): Base layers (the OS and the harness) keep the level their publisher chose.
+#[test]
+fn compression_leaves_the_os_layer_as_it_is() {
+    let scratch = Scratch::new("base");
+    let os = scratch.store().join("zstd-layers").join(ap::fetch::os().sha256);
+    let before = fs::read(&os).unwrap();
+    let dir = scratch.project("AGENT claude\nOS minimal\nCOMPRESSION 19\nADD ./data\n");
+
+    let out = scratch.build(&dir);
+
+    assert!(out.starts_with("hit OS minimal\n"), "{out}");
+    let agent = Agents::new(scratch.store()).get("notes").unwrap().unwrap();
+    assert_eq!(agent.layers[0].digest, ap::fetch::os().sha256);
+    assert_eq!(fs::read(&os).unwrap(), before);
 }

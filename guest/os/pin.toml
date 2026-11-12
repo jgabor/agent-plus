@@ -1,0 +1,3 @@
+version = "13-ap.1"
+url = "https://github.com/jgabor/agent-plus-guest/releases/download/os-minimal-13-ap.1/minimal.erofs"
+sha256 = "46edc915c86a4e5636f13ff37eaa96816ba9a20aaa98c5ab1c5a638ff1249ca4"

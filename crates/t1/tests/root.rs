@@ -3,6 +3,7 @@
 use ap::boot::{self, Guest, Layer, Report};
 use erofs::{Dir, File, Node};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process;
@@ -132,4 +133,47 @@ fn the_guest_runs_from_its_layers_under_a_tmpfs_upper_layer() {
         again["found"], "false",
         "a write outlived its VM: {again:?}"
     );
+}
+
+/// Each layer between the bottom and the top replaces the greeting, so only
+/// a root with every layer in its place greets from the top.
+#[test]
+fn ten_layers_stack_in_order() {
+    const LAYERS: usize = 10;
+    let store = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("root-ten-{}", process::id()));
+    let _ = fs::remove_dir_all(&store);
+    let probe = fs::read(guest_binary::build("root-probe")).unwrap();
+    let [bottom, top] = layers(probe);
+    let middle = (1..LAYERS - 1).map(|index| {
+        image(dir(vec![(
+            "etc",
+            Node::Dir(dir(vec![(
+                "greeting",
+                file(0o644, format!("from layer {index}").into_bytes()),
+            )])),
+        )]))
+    });
+    let images: Vec<Vec<u8>> = [bottom].into_iter().chain(middle).chain([top]).collect();
+    let stored = Layers::new(&store);
+    let attached: Vec<Layer> = images
+        .iter()
+        .map(|image| {
+            let digest = stored.put(image, LEVEL).unwrap();
+            let disk = stored.get(&digest).unwrap();
+            Layer { digest, disk }
+        })
+        .collect();
+    fs::remove_dir_all(&store).unwrap();
+
+    let kernel = fs::read(kernel::vmlinux()).unwrap();
+    let init = fs::read(guest_binary::ap()).unwrap();
+    let seen = boot_with(&init, &kernel, attached);
+    assert_eq!(seen["greeting"], "from the top layer", "{seen:?}");
+    assert_eq!(seen["kept"], "kept from the bottom layer", "{seen:?}");
+    let mut lower = String::from("lowerdir=");
+    for index in (0..LAYERS).rev() {
+        let _ = write!(lower, "/layers/{index}:");
+    }
+    lower.pop();
+    assert!(seen["root"].contains(&format!("{lower},")), "{seen:?}");
 }

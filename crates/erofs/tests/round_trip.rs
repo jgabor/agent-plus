@@ -8,7 +8,6 @@ use std::fs;
 use std::io::{self, Cursor, Read};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -694,20 +693,20 @@ fn mkerofs_writes_a_directory_as_it_is_on_disk() {
 }
 
 #[test]
-fn mkerofs_refuses_a_socket() {
-    // A socket's path must be short, and Cargo's scratch directory may not be.
-    let tree = std::env::temp_dir().join(format!("mkerofs-{}", std::process::id()));
+fn mkerofs_refuses_a_fifo() {
+    let scratch = scratch("mkerofs-fifo");
+    let tree = scratch.join("tree");
     fs::create_dir(&tree).expect("mkdir");
-    let socket = UnixListener::bind(tree.join("sock"));
-    let run = socket
-        .as_ref()
-        .map(|_| mkerofs(&tree, &scratch("mkerofs-socket").join("image")));
-    fs::remove_dir_all(&tree).expect("remove the tree");
-    let run = run.expect("bind a socket");
-    assert!(!run.status.success(), "a socket is refused");
+    let made = Command::new("mkfifo")
+        .arg(tree.join("fifo"))
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo");
+    let run = mkerofs(&tree, &scratch.join("image"));
+    assert!(!run.status.success(), "a FIFO is refused");
     assert_eq!(
         String::from_utf8_lossy(&run.stderr),
-        "mkerofs: sock: a device, FIFO, or socket can't go in an image\n"
+        "mkerofs: fifo: a device, FIFO, or socket can't go in an image\n"
     );
 }
 

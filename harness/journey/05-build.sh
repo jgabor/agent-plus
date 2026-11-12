@@ -6,6 +6,7 @@ store="$HOME/.local/share/ap"
 mkdir -p notes/src notes/out
 cat >notes/Agentfile <<'EOF'
 AGENT claude
+OS minimal
 SYSTEM ./system.md
 PROMPT Review the notes.
 MODEL opus
@@ -20,8 +21,9 @@ echo "fn main() {}" >notes/src/main.rs
 printf 'NETWORK +\nPOLICY +\n' >grants
 
 ap build --approve=grants notes >first
-if [ "$(grep -c '^built ' first)" -ne 3 ] || ! grep -qx 'agent notes' first; then
-  echo "the first build didn't build three layers:" >&2
+if ! grep -qx 'fetched OS minimal' first || [ "$(grep -c '^built ' first)" -ne 3 ] ||
+  ! grep -qx 'agent notes' first; then
+  echo "the first build didn't fetch the OS and build three layers:" >&2
   cat first >&2
   exit 1
 fi
@@ -29,9 +31,9 @@ if [ ! -f "$store/agents/notes" ]; then
   echo "the store has no agent named notes" >&2
   exit 1
 fi
-if [ "$(grep -c '^LAYER ' "$store/agents/notes")" -ne 3 ] ||
-  [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 3 ]; then
-  echo "the store doesn't hold the agent's three layers" >&2
+if [ "$(grep -c '^LAYER ' "$store/agents/notes")" -ne 4 ] ||
+  [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 4 ]; then
+  echo "the store doesn't hold the agent's four layers" >&2
   exit 1
 fi
 
@@ -42,7 +44,7 @@ snapshot() {
 
 snapshot >before
 ap build --approve=grants notes >second
-if [ "$(grep -c '^hit ' second)" -ne 3 ] || grep -q '^built ' second; then
+if [ "$(grep -c '^hit ' second)" -ne 4 ] || grep -q '^built \|^fetched ' second; then
   echo "a rebuild with nothing changed wasn't a hit for every layer:" >&2
   cat second >&2
   exit 1
@@ -56,12 +58,13 @@ fi
 
 echo "two" >notes/data
 ap build --approve=grants notes >third
-if [ "$(grep -c '^built ' third)" -ne 1 ] || ! grep -q '^built ADD ./data$' third; then
+if [ "$(grep -c '^built \|^fetched ' third)" -ne 1 ] ||
+  ! grep -q '^built ADD ./data$' third; then
   echo "changing one added file didn't rebuild only its layer:" >&2
   cat third >&2
   exit 1
 fi
-if [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 3 ]; then
+if [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 4 ]; then
   echo "the rebuild left a layer that nothing uses" >&2
   exit 1
 fi

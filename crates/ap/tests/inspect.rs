@@ -188,7 +188,10 @@ fn inspect_grants_prints_what_approves_a_fresh_build() {
 #[test]
 fn inspect_grants_escapes_what_it_prints() {
     let scratch = Scratch::new("escapes");
-    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSHARE ./a\u{202e}b /work/x rw\n");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nSHARE ./a\u{202e}b /work/x rw\n",
+    );
     fs::create_dir_all(dir.join("a\u{202e}b")).unwrap();
     let file = scratch.root.join("grants");
     fs::write(

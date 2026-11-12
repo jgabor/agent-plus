@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::pki_types::ServerName;
-use graviola::hashing::sha2::Sha256Context;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use ::store::Layers;
+use graviola::hashing::sha2::Sha256Context;
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 use crate::store::Store;
 

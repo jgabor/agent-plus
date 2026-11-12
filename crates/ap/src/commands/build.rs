@@ -16,8 +16,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use agentfile::{
-    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings,
-    Sources, Text,
+    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Sources,
+    Text,
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
@@ -356,7 +356,10 @@ fn store_layers(
             Made::Fetch(pin, level) => {
                 let fetched = fetch::layer(layers, &client, &pin, level)
                     .map_err(|error| format!("ap: {label}: {error}"))?;
-                (if fetched { "fetched" } else { "hit" }, pin.sha256.to_string())
+                (
+                    if fetched { "fetched" } else { "hit" },
+                    pin.sha256.to_string(),
+                )
             }
             Made::Image(image, level) => {
                 put.push((built.len(), image, level));

@@ -127,7 +127,9 @@ fn data() -> Vec<u8> {
 fn compression_sets_the_level_of_the_layers_a_build_makes() {
     let scratch = Scratch::new("sets");
     for level in [19, -3] {
-        let dir = scratch.project(&format!("AGENT claude\nOS minimal\nCOMPRESSION {level}\nADD ./data\n"));
+        let dir = scratch.project(&format!(
+            "AGENT claude\nOS minimal\nCOMPRESSION {level}\nADD ./data\n"
+        ));
         scratch.build(&dir);
         scratch.assert_level(level);
     }
@@ -196,7 +198,10 @@ fn changing_back_to_a_level_another_agent_recorded_recompresses_the_layer() {
 #[test]
 fn compression_leaves_the_os_layer_as_it_is() {
     let scratch = Scratch::new("base");
-    let os = scratch.store().join("zstd-layers").join(ap::fetch::os().sha256);
+    let os = scratch
+        .store()
+        .join("zstd-layers")
+        .join(ap::fetch::os().sha256);
     let before = fs::read(&os).unwrap();
     let dir = scratch.project("AGENT claude\nOS minimal\nCOMPRESSION 19\nADD ./data\n");
 

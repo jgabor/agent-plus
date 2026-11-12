@@ -333,7 +333,11 @@ fn replace_takes_over_a_name_from_a_moved_directory() {
     let before = scratch.agent("agent");
     let moved = scratch.root.join("moved");
     fs::rename(&old, &moved).unwrap();
-    fs::write(moved.join("Agentfile"), "AGENT claude\nOS minimal\nSYSTEM \"after\"\n").unwrap();
+    fs::write(
+        moved.join("Agentfile"),
+        "AGENT claude\nOS minimal\nSYSTEM \"after\"\n",
+    )
+    .unwrap();
 
     let output = scratch.ap(&moved, &["build", "-t", "agent"]);
     assert_eq!(output.status.code(), Some(1));
@@ -487,7 +491,11 @@ fn literal_text_is_captured_too() {
     let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSYSTEM Be careful.\n");
     scratch.build(&dir, &[]);
     let before = scratch.agent("notes").layers;
-    fs::write(dir.join("Agentfile"), "AGENT claude\nOS minimal\nSYSTEM Be bold.\n").unwrap();
+    fs::write(
+        dir.join("Agentfile"),
+        "AGENT claude\nOS minimal\nSYSTEM Be bold.\n",
+    )
+    .unwrap();
     scratch.build(&dir, &[]);
     assert_ne!(scratch.agent("notes").layers, before);
 }
@@ -518,7 +526,10 @@ fn a_missing_text_file_is_an_error() {
 #[test]
 fn a_missing_share_source_is_an_error() {
     let scratch = Scratch::new("share-missing");
-    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSHARE ./here\nSHARE ./gone\n");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nSHARE ./here\nSHARE ./gone\n",
+    );
     fs::create_dir(dir.join("here")).unwrap();
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
@@ -570,7 +581,10 @@ fn instructions_that_are_not_built_yet_fail() {
 #[test]
 fn build_reports_every_error() {
     let scratch = Scratch::new("every-error");
-    let dir = scratch.project("notes", "AGENT claude\nOS minimal\nNOPE x\nMODEL opus\nMODEL sonnet\n");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nNOPE x\nMODEL opus\nMODEL sonnet\n",
+    );
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);

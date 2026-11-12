@@ -279,8 +279,15 @@ records its arguments, environment, files, and network view.
 **Harness probe (T2).** The harness starts with no credentials, and the check
 reads what it reports before sign-in. For Claude Code, that is the `init` event
 of `claude -p <prompt> --output-format stream-json --verbose`, which lists the
-working directory, MCP servers, skills, and commands. The Codex probe is
-undefined (see [Open decisions](#open-decisions)).
+working directory, MCP servers, skills, and commands. For Codex, the check
+starts `codex app-server` with the `-c` overrides the adapter gives a run. It
+sends JSON-RPC requests after the `initialize` request and the `initialized`
+notification. The result of `thread/start` gives the working directory, model,
+reasoning effort, approval policy, approval reviewer, sandbox, and the
+`AGENTS.md` files that Codex loaded. `skills/list` lists the skills, and
+`mcpServerStatus/list` lists the MCP servers with their tools. None of these
+needs a sign-in or the network. Codex lists no commands, so the check reads
+none. `codex exec --json` reports none of this before its first model call.
 
 **Bench.** Builds the static `ap` of the base and of the candidate under a
 shared hold of the activity lock, then measures in the measuring slot, which
@@ -885,7 +892,6 @@ The harness is built before product features.
 | Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
 | Limit on model spend for workers | Workers run no step marked `spend` |
 | Credential and spend limit for Codex in journey step 13 | Step 13 gets no Codex credential |
-| Codex probe for T2 | T2 covers Claude Code only |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
 | Bands for every budget except boot, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |

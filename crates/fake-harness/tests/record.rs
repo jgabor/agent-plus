@@ -71,3 +71,44 @@ fn it_prints_one_line() {
     assert_eq!(out.matches('\n').count(), 1, "{out}");
     assert!(out.ends_with("}\n"), "{out}");
 }
+
+#[test]
+fn it_records_its_working_directory() {
+    let directory = empty_directory("directory");
+    let out = record(&directory, &[], &[]);
+    let expected = format!(
+        r#""directory":"{}""#,
+        directory.canonicalize().unwrap().display()
+    );
+    assert!(out.contains(&expected), "{out}");
+}
+
+#[test]
+fn it_records_its_user_by_name() {
+    let directory = empty_directory("user");
+    let out = record(&directory, &[], &[]);
+    let name = Command::new("id").arg("-un").output().unwrap().stdout;
+    let expected = format!(r#""user":"{}""#, String::from_utf8(name).unwrap().trim());
+    assert!(out.contains(&expected), "{out}");
+}
+
+#[test]
+fn it_exits_with_the_status_it_is_given() {
+    let directory = empty_directory("status");
+    let output = Command::new(env!("CARGO_BIN_EXE_fake-harness"))
+        .current_dir(&directory)
+        .env_clear()
+        .env("FAKE_HARNESS_STATUS", "3")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.ends_with(b"}\n"));
+}
+
+#[test]
+fn it_writes_the_file_it_is_given_after_it_reports() {
+    let directory = empty_directory("write");
+    let out = record(&directory, &[], &[("FAKE_HARNESS_WRITE", "ran")]);
+    assert!(out.contains(r#""files":[]"#), "{out}");
+    assert!(directory.join("ran").is_file());
+}

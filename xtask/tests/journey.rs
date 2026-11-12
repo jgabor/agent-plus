@@ -96,6 +96,24 @@ fn a_passing_step_counts() {
 }
 
 #[test]
+fn a_step_finds_the_fake_harness_beside_ap() {
+    let manifest = manifest().replace("\"ap\"", "\"fake-harness\"");
+    let root = workspace(
+        "fake-harness",
+        &step(1, "", "harness/journey/one.sh"),
+        &[
+            ("crates/fake-harness/Cargo.toml", &manifest),
+            ("crates/fake-harness/src/main.rs", "fn main() {}\n"),
+            (
+                "harness/journey/one.sh",
+                "#!/bin/sh\n[ \"$(command -v fake-harness)\" = \"$(dirname \"$(command -v ap)\")/fake-harness\" ]\n",
+            ),
+        ],
+    );
+    assert_journey(&root, "pass step 1\njourney 1 of 1\n");
+}
+
+#[test]
 fn a_failing_step_does_not_count() {
     let root = workspace(
         "fails",

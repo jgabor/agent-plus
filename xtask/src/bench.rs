@@ -648,18 +648,27 @@ mod tests {
 
     #[test]
     fn the_noop_lockfile_pins_the_harness_by_its_digest() {
-        let mut sha256sum = Command::new("sha256sum")
+        // macOS has `shasum`, and may lack `sha256sum`, as the journey's
+        // step 5 allows.
+        let mut hasher = Command::new("sha256sum")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
-            .expect("sha256sum runs");
-        sha256sum
+            .or_else(|_| {
+                Command::new("shasum")
+                    .args(["-a", "256"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+            })
+            .expect("sha256sum or shasum runs");
+        hasher
             .stdin
             .take()
             .unwrap()
             .write_all(NOOP_HARNESS.as_bytes())
             .unwrap();
-        let output = sha256sum.wait_with_output().unwrap();
+        let output = hasher.wait_with_output().unwrap();
         let digest = String::from_utf8(output.stdout).unwrap();
         assert_eq!(digest.split(' ').next(), Some(NOOP_HARNESS_SHA256));
         let lock = NOOP_FILES

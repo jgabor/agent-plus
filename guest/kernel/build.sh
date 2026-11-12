@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the guest kernel from a pinned kernel.org source, in a pinned
-# toolchain, and prints the SHA-256 of the result. It needs docker. Run it
-# through `cargo xtask run`.
+# toolchain, and prints the SHA-256 of the result. It needs docker, and an
+# x86-64 host or emulation. Run it through `cargo xtask run`.
 set -eu
 
 version=7.3.3
@@ -83,7 +83,7 @@ fi
 # https, so the certificates come from the current archive. They can't reach
 # the kernel.
 docker build --iidfile "$out/toolchain.id" - <<DOCKERFILE
-FROM $image
+FROM --platform=linux/amd64 $image
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \\
  && apt-get install -qq -y --no-install-recommends ca-certificates \\
@@ -101,7 +101,8 @@ DOCKERFILE
 toolchain=$(cat "$out/toolchain.id")
 
 # No network: everything the build reads is already here.
-docker run --rm --network none --user "$(id -u):$(id -g)" \
+docker run --rm --platform linux/amd64 --network none \
+  --user "$(id -u):$(id -g)" \
   --volume "$here:$work/guest/kernel:ro" \
   --volume "$out:$work/target/guest-kernel" \
   "$toolchain" sh "$work/guest/kernel/build.sh" compile

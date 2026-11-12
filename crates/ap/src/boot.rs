@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
 use guest::protocol::{MAX_BODY, PORT, ToGuest, ToHost};
-use guest::{Channel, Event, agent};
+use guest::{Channel, Event, agent, root};
+use vmm::block::Block;
 use vmm::initramfs::{self, Entry};
 use vmm::serial::Serial;
 use vmm::vsock::{Connection, Vsock};
@@ -27,6 +28,11 @@ const MEMORY: usize = 256 << 20;
 const DEVICE_ADDRESS: u64 = 0xd000_0000;
 const DEVICE_SIZE: u64 = 0x1000;
 const LINE: u32 = 5;
+/// The vsock device has the first slot, and each layer's disk one after it,
+/// with the next interrupt line. The guest has no MP table, so its interrupts
+/// are the legacy PIC's, which end at 15.
+const LAST_LINE: u32 = 15;
+const MAX_LAYERS: usize = (LAST_LINE - LINE) as usize;
 const COMMAND_LINE: &str = "console=ttyS0 reboot=t virtio_mmio.device=4K@0xd0000000:5";
 const GUEST_CID: u64 = 3;
 const RELEASE_FILE: &str = "/proc/sys/kernel/osrelease";
@@ -59,6 +65,9 @@ pub struct Guest<'a> {
     pub init: &'a [u8],
     /// More files for the guest's root filesystem.
     pub files: &'a [Entry<'a>],
+    /// An agent's layers, bottom first. With any, the guest's root is these
+    /// layers stacked under a writable layer that ends with the machine.
+    pub layers: Vec<Layer>,
     /// A program to run once the init is ready. Without one, the machine
     /// powers off as soon as the init reports.
     pub command: Option<&'a [Vec<u8>]>,
@@ -68,6 +77,14 @@ pub struct Guest<'a> {
     /// instruction. It stays confined for the rest of its life, so only a
     /// process that has done all its host work may ask.
     pub confine: bool,
+}
+
+/// One of an agent's layers, served to the guest as a read-only disk.
+pub struct Layer {
+    /// The SHA-256 of the layer's content, which names it to the guest.
+    pub digest: String,
+    /// The layer's EROFS image.
+    pub disk: Vec<u8>,
 }
 
 /// Why a machine didn't boot and power off cleanly.
@@ -174,12 +191,13 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         kernel: &kernel,
         init: &init,
         files: &files,
+        layers: Vec::new(),
         command: (!command.is_empty()).then_some(command),
         timeout,
         confine: true,
     };
     let mut relay = Relay::start(Instant::now() + timeout);
-    let result = boot(&guest, |report| match report {
+    let result = boot(guest, |report| match report {
         Report::Ready(release) if command.is_empty() => {
             relay.send(Piece::Release(release.to_owned()));
         }
@@ -279,7 +297,8 @@ fn print(pieces: &Receiver<Piece>, written: &Sender<()>) {
 ///
 /// The VM lives inside this call, on this thread. When it returns, for any
 /// reason, the VM is gone.
-pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, Error> {
+pub fn boot(guest: Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, Error> {
+    let command_line = command_line(&guest.layers)?;
     let run_frame = guest.command.map(run_frame).transpose()?;
     let wants_status = run_frame.is_some();
     let mut entries = vec![Entry::File {
@@ -295,15 +314,22 @@ pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, 
     let vm = Vm::new(GuestMemory::new(MEMORY).map_err(vm_failed)?).map_err(vm_failed)?;
     vm.add_interrupt_controllers().map_err(vm_failed)?;
     let bad_kernel = |error: loader::Error| Error::Failed(format!("bad kernel: {error:?}"));
-    let entry = loader::load(vm.memory(), guest.kernel, COMMAND_LINE).map_err(bad_kernel)?;
+    let entry = loader::load(vm.memory(), guest.kernel, &command_line).map_err(bad_kernel)?;
     loader::load_initramfs(vm.memory(), &entry, &archive).map_err(bad_kernel)?;
     let mut vcpu = vm.create_vcpu().map_err(vm_failed)?;
     vm.expose_cpu_features(&vcpu).map_err(vm_failed)?;
     loader::enter(&vcpu, &entry).map_err(vm_failed)?;
 
+    let disks = (guest.layers.into_iter().zip(LINE + 1..))
+        .map(|(layer, line)| {
+            let name = root::name(&layer.digest).as_bytes().to_vec();
+            (Block::new(layer.disk, &name), vm.interrupt(line))
+        })
+        .collect();
     let mut machine = Machine {
         serial: Serial::new(),
         vsock: Vsock::new(GUEST_CID, &[PORT]),
+        disks,
         memory: vm.memory(),
         interrupt: vm.interrupt(LINE),
         connection: None,
@@ -338,6 +364,38 @@ pub fn boot(guest: &Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, 
     }
 }
 
+/// The kernel command line: a slot for each layer's disk after the vsock
+/// device's, and the order to stack the layers in.
+fn command_line(layers: &[Layer]) -> Result<String, Error> {
+    if layers.len() > MAX_LAYERS {
+        return Err(Error::Failed(format!(
+            "an agent can have at most {MAX_LAYERS} layers for now, and this one has {}",
+            layers.len()
+        )));
+    }
+    let mut line = COMMAND_LINE.to_owned();
+    if layers.is_empty() {
+        return Ok(line);
+    }
+    let mut names = Vec::new();
+    for (slot, layer) in (1..).zip(layers) {
+        let name = root::name(&layer.digest);
+        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(Error::Failed(format!(
+                "a layer has a bad digest: {:?}",
+                layer.digest
+            )));
+        }
+        let address = DEVICE_ADDRESS + slot * DEVICE_SIZE;
+        let irq = LINE as u64 + slot;
+        line.push_str(&format!(" virtio_mmio.device=4K@{address:#x}:{irq}"));
+        names.push(name);
+    }
+    line.push(' ');
+    line.push_str(&root::parameter(&names));
+    Ok(line)
+}
+
 fn run_frame(argv: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
     let mut frame = Vec::new();
     ToGuest::Run {
@@ -352,11 +410,13 @@ fn failed(context: &str, error: io::Error) -> Error {
     Error::Failed(format!("{context}: {error}"))
 }
 
-/// The serial port, the vsock device, and the host's end of the channel. It
-/// all runs on the vCPU thread, during the guest's exits.
+/// The serial port, the vsock device, the layers' disks, and the host's end of
+/// the channel. It all runs on the vCPU thread, during the guest's exits.
 struct Machine<'vm, F> {
     serial: Serial,
     vsock: Vsock,
+    /// Each layer's disk, bottom first, and its interrupt.
+    disks: Vec<(Block, Interrupt<'vm>)>,
     memory: &'vm GuestMemory,
     interrupt: Interrupt<'vm>,
     connection: Option<Connection>,
@@ -474,9 +534,19 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
     }
 
     fn mmio_write(&mut self, address: u64, data: &[u8]) {
-        let Some(offset) = device_offset(address) else {
+        let Some((slot, offset)) = device_offset(address) else {
             return;
         };
+        if let Some((disk, interrupt)) = slot.checked_sub(1).and_then(|at| self.disks.get_mut(at)) {
+            if disk.write(self.memory, offset, data) {
+                // A failed pulse leaves the guest waiting, and the timeout ends it.
+                let _ = interrupt.pulse();
+            }
+            return;
+        }
+        if slot != 0 {
+            return;
+        }
         let mut interrupt = self.vsock.write(self.memory, offset, data);
         self.run_host();
         interrupt |= self.vsock.service(self.memory);
@@ -488,16 +558,20 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
 
     fn mmio_read(&mut self, address: u64, data: &mut [u8]) {
         match device_offset(address) {
-            Some(offset) => self.vsock.read(offset, data),
-            None => data.fill(0xff),
+            Some((0, offset)) => self.vsock.read(offset, data),
+            Some((slot, offset)) if slot <= self.disks.len() => {
+                self.disks[slot - 1].0.read(offset, data);
+            }
+            _ => data.fill(0xff),
         }
     }
 }
 
-fn device_offset(address: u64) -> Option<u64> {
-    address
-        .checked_sub(DEVICE_ADDRESS)
-        .filter(|offset| *offset < DEVICE_SIZE)
+/// Which device slot an address falls in, and where in it.
+fn device_offset(address: u64) -> Option<(usize, u64)> {
+    let offset = address.checked_sub(DEVICE_ADDRESS)?;
+    let slot = usize::try_from(offset / DEVICE_SIZE).ok()?;
+    (slot <= MAX_LAYERS).then_some((slot, offset % DEVICE_SIZE))
 }
 
 /// Runs the guest's init until the machine powers off. Returns only if the
@@ -524,4 +598,71 @@ impl Channel for Host {
 
 fn protocol_failed(error: guest::protocol::ProtocolError) -> io::Error {
     io::Error::other(format!("{error:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layer(digest: &str) -> Layer {
+        Layer {
+            digest: digest.to_owned(),
+            disk: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_machine_without_layers_keeps_its_command_line() {
+        assert_eq!(command_line(&[]).unwrap(), COMMAND_LINE);
+    }
+
+    #[test]
+    fn each_layer_gets_the_next_slot_and_line_and_keeps_its_place() {
+        let top = "b".repeat(64);
+        let line = command_line(&[layer("a1"), layer(&top)]).unwrap();
+        assert_eq!(
+            line,
+            format!(
+                "{COMMAND_LINE} virtio_mmio.device=4K@0xd0001000:6 \
+                 virtio_mmio.device=4K@0xd0002000:7 ap.layers=a1,{}",
+                &top[..root::NAME_LEN]
+            )
+        );
+        assert_eq!(root::order(&line), ["a1", &top[..root::NAME_LEN]]);
+    }
+
+    #[test]
+    fn the_last_line_is_the_pic_s_last() {
+        let most: Vec<Layer> = (0..MAX_LAYERS).map(|_| layer("ab")).collect();
+        assert!(
+            command_line(&most)
+                .unwrap()
+                .ends_with(":15 ap.layers=ab,ab,ab,ab,ab,ab,ab,ab,ab,ab")
+        );
+        let too_many: Vec<Layer> = (0..=MAX_LAYERS).map(|_| layer("ab")).collect();
+        let error = command_line(&too_many).unwrap_err().to_string();
+        assert!(error.contains("at most 10 layers"), "{error}");
+    }
+
+    #[test]
+    fn a_digest_that_could_break_the_command_line_is_refused() {
+        for digest in ["", "a b", "a,b", "a=b"] {
+            assert!(command_line(&[layer(digest)]).is_err(), "{digest:?}");
+        }
+    }
+
+    #[test]
+    fn an_address_names_its_slot_and_offset() {
+        assert_eq!(device_offset(DEVICE_ADDRESS), Some((0, 0)));
+        assert_eq!(device_offset(DEVICE_ADDRESS + 0x1070), Some((1, 0x70)));
+        assert_eq!(
+            device_offset(DEVICE_ADDRESS + MAX_LAYERS as u64 * DEVICE_SIZE + 0xfff),
+            Some((MAX_LAYERS, 0xfff))
+        );
+        assert_eq!(
+            device_offset(DEVICE_ADDRESS + (MAX_LAYERS as u64 + 1) * DEVICE_SIZE),
+            None
+        );
+        assert_eq!(device_offset(DEVICE_ADDRESS - 1), None);
+    }
 }

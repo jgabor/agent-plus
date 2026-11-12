@@ -1,15 +1,16 @@
 //! The real system calls.
 
-use crate::{Mount, System};
-use std::ffi::{CStr, OsStr, c_char, c_int, c_short, c_ulong, c_void};
+use crate::{MOUNTS, Mount, System, root};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_short, c_ulong, c_void};
 use std::fs::File;
 use std::mem::size_of;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs as unix_fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
-use std::{fs, io, ptr};
+use std::{env, fs, io, ptr};
 
 const WNOHANG: c_int = 1;
 const ECHILD: i32 = 10;
@@ -22,6 +23,14 @@ const HOST_CID: u32 = 2;
 const POLLIN: c_short = 1;
 const FIONREAD: c_ulong = 0x541B;
 const FOREVER: c_int = -1;
+const MS_RDONLY: c_ulong = 1;
+const MS_MOVE: c_ulong = 8192;
+const COMMAND_LINE: &str = "/proc/cmdline";
+/// Where the init stacks the layers, in the initramfs. Once the stack is the
+/// root, nothing in the guest can reach these.
+const LAYERS: &str = "/layers";
+const UPPER: &str = "/upper";
+const STACK: &str = "/stack";
 
 /// `struct sockaddr_vm`.
 #[repr(C)]
@@ -80,6 +89,57 @@ impl System for Linux {
             )
         })?;
         Ok(())
+    }
+
+    fn stack_layers(&mut self) -> io::Result<()> {
+        let command_line = fs::read_to_string(COMMAND_LINE)?;
+        let order = root::order(&command_line);
+        if order.is_empty() {
+            return Ok(());
+        }
+        let devices = root::devices(&order, &disks()?).map_err(|name| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no disk serves layer {name}"),
+            )
+        })?;
+        let mut lower = Vec::new();
+        for (index, device) in devices.iter().enumerate() {
+            let target = format!("{LAYERS}/{index}");
+            fs::create_dir_all(&target)?;
+            mount_with(&format!("/dev/{device}"), &target, "erofs", MS_RDONLY, "")?;
+            lower.push(target);
+        }
+        // The writable layer ends with the machine, so it lives in memory.
+        fs::create_dir_all(UPPER)?;
+        mount_with("tmpfs", UPPER, "tmpfs", 0, "mode=0755")?;
+        let (upper, work) = (format!("{UPPER}/upper"), format!("{UPPER}/work"));
+        fs::create_dir(&upper)?;
+        fs::create_dir(&work)?;
+        fs::create_dir_all(STACK)?;
+        let options = root::overlay_options(&lower, &upper, &work);
+        mount_with("overlay", STACK, "overlay", 0, &options)?;
+        for mount in &MOUNTS {
+            let target = path(mount.target);
+            let moved = Path::new(STACK).join(target.strip_prefix("/").unwrap_or(target));
+            match fs::create_dir(&moved) {
+                Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+                _ => {}
+            }
+            mount_with(
+                &target.to_string_lossy(),
+                &moved.to_string_lossy(),
+                "",
+                MS_MOVE,
+                "",
+            )?;
+        }
+        // The initramfs is the kernel's first root, which can't be pivoted
+        // away from, so the stack is moved over it instead.
+        env::set_current_dir(STACK)?;
+        mount_with(".", "/", "", MS_MOVE, "")?;
+        unix_fs::chroot(".")?;
+        env::set_current_dir("/")
     }
 
     fn reap(&mut self) -> io::Result<Option<i32>> {
@@ -184,6 +244,50 @@ pub fn connect_to_host(port: u32) -> io::Result<File> {
     // SAFETY: `address` outlives the call, and `length` is its size.
     checked(unsafe { connect(fd, &address, length) })?;
     Ok(stream)
+}
+
+/// Every virtio-blk disk, with its serial.
+fn disks() -> io::Result<Vec<(String, String)>> {
+    let mut disks = Vec::new();
+    for entry in fs::read_dir("/sys/block")? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("vd") {
+            continue;
+        }
+        let serial = fs::read_to_string(format!("/sys/block/{name}/serial"))?;
+        disks.push((name, serial.trim().to_owned()));
+    }
+    Ok(disks)
+}
+
+/// `mount(2)` with arguments made at run time. An empty type or data passes
+/// none.
+fn mount_with(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: c_ulong,
+    data: &str,
+) -> io::Result<()> {
+    let text = |value: &str| CString::new(value).map_err(io::Error::other);
+    let (source, target) = (text(source)?, text(target)?);
+    let (fstype, data) = (text(fstype)?, text(data)?);
+    let or_null = |value: &CString| match value.is_empty() {
+        true => ptr::null(),
+        false => value.as_ptr(),
+    };
+    // SAFETY: every pointer is null or comes from a `CString` that outlives
+    // the call.
+    checked(unsafe {
+        mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            or_null(&fstype),
+            flags,
+            or_null(&data).cast(),
+        )
+    })?;
+    Ok(())
 }
 
 /// A call's result, or its error when it returns -1, as these calls do.

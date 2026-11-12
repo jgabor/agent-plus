@@ -194,12 +194,13 @@ fn confined_owner_process() {
         kernel: &kernel,
         init: &init,
         files: &[],
+        layers: Vec::new(),
         command: None,
         timeout: TIMEOUT,
         confine: env::var(CONFINE_VARIABLE).unwrap() == "on",
     };
     let mut attempted = false;
-    let result = boot::boot(&guest, |report| {
+    let result = boot::boot(guest, |report| {
         if matches!(report, Report::Ready(_)) && !attempted {
             attempted = true;
             log.write_all(format!("attempting {}\n", attempt.name()).as_bytes())

@@ -5,15 +5,20 @@
 //! layer whose key an agent already recorded is a hit, and isn't built again.
 //!
 //! The agent's bottom layer is the pinned `OS minimal` layer, downloaded only
-//! if the store doesn't have it. The other tiers, and the instructions that
-//! need any other fetch, fail, and no lockfile is written.
+//! if the store doesn't have it. The harness layer comes from the file that
+//! `Agentfile.lock` pins, which the download cache must already hold. The
+//! other tiers, and the instructions that need any other fetch, fail, and no
+//! lockfile is written.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use agentfile::{
     Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Sources,
@@ -21,6 +26,7 @@ use agentfile::{
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
+use ap::lock::{self, Lock, Locked};
 use ap::paths::HostPath;
 use graviola::hashing::sha2::Sha256Context;
 
@@ -32,9 +38,9 @@ const NOT_BUILT: [&str; 5] = ["REPO", "PLUGIN", "SKILL", "MCP", "SEAL"];
 /// it at run time, so it has no file of its own in the harness's directory.
 const PROMPT: &str = "/etc/ap/prompt";
 
-/// The zstd level the store keeps the OS layer at, which `COMPRESSION`
-/// doesn't change.
-const OS_LEVEL: i8 = 3;
+/// The zstd level the store keeps the OS and harness layers at, which
+/// `COMPRESSION` doesn't change, so that every agent shares them.
+const BASE_LEVEL: i8 = 3;
 
 /// The arguments of `ap build`.
 pub struct Args {
@@ -115,6 +121,8 @@ enum Content {
     Image(Vec<u8>),
     /// A layer to download, unless the store has it.
     Fetch(Pin<'static>),
+    /// The locked harness, from its file in the download cache.
+    Harness(Locked, PathBuf),
 }
 
 fn build(args: &Args) -> Result<(), String> {
@@ -183,12 +191,22 @@ fn build(args: &Args) -> Result<(), String> {
         lines.join("\n")
     };
     let instructions = agentfile::parse(&source).map_err(report)?;
+    let lock = read_lock(&path.with_extension("lock"), &context)?;
+    let cache = lock::cache(
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        Some(home.as_os_str()),
+    );
     let mut resolved = Resolved {
         context: context.clone(),
         home: home.clone(),
         paths: HashMap::new(),
     };
-    let (planned, warnings) = plan(&instructions, &mut resolved, dir_name).map_err(report)?;
+    let cached = Cached {
+        lock: &lock,
+        cache: cache.as_deref(),
+    };
+    let (planned, warnings) =
+        plan(&instructions, &mut resolved, &cached, dir_name).map_err(report)?;
     if args.strict && !warnings.is_empty() {
         return Err(report(warnings));
     }
@@ -243,7 +261,7 @@ fn build(args: &Args) -> Result<(), String> {
         let current = match planned.take() {
             Some(current) => current,
             None => {
-                plan(&instructions, &mut resolved, dir_name)
+                plan(&instructions, &mut resolved, &cached, dir_name)
                     .map_err(report)?
                     .0
             }
@@ -333,6 +351,7 @@ fn store_layers(
         let image = match content {
             Content::Add(add) => add.image(),
             Content::Image(image) => Ok(image),
+            Content::Harness(locked, path) => harness(&locked, &path),
             Content::Fetch(_) => unreachable!("a fetch was made above"),
         };
         match image {
@@ -399,12 +418,39 @@ impl Resolved {
     }
 }
 
+/// What the lockfile pins, and the download cache that holds it.
+struct Cached<'a> {
+    lock: &'a Lock,
+    /// `None` when there is no place for the cache.
+    cache: Option<&'a Path>,
+}
+
+/// Reads the lockfile at `path`, shown as it is, through its canonical path
+/// in `context`. A missing lockfile pins nothing.
+fn read_lock(path: &Path, context: &Path) -> Result<Lock, String> {
+    let shown = path.display();
+    let name = path.file_name().unwrap_or_default();
+    let host = match HostPath::resolve(&name.to_string_lossy(), context, Path::new("/")) {
+        Ok(host) => host,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Lock::default()),
+        Err(error) => return Err(format!("ap: {shown}: {error}")),
+    };
+    let mut bytes = Vec::new();
+    host.open()
+        .and_then(|mut file| file.read_to_end(&mut bytes))
+        .map_err(|error| format!("ap: {shown}: {error}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| format!("ap: {shown} isn't UTF-8 text"))?;
+    Lock::read(&text).map_err(|error| format!("{shown}:{}: {}", error.line, error.message))
+}
+
 /// Checks the Agentfile against the host, and plans its layers: the OS first,
-/// one for each `ADD`, in line order, and the harness configuration last. It returns
-/// every error it finds, or the layers and the warnings.
+/// then the locked harness, one for each `ADD`, in line order, and the harness
+/// configuration last. It returns every error it finds, or the layers and the
+/// warnings.
 fn plan(
     instructions: &[Instruction],
     resolved: &mut Resolved,
+    cached: &Cached,
     dir_name: &str,
 ) -> Result<(Vec<Planned>, Vec<Error>), Vec<Error>> {
     let mut errors = Vec::new();
@@ -486,9 +532,41 @@ fn plan(
         line: os_line.unwrap_or(1),
         label: "OS minimal".to_string(),
         key: os_key(fetch::os().sha256),
-        level: OS_LEVEL,
+        level: BASE_LEVEL,
         content: Content::Fetch(fetch::os()),
     });
+    let agent_line = instructions
+        .iter()
+        .find(|instruction| instruction.name == "AGENT")
+        .map_or(1, |instruction| instruction.line);
+    match (&cached.lock.harness, cached.cache) {
+        (Some(locked), Some(cache)) if locked.resolves(&settings.agent) => {
+            planned.push(Planned {
+                line: agent_line,
+                label: locked.label(),
+                key: harness_key(locked),
+                level: BASE_LEVEL,
+                content: Content::Harness(locked.clone(), cache.join(&locked.sha256)),
+            });
+        }
+        (Some(locked), Some(_)) => errors.push(fail(
+            agent_line,
+            format!(
+                "Agentfile.lock locks `{}`, and resolving a harness again is not built yet",
+                locked.label()
+            ),
+        )),
+        (None, _) => errors.push(fail(
+            agent_line,
+            "Agentfile.lock locks no harness, and resolving and downloading a harness is not built yet"
+                .to_string(),
+        )),
+        (Some(_), None) => errors.push(fail(
+            agent_line,
+            "HOME isn't an absolute path, so there's no download cache to take the harness from"
+                .to_string(),
+        )),
+    }
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
@@ -585,10 +663,10 @@ fn configuration(
         if !text.ends_with(b"\n") {
             text.push(b'\n');
         }
-        insert(&mut root, file, text);
+        insert(&mut root, file, text_file(text));
     }
     if let Some(prompt) = prompt {
-        insert(&mut root, PROMPT, prompt.to_vec());
+        insert(&mut root, PROMPT, text_file(prompt.to_vec()));
     }
     let mut image = Vec::new();
     erofs::write(root, &mut image).map_err(|error| match error {
@@ -598,8 +676,18 @@ fn configuration(
     Ok(image)
 }
 
-/// Puts a file at the absolute `path` in `root`, with the directories above it.
-fn insert(root: &mut erofs::Dir, path: &str, data: Vec<u8>) {
+/// A file that anyone can read, holding `data`.
+fn text_file(data: Vec<u8>) -> erofs::Node {
+    erofs::Node::File(erofs::File {
+        mode: 0o644,
+        size: data.len() as u64,
+        content: Box::new(Cursor::new(data)),
+    })
+}
+
+/// Puts `node` at the absolute `path` in `root`, with the directories above
+/// it.
+fn insert(root: &mut erofs::Dir, path: &str, node: erofs::Node) {
     let mut names: Vec<&str> = path.split('/').filter(|name| !name.is_empty()).collect();
     let Some(last) = names.pop() else {
         return;
@@ -620,14 +708,107 @@ fn insert(root: &mut erofs::Dir, path: &str, data: Vec<u8>) {
         };
         dir = next;
     }
-    dir.entries.insert(
-        last.as_bytes().to_vec(),
+    dir.entries.insert(last.as_bytes().to_vec(), node);
+}
+
+/// Where the harness layer puts the harness, which its adapter starts.
+fn harness_path(harness: Harness) -> String {
+    format!("/usr/local/bin/{}", lock::name(harness))
+}
+
+/// The harness layer, as an uncompressed EROFS image: the cached file at
+/// `path`, as an executable at [`harness_path`]. The file is hashed as it is
+/// read, and a digest that isn't the locked one is an error.
+fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
+    let shown = path.display();
+    // Nonblocking, so that a FIFO fails the check below instead of waiting
+    // for a writer. A regular file reads the same either way.
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => io::Error::new(
+            error.kind(),
+            format!(
+                "`{}` isn't in the download cache at {shown}, and downloading a harness is not built yet",
+                locked.label()
+            ),
+        ),
+        _ => io::Error::new(error.kind(), format!("{shown}: {error}")),
+    })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{shown} isn't a file"),
+        ));
+    }
+    let hash = Rc::new(RefCell::new(Sha256Context::new()));
+    let mut root = erofs::Dir {
+        mode: 0o755,
+        entries: BTreeMap::new(),
+    };
+    let content = Hashing {
+        file,
+        hash: Rc::clone(&hash),
+    };
+    insert(
+        &mut root,
+        &harness_path(locked.harness),
         erofs::Node::File(erofs::File {
-            mode: 0o644,
-            size: data.len() as u64,
-            content: Box::new(Cursor::new(data)),
+            mode: 0o755,
+            size: metadata.len(),
+            content: Box::new(content),
         }),
     );
+    let mut image = Vec::new();
+    erofs::write(root, &mut image).map_err(|error| match error {
+        erofs::Error::Io(error) => io::Error::new(error.kind(), format!("{shown}: {error}")),
+        error => io::Error::new(io::ErrorKind::InvalidData, format!("{shown}: {error}")),
+    })?;
+    let actual: String = Rc::into_inner(hash)
+        .ok_or_else(|| io::Error::other("the harness is still being read"))?
+        .into_inner()
+        .finish()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual != locked.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{shown} has digest {actual}, not the {} that Agentfile.lock locks",
+                locked.sha256
+            ),
+        ));
+    }
+    Ok(image)
+}
+
+/// A file that adds what is read from it to a hash.
+struct Hashing {
+    file: fs::File,
+    hash: Rc<RefCell<Sha256Context>>,
+}
+
+impl Read for Hashing {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read(buf)?;
+        self.hash.borrow_mut().update(&buf[..read]);
+        Ok(read)
+    }
+}
+
+/// The harness layer's key. Its image is a function of the harness and the
+/// file's digest.
+fn harness_key(locked: &Locked) -> String {
+    let mut hash = Sha256Context::new();
+    hash.update(b"harness\0");
+    hash.update(lock::name(locked.harness).as_bytes());
+    hash.update(b"\0");
+    hash.update(locked.sha256.as_bytes());
+    hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The OS layer's key, from the digest it is pinned to.

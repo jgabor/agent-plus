@@ -1,6 +1,8 @@
 //! `ap init`, from SPEC.md's `ap init` section and the lines that AUTH,
 //! NETWORK, and POLICY say it writes.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -137,6 +139,7 @@ fn init_writes_a_formatted_agentfile_that_builds_but_for_its_os() {
     let file = scratch.root.join("approved-grants");
     fs::write(&file, grants.to_string()).unwrap();
     let approve = format!("--approve={}", file.display());
+    common::pin_harness(&scratch.home, &dir);
     let output = scratch.ap(&dir, &["build", "--strict", &approve]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert_eq!(

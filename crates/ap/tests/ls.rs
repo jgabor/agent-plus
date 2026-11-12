@@ -43,6 +43,7 @@ impl Scratch {
         let dir = self.root.join(path);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), "AGENT claude\nOS minimal\n").unwrap();
+        common::pin_harness(&self.home, &dir);
         // Approval has tests of its own, so the build approves what it asks
         // for.
         let grants = self.root.join("approved-grants");

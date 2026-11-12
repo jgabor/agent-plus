@@ -21,12 +21,13 @@ fn boot_silent_init(timeout: Duration) -> (Result<Option<u8>, Error>, u32) {
         kernel: kernel_image(),
         init: &init,
         files: &[],
+        layers: Vec::new(),
         command: None,
         timeout,
         confine: false,
     };
     let mut ready_calls = 0;
-    let result = boot::boot(&guest, |report| {
+    let result = boot::boot(guest, |report| {
         if matches!(report, Report::Ready(_)) {
             ready_calls += 1;
         }
@@ -58,12 +59,13 @@ fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
         kernel: kernel_image(),
         init: &init,
         files: &[],
+        layers: Vec::new(),
         command: Some(&command),
         timeout: Duration::from_secs(30),
         confine: false,
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
-    let status = boot::boot(&guest, |report| match report {
+    let status = boot::boot(guest, |report| match report {
         Report::Ready(_) => {}
         Report::Stdout(bytes) => stdout.extend_from_slice(bytes),
         Report::Stderr(bytes) => stderr.extend_from_slice(bytes),

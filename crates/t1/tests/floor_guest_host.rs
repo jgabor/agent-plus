@@ -1099,6 +1099,7 @@ fn vm_owner_process() {
         kernel: &kernel,
         init: &init,
         files: &files,
+        layers: Vec::new(),
         command: wants_command.then_some(command.as_slice()),
         timeout: if directory.join("short-timeout").exists() {
             SHORT_TIMEOUT
@@ -1114,7 +1115,7 @@ fn vm_owner_process() {
 
     let (mut stdout_filter, mut stderr_filter) = (Filter::default(), Filter::default());
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let result = boot::boot(&guest, |report| match report {
+    let result = boot::boot(guest, |report| match report {
         Report::Ready(_) => {}
         Report::Stdout(bytes) => {
             plant(vmm, bytes);

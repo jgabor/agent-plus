@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod linux;
 pub mod protocol;
+pub mod root;
 
 use std::ffi::{CStr, c_ulong};
 use std::io;
@@ -72,6 +73,9 @@ pub trait Channel {
 /// The system calls the init makes.
 pub trait System {
     fn mount(&mut self, mount: &Mount) -> io::Result<()>;
+    /// Makes the agent's layers the root, if the host attached any, and moves
+    /// the filesystems in [`MOUNTS`] into it.
+    fn stack_layers(&mut self) -> io::Result<()>;
     /// Collects one exited child and returns its PID, or `None` if no child
     /// has exited.
     fn reap(&mut self) -> io::Result<Option<i32>>;
@@ -93,6 +97,7 @@ fn serve(system: &mut impl System, channel: &mut impl Channel) -> io::Result<()>
     for mount in &MOUNTS {
         system.mount(mount)?;
     }
+    system.stack_layers()?;
     loop {
         match channel.next_event()? {
             Event::ChildExited => while system.reap()?.is_some() {},

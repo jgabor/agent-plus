@@ -67,6 +67,10 @@ impl System for RealReap {
         Ok(())
     }
 
+    fn stack_layers(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+
     fn reap(&mut self) -> std::io::Result<Option<i32>> {
         let pid = Linux.reap()?;
         self.0.extend(pid);

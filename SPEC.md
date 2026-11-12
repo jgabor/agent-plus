@@ -410,8 +410,9 @@ directory) and writes an image into the local store.
   name at random, and picks again if the store already has a run with that
   name. A command that takes a run accepts a name of any length, so names
   can get longer later.
-- **End.** A run ends when its `ap run` exits, for any reason, including a
-  closed terminal or a killed `ap run` process, and its VM stops with it.
+- **End.** A run that `ap run` started ends when that `ap run` exits, for
+  any reason, including a closed terminal or a killed `ap run` process, and
+  its VM stops with it.
 - **Flags.** `ap run` takes `-p`/`--prompt`, `-i`, `-t`, `--share`,
   `--network`, `--resume`, `--gui`, and `--approve=<file>`. Of these, only
   `-p`, `--share`, and `--network` change what the Agentfile says, and only
@@ -579,18 +580,23 @@ and exits with the command's status.
   standard input and standard output of `ap exec` are terminals, the
   command gets a terminal too.
 - Its output isn't part of the run's log.
-- A command that isn't found exits with status 127, and one that can't be
-  run exits with status 126.
-- If the run has finished or doesn't exist, or ends while the command runs,
-  `ap exec` says so on standard error and exits with status 125.
+- If the command isn't found, `ap exec` exits with status 127, and if it
+  can't be run, with status 126.
+- If the run has finished or doesn't exist, `ap exec` says so on standard
+  error and exits with status 125.
+- If the run ends while the command runs, `ap exec` exits with status 125.
 
 ### ap stop
 
 `ap stop <run>` stops an active run. It sends the harness `SIGTERM`, and
-powers the VM off if the harness hasn't exited 10 seconds later. It returns
-once the VM has stopped, prints nothing, and exits 0.
+powers the VM off if the harness hasn't exited 10 seconds later.
 
-- The run's `ap run` then exits with status 143, and the run's log is kept.
+- `ap stop` returns once the VM has stopped.
+- On success, it prints nothing and exits 0.
+- If the harness exits after `SIGTERM`, the run's `ap run` exits with the
+  harness's status. If `ap stop` powers the VM off, `ap run` exits with
+  status 137.
+- The stopped run's log is kept.
 - On a finished run, `ap stop` does nothing and exits 0.
 - If the run doesn't exist, `ap stop` says so on standard error and exits 1.
 

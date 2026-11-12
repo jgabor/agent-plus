@@ -405,6 +405,13 @@ directory) and writes an image into the local store.
   is a path to a directory with an Agentfile; `ap` rebuilds it if anything
   changed, then runs it. With a path, `ap run` takes `-t <name>`, like
   `ap build`. Anything else is an agent name.
+- **Run name.** Every run has a name of 8 characters from
+  `0123456789abcdefghijklmnopqrstuvwxyz`, such as `k3x9q2mf`. `ap` picks the
+  name at random, and picks again if the store already has a run with that
+  name. A command that takes a run accepts a name of any length, so names
+  can get longer later.
+- **End.** A run ends when its `ap run` exits, for any reason, including a
+  closed terminal or a killed `ap run` process, and its VM stops with it.
 - **Flags.** `ap run` takes `-p`/`--prompt`, `-i`, `-t`, `--share`,
   `--network`, `--resume`, `--gui`, and `--approve=<file>`. Of these, only
   `-p`, `--share`, and `--network` change what the Agentfile says, and only
@@ -430,10 +437,10 @@ directory) and writes an image into the local store.
   adapter marks every share as trusted (`trust_level = "trusted"`), so
   Codex loads a repository's own configuration, hooks, and rules.
 - **Ephemeral.** Every run starts from the image with an empty writable
-  overlay, and the overlay is discarded when the run ends. Two things
+  overlay, and the overlay is discarded when the run ends. Three things
   outlast it: the state that `AUTH login` and `PERSIST` keep (see
-  [PERSIST](#persist)), and unapplied copy-on-write changes in shares (see
-  [SHARE](#share)).
+  [PERSIST](#persist)), unapplied copy-on-write changes in shares (see
+  [SHARE](#share)), and the run's log (see [`ap logs`](#ap-logs)).
 - **User.** The agent runs as the non-root user `agent`, with
   `HOME=/home/agent`.
 - **Updates.** Harness self-updates are disabled. The harness version
@@ -524,24 +531,68 @@ says which layers it frees, and [SHARE](#share) says when it refuses.
 
 ### ap ps
 
-`ap ps` lists the running agents, with their forwarded ports.
+`ap ps` lists the active runs. It prints a header row, then one row per
+run, newest first, with the run's name, its agent, and when it started. It
+exits 0, even when no run is active. A run with forwarded ports also shows
+them.
+
+`ap ps -a` also lists the finished runs whose logs are kept. It adds each
+run's status: `running`, or `exited` and the run's exit status.
 
 ### ap attach
 
-`ap attach <run>` attaches to a running agent's terminal.
+`ap attach <run>` connects your terminal to an active run. For an
+interactive run, both terminals show the same screen, and keys from either
+reach the harness. For a headless run, it streams the output from then on,
+and sends no input.
+
+- When the run ends, `ap attach` exits with the run's exit status.
+- Ending `ap attach`, for example by closing its terminal, leaves the run
+  running.
+- If the run has finished or doesn't exist, `ap attach` says so on
+  standard error and exits with status 125.
 
 ### ap logs
 
 `ap logs <run>` shows a run's output and its network decisions.
 [Grants](#grants) says what it escapes.
 
+- It prints the run's output from its start, for an active run up to that
+  moment, and exits 0.
+- A headless run's log keeps standard output and standard error apart, and
+  `ap logs` writes each to the same stream.
+- An interactive run's log holds what the run showed in your terminal,
+  filtered as [Run](#run) says.
+- A finished run's log is kept until `ap rm <agent>` or `ap reset <agent>`
+  deletes it.
+- If the run doesn't exist, or its log was deleted, `ap logs` says so on
+  standard error and exits 1.
+
 ### ap exec
 
-`ap exec <run> <command>` runs a command inside a running agent.
+`ap exec <run> <command> [<arg>...]` runs a command inside an active run,
+and exits with the command's status.
+
+- The command runs directly, not through a shell, with the harness's user,
+  environment, and working directory.
+- Its standard input, output, and error are those of `ap exec`. When both
+  standard input and standard output of `ap exec` are terminals, the
+  command gets a terminal too.
+- Its output isn't part of the run's log.
+- A command that isn't found exits with status 127, and one that can't be
+  run exits with status 126.
+- If the run has finished or doesn't exist, or ends while the command runs,
+  `ap exec` says so on standard error and exits with status 125.
 
 ### ap stop
 
-`ap stop <run>` stops a run.
+`ap stop <run>` stops an active run. It sends the harness `SIGTERM`, and
+powers the VM off if the harness hasn't exited 10 seconds later. It returns
+once the VM has stopped, prints nothing, and exits 0.
+
+- The run's `ap run` then exits with status 143, and the run's log is kept.
+- On a finished run, `ap stop` does nothing and exits 0.
+- If the run doesn't exist, `ap stop` says so on standard error and exits 1.
 
 ### ap diff
 

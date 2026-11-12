@@ -15,6 +15,8 @@ const READ_ONLY: u64 = 1 << 5;
 const SECTOR: u64 = 512;
 const HEADER: usize = 16;
 const ID_LEN: usize = 20;
+/// What fills the bytes a request leaves unanswered.
+static ZEROS: [u8; 64 << 10] = [0; 64 << 10];
 
 const TYPE_IN: u32 = 0;
 const TYPE_OUT: u32 = 1;
@@ -66,10 +68,7 @@ impl Block {
             return false;
         }
         let mut used = false;
-        loop {
-            let Some(queue) = self.transport.queue(REQUESTS) else {
-                break;
-            };
+        while let Some(queue) = self.transport.queue(REQUESTS) {
             // A broken ring has already stopped the queue.
             let Ok(Some(chain)) = queue.pop(memory) else {
                 break;
@@ -90,7 +89,9 @@ impl Block {
     }
 
     /// Serves one request, and returns how many bytes it wrote. The status
-    /// is the last writable byte, and a chain with none gets no answer.
+    /// is the last writable byte, and a chain with none gets no answer. The
+    /// used length counts from the first writable byte, so every byte before
+    /// the status is written, with zeros where the answer is shorter.
     fn serve(&self, memory: &GuestMemory, chain: &Chain) -> u32 {
         let Some(room) = writable_len(chain).checked_sub(1) else {
             return 0;
@@ -107,10 +108,19 @@ impl Block {
             Some((TYPE_OUT, _)) | None => (STATUS_IOERR, 0),
             Some(_) => (STATUS_UNSUPP, 0),
         };
+        let mut at = written;
+        while at < room {
+            let len = (room - at).min(ZEROS.len());
+            if !write_at(memory, chain, at, &ZEROS[..len]) {
+                return 0;
+            }
+            at += len;
+        }
         if !write_at(memory, chain, room, &[status]) {
             return 0;
         }
-        (written + 1) as u32
+        // The queue refuses a chain of more than `u32::MAX` bytes.
+        (room + 1) as u32
     }
 
     /// Copies `len` bytes from `sector` on, if they all lie on the disk.
@@ -333,10 +343,14 @@ mod tests {
     #[test]
     fn a_read_past_the_end_fails_and_copies_nothing() {
         let mut driver = Driver::new();
-        assert_eq!(driver.request(TYPE_IN, 2, &[1024]), (STATUS_IOERR, 1));
+        driver.memory.write(DATA, &[0xaa; 1024]).unwrap();
+        assert_eq!(driver.request(TYPE_IN, 2, &[1024]), (STATUS_IOERR, 1025));
         assert_eq!(driver.data(1024), [0; 1024]);
-        assert_eq!(driver.request(TYPE_IN, 3, &[512]), (STATUS_IOERR, 1));
-        assert_eq!(driver.request(TYPE_IN, u64::MAX, &[512]), (STATUS_IOERR, 1));
+        assert_eq!(driver.request(TYPE_IN, 3, &[512]), (STATUS_IOERR, 513));
+        assert_eq!(
+            driver.request(TYPE_IN, u64::MAX, &[512]),
+            (STATUS_IOERR, 513)
+        );
         // The disk still serves its last sector.
         assert_eq!(driver.request(TYPE_IN, 2, &[512]), (STATUS_OK, 513));
     }
@@ -360,15 +374,16 @@ mod tests {
     #[test]
     fn a_long_id_is_cut_to_twenty_bytes() {
         let mut driver = Driver::with(disk(), &[b'x'; 64]);
-        assert_eq!(driver.request(TYPE_GET_ID, 0, &[32]), (STATUS_OK, 21));
-        assert_eq!(driver.data(21), [&[b'x'; 20][..], &[0]].concat());
+        driver.memory.write(DATA, &[0xaa; 32]).unwrap();
+        assert_eq!(driver.request(TYPE_GET_ID, 0, &[32]), (STATUS_OK, 33));
+        assert_eq!(driver.data(32), [&[b'x'; 20][..], &[0; 12]].concat());
     }
 
     #[test]
     fn a_request_the_device_doesnt_know_is_unsupported() {
         let mut driver = Driver::new();
         for kind in [4, 11, u32::MAX] {
-            assert_eq!(driver.request(kind, 0, &[512]), (STATUS_UNSUPP, 1));
+            assert_eq!(driver.request(kind, 0, &[512]), (STATUS_UNSUPP, 513));
         }
     }
 
@@ -378,7 +393,10 @@ mod tests {
         driver.memory.write(STATUS_AT, &[0xff]).unwrap();
         driver.descriptor(0, HEADER_AT, 8, NEXT);
         driver.descriptor(1, STATUS_AT, 1, WRITE);
-        driver.memory.write(AVAILABLE + 2, &1u16.to_le_bytes()).unwrap();
+        driver
+            .memory
+            .write(AVAILABLE + 2, &1u16.to_le_bytes())
+            .unwrap();
         assert!(driver.set(QUEUE_NOTIFY, 0));
         let mut status = [0];
         driver.memory.read(STATUS_AT, &mut status).unwrap();
@@ -389,7 +407,10 @@ mod tests {
     fn a_request_with_no_room_for_a_status_gets_no_answer() {
         let mut driver = Driver::new();
         driver.descriptor(0, HEADER_AT, HEADER as u32, 0);
-        driver.memory.write(AVAILABLE + 2, &1u16.to_le_bytes()).unwrap();
+        driver
+            .memory
+            .write(AVAILABLE + 2, &1u16.to_le_bytes())
+            .unwrap();
         assert!(driver.set(QUEUE_NOTIFY, 0));
         let mut len = [0; 4];
         driver.memory.read(USED + 8, &mut len).unwrap();
@@ -406,7 +427,10 @@ mod tests {
         driver.descriptor(1, HEADER_AT + 10, 6, NEXT);
         driver.descriptor(2, DATA, 512, WRITE | NEXT);
         driver.descriptor(3, STATUS_AT, 1, WRITE);
-        driver.memory.write(AVAILABLE + 2, &1u16.to_le_bytes()).unwrap();
+        driver
+            .memory
+            .write(AVAILABLE + 2, &1u16.to_le_bytes())
+            .unwrap();
         assert!(driver.set(QUEUE_NOTIFY, 0));
         assert_eq!(driver.data(512), disk()[512..1024]);
     }
@@ -417,7 +441,10 @@ mod tests {
         driver.set(STATUS, 0);
         driver.descriptor(0, HEADER_AT, HEADER as u32, NEXT);
         driver.descriptor(1, STATUS_AT, 1, WRITE);
-        driver.memory.write(AVAILABLE + 2, &1u16.to_le_bytes()).unwrap();
+        driver
+            .memory
+            .write(AVAILABLE + 2, &1u16.to_le_bytes())
+            .unwrap();
         assert!(!driver.set(QUEUE_NOTIFY, 0));
     }
 }

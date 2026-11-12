@@ -131,7 +131,10 @@ fn the_guest_mounts_a_stored_layer_read_only_as_erofs() {
     assert_eq!(status, "ok");
     let mount: Vec<&str> = mount.split(' ').collect();
     assert_eq!(mount[..3], ["/dev/vda", "/layer", "erofs"], "{mount:?}");
-    assert!(mount[3].split(',').any(|option| option == "ro"), "{mount:?}");
+    assert!(
+        mount[3].split(',').any(|option| option == "ro"),
+        "{mount:?}"
+    );
     assert_eq!(read_only, "1", "the disk itself should be read-only");
     assert_eq!(id, serial);
     assert_eq!(entries, "dir");

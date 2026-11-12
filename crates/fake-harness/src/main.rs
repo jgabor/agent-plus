@@ -47,7 +47,10 @@ fn main() -> ExitCode {
     if let Some(path) = env::var_os("FAKE_HARNESS_WRITE")
         && let Err(e) = fs::write(&path, "")
     {
-        eprintln!("fake-harness: couldn't write {}: {e}", path.to_string_lossy());
+        eprintln!(
+            "fake-harness: couldn't write {}: {e}",
+            path.to_string_lossy()
+        );
         return ExitCode::FAILURE;
     }
     match env::var("FAKE_HARNESS_STATUS") {
@@ -62,14 +65,14 @@ fn main() -> ExitCode {
     }
 }
 
-/// The name `/etc/passwd` gives this process's user, or its uid if it has
-/// none there.
+/// The name `/etc/passwd` gives this process's effective user, or its uid if
+/// it has none there.
 fn user() -> String {
     let uid = fs::read_to_string("/proc/self/status")
         .unwrap_or_default()
         .lines()
         .find_map(|line| line.strip_prefix("Uid:"))
-        .and_then(|ids| ids.split_whitespace().next().map(str::to_string))
+        .and_then(|ids| ids.split_whitespace().nth(1).map(str::to_string))
         .unwrap_or_default();
     fs::read_to_string("/etc/passwd")
         .unwrap_or_default()

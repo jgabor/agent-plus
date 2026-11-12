@@ -73,9 +73,9 @@ case "$(array first arguments)" in
     ;;
 esac
 case "$(array first interfaces)" in
-  '' | '"lo"') ;;
+  '"lo"') ;;
   *)
-    echo "the harness sees a network interface besides loopback:" >&2
+    echo "the harness sees a network interface besides loopback, or none:" >&2
     cat first >&2
     exit 1
     ;;

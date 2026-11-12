@@ -25,7 +25,7 @@ const FIELDS: &[&str] = &["key", "name", "target", "band_pct", "band_abs"];
 const NOOP_FILES: &[(&str, &str)] = &[
     (
         "agent/Agentfile",
-        "AGENT claude\nSYSTEM ./system.md\nPROMPT Review the notes.\nMODEL opus\nADD ./data\nADD ./src /work\nSHARE ./out\n",
+        "AGENT claude\nOS minimal\nSYSTEM ./system.md\nPROMPT Review the notes.\nMODEL opus\nADD ./data\nADD ./src /work\nSHARE ./out\n",
     ),
     ("agent/system.md", "Be careful.\n"),
     ("agent/data", "one\n"),

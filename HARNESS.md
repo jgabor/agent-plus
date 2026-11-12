@@ -280,14 +280,14 @@ records its arguments, environment, files, and network view.
 reads what it reports before sign-in. For Claude Code, that is the `init` event
 of `claude -p <prompt> --output-format stream-json --verbose`, which lists the
 working directory, MCP servers, skills, and commands. For Codex, the check
-starts `codex app-server` with the `-c` overrides the adapter gives a run, and
-sends it JSON-RPC requests. The result of `thread/start` gives the working
-directory, model, reasoning effort, approval policy, sandbox, and the
+starts `codex app-server` with the `-c` overrides the adapter gives a run. It
+sends JSON-RPC requests after the `initialize` request and the `initialized`
+notification. The result of `thread/start` gives the working directory, model,
+reasoning effort, approval policy, approval reviewer, sandbox, and the
 `AGENTS.md` files that Codex loaded. `skills/list` lists the skills, and
 `mcpServerStatus/list` lists the MCP servers with their tools. None of these
-needs a sign-in or the network. Codex has no custom commands, so the check
-reads none. `codex exec --json` reports none of this before its first model
-call.
+needs a sign-in or the network. Codex lists no commands, so the check reads
+none. `codex exec --json` reports none of this before its first model call.
 
 **Bench.** Builds the static `ap` of the base and of the candidate under a
 shared hold of the activity lock, then measures in the measuring slot, which

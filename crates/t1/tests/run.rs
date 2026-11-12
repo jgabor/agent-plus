@@ -172,7 +172,7 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
     let first = scratch.run(&["fake", "-p", PROMPT]);
     assert_eq!(
         array(&first, "arguments"),
-        ["\"-p\"", &format!("\"{PROMPT}\"")],
+        ["\"-p\"", "\"--\"", &format!("\"{PROMPT}\"")],
         "{first}"
     );
     for seen in [
@@ -195,7 +195,7 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
     let second = scratch.run(&["fake"]);
     assert_eq!(
         array(&second, "arguments"),
-        ["\"-p\"", &format!("\"{BUILT_PROMPT}\"")],
+        ["\"-p\"", "\"--\"", &format!("\"{BUILT_PROMPT}\"")],
         "{second}"
     );
     assert!(
@@ -208,8 +208,14 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
 fn the_harness_starts_in_the_workdir_which_must_be_a_directory() {
     let scratch = Scratch::new("workdir");
     scratch.build("tmp", &fake("WORKDIR /tmp\n"));
-    let report = scratch.run(&["tmp", "--prompt", PROMPT]);
+    // A prompt that looks like a flag is still the prompt.
+    let report = scratch.run(&["tmp", "--prompt", "--help"]);
     assert!(report.contains("\"directory\":\"/tmp\""), "{report}");
+    assert_eq!(
+        array(&report, "arguments"),
+        ["\"-p\"", "\"--\"", "\"--help\""],
+        "{report}"
+    );
 
     scratch.build("nowhere", &fake("WORKDIR ~/nowhere\n"));
     let output = scratch.ap(&["run", "nowhere", "-p", PROMPT]);

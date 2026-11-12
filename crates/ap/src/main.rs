@@ -42,7 +42,8 @@ fn main() -> ExitCode {
         // The guest's init started this to become `agent` and exec the harness.
         let error = guest::agent::exec_as_agent(&args);
         eprintln!("ap: can't start the harness: {error}");
-        return ExitCode::from(126);
+        // The harness never started, so this is `ap`'s failure, not its.
+        return ExitCode::from(125);
     }
     if args.len() == 1 && args[0] == "--version" {
         println!("ap {}", env!("CARGO_PKG_VERSION"));

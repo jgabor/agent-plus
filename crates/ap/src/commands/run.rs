@@ -214,8 +214,9 @@ fn start(args: &Args) -> Result<(Vec<Layer>, Start), Error> {
         .map_or_else(|| HOME.to_owned(), |workdir| guest_path(&workdir.path));
     let harness = super::build::harness_path(settings.agent.harness);
     let argv = match settings.agent.harness {
-        agentfile::Harness::Claude => vec![harness, "-p".to_owned()],
-        agentfile::Harness::Codex => vec![harness, "exec".to_owned()],
+        // `--` keeps a prompt that starts with `-` from reading as a flag.
+        agentfile::Harness::Claude => vec![harness, "-p".to_owned(), "--".to_owned()],
+        agentfile::Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
     };
 
     let layers = ::store::Layers::new(&root);

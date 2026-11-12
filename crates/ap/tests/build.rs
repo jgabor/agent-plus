@@ -944,3 +944,43 @@ fn the_os_layer_is_the_bottom_layer() {
     assert_eq!(bottom.digest, ap::fetch::os().sha256);
     assert_eq!(bottom.instruction, "OS minimal");
 }
+
+#[test]
+fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
+    let scratch = Scratch::new("harness-fifo");
+    let dir = scratch.project("notes", "AGENT claude\n");
+    let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
+    fs::remove_file(&path).unwrap();
+    let made = Command::new("mkfifo").arg(&path).status().unwrap();
+    assert!(made.success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ap"))
+        .arg("build")
+        .arg(format!(
+            "--approve={}",
+            scratch.approval(&dir, &[]).unwrap().display()
+        ))
+        .current_dir(&dir)
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("ap build waited on a FIFO in the download cache");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1));
+    let mut message = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut message).unwrap();
+    assert!(message.contains("isn't a file"), "{message}");
+    assert!(scratch.layer_files().is_empty());
+}

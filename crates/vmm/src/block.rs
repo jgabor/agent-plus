@@ -68,7 +68,13 @@ impl Block {
             return false;
         }
         let mut used = false;
-        while let Some(queue) = self.transport.queue(REQUESTS) {
+        // A ring holds at most a queue's worth of requests. A guest whose
+        // answers publish more requests waits for its next notification, so
+        // the vCPU thread always gets back to the guest.
+        for _ in 0..QUEUE_SIZE {
+            let Some(queue) = self.transport.queue(REQUESTS) else {
+                break;
+            };
             // A broken ring has already stopped the queue.
             let Ok(Some(chain)) = queue.pop(memory) else {
                 break;
@@ -433,6 +439,29 @@ mod tests {
             .unwrap();
         assert!(driver.set(QUEUE_NOTIFY, 0));
         assert_eq!(driver.data(512), disk()[512..1024]);
+    }
+
+    #[test]
+    fn answers_that_publish_requests_stop_at_a_queue_s_worth() {
+        // Sector `s` starts with `s + 1`, and each request reads the sector
+        // named by the available index into the available index.
+        let mut disk = vec![0; 1024 * SECTOR as usize];
+        for (sector, bytes) in disk.chunks_mut(SECTOR as usize).enumerate() {
+            bytes[..2].copy_from_slice(&(sector as u16 + 1).to_le_bytes());
+        }
+        let mut driver = Driver::with(disk, b"");
+        driver.descriptor(0, HEADER_AT, 8, NEXT);
+        driver.descriptor(1, AVAILABLE + 2, 8, NEXT);
+        driver.descriptor(2, AVAILABLE + 2, 2, WRITE | NEXT);
+        driver.descriptor(3, STATUS_AT, 1, WRITE);
+        driver
+            .memory
+            .write(AVAILABLE + 2, &1u16.to_le_bytes())
+            .unwrap();
+        assert!(driver.set(QUEUE_NOTIFY, 0));
+        let mut served = [0; 2];
+        driver.memory.read(USED + 2, &mut served).unwrap();
+        assert_eq!(u16::from_le_bytes(served), QUEUE_SIZE);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The virtual machine monitor: KVM through hand-declared ioctls, with no
 //! dependencies.
 
+pub mod block;
 pub mod boot;
 pub mod confine;
 pub mod initramfs;

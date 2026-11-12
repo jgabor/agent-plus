@@ -3,7 +3,14 @@
 //! checks in `fs/erofs/super.c`, `inode.c`, and `dir.c`.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::fs;
 use std::io::{self, Cursor, Read};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use erofs::{Dir, Error, File, Node, Symlink};
 
@@ -593,4 +600,140 @@ fn content_of_the_wrong_length_is_an_error() {
         let err = erofs::write(root, &mut out).expect_err("wrong length");
         assert!(matches!(err, Error::Content { .. }), "{err}");
     }
+}
+
+/// What `dir` holds on disk, read with `std::fs` alone.
+fn on_disk(dir: &Path) -> Tree {
+    let mode = |path: &Path| {
+        let meta = fs::symlink_metadata(path).expect("metadata");
+        (meta.permissions().mode() & 0o7777) as u16
+    };
+    let mut entries = BTreeMap::new();
+    for entry in fs::read_dir(dir).expect("read a directory") {
+        let path = entry.expect("an entry").path();
+        let kind = fs::symlink_metadata(&path).expect("metadata").file_type();
+        let tree = if kind.is_dir() {
+            on_disk(&path)
+        } else if kind.is_symlink() {
+            let target = fs::read_link(&path).expect("a link target");
+            Tree::Symlink(mode(&path), target.into_os_string().into_vec())
+        } else {
+            assert!(kind.is_file(), "{} is a regular file", path.display());
+            Tree::File(mode(&path), fs::read(&path).expect("read a file"))
+        };
+        let name = path.file_name().expect("a name").as_bytes().to_vec();
+        entries.insert(name, tree);
+    }
+    Tree::Dir(mode(dir), entries)
+}
+
+/// A new, empty directory for one test, under Cargo's scratch directory.
+fn scratch(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).expect("clear the scratch directory");
+    }
+    fs::create_dir_all(&dir).expect("make the scratch directory");
+    dir
+}
+
+fn mkerofs(tree: &Path, image: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_mkerofs"))
+        .arg(tree)
+        .arg(image)
+        .output()
+        .expect("run mkerofs")
+}
+
+#[test]
+fn mkerofs_writes_a_directory_as_it_is_on_disk() {
+    let scratch = scratch("mkerofs-tree");
+    let tree = scratch.join("tree");
+    let put = |path: &str, data: &[u8], mode: u32| {
+        let path = tree.join(path);
+        fs::write(&path, data).expect("write a file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod");
+    };
+    fs::create_dir_all(tree.join("usr/bin")).expect("mkdir");
+    fs::create_dir(tree.join("tmp")).expect("mkdir");
+    fs::create_dir(tree.join("empty")).expect("mkdir");
+    put("usr/bin/su", b"setuid", 0o4755);
+    put("usr/bin/empty", b"", 0o644);
+    put("usr/bin/two-blocks", &[3; 8193], 0o755);
+    put("secret", b"only the owner", 0o600);
+    fs::hard_link(tree.join("usr/bin/su"), tree.join("usr/bin/su-again")).expect("hard link");
+    std::os::unix::fs::symlink("usr/bin", tree.join("bin")).expect("symlink");
+    std::os::unix::fs::symlink("/nowhere", tree.join("dangling")).expect("symlink");
+    fs::write(tree.join(OsStr::from_bytes(b"\xffname")), b"not UTF-8").expect("write");
+    fs::set_permissions(tree.join("tmp"), fs::Permissions::from_mode(0o1777)).expect("chmod");
+    fs::set_permissions(tree.join("empty"), fs::Permissions::from_mode(0o700)).expect("chmod");
+
+    let image = scratch.join("image");
+    let run = mkerofs(&tree, &image);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let read = Reader::read(&fs::read(&image).expect("read the image"));
+    assert_eq!(read, on_disk(&tree));
+    let Tree::Dir(_, root) = &read else {
+        panic!("the root is a directory")
+    };
+    let Some(Tree::Dir(_, bin)) = root.get(&b"usr"[..]).and_then(|usr| match usr {
+        Tree::Dir(_, usr) => usr.get(&b"bin"[..]),
+        _ => None,
+    }) else {
+        panic!("usr/bin is a directory")
+    };
+    assert_eq!(
+        bin.get(&b"su-again"[..]),
+        Some(&Tree::File(0o4755, b"setuid".to_vec())),
+        "a hard link is a copy"
+    );
+}
+
+#[test]
+fn mkerofs_refuses_a_socket() {
+    // A socket's path must be short, and Cargo's scratch directory may not be.
+    let tree = std::env::temp_dir().join(format!("mkerofs-{}", std::process::id()));
+    fs::create_dir(&tree).expect("mkdir");
+    let socket = UnixListener::bind(tree.join("sock"));
+    let run = socket
+        .as_ref()
+        .map(|_| mkerofs(&tree, &scratch("mkerofs-socket").join("image")));
+    fs::remove_dir_all(&tree).expect("remove the tree");
+    let run = run.expect("bind a socket");
+    assert!(!run.status.success(), "a socket is refused");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr),
+        "mkerofs: sock: a device, FIFO, or socket can't go in an image\n"
+    );
+}
+
+/// `guest/os/build.sh` runs this on the tree it made and the image of it.
+#[test]
+#[ignore = "needs AP_OS_TREE and AP_OS_IMAGE, which guest/os/build.sh sets"]
+fn the_os_layer_holds_its_tree() {
+    let var = |name| std::env::var_os(name).unwrap_or_else(|| panic!("{name:?} is set"));
+    let tree = PathBuf::from(var("AP_OS_TREE"));
+    let image = fs::read(var("AP_OS_IMAGE")).expect("read the image");
+    if let Some(path) = difference(&Reader::read(&image), &on_disk(&tree)) {
+        panic!("the image and the tree differ at {path}");
+    }
+}
+
+/// The first path where two trees differ, so that a large tree's failure
+/// doesn't print both trees.
+fn difference(a: &Tree, b: &Tree) -> Option<String> {
+    let (Tree::Dir(a_mode, a), Tree::Dir(b_mode, b)) = (a, b) else {
+        return (a != b).then(String::new);
+    };
+    if a_mode != b_mode || a.len() != b.len() || a.keys().ne(b.keys()) {
+        return Some(String::new());
+    }
+    a.iter().zip(b.values()).find_map(|((name, a), b)| {
+        let below = difference(a, b)?;
+        Some(format!("/{}{below}", String::from_utf8_lossy(name)))
+    })
 }

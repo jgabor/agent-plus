@@ -117,7 +117,7 @@ the parent's plan. Don't fix it in this PR.
 | `in-progress` | An agent holds the issue |
 | `land-needed` | The issue's PR is ready for a person to merge |
 | `answer-needed` | The issue is waiting for an answer |
-| `spec-change` | The PR touches SPEC.md, `xtask/`, `.github/`, or `harness/` outside its ledger and journey scripts |
+| `spec-change` | The PR touches SPEC.md, AGENTS.md, HARNESS.md, `xtask/`, `.github/`, or `harness/` outside its ledger and journey scripts |
 
 ### Claiming work
 

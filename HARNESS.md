@@ -324,6 +324,7 @@ Files outside any single lane follow these rules:
 | File | Rule |
 |---|---|
 | `SPEC.md` | Changed only by `spec-change` PRs |
+| `AGENTS.md` and `HARNESS.md` | Changed only by `spec-change` PRs, so an agent can't change its own rules |
 | `harness/ledger/` | One new file per merge |
 | `harness/waived.txt` | Changed only by `spec-change` PRs, with union merge through `.gitattributes` |
 | `harness/journey/` | Step scripts, which any PR may change |
@@ -831,8 +832,9 @@ passes. No scheduled work runs on GitHub.
 ## Owner actions
 
 - Add `auto:*` labels to top-level issues.
-- Merge `spec-change` PRs, which cover SPEC.md, `xtask/`, `.github/`, and
-  `harness/`, with any merge button once `xtask/gate` is green.
+- Merge `spec-change` PRs, which cover SPEC.md, AGENTS.md, HARNESS.md,
+  `xtask/`, `.github/`, and `harness/`, with any merge button once
+  `xtask/gate` is green.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
 - If the PR is behind `main`, wait for the [refresh](#refresh) to prove it

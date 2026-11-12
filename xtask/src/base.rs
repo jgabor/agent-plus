@@ -11,7 +11,14 @@ pub const MAIN: &str = "refs/remotes/origin/main";
 pub const SPEC_CHANGE: &str = "spec-change";
 const LEDGER: &str = "harness/ledger";
 /// A path that ends in `/` covers everything under it.
-const PROTECTED: [&str; 4] = ["SPEC.md", "xtask/", "harness/", ".github/"];
+const PROTECTED: [&str; 6] = [
+    "SPEC.md",
+    "AGENTS.md",
+    "HARNESS.md",
+    "xtask/",
+    "harness/",
+    ".github/",
+];
 const NOT_PROTECTED: [&str; 2] = ["harness/ledger/", "harness/journey/"];
 
 /// The commit where this branch left `origin/main`, or `None` if there is no

@@ -337,6 +337,8 @@ fn an_unrelated_history_is_a_problem() {
 fn each_protected_path_needs_the_label() {
     for (index, path) in [
         "SPEC.md",
+        "AGENTS.md",
+        "HARNESS.md",
         "harness/waived.txt",
         "harness/journey.toml",
         "harness/budgets.toml",
@@ -367,6 +369,8 @@ fn the_ledger_and_journey_scripts_need_no_label() {
         "harnessed.txt",
         "docs/xtask/notes.txt",
         "SPEC.md.orig",
+        "README.md",
+        "docs/AGENTS.md",
     ]
     .iter()
     .enumerate()

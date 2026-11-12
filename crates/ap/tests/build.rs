@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -127,6 +127,20 @@ impl Scratch {
             Err(_) => Vec::new(),
         }
     }
+}
+
+/// Binds a Unix socket at `path`, however long the checkout's path is.
+///
+/// A socket address holds about 104 bytes, fewer than a deep checkout's
+/// target directory needs, so this binds through a short link in `/tmp` to the
+/// socket's directory, and removes the link afterwards.
+fn bind(path: &Path) -> UnixListener {
+    let link = PathBuf::from(format!("/tmp/ap-build-{}", std::process::id()));
+    let _ = fs::remove_file(&link);
+    symlink(path.parent().unwrap(), &link).unwrap();
+    let socket = UnixListener::bind(link.join(path.file_name().unwrap()));
+    fs::remove_file(&link).unwrap();
+    socket.unwrap()
 }
 
 fn stdout(output: &Output) -> String {
@@ -637,7 +651,7 @@ fn strict_turns_a_warning_into_an_error() {
     let scratch = Scratch::new("strict");
     let dir = scratch.project("notes", "AGENT claude\nADD ./data\n");
     fs::create_dir(dir.join("data")).unwrap();
-    let _socket = UnixListener::bind(dir.join("data/socket")).unwrap();
+    let _socket = bind(&dir.join("data/socket"));
 
     let output = scratch.ap(&dir, &["build", "--strict"]);
     assert_eq!(output.status.code(), Some(1));

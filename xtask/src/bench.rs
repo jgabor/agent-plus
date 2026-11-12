@@ -20,12 +20,21 @@ const BOOT_TIMEOUT_SECONDS: &str = "30";
 /// boot that fails exits with 124 or 125.
 const USAGE_STATUS: i32 = 2;
 const FIELDS: &[&str] = &["key", "name", "target", "band_pct", "band_abs"];
+/// The harness that the no-op build's lockfile pins, and its SHA-256. Any
+/// fixed bytes will do, since `ap build` only stores them.
+const NOOP_HARNESS: &str = "fake harness\n";
+const NOOP_HARNESS_SHA256: &str =
+    "1a00fe01e85b2882b602d46ed2ad4531bf806b3ba5b2a5a194219587c398606c";
 /// The fixed directory that `noop_build_ms` rebuilds: the Agentfile of
-/// journey step 5, with its files.
+/// journey step 5, with its files, and a lockfile that pins `NOOP_HARNESS`.
 const NOOP_FILES: &[(&str, &str)] = &[
     (
         "agent/Agentfile",
         "AGENT claude\nOS minimal\nSYSTEM ./system.md\nPROMPT Review the notes.\nMODEL opus\nADD ./data\nADD ./src /work\nSHARE ./out\n",
+    ),
+    (
+        "agent/Agentfile.lock",
+        "HARNESS claude 0.0.0 1a00fe01e85b2882b602d46ed2ad4531bf806b3ba5b2a5a194219587c398606c\n",
     ),
     ("agent/system.md", "Be careful.\n"),
     ("agent/data", "one\n"),
@@ -482,7 +491,8 @@ fn no_boot(binary: &Path) -> Problem {
 /// The medians of rebuilding the fixed directory with nothing changed, for
 /// both builds, or for the candidate alone when the base has no `ap build`.
 /// Each build has a `HOME` of its own, so neither reads the other's store,
-/// and builds the directory once to warm up, so every timed run is a rebuild.
+/// and its download cache holds the harness the lockfile pins. Each builds
+/// the directory once to warm up, so every timed run is a rebuild.
 fn noop_builds(
     base: &Path,
     candidate: &Path,
@@ -503,7 +513,9 @@ fn noop_builds(
         directory.join("home/candidate"),
     ];
     for home in &homes {
-        fs::create_dir_all(home).map_err(problem)?;
+        let cache = home.join(".cache/ap");
+        fs::create_dir_all(&cache).map_err(problem)?;
+        fs::write(cache.join(NOOP_HARNESS_SHA256), NOOP_HARNESS).map_err(problem)?;
     }
     let home_of = |binary: &Path| if binary == base { &homes[0] } else { &homes[1] };
     let timed = |binary: &Path| {
@@ -630,7 +642,35 @@ fn over_band(base: f64, candidate: f64, band: Band) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, median, over_band};
+    use super::{Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, median, over_band};
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[test]
+    fn the_noop_lockfile_pins_the_harness_by_its_digest() {
+        let mut sha256sum = Command::new("sha256sum")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sha256sum runs");
+        sha256sum
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(NOOP_HARNESS.as_bytes())
+            .unwrap();
+        let output = sha256sum.wait_with_output().unwrap();
+        let digest = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(digest.split(' ').next(), Some(NOOP_HARNESS_SHA256));
+        let lock = NOOP_FILES
+            .iter()
+            .find(|(path, _)| *path == "agent/Agentfile.lock")
+            .map(|(_, content)| *content);
+        assert_eq!(
+            lock,
+            Some(format!("HARNESS claude 0.0.0 {NOOP_HARNESS_SHA256}\n").as_str())
+        );
+    }
 
     #[test]
     fn the_median_is_the_middle_value() {

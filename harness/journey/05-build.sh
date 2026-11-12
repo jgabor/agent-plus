@@ -17,13 +17,24 @@ EOF
 echo "Be careful." >notes/system.md
 echo "one" >notes/data
 echo "fn main() {}" >notes/src/main.rs
+# The lockfile pins the fake harness, which the download cache holds, as in
+# step 7.
+fake=$(command -v fake-harness)
+if command -v sha256sum >/dev/null; then
+  digest=$(sha256sum "$fake" | cut -d ' ' -f 1)
+else
+  digest=$(shasum -a 256 "$fake" | cut -d ' ' -f 1)
+fi
+mkdir -p "$HOME/.cache/ap"
+cp "$fake" "$HOME/.cache/ap/$digest"
+echo "HARNESS claude 0.0.0 $digest" >notes/Agentfile.lock
 # The approval of these grants is step 6's.
 printf 'NETWORK +\nPOLICY +\n' >grants
 
 ap build --approve=grants notes >first
-if ! grep -qx 'fetched OS minimal' first || [ "$(grep -c '^built ' first)" -ne 3 ] ||
+if ! grep -qx 'fetched OS minimal' first || [ "$(grep -c '^built ' first)" -ne 4 ] ||
   ! grep -qx 'agent notes' first; then
-  echo "the first build didn't fetch the OS and build three layers:" >&2
+  echo "the first build didn't fetch the OS and build four layers:" >&2
   cat first >&2
   exit 1
 fi
@@ -44,7 +55,7 @@ snapshot() {
 
 snapshot >before
 ap build --approve=grants notes >second
-if [ "$(grep -c '^hit ' second)" -ne 4 ] || grep -q '^built \|^fetched ' second; then
+if [ "$(grep -c '^hit ' second)" -ne 5 ] || grep -q '^built \|^fetched ' second; then
   echo "a rebuild with nothing changed wasn't a hit for every layer:" >&2
   cat second >&2
   exit 1

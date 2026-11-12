@@ -15,6 +15,17 @@ ADD ../shared/data /shared
 NETWORK -
 NETWORK +github.com
 EOF2
+# The lockfile pins the fake harness, which the download cache holds, as in
+# step 7.
+fake=$(command -v fake-harness)
+if command -v sha256sum >/dev/null; then
+  digest=$(sha256sum "$fake" | cut -d ' ' -f 1)
+else
+  digest=$(shasum -a 256 "$fake" | cut -d ' ' -f 1)
+fi
+mkdir -p "$HOME/.cache/ap"
+cp "$fake" "$HOME/.cache/ap/$digest"
+echo "HARNESS claude 0.0.0 $digest" >notes/Agentfile.lock
 
 # Fails unless `ap build` with these arguments fails, with no terminal.
 build_fails() {

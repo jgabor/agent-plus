@@ -10,6 +10,7 @@ vmm = { path = "../vmm" }
 guest = { path = "../guest" }
 
 [dev-dependencies]
+agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 erofs = { path = "../erofs" }
 store = { path = "../store" }

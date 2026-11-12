@@ -2,6 +2,7 @@
 
 use ap::boot::{self, Guest, Layer, Report};
 use erofs::{Dir, File, Node};
+use guest::protocol::ToGuest;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -70,7 +71,9 @@ fn boot_with(init: &[u8], kernel: &[u8], layers: Vec<Layer>) -> BTreeMap<String,
         init,
         files: &[],
         layers,
-        command: Some(&PROBE.iter().map(|arg| arg.to_vec()).collect::<Vec<_>>()),
+        request: Some(ToGuest::Run {
+            argv: PROBE.iter().map(|arg| arg.to_vec()).collect(),
+        }),
         timeout: TIMEOUT,
         confine: false,
     };

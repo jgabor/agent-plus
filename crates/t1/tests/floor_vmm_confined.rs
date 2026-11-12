@@ -195,7 +195,7 @@ fn confined_owner_process() {
         init: &init,
         files: &[],
         layers: Vec::new(),
-        command: None,
+        request: None,
         timeout: TIMEOUT,
         confine: env::var(CONFINE_VARIABLE).unwrap() == "on",
     };

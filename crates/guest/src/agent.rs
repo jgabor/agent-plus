@@ -4,14 +4,27 @@
 //! a program runs, it reaps every child of the process, so orphans don't stay
 //! zombies. A process runs one `serve` at a time, and nothing else in it may
 //! wait for a child meanwhile.
+//!
+//! A [`Start`] runs the harness as the user `agent`, whom [`add_account`]
+//! adds to the guest's root first, with the environment and directory the
+//! host gives it. Its prompt is its last argument: the host's, or else the
+//! one the agent was built with.
+//!
+//! The init doesn't change user itself. std spawns a program that changes
+//! user through a Unix socket, and the guest kernel has none. So the init
+//! starts its own program as [`AS_AGENT`], which becomes `agent` in
+//! [`exec_as_agent`] and then execs the harness.
 
 use crate::linux::{bytes_waiting, program_has_ended, reap_until};
-use crate::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
-use std::ffi::OsStr;
+use crate::protocol::{MAX_OUTPUT, ProtocolError, Start, ToGuest, ToHost};
+use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::fs::{MetadataExt, chown};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
@@ -19,6 +32,19 @@ use std::thread;
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
 const SIGNALED: u8 = 128;
+
+/// The agent's home directory.
+pub const HOME: &str = "/home/agent";
+/// The agent's user and group id. They are fixed, so no layer chooses them.
+const ID: u32 = 1000;
+const PASSWD: &str = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
+const GROUP: &str = "agent:x:1000:";
+/// Where the build puts the agent's prompt.
+const PROMPT: &str = "/etc/ap/prompt";
+/// The name the init's own program runs under to start the harness.
+pub const AS_AGENT: &str = "ap-as-agent";
+/// The init's own program, which exec can reach after the root moves.
+const SELF: &str = "/proc/self/exe";
 
 /// Output waiting to be sent. The bound stops a program from filling the
 /// guest's memory faster than the host reads.
@@ -29,10 +55,124 @@ const QUEUE: usize = 4;
 /// A refused frame ends the service. The caller powers off, and a program
 /// still running goes with the machine.
 pub fn serve(channel: &mut (impl Read + Write)) -> Result<(), ProtocolError> {
-    while let Some(ToGuest::Run { argv }) = ToGuest::read(channel)? {
-        run(&argv, channel)?;
+    while let Some(request) = ToGuest::read(channel)? {
+        match request {
+            ToGuest::Run { argv } => {
+                let (program, args) = argv.split_first().ok_or(ProtocolError::Malformed)?;
+                let mut command = Command::new(OsStr::from_bytes(program));
+                command.args(args.iter().map(|arg| OsStr::from_bytes(arg)));
+                run(command, channel, |error| {
+                    ToHost::Exited(status_of_failure(error))
+                })?;
+            }
+            ToGuest::Start(start) => match harness(&start) {
+                Ok(command) => run(command, channel, |error| {
+                    ToHost::Failed(format!("can't start the harness: {error}").into_bytes())
+                })?,
+                Err(reason) => ToHost::Failed(reason.into_bytes()).write(channel)?,
+            },
+        }
     }
     Ok(())
+}
+
+/// The harness's command, as `agent`, or why it can't start.
+fn harness(start: &Start) -> Result<Command, String> {
+    add_account(Path::new("/")).map_err(|error| format!("can't add the user agent: {error}"))?;
+    let directory = OsStr::from_bytes(&start.directory);
+    if !fs::metadata(directory).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(format!(
+            "the working directory {} isn't a directory",
+            directory.to_string_lossy()
+        ));
+    }
+    let prompt = match &start.prompt {
+        Some(prompt) => prompt.clone(),
+        None => match fs::read(PROMPT) {
+            Ok(prompt) => prompt,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(format!("can't read the prompt: {error}")),
+        },
+    };
+    if prompt.is_empty() {
+        return Err("the agent has no prompt, and interactive runs are not built yet".to_owned());
+    }
+    let program = OsStr::from_bytes(start.argv.first().ok_or("the harness has no program")?);
+    match fs::metadata(program) {
+        Ok(metadata) if metadata.is_file() && metadata.mode() & 0o111 != 0 => {}
+        _ => {
+            return Err(format!(
+                "the harness {} isn't an executable file",
+                program.to_string_lossy()
+            ));
+        }
+    }
+    let mut command = Command::new(SELF);
+    command
+        .arg0(AS_AGENT)
+        .args(start.argv.iter().map(|arg| OsStr::from_bytes(arg)))
+        .arg(OsStr::from_bytes(&prompt))
+        .env_clear()
+        .envs(
+            (start.env.iter())
+                .map(|(key, value)| (OsStr::from_bytes(key), OsStr::from_bytes(value))),
+        )
+        .current_dir(directory);
+    Ok(command)
+}
+
+/// Becomes `agent`, with no other groups, and execs `argv`. Returns only if
+/// that fails.
+pub fn exec_as_agent(argv: &[OsString]) -> io::Error {
+    let Some((program, args)) = argv.split_first() else {
+        return io::Error::new(io::ErrorKind::InvalidInput, "no program to run");
+    };
+    // As root, std drops every supplementary group before it changes user.
+    Command::new(program).args(args).uid(ID).gid(ID).exec()
+}
+
+/// Adds the user `agent` to the root at `root`, unless it has one, and gives
+/// it its home directory. Only the directory itself changes owner, because
+/// changing a file in a layer copies it to the writable layer.
+pub fn add_account(root: &Path) -> io::Result<()> {
+    let etc = root.join("etc");
+    fs::create_dir_all(&etc)?;
+    for (file, line) in [("passwd", PASSWD), ("group", GROUP)] {
+        let path = etc.join(file);
+        let text = match fs::read(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        if let Some(text) = with_agent(&text, line) {
+            fs::write(&path, text)?;
+        }
+    }
+    let home = root.join(HOME.trim_start_matches('/'));
+    fs::create_dir_all(&home)?;
+    // A symlink here would hand its target to the agent.
+    if !fs::symlink_metadata(&home)?.is_dir() {
+        return Err(io::Error::other(format!("{HOME} isn't a directory")));
+    }
+    chown(&home, Some(ID), Some(ID))
+}
+
+/// `passwd` or `group` with `line` added, or `None` if it already names
+/// `agent`.
+pub fn with_agent(text: &[u8], line: &str) -> Option<Vec<u8>> {
+    if text
+        .split(|byte| *byte == b'\n')
+        .any(|entry| entry.starts_with(b"agent:"))
+    {
+        return None;
+    }
+    let mut text = text.to_vec();
+    if !text.is_empty() && !text.ends_with(b"\n") {
+        text.push(b'\n');
+    }
+    text.extend_from_slice(line.as_bytes());
+    text.push(b'\n');
+    Some(text)
 }
 
 enum Update {
@@ -40,19 +180,23 @@ enum Update {
     Ended(io::Result<ExitStatus>),
 }
 
-fn run(argv: &[Vec<u8>], channel: &mut impl Write) -> Result<(), ProtocolError> {
-    let (program, args) = argv.split_first().ok_or(ProtocolError::Malformed)?;
+/// Runs `command`, and streams back its output and status. If it can't be
+/// spawned, `refused` says what to report instead.
+fn run(
+    mut command: Command,
+    channel: &mut impl Write,
+    refused: fn(&io::Error) -> ToHost,
+) -> Result<(), ProtocolError> {
     // Both ends close on exec, so the program can't hold this open.
     let (ended, ended_writer) = io::pipe()?;
-    let spawned = Command::new(OsStr::from_bytes(program))
-        .args(args.iter().map(|arg| OsStr::from_bytes(arg)))
+    let spawned = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let mut child = match spawned {
         Ok(child) => child,
-        Err(error) => return ToHost::Exited(status_of_failure(&error)).write(channel),
+        Err(error) => return refused(&error).write(channel),
     };
 
     let (updates, received) = sync_channel(QUEUE);
@@ -194,6 +338,26 @@ mod tests {
         fn as_fd(&self) -> BorrowedFd<'_> {
             self.0.as_fd()
         }
+    }
+
+    #[test]
+    fn the_agent_is_added_once_after_every_other_entry() {
+        let line = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
+        assert_eq!(
+            with_agent(b"", line).unwrap(),
+            format!("{line}\n").as_bytes()
+        );
+        assert_eq!(
+            with_agent(b"root:x:0:0:root:/root:/bin/sh", line).unwrap(),
+            format!("root:x:0:0:root:/root:/bin/sh\n{line}\n").as_bytes()
+        );
+        assert_eq!(
+            with_agent(b"root:x:0:\n", "agent:x:1000:").unwrap(),
+            b"root:x:0:\nagent:x:1000:\n"
+        );
+        assert_eq!(with_agent(b"root:x:0:\nagent:x:7:\n", line), None);
+        // Another user whose name starts with `agent` is someone else.
+        assert!(with_agent(b"agents:x:7:\n", line).is_some());
     }
 
     #[test]

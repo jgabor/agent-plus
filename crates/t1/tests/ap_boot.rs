@@ -2,6 +2,7 @@
 //! `ap` itself as the init.
 
 use ap::boot::{self, Error, Guest, Report};
+use guest::protocol::ToGuest;
 use std::fs;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -22,7 +23,7 @@ fn boot_silent_init(timeout: Duration) -> (Result<Option<u8>, Error>, u32) {
         init: &init,
         files: &[],
         layers: Vec::new(),
-        command: None,
+        request: None,
         timeout,
         confine: false,
     };
@@ -54,13 +55,14 @@ fn a_guest_past_its_timeout_is_stopped_and_reported() {
 #[test]
 fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
     let init = fs::read(guest_binary::build("output-init")).unwrap();
-    let command = [b"anything".to_vec()];
     let guest = Guest {
         kernel: kernel_image(),
         init: &init,
         files: &[],
         layers: Vec::new(),
-        command: Some(&command),
+        request: Some(ToGuest::Run {
+            argv: vec![b"anything".to_vec()],
+        }),
         timeout: Duration::from_secs(30),
         confine: false,
     };

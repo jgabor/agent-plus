@@ -1,6 +1,6 @@
 //! The `ap` command.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::process::ExitCode;
 use std::time::Duration;
@@ -14,6 +14,7 @@ mod commands {
     pub mod inspect;
     pub mod ls;
     pub mod rm;
+    pub mod run;
 }
 
 const USAGE: &str = "usage: ap --version
@@ -23,6 +24,7 @@ const USAGE: &str = "usage: ap --version
        ap ls
        ap inspect [--grants] agent
        ap rm agent
+       ap run [-p prompt] agent
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -36,6 +38,12 @@ fn main() -> ExitCode {
     }
 
     let args: Vec<_> = args.collect();
+    if program.as_deref() == Some(OsStr::new(guest::agent::AS_AGENT)) {
+        // The guest's init started this to become `agent` and exec the harness.
+        let error = guest::agent::exec_as_agent(&args);
+        eprintln!("ap: can't start the harness: {error}");
+        return ExitCode::from(126);
+    }
     if args.len() == 1 && args[0] == "--version" {
         println!("ap {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
@@ -69,6 +77,11 @@ fn main() -> ExitCode {
         && let Some(name) = commands::rm::parse(&args[1..])
     {
         return ExitCode::from(commands::rm::run(&name));
+    }
+    if args.first().is_some_and(|command| command == "run")
+        && let Some(run) = commands::run::parse(&args[1..])
+    {
+        return ExitCode::from(commands::run::run(&run));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

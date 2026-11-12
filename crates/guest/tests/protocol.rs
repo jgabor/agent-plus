@@ -1,12 +1,14 @@
 //! The frames, and what the guest and the host refuse to read.
 
-use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
+use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, Start, ToGuest, ToHost};
 use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;
 const EXITED: u8 = 4;
 const READY: u8 = 5;
+const START: u8 = 6;
+const FAILED: u8 = 7;
 
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
@@ -28,9 +30,29 @@ fn run(argv: &[&[u8]]) -> ToGuest {
     }
 }
 
+fn start(prompt: Option<&[u8]>) -> ToGuest {
+    ToGuest::Start(Start {
+        argv: vec![b"/usr/local/bin/claude".to_vec(), b"-p".to_vec()],
+        env: vec![
+            (b"HOME".to_vec(), b"/home/agent".to_vec()),
+            (b"EMPTY".to_vec(), Vec::new()),
+            (b"EQUALS".to_vec(), b"a=b".to_vec()),
+        ],
+        directory: b"/home/agent".to_vec(),
+        prompt: prompt.map(<[u8]>::to_vec),
+    })
+}
+
 #[test]
 fn every_message_survives_the_wire() {
-    for message in [run(&[b"sh"]), run(&[b"sh", b"", b"\xff a"]), run(&[b""])] {
+    for message in [
+        run(&[b"sh"]),
+        run(&[b"sh", b"", b"\xff a"]),
+        run(&[b""]),
+        start(None),
+        start(Some(b"Say what you can see.")),
+        start(Some(b"")),
+    ] {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
         assert_eq!(to_guest(wire).unwrap(), Some(message));
@@ -41,6 +63,7 @@ fn every_message_survives_the_wire() {
         ToHost::Stdout(Vec::new()),
         ToHost::Exited(0),
         ToHost::Exited(255),
+        ToHost::Failed(b"no prompt".to_vec()),
     ] {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
@@ -57,6 +80,108 @@ fn the_format_is_a_little_endian_length_a_tag_and_a_payload() {
     let mut wire = Vec::new();
     ToHost::Exited(7).write(&mut wire).unwrap();
     assert_eq!(wire, [2, 0, 0, 0, EXITED, 7]);
+}
+
+#[test]
+fn a_start_counts_its_arguments_and_variables_and_ends_each_string_with_a_nul() {
+    let mut wire = Vec::new();
+    ToGuest::Start(Start {
+        argv: vec![b"h".to_vec()],
+        env: vec![(b"K".to_vec(), b"v".to_vec())],
+        directory: b"/d".to_vec(),
+        prompt: Some(b"p".to_vec()),
+    })
+    .write(&mut wire)
+    .unwrap();
+    let body = [
+        &[START][..],
+        &1u32.to_le_bytes(),
+        &1u32.to_le_bytes(),
+        b"h\0K=v\0/d\0p\0",
+    ]
+    .concat();
+    assert_eq!(wire, frame(&body));
+}
+
+#[test]
+fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
+    let base = Start {
+        argv: vec![b"h".to_vec()],
+        env: Vec::new(),
+        directory: b"/".to_vec(),
+        prompt: None,
+    };
+    let refused = [
+        Start {
+            argv: Vec::new(),
+            ..base.clone()
+        },
+        Start {
+            argv: vec![b"h\0".to_vec()],
+            ..base.clone()
+        },
+        Start {
+            env: vec![(Vec::new(), b"v".to_vec())],
+            ..base.clone()
+        },
+        Start {
+            env: vec![(b"K=".to_vec(), b"v".to_vec())],
+            ..base.clone()
+        },
+        Start {
+            env: vec![(b"K".to_vec(), b"v\0".to_vec())],
+            ..base.clone()
+        },
+        Start {
+            directory: b"/\0".to_vec(),
+            ..base.clone()
+        },
+        Start {
+            prompt: Some(b"p\0".to_vec()),
+            ..base
+        },
+    ];
+    for start in refused {
+        let message = ToGuest::Start(start);
+        assert!(
+            matches!(
+                message.write(&mut Vec::new()),
+                Err(ProtocolError::Malformed)
+            ),
+            "{message:?}"
+        );
+    }
+}
+
+#[test]
+fn a_start_whose_counts_dont_match_its_strings_is_refused() {
+    let body = |argc: u32, envc: u32, strings: &[u8]| {
+        [
+            &[START][..],
+            &argc.to_le_bytes(),
+            &envc.to_le_bytes(),
+            strings,
+        ]
+        .concat()
+    };
+    let bad: [Vec<u8>; 9] = [
+        vec![START],
+        vec![START, 1, 0, 0, 0],
+        body(1, 0, b""),
+        body(1, 0, b"h\0"),
+        body(0, 0, b"/d\0"),
+        body(1, 1, b"h\0/d\0"),
+        body(1, 1, b"h\0=v\0/d\0"),
+        body(1, 0, b"h\0/d\0p\0extra\0"),
+        body(u32::MAX, u32::MAX, b"h\0/d\0"),
+    ];
+    for body in bad {
+        assert!(
+            matches!(to_guest(frame(&body)), Err(ProtocolError::Malformed)),
+            "{body:?}"
+        );
+    }
+    assert!(to_guest(frame(&body(1, 0, b"h\0/d"))).is_err());
 }
 
 #[test]
@@ -80,6 +205,12 @@ fn no_message_to_the_host_can_ask_it_to_run_anything() {
         to_host(frame(&[RUN, b's', b'h', 0])),
         Err(ProtocolError::UnknownTag(RUN))
     ));
+    let mut wire = Vec::new();
+    start(None).write(&mut wire).unwrap();
+    assert!(matches!(
+        to_host(wire),
+        Err(ProtocolError::UnknownTag(START))
+    ));
 }
 
 #[test]
@@ -93,13 +224,13 @@ fn the_guest_refuses_what_only_the_host_reads() {
 #[test]
 fn every_unknown_tag_is_refused() {
     for tag in 0..=u8::MAX {
-        if tag != RUN {
+        if tag != RUN && tag != START {
             assert!(matches!(
                 to_guest(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag
             ));
         }
-        if !(STDOUT..=READY).contains(&tag) {
+        if !(STDOUT..=READY).contains(&tag) && tag != FAILED {
             assert!(matches!(
                 to_host(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag

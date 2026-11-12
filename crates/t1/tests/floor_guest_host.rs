@@ -17,7 +17,7 @@
 
 use ap::boot::{self, Guest, Report};
 use ap::filter::Filter;
-use guest::protocol::{MAX_BODY, MAX_OUTPUT, ToHost};
+use guest::protocol::{MAX_BODY, MAX_OUTPUT, ToGuest, ToHost};
 use std::env;
 use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
@@ -1094,13 +1094,14 @@ fn vm_owner_process() {
         }
     }
     let wants_command = !fs::read(directory.join("command")).unwrap().is_empty();
-    let command = [b"anything".to_vec()];
     let guest = Guest {
         kernel: &kernel,
         init: &init,
         files: &files,
         layers: Vec::new(),
-        command: wants_command.then_some(command.as_slice()),
+        request: wants_command.then(|| ToGuest::Run {
+            argv: vec![b"anything".to_vec()],
+        }),
         timeout: if directory.join("short-timeout").exists() {
             SHORT_TIMEOUT
         } else {

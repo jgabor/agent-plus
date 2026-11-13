@@ -1,5 +1,6 @@
-//! The Claude Code adapter, against the golden files in `golden/claude/`: the
-//! files it renders, and the arguments it starts the harness with.
+//! The Claude Code and Codex adapters, against the golden files in
+//! `golden/claude/` and `golden/codex/`: the files each renders, and the
+//! arguments it starts the harness with.
 //!
 //! `AP_BLESS=1 cargo test --test adapter` writes the golden files from the
 //! adapter, for a change that means to change them. Read the diff before you
@@ -9,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use agentfile::{Effort, Mode};
-use ap::adapter::claude;
+use ap::adapter::{claude, codex};
 
 const EFFORTS: [Effort; 5] = [
     Effort::Low,
@@ -28,10 +29,24 @@ const VERSIONS: [&str; 11] = [
     "2.1.111", "2.1.323",
 ];
 
-/// Fails unless `actual` is what the golden file `name` holds.
+/// The current version, and the versions on either side of each change in
+/// what Codex accepts.
+const CODEX_VERSIONS: [&str; 12] = [
+    "0.2.0", "0.58.0", "0.59.0", "0.123.0", "0.124.0", "0.137.0", "0.138.0", "0.146.1", "0.147.0",
+    "0.155.1", "0.156.0", "0.169.0",
+];
+
+/// Fails unless `actual` is what the Claude Code golden file `name` holds.
 fn golden(name: &str, actual: &[u8]) {
+    golden_in("claude", name, actual);
+}
+
+/// Fails unless `actual` is what the golden file `name` in `golden/<dir>/`
+/// holds.
+fn golden_in(dir: &str, name: &str, actual: &[u8]) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/golden/claude")
+        .join("tests/golden")
+        .join(dir)
         .join(name);
     if std::env::var_os("AP_BLESS").is_some() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -200,4 +215,141 @@ fn an_agentfile_without_mode_starts_in_auto() {
     let settings = agentfile::Settings::read(&instructions).unwrap();
     let arguments = claude::arguments("2.1.323", None, None, settings.mode);
     assert_eq!(arguments, ["--permission-mode", "auto"]);
+}
+
+/// The file the Codex adapter renders at `path`, for these values.
+fn codex_file(system: &[&str], path: &str) -> Option<Vec<u8>> {
+    let system: Vec<Vec<u8>> = system
+        .iter()
+        .map(|value| value.as_bytes().to_vec())
+        .collect();
+    codex::files(&system)
+        .into_iter()
+        .find(|(at, _)| *at == path)
+        .map(|(_, content)| content)
+}
+
+// spec(SYSTEM): `SYSTEM` sets the harness's global instructions, the equivalent of a global `AGENTS.md`.
+// spec(SYSTEM): | `codex` | `~/.codex/AGENTS.md` |
+// spec(SYSTEM): The values concatenate in file order, separated by a blank line.
+#[test]
+fn system_goes_to_codex_agents_md() {
+    assert_eq!(codex::INSTRUCTIONS, "/home/agent/.codex/AGENTS.md");
+    let values = ["Be careful.", "Never push to main.\n\n", "Ask first.\n"];
+    let rendered = codex_file(&values, codex::INSTRUCTIONS).expect("no AGENTS.md");
+    golden_in("codex", "AGENTS.md", &rendered);
+    assert_eq!(codex_file(&[], codex::INSTRUCTIONS), None);
+}
+
+// spec(Run): **Updates.** Harness self-updates are disabled.
+// spec(AGENT): which first-run state it prepares, so a new VM doesn't repeat the harness's setup
+#[test]
+fn the_codex_configuration_turns_updates_off_and_holds_first_run_state() {
+    assert_eq!(codex::CONFIGURATION, "/home/agent/.codex/config.toml");
+    for system in [&[][..], &["Be careful."][..]] {
+        let configuration = codex_file(system, codex::CONFIGURATION).expect("no config.toml");
+        golden_in("codex", "config.toml", &configuration);
+    }
+    let text = String::from_utf8(codex_file(&[], codex::CONFIGURATION).unwrap()).unwrap();
+    assert!(
+        text.contains("check_for_update_on_startup = false"),
+        "{text}"
+    );
+    assert!(
+        text.contains("screen_reader_detection_done = true"),
+        "{text}"
+    );
+}
+
+// spec(MODEL): `<model>` is passed to the harness unchanged, so it accepts whatever names or aliases the harness accepts.
+// spec(MODEL): Without `MODEL`, the harness uses its default model.
+// spec(EFFORT): Without `EFFORT`, the harness uses its default effort.
+#[test]
+fn the_codex_model_passes_unchanged() {
+    let mut lines = String::new();
+    for model in [
+        None,
+        Some("gpt-5.5-codex"),
+        Some("o3"),
+        Some("-weird name"),
+        Some("model=\"quoted\""),
+    ] {
+        let arguments = codex::arguments("0.169.0", model, None, Mode::Edit, false);
+        lines.push_str(&format!("{model:?}: {arguments:?}\n"));
+    }
+    golden_in("codex", "model.txt", lines.as_bytes());
+}
+
+// spec(EFFORT): The adapter maps the level to the harness's own setting.
+// spec(EFFORT): The adapter knows which levels each harness version accepts.
+// spec(EFFORT): A level the harness doesn't accept is a build warning, and the adapter uses the nearest lower level, or the harness's lowest level if none is lower.
+#[test]
+fn each_codex_effort_maps_to_a_level_the_version_accepts() {
+    let mut lines = String::new();
+    for version in CODEX_VERSIONS {
+        for effort in EFFORTS {
+            let (level, warning) = codex::effort(version, effort);
+            let arguments = codex::arguments(version, None, Some(effort), Mode::Full, false);
+            lines.push_str(&format!(
+                "{version} {}: {level:?} {arguments:?}{}\n",
+                effort_name(effort),
+                warning.map_or(String::new(), |warning| format!(", warning: {warning}"))
+            ));
+        }
+    }
+    golden_in("codex", "effort.txt", lines.as_bytes());
+}
+
+// spec(MODE): | `read` | reads and explores, and doesn't edit. In an interactive Claude Code run, approving its plan lets it start editing | `plan` | `read-only` sandbox, approval `never` |
+// spec(MODE): | `ask` | reads, and asks before anything else | `default` | `read-only` sandbox, approval `on-request` |
+// spec(MODE): | `edit` | also edits files in its workspace. Claude Code asks before commands other than common file operations. Codex runs commands inside its sandbox and asks before leaving it | `acceptEdits` | `workspace-write` sandbox, approval `on-request` |
+// spec(MODE): | `auto` | runs without routine prompts. The harness's own reviewer checks actions beyond reads and workspace edits (Claude Code) or beyond the sandbox (Codex) | `auto` | `workspace-write` sandbox, approval `on-request`, reviewer `auto_review` |
+// spec(MODE): | `full` | skips permission prompts and the harness's checks, except the few actions the harness never auto-approves. The VM is the boundary | `bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+// spec(MODE): The adapter sets the mode on the harness's command line, with flags or Codex's `-c` overrides, every time it starts the harness, including on `--resume`, so a project's settings or an earlier session can't pick a different one.
+// spec(MODE): With `auto`, the adapter turns it on (`sandbox_workspace_write.network_access`), because `NETWORK` already decides what the agent can reach.
+// spec(MODE): With `edit`, it stays off, so Codex asks before commands that need the network.
+// spec(MODE): In a headless Codex run, `MODE auto` uses `codex exec --approve-for-me`, which selects the same sandbox, approval policy, and reviewer.
+#[test]
+fn each_codex_mode_is_set_on_the_command_line() {
+    let mut lines = String::new();
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                let arguments = codex::arguments(
+                    version,
+                    Some("gpt-5.5-codex"),
+                    Some(Effort::High),
+                    mode,
+                    interactive,
+                );
+                let run = if interactive {
+                    "interactive"
+                } else {
+                    "headless"
+                };
+                lines.push_str(&format!(
+                    "{version} {run} {}: {arguments:?}\n",
+                    mode_name(mode)
+                ));
+            }
+        }
+    }
+    golden_in("codex", "mode.txt", lines.as_bytes());
+}
+
+// spec(MODE): The default is `auto`.
+#[test]
+fn a_codex_agentfile_without_mode_starts_in_auto() {
+    let instructions = agentfile::parse("AGENT codex\nOS minimal\n").unwrap();
+    let settings = agentfile::Settings::read(&instructions).unwrap();
+    let arguments = codex::arguments("0.169.0", None, None, settings.mode, false);
+    assert_eq!(
+        arguments,
+        [
+            "exec",
+            "--approve-for-me",
+            "-c",
+            "sandbox_workspace_write.network_access=true"
+        ]
+    );
 }

@@ -23,7 +23,7 @@
 
 use agentfile::{Effort, Mode};
 
-use super::version;
+use super::{effort_name as name, version};
 
 /// Where `SYSTEM` goes.
 pub const INSTRUCTIONS: &str = "/home/agent/.claude/CLAUDE.md";
@@ -142,15 +142,4 @@ pub fn arguments(
     };
     arguments.extend(["--permission-mode".to_owned(), mode.to_owned()]);
     arguments
-}
-
-/// The level as `EFFORT` and `--effort` write it.
-fn name(effort: Effort) -> &'static str {
-    match effort {
-        Effort::Low => "low",
-        Effort::Medium => "medium",
-        Effort::High => "high",
-        Effort::Xhigh => "xhigh",
-        Effort::Max => "max",
-    }
 }

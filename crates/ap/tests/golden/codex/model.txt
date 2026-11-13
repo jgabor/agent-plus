@@ -1,0 +1,5 @@
+None: ["exec", "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\"", "-c", "sandbox_workspace_write.network_access=false"]
+Some("gpt-5.5-codex"): ["exec", "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\"", "-c", "sandbox_workspace_write.network_access=false", "--model", "gpt-5.5-codex"]
+Some("o3"): ["exec", "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\"", "-c", "sandbox_workspace_write.network_access=false", "--model", "o3"]
+Some("-weird name"): ["exec", "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\"", "-c", "sandbox_workspace_write.network_access=false", "--model", "-weird name"]
+Some("model=\"quoted\""): ["exec", "-c", "sandbox_mode=\"workspace-write\"", "-c", "approval_policy=\"on-request\"", "-c", "approvals_reviewer=\"user\"", "-c", "sandbox_workspace_write.network_access=false", "--model", "model=\"quoted\""]

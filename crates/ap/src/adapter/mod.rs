@@ -4,6 +4,7 @@
 //! agent's final layer, and `ap run` starts the harness with its arguments.
 
 pub mod claude;
+pub mod codex;
 
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
@@ -30,4 +31,17 @@ fn version(text: &str) -> Vec<u64> {
     text.split('.')
         .map_while(|part| part.parse().ok())
         .collect()
+}
+
+/// The level as `EFFORT` writes it, which is also how both harnesses write
+/// it.
+fn effort_name(effort: agentfile::Effort) -> &'static str {
+    use agentfile::Effort;
+    match effort {
+        Effort::Low => "low",
+        Effort::Medium => "medium",
+        Effort::High => "high",
+        Effort::Xhigh => "xhigh",
+        Effort::Max => "max",
+    }
 }

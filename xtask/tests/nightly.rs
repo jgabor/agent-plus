@@ -1413,7 +1413,7 @@ fn mutants_run_as_one_contained_job() {
     assert_mutation_ran(&repo, &output, 0, "pass");
     let calls = repo.read_bin("systemd-calls");
     for part in [
-        "--user --scope --quiet --collect --expand-environment=no",
+        flags().as_str(),
         "TimeoutStopSec=30",
         "MemoryMax=8G",
         "MemorySwapMax=0",
@@ -1423,6 +1423,18 @@ fn mutants_run_as_one_contained_job() {
     ] {
         assert!(calls.contains(part), "{part} in {calls}");
     }
+}
+
+/// The flags each job starts with. A job joins its caller's slice where the
+/// caller has one, which this test's caller shares.
+fn flags() -> String {
+    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let inherit = if own.contains("/user@") {
+        " --slice-inherit"
+    } else {
+        ""
+    };
+    format!("--user --scope --quiet --collect --expand-environment=no{inherit} -p ")
 }
 
 /// Finds the runner in the fake's arguments, and runs `cargo test` with it. The
@@ -1486,7 +1498,7 @@ fn each_test_of_mutants_is_a_job_of_its_own() {
         .find(|line| line.contains("/runaway-"))
         .unwrap_or_else(|| panic!("no job ran the test in {calls}"));
     for part in [
-        "--user --scope --quiet --collect --expand-environment=no",
+        flags().as_str(),
         "MemoryMax=8G",
         "MemorySwapMax=0",
         "OOMPolicy=kill",
@@ -1761,6 +1773,60 @@ sleep 30
         !is_alive(escaped[0], escaped[3]),
         "process {} outlived the job's limit",
         escaped[0]
+    );
+}
+
+/// A test binary's job stays in the slice of the job that runs `cargo mutants`,
+/// and stops when that job stops. This job starts one with the runner that
+/// `cargo` would use.
+#[test]
+fn a_test_job_stays_in_the_slice_of_its_outer_job() {
+    let repo = Repo::new("real-slice");
+    fs::remove_file(repo.bin.join("systemd-run")).unwrap();
+    repo.set_mutants(
+        r#"for a in "$@"; do case "$a" in --cargo-arg=*) runner="${a#*runner=[\"}"; runner="${runner%\"]}";; esac; done
+cut -d: -f3 /proc/self/cgroup > "$d/outer"
+"$runner" sh -c 'cut -d: -f3 /proc/self/cgroup > "$1/inner.new"
+echo $$ $(cut -d")" -f2 /proc/$$/stat | cut -d" " -f21) >> "$1/inner.new"
+mv "$1/inner.new" "$1/inner"
+exec sleep 3609' sh "$d" </dev/null >/dev/null 2>&1 &
+while [ ! -e "$d/inner" ]; do sleep 0.1; done
+sleep 30
+"#,
+    );
+    repo.touch(&["ap"]);
+    let slice = format!("xtask-nightly-{}", std::process::id());
+    let output = repo
+        .command("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--slice={slice}"))
+        .args(["--", env!("CARGO_BIN_EXE_xtask"), "nightly"])
+        .env("XTASK_MUTATION_SECONDS", "1")
+        .output()
+        .unwrap();
+    let inner = repo.read_bin("inner");
+    let (cgroup, ids) = inner.split_once('\n').unwrap();
+    let ids: Vec<u64> = ids
+        .split_whitespace()
+        .map(|id| id.parse().unwrap())
+        .collect();
+    let _reap = Reap(ids[0], ids[1]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let outer = repo.read_bin("outer");
+    let parent = |path: &str| path.trim().rsplit_once('/').unwrap().0.to_string();
+    assert!(
+        parent(&outer).ends_with(&format!("/{slice}.slice")),
+        "{outer}"
+    );
+    assert_eq!(parent(cgroup), parent(&outer), "{cgroup}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_alive(ids[0], ids[1]) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !is_alive(ids[0], ids[1]),
+        "process {} outlived its outer job",
+        ids[0]
     );
 }
 

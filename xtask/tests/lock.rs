@@ -192,6 +192,70 @@ fn without_a_user_session_nothing_runs() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// Prints the cgroup of the job, and then of `xtask`, which started it.
+const CGROUPS: &str = "cut -d: -f3 /proc/self/cgroup; cut -d: -f3 /proc/$PPID/cgroup";
+
+/// Limits set on the caller's slice must reach the job, so it can't land in
+/// the user manager's `app.slice` instead.
+#[test]
+fn a_job_stays_in_the_slice_of_its_caller() {
+    let root = workspace("slice");
+    let slice = format!("xtask-lock-{}", std::process::id());
+    let output = Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--slice={slice}"))
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_xtask"))
+        .args(["run", "sh", "-c", CGROUPS])
+        .current_dir(&root)
+        .env_remove(HOLD_ENV)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    let parents: Vec<&str> = stdout
+        .lines()
+        .map(|cgroup| cgroup.rsplit_once('/').unwrap().0)
+        .collect();
+    assert_eq!(parents.len(), 2, "{stdout}");
+    assert!(parents[1].ends_with(&format!("/{slice}.slice")), "{stdout}");
+    assert_eq!(parents[0], parents[1], "{stdout}");
+}
+
+/// A GitHub-hosted runner starts `xtask` from a system service, where
+/// `systemd-run --slice-inherit` finds no slice and refuses to start the job.
+/// A new cgroup namespace hides the slice in the same way, but where this test
+/// already runs in no slice of the user manager it needs none.
+#[test]
+fn a_caller_in_no_slice_of_the_user_manager_still_gets_its_job() {
+    let root = workspace("no-slice");
+    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let mut command = if own.contains("/user@") {
+        let mut command = Command::new("unshare");
+        command
+            .args(["--user", "--map-current-user", "--cgroup", "--"])
+            .arg(env!("CARGO_BIN_EXE_xtask"));
+        command
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+    };
+    let output = command
+        .args(["run", "sh", "-c", "echo ran"])
+        .current_dir(&root)
+        .env_remove(HOLD_ENV)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "ran\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
+
 #[test]
 fn a_program_that_is_not_executable_is_a_problem() {
     let root = workspace("not-executable");

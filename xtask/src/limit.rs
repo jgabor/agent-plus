@@ -7,9 +7,13 @@
 //! its workers in process groups of their own. If there's no scope, nothing
 //! runs.
 //!
+//! A job joins the slice of the process that starts it, so limits set on that
+//! slice reach it too. A caller in no slice of the user manager, such as a
+//! GitHub-hosted runner, gets the user manager's default slice instead.
+//!
 //! A job started inside a job keeps its own limit, and doesn't count against
-//! the enclosing one. Each scope is a new unit under the user manager, so the
-//! two are siblings, and a scope can't hold another unit. Only a slice can, so
+//! the enclosing one. Each scope is a new unit in the same slice, so the two
+//! are siblings, and a scope can't hold another unit. Only a slice can, so
 //! a shared limit would need a slice for every job, set up and cleaned up
 //! apart from `systemd-run`, in a way that holds if `xtask` dies. It would also
 //! change what going over the limit does: the kernel picks from every job in
@@ -25,6 +29,7 @@ use crate::Problem;
 use crate::lock::Hold;
 use std::env;
 use std::ffi::OsStr;
+use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -90,6 +95,11 @@ fn options(limit: Option<u64>, out_of_memory: &str) -> Result<Vec<String>, Probl
         .map(String::from)
         .to_vec();
     options.push("--expand-environment=no".to_string());
+    // A job from `job_script` starts inside a job from here, so it inherits
+    // exactly when this process can.
+    if fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroup| in_user_manager(&cgroup)) {
+        options.push("--slice-inherit".to_string());
+    }
     for property in [
         format!("MemoryMax={}", memory()?),
         "MemorySwapMax=0".to_string(),
@@ -108,6 +118,21 @@ fn options(limit: Option<u64>, out_of_memory: &str) -> Result<Vec<String>, Probl
         }
     }
     Ok(options)
+}
+
+/// Whether `cgroup`, as `/proc/self/cgroup` gives it, runs under a user
+/// manager, below any slices of the system's. Anywhere else, as in a system
+/// service or a cgroup namespace, `systemd-run --slice-inherit` finds no slice
+/// and refuses to start the job.
+fn in_user_manager(cgroup: &str) -> bool {
+    cgroup
+        .lines()
+        .filter_map(|line| line.strip_prefix("0::"))
+        .any(|path| {
+            path.split('/')
+                .find(|part| !part.is_empty() && !part.ends_with(".slice"))
+                .is_some_and(|part| part.starts_with("user@") && part.ends_with(".service"))
+        })
 }
 
 /// Quotes `word` for `sh`.
@@ -149,4 +174,31 @@ pub fn run(
         status,
         timed_out: started.elapsed() >= Duration::from_secs(limit),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_user_manager;
+
+    #[test]
+    fn only_a_process_under_a_user_manager_can_inherit_its_slice() {
+        for (cgroup, inherits) in [
+            (
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/a.scope\n",
+                true,
+            ),
+            (
+                "0::/user.slice/user-1000.slice/user@1000.service/init.scope\n",
+                true,
+            ),
+            ("0::/system.slice/runner.service\n", false),
+            ("0::/user.slice/user-1000.slice/session-2.scope\n", false),
+            ("0::/user@1000.service.d/a.scope\n", false),
+            ("0::/\n", false),
+            ("0::/../../run-a.scope\n", false),
+            ("", false),
+        ] {
+            assert_eq!(in_user_manager(cgroup), inherits, "{cgroup}");
+        }
+    }
 }

@@ -765,6 +765,7 @@ fn settings_and_run_instructions_are_recorded() {
         "AGENT claude:2.1.319\n\
          OS minimal\n\
          SYSTEM Be careful.\n\
+         PROMPT Take notes.\n\
          MODEL opus\n\
          EFFORT high\n\
          MODE auto\n\
@@ -784,6 +785,7 @@ fn settings_and_run_instructions_are_recorded() {
         [
             declared("AGENT", &["claude:2.1.319"]),
             declared("OS", &["minimal"]),
+            declared("PROMPT", &[]),
             declared("MODEL", &["opus"]),
             declared("EFFORT", &["high"]),
             declared("MODE", &["auto"]),

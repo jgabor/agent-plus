@@ -76,6 +76,7 @@ fn boot_with(init: &[u8], kernel: &[u8], layers: Vec<Layer>) -> BTreeMap<String,
         }),
         timeout: TIMEOUT,
         confine: false,
+        input: None,
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = boot::boot(guest, |report| match report {

@@ -4,8 +4,10 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::RawFd;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,7 +18,7 @@ use vmm::block::Block;
 use vmm::initramfs::{self, Entry};
 use vmm::serial::Serial;
 use vmm::vsock::{Connection, Vsock};
-use vmm::{GuestMemory, Interrupt, Ports, Stop, Vm, boot as loader};
+use vmm::{GuestMemory, Interrupt, Ports, Stop, Vm, Waker, boot as loader};
 
 use crate::fetch::{self, Client};
 use crate::filter::Filter;
@@ -48,6 +50,9 @@ const PROGRAM_HEADER_MIN: usize = 56;
 /// How many frames of output may wait for the user's terminal. Past this the
 /// guest waits too, so a slow reader can't fill the host's memory.
 const OUTPUT_WINDOW: usize = 16;
+/// How many bytes of input may wait for the guest. Past this the sender
+/// waits too.
+const INPUT_WINDOW: usize = 64 << 10;
 
 /// What the guest reports while it runs.
 pub enum Report<'a> {
@@ -77,6 +82,54 @@ pub struct Guest<'a> {
     /// instruction. It stays confined for the rest of its life, so only a
     /// process that has done all its host work may ask.
     pub confine: bool,
+    /// What another thread sends the guest's harness while it runs.
+    pub input: Option<&'a Input>,
+}
+
+/// What a harness in a terminal gets while it runs: keys and resizes, sent
+/// from a thread other than the vCPU's. They reach the guest after the
+/// request that started the harness.
+pub struct Input {
+    /// Frames for the guest, not yet handed to the vsock device.
+    queued: Mutex<Vec<u8>>,
+    room: Condvar,
+    waker: Waker,
+    /// The descriptor the sender reads its input from. A confined process
+    /// may read it, and no other.
+    source: RawFd,
+}
+
+impl Input {
+    /// Input that the sender reads from `source`.
+    pub fn new(source: RawFd) -> Input {
+        Input {
+            queued: Mutex::new(Vec::new()),
+            room: Condvar::new(),
+            waker: Waker::default(),
+            source,
+        }
+    }
+
+    /// Queues `message` for the guest, and waits while too much is queued
+    /// already, so the guest's pace holds back the sender.
+    pub fn send(&self, message: &ToGuest) -> Result<(), Error> {
+        let mut frame = Vec::new();
+        message
+            .write(&mut frame)
+            .map_err(|error| Error::Failed(format!("can't send input: {error:?}")))?;
+        let mut queued = self.queued();
+        while queued.len() >= INPUT_WINDOW {
+            queued = self.room.wait(queued).unwrap_or_else(PoisonError::into_inner);
+        }
+        queued.extend_from_slice(&frame);
+        drop(queued);
+        self.waker.wake();
+        Ok(())
+    }
+
+    fn queued(&self) -> MutexGuard<'_, Vec<u8>> {
+        self.queued.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// One of an agent's layers, served to the guest as a read-only disk.
@@ -194,19 +247,21 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
             let _ = io::stderr().write_all(&stderr_filter.push(bytes));
         }
     };
-    relayed(timeout, Vec::new(), request, print)
+    relayed(timeout, Vec::new(), request, None, print)
 }
 
 /// A run's machine: the agent's layers, with its harness started as `start`
-/// says. It hands the harness's output to `output`, unfiltered, on a thread
-/// of its own, and returns the harness's status.
+/// says, and sent `input` while it runs. It hands the harness's output to
+/// `output`, unfiltered, on a thread of its own, and returns the harness's
+/// status.
 pub fn boot_agent(
     timeout: Duration,
     layers: Vec<Layer>,
     start: Start,
+    input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
 ) -> Result<u8, Error> {
-    relayed(timeout, layers, Some(ToGuest::Start(start)), output)
+    relayed(timeout, layers, Some(ToGuest::Start(start)), input, output)
 }
 
 /// Boots the pinned kernel with this program as its init, and relays what
@@ -215,6 +270,7 @@ fn relayed(
     timeout: Duration,
     layers: Vec<Layer>,
     request: Option<ToGuest>,
+    input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
 ) -> Result<u8, Error> {
     let init = fs::read("/proc/self/exe").map_err(|error| failed("can't read ap itself", error))?;
@@ -240,6 +296,7 @@ fn relayed(
         request,
         timeout,
         confine: true,
+        input,
     };
     let mut relay = Relay::start(Instant::now() + timeout, output);
     let result = boot(guest, |report| match report {
@@ -370,12 +427,16 @@ pub fn boot(guest: Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, E
         status: None,
         failure: None,
         on_report,
+        input: guest.input,
     };
     if guest.confine {
-        vmm::confine::confine().map_err(|error| failed("can't confine ap", error))?;
+        let readable = guest.input.map(|input| input.source);
+        vmm::confine::confine(readable).map_err(|error| failed("can't confine ap", error))?;
     }
+    let waker = Waker::default();
+    let waker = guest.input.map_or(&waker, |input| &input.waker);
     let stop = vcpu
-        .run_ports(guest.timeout, &mut machine)
+        .run_waking(guest.timeout, &mut machine, waker)
         .map_err(vm_failed)?;
 
     match (stop, machine.failure, machine.ready) {
@@ -456,6 +517,7 @@ struct Machine<'vm, F> {
     status: Option<u8>,
     failure: Option<String>,
     on_report: F,
+    input: Option<&'vm Input>,
 }
 
 impl<F: FnMut(Report)> Machine<'_, F> {
@@ -478,6 +540,24 @@ impl<F: FnMut(Report)> Machine<'_, F> {
                 self.handle_frame(connection);
             }
         }
+    }
+
+    /// Hands queued input to the vsock device, once the harness has been
+    /// asked to start, as much as fits.
+    fn pass_input(&mut self) {
+        let (Some(input), Some(connection)) = (self.input, self.connection) else {
+            return;
+        };
+        if !self.ready || self.run_frame.is_some() || self.finished {
+            return;
+        }
+        let mut queued = input.queued();
+        if queued.is_empty() {
+            return;
+        }
+        let taken = self.vsock.send(connection, &queued);
+        queued.drain(..taken);
+        input.room.notify_all();
     }
 
     fn handle_frame(&mut self, connection: Connection) {
@@ -589,8 +669,17 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
         }
         let mut interrupt = self.vsock.write(self.memory, offset, data);
         self.run_host();
+        self.pass_input();
         interrupt |= self.vsock.service(self.memory);
         if interrupt {
+            // A failed pulse leaves the guest waiting, and the timeout ends it.
+            let _ = self.interrupt.pulse();
+        }
+    }
+
+    fn woken(&mut self) {
+        self.pass_input();
+        if self.vsock.service(self.memory) {
             // A failed pulse leaves the guest waiting, and the timeout ends it.
             let _ = self.interrupt.pulse();
         }

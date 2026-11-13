@@ -247,12 +247,17 @@ fn build(args: &Args) -> Result<(), String> {
     let Some(agentfile_path) = agentfile.path().to_str().map(str::to_string) else {
         return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
     };
+    // Text stays in the layers. Only that there is a `PROMPT` is kept, which
+    // makes a run headless.
     let declared: Vec<::store::Declared> = instructions
         .iter()
-        .filter(|instruction| instruction.text.is_none())
+        .filter(|instruction| instruction.text.is_none() || instruction.name == "PROMPT")
         .map(|instruction| ::store::Declared {
             name: instruction.name.clone(),
-            arguments: instruction.arguments.clone(),
+            arguments: match instruction.text {
+                Some(_) => Vec::new(),
+                None => instruction.arguments.clone(),
+            },
         })
         .collect();
 

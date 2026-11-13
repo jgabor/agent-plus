@@ -1,17 +1,22 @@
-//! `ap run <agent> [-p <prompt>]`, from SPEC.md's Run section. It names the
-//! run, and starts a run process that boots the agent's layers in a new
-//! microVM and starts the harness there headless, as the user `agent`, as
+//! `ap run <agent> [-i] [-p <prompt>]`, from SPEC.md's Run section. It names
+//! the run, and starts a run process that boots the agent's layers in a new
+//! microVM and starts the harness there as the user `agent`, as
 //! [`ap::runs`] says. It streams the harness's output and exits with its
 //! status, or with 125 if the harness never started.
 //!
-//! Only a headless run of an agent with `NETWORK -` is built. Everything else
-//! on #297's list of what isn't built yet fails with 125 and says so, before
-//! any VM starts.
+//! A run with a prompt is headless, and the harness gets pipes. Any other
+//! run, or one with `-i`, is interactive: the harness gets a terminal in the
+//! guest, and your terminal is put in raw mode for as long as the run lasts,
+//! so every key reaches the harness. Its resizes follow.
+//!
+//! Only an agent with `NETWORK -` runs. Everything else on #297's list of
+//! what isn't built yet fails with 125 and says so, before any VM starts.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Read, Write};
+use std::mem::MaybeUninit;
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
@@ -19,6 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentfile::{Files, Harness, Instruction, Network, Os, Part, Secrets, Settings, Sign};
@@ -26,14 +33,23 @@ use ap::boot::Error;
 use ap::filter::Filter;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
-use guest::protocol::Start;
+use guest::protocol::{Size, Start};
 
 /// The `PATH` the harness gets, unless `ENV` sets one.
 const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 
+/// The size an interactive harness's terminal starts at when yours doesn't
+/// report one.
+const DEFAULT_SIZE: Size = Size {
+    rows: 24,
+    columns: 80,
+};
+
+/// How much of what you type goes to the run at a time.
+const KEYS: usize = 4096;
+
 /// The flags SPEC.md gives `ap run` that aren't built yet.
-const FLAGS_NOT_BUILT: [&str; 7] = [
-    "-i",
+const FLAGS_NOT_BUILT: [&str; 6] = [
     "-t",
     "--share",
     "--network",
@@ -63,17 +79,20 @@ pub struct Args {
     agent: OsString,
     /// The prompt from `-p` or `--prompt`.
     prompt: Option<Vec<u8>>,
+    /// Whether `-i` forces an interactive run.
+    interactive: bool,
     /// The first flag that isn't built yet.
     not_built: Option<&'static str>,
 }
 
-/// Reads `ap run`'s arguments: the agent, and `-p <prompt>` or
-/// `--prompt <prompt>` at most once, in either order. A flag that isn't built
-/// yet stops the reading, because `ap run` fails on it anyway. Any other flag
-/// is bad usage.
+/// Reads `ap run`'s arguments: the agent, `-i` at most once, and
+/// `-p <prompt>` or `--prompt <prompt>` at most once, in any order. A flag
+/// that isn't built yet stops the reading, because `ap run` fails on it
+/// anyway. Any other flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut agent = None;
     let mut prompt = None;
+    let mut interactive = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let flag = arg.as_bytes();
@@ -85,11 +104,14 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
             return Some(Args {
                 agent: agent.unwrap_or_default(),
                 prompt,
+                interactive,
                 not_built: Some(not_built),
             });
         }
         if (arg == "-p" || arg == "--prompt") && prompt.is_none() {
             prompt = Some(args.next()?.as_bytes().to_vec());
+        } else if arg == "-i" && !interactive {
+            interactive = true;
         } else if flag.starts_with(b"-") || agent.is_some() {
             return None;
         } else {
@@ -99,6 +121,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
     Some(Args {
         agent: agent?,
         prompt,
+        interactive,
         not_built: None,
     })
 }
@@ -161,8 +184,20 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .spawn()
         .map_err(fail("can't start the run process"))?;
 
+    let interactive = start.terminal.is_some();
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;
+    let raw = match interactive {
+        true => {
+            let writer = stream.try_clone().map_err(fail("can't start the run"))?;
+            let writer = Arc::new(Mutex::new(writer));
+            pass_keys(Arc::clone(&writer));
+            pass_resizes(writer);
+            Some(RawMode::start().map_err(fail("can't set up your terminal"))?)
+        }
+        false => None,
+    };
     let end = relay(&mut stream).map_err(fail("lost the run"));
+    drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
     let _ = process.wait();
     drop(held);
@@ -176,6 +211,109 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
 /// An error from `ap run`'s own work, in this context.
 fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
     move |error| Error::Failed(format!("{context}: {error}"))
+}
+
+/// Your terminal in raw mode, until this drops: every key goes to the run as
+/// it is typed, and nothing turns a key into a signal.
+struct RawMode(libc::termios);
+
+impl RawMode {
+    fn start() -> io::Result<RawMode> {
+        let mut saved = MaybeUninit::uninit();
+        // SAFETY: `tcgetattr` fills the whole struct when it returns 0.
+        let saved = unsafe {
+            if libc::tcgetattr(libc::STDIN_FILENO, saved.as_mut_ptr()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            saved.assume_init()
+        };
+        let mut raw = saved;
+        // SAFETY: both calls take a valid struct, which outlives them.
+        unsafe {
+            libc::cfmakeraw(&mut raw);
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(RawMode(saved))
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        // SAFETY: the struct is the one `tcgetattr` filled. A terminal that
+        // went away has nothing to restore.
+        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, &self.0) };
+    }
+}
+
+/// Passes what you type to the run, until your input ends. The run goes on,
+/// and ends when the harness does.
+fn pass_keys(writer: Arc<Mutex<UnixStream>>) {
+    thread::spawn(move || {
+        let mut keys = [0; KEYS];
+        let mut stdin = io::stdin();
+        loop {
+            let count = match stdin.read(&mut keys) {
+                Ok(0) => return,
+                Ok(count) => count,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            };
+            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+            if runs::send_input(&mut *writer, &keys[..count]).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Passes each new size of your terminal to the run. `SIGWINCH` is blocked
+/// already, so this thread is the one that takes it.
+fn pass_resizes(writer: Arc<Mutex<UnixStream>>) {
+    thread::spawn(move || {
+        let set = resize_signal();
+        loop {
+            let mut signal = 0;
+            // SAFETY: both pointers are valid for the whole call.
+            if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+                return;
+            }
+            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+            if runs::send_resize(&mut *writer, terminal_size()).is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// The set that holds only `SIGWINCH`.
+fn resize_signal() -> libc::sigset_t {
+    let mut set = MaybeUninit::uninit();
+    // SAFETY: `sigemptyset` initializes the set, and `sigaddset` takes it
+    // initialized.
+    unsafe {
+        libc::sigemptyset(set.as_mut_ptr());
+        libc::sigaddset(set.as_mut_ptr(), libc::SIGWINCH);
+        set.assume_init()
+    }
+}
+
+/// The size of your terminal, or [`DEFAULT_SIZE`] if it reports none.
+fn terminal_size() -> Size {
+    let mut window = MaybeUninit::<libc::winsize>::zeroed();
+    // SAFETY: `TIOCGWINSZ` writes one `struct winsize` through this pointer,
+    // which is valid for the whole call.
+    let read = unsafe { libc::ioctl(libc::STDIN_FILENO, libc::TIOCGWINSZ, window.as_mut_ptr()) };
+    // SAFETY: the struct started zeroed, which is a valid `winsize`.
+    let window = unsafe { window.assume_init() };
+    if read != 0 || window.ws_row == 0 || window.ws_col == 0 {
+        return DEFAULT_SIZE;
+    }
+    Size {
+        rows: window.ws_row,
+        columns: window.ws_col,
+    }
 }
 
 /// Writes the run's output to this process's, filtered, until the run ends.
@@ -278,14 +416,34 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
             "network rules are not built yet, so the guest has no network, and `ap run` starts only an agent with `NETWORK -`".to_owned(),
         ));
     }
-    let prompt = match &args.prompt {
-        Some(prompt) if prompt.is_empty() => {
+    // A build records that the agent has a `PROMPT`, though not the text,
+    // which only the guest reads.
+    let built_prompt = record
+        .declared
+        .iter()
+        .any(|declared| declared.name == "PROMPT");
+    let interactive = args.interactive
+        || args
+            .prompt
+            .as_ref()
+            .map_or(!built_prompt, |prompt| prompt.is_empty());
+    let terminal = match interactive {
+        true if !io::stdin().is_terminal() => {
             return Err(fail(
-                "an empty prompt opens the interactive interface, which is not built yet"
+                "an interactive run needs a terminal on standard input. Give a prompt with `-p` to run headless"
                     .to_owned(),
             ));
         }
-        prompt => prompt.clone(),
+        true => {
+            // Blocked before the size is read, a resize from here on waits
+            // for the thread that passes it on.
+            // SAFETY: the set is valid, and a null old set is allowed.
+            unsafe {
+                libc::pthread_sigmask(libc::SIG_BLOCK, &resize_signal(), std::ptr::null_mut())
+            };
+            Some(terminal_size())
+        }
+        false => None,
     };
     let secrets = Secrets::read(&instructions).map_err(unreadable)?;
     let files = Files::read(&instructions).map_err(unreadable)?;
@@ -322,7 +480,10 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
             for (key, value) in ap::adapter::claude::environment(version, settings.effort) {
                 env.insert(key.into_bytes(), value.into_bytes());
             }
-            let mut argv = vec![harness, "-p".to_owned()];
+            let mut argv = vec![harness];
+            if !interactive {
+                argv.push("-p".to_owned());
+            }
             argv.extend(ap::adapter::claude::arguments(
                 version,
                 settings.model.as_deref(),
@@ -332,6 +493,7 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
             argv.push("--".to_owned());
             argv
         }
+        Harness::Codex if interactive => vec![harness, "--".to_owned()],
         Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
     };
 
@@ -347,7 +509,8 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         argv: argv.into_iter().map(String::into_bytes).collect(),
         env: env.into_iter().collect(),
         directory: directory.into_bytes(),
-        prompt,
+        prompt: args.prompt.clone(),
+        terminal,
     };
     Ok((root, layers, start))
 }

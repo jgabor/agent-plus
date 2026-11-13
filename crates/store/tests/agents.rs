@@ -178,6 +178,8 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
         format!("{head}BOGUS word\n"),
         format!("{head}ENV \\x\n"),
         format!("{head}SYSTEM hello\n"),
+        format!("{head}SYSTEM\n"),
+        format!("{head}PROMPT hello\n"),
         format!("{head}AGENTFILE /work/notes/Agentfile\n"),
         "AGENTFILE /work/notes/Agentfile\nAGENT claude\n".to_string(),
         "DIRECTORY /work/notes\nAGENT claude\n".to_string(),
@@ -212,6 +214,12 @@ fn recording_a_declaration_that_is_not_an_instruction_is_refused() {
         assert_eq!(error.kind(), ErrorKind::InvalidInput, "{name:?}");
     }
     assert_eq!(agents.get("notes").unwrap(), None);
+
+    // A record keeps that the agent has a prompt, and never its text.
+    let mut recorded = agent("notes", "/work/notes", Vec::new());
+    recorded.declared = vec![declared("PROMPT", &[])];
+    agents.record(&recorded, false).unwrap();
+    assert_eq!(agents.get("notes").unwrap(), Some(recorded));
 }
 
 #[test]

@@ -25,7 +25,7 @@ const USAGE: &str = "usage: ap --version
        ap ls
        ap inspect [--grants] agent
        ap rm agent
-       ap run [-p prompt] agent
+       ap run [-i] [-p prompt] agent
        ap ps
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;

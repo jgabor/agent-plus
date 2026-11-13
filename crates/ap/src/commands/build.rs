@@ -4,8 +4,9 @@
 //! harness configuration into a layer, and records the agent in the store. A
 //! layer whose key an agent already recorded is a hit, and isn't built again.
 //!
-//! Nothing is fetched yet, so the instructions that need a fetch fail, and
-//! no lockfile is written.
+//! The agent's bottom layer is the pinned `OS minimal` layer, downloaded only
+//! if the store doesn't have it. The other tiers, and the instructions that
+//! need any other fetch, fail, and no lockfile is written.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{OsStr, OsString};
@@ -15,10 +16,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use agentfile::{
-    Error, Files, GuestPath, Harness, Instruction, Network, Policy, Secrets, Settings, Sources,
+    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Sources,
     Text,
 };
 use ap::add;
+use ap::fetch::{self, Client, Pin};
 use ap::paths::HostPath;
 use graviola::hashing::sha2::Sha256Context;
 
@@ -29,6 +31,10 @@ const NOT_BUILT: [&str; 5] = ["REPO", "PLUGIN", "SKILL", "MCP", "SEAL"];
 /// Where the prompt goes in the harness configuration layer. The harness gets
 /// it at run time, so it has no file of its own in the harness's directory.
 const PROMPT: &str = "/etc/ap/prompt";
+
+/// The zstd level the store keeps the OS layer at, which `COMPRESSION`
+/// doesn't change.
+const OS_LEVEL: i8 = 3;
 
 /// The arguments of `ap build`.
 pub struct Args {
@@ -107,15 +113,8 @@ struct Planned {
 enum Content {
     Add(add::Layer),
     Image(Vec<u8>),
-}
-
-impl Planned {
-    fn image(self) -> io::Result<Vec<u8>> {
-        match self.content {
-            Content::Add(layer) => layer.image(),
-            Content::Image(image) => Ok(image),
-        }
-    }
+    /// A layer to download, unless the store has it.
+    Fetch(Pin<'static>),
 }
 
 fn build(args: &Args) -> Result<(), String> {
@@ -284,10 +283,21 @@ fn build(args: &Args) -> Result<(), String> {
 
 const NAME_RULE: &str = "A name is 1 to 63 lowercase letters, digits, and `-`, starting and ending with a letter or digit";
 
+/// What putting one layer in the store takes.
+enum Made {
+    /// The store has the layer with this digest.
+    Hit(String),
+    /// An image to put at a zstd level.
+    Image(Vec<u8>, i8),
+    /// A layer to download at a zstd level, unless the store has it.
+    Fetch(Pin<'static>, i8),
+}
+
 /// Puts each layer in the store, unless an agent already recorded its key
-/// and the store keeps it at the layer's level, and returns the agent's layers with a line for each. Every image is made
-/// before any is put, so a layer that can't be made leaves the store as it
-/// was, and its error names its line.
+/// and the store keeps it at the layer's level, and returns the agent's layers
+/// with a line for each. Every image is made before any download, and every
+/// download before any image is put, so a layer that can't be made leaves the
+/// store as it was, and its error names its line.
 fn store_layers(
     agents: &::store::Agents,
     layers: &::store::Layers,
@@ -296,50 +306,65 @@ fn store_layers(
     report: &dyn Fn(Vec<Error>) -> String,
 ) -> Result<(Vec<::store::Layer>, Vec<String>), String> {
     let io = |error: io::Error| format!("ap: {error}");
-    // Each layer's key and label, with its digest on a hit or its image.
+    // Each layer's key and label, with what putting it takes.
     let mut made = Vec::new();
     let mut errors = Vec::new();
     for layer in planned {
+        let (line, label, key, level) = (layer.line, layer.label, layer.key, layer.level);
+        let content = match layer.content {
+            Content::Fetch(pin) => {
+                made.push((key, label, Made::Fetch(pin, level)));
+                continue;
+            }
+            content => content,
+        };
         let found = match use_cache {
-            true => agents.layer(&layer.key).map_err(io)?,
+            true => agents.layer(&key).map_err(io)?,
             false => None,
         };
         // Agents at other levels can share a layer, and the last to put it
         // set its level.
-        let found = match found {
-            Some(digest) if layers.level(&digest).map_err(io)? == Some(layer.level) => Some(digest),
-            _ => None,
+        if let Some(digest) = found
+            && layers.level(&digest).map_err(io)? == Some(level)
+        {
+            made.push((key, label, Made::Hit(digest)));
+            continue;
+        }
+        let image = match content {
+            Content::Add(add) => add.image(),
+            Content::Image(image) => Ok(image),
+            Content::Fetch(_) => unreachable!("a fetch was made above"),
         };
-        let (line, label, key, level) = (
-            layer.line,
-            layer.label.clone(),
-            layer.key.clone(),
-            layer.level,
-        );
-        let content = match found {
-            Some(digest) => Ok(digest),
-            None => match layer.image() {
-                Ok(image) => Err((image, level)),
-                Err(error) => {
-                    errors.push(Error {
-                        line,
-                        message: error.to_string(),
-                    });
-                    continue;
-                }
-            },
-        };
-        made.push((key, label, content));
+        match image {
+            Ok(image) => made.push((key, label, Made::Image(image, level))),
+            Err(error) => errors.push(Error {
+                line,
+                message: error.to_string(),
+            }),
+        }
     }
     if !errors.is_empty() {
         return Err(report(errors));
     }
     let mut built = Vec::new();
     let mut lines = Vec::new();
+    let client = Client::new();
+    let mut put = Vec::new();
     for (key, label, content) in made {
         let (status, digest) = match content {
-            Ok(digest) => ("hit", digest),
-            Err((image, level)) => ("built", layers.put(&image, level).map_err(io)?),
+            Made::Hit(digest) => ("hit", digest),
+            Made::Fetch(pin, level) => {
+                let fetched = fetch::layer(layers, &client, &pin, level)
+                    .map_err(|error| format!("ap: {label}: {error}"))?;
+                (
+                    if fetched { "fetched" } else { "hit" },
+                    pin.sha256.to_string(),
+                )
+            }
+            Made::Image(image, level) => {
+                put.push((built.len(), image, level));
+                ("built", String::new())
+            }
         };
         lines.push(format!("{status} {label}"));
         built.push(::store::Layer {
@@ -347,6 +372,9 @@ fn store_layers(
             digest,
             instruction: label,
         });
+    }
+    for (index, image, level) in put {
+        built[index].digest = layers.put(&image, level).map_err(io)?;
     }
     Ok((built, lines))
 }
@@ -371,8 +399,8 @@ impl Resolved {
     }
 }
 
-/// Checks the Agentfile against the host, and plans its layers: one for each
-/// `ADD`, in line order, and the harness configuration last. It returns
+/// Checks the Agentfile against the host, and plans its layers: the OS first,
+/// one for each `ADD`, in line order, and the harness configuration last. It returns
 /// every error it finds, or the layers and the warnings.
 fn plan(
     instructions: &[Instruction],
@@ -381,6 +409,26 @@ fn plan(
 ) -> Result<(Vec<Planned>, Vec<Error>), Vec<Error>> {
     let mut errors = Vec::new();
     let settings = take(&mut errors, Settings::read(instructions));
+    // The line of the `OS` instruction, if there is one.
+    let os_line = instructions
+        .iter()
+        .find(|instruction| instruction.name == "OS")
+        .map(|instruction| instruction.line);
+    let unbuilt = match settings.as_ref().map(|settings| settings.os) {
+        Some(Os::Standard) => Some("standard"),
+        Some(Os::Desktop) => Some("desktop"),
+        Some(Os::Minimal) | None => None,
+    };
+    if let Some(tier) = unbuilt {
+        let message = match os_line {
+            Some(_) => format!("`OS {tier}` is not built yet"),
+            None => format!("`OS {tier}`, the default, is not built yet"),
+        };
+        errors.push(Error {
+            line: os_line.unwrap_or(1),
+            message,
+        });
+    }
     let sources = take(&mut errors, Sources::read(instructions));
     let files = take(&mut errors, Files::read(instructions));
     take(&mut errors, Secrets::read(instructions));
@@ -434,6 +482,13 @@ fn plan(
         return Err(errors);
     };
     let level = settings.compression.level();
+    planned.push(Planned {
+        line: os_line.unwrap_or(1),
+        label: "OS minimal".to_string(),
+        key: os_key(fetch::os().sha256),
+        level: OS_LEVEL,
+        content: Content::Fetch(fetch::os()),
+    });
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
@@ -573,6 +628,14 @@ fn insert(root: &mut erofs::Dir, path: &str, data: Vec<u8>) {
             content: Box::new(Cursor::new(data)),
         }),
     );
+}
+
+/// The OS layer's key, from the digest it is pinned to.
+fn os_key(sha256: &str) -> String {
+    let mut hash = Sha256Context::new();
+    hash.update(b"OS minimal\0");
+    hash.update(sha256.as_bytes());
+    hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The harness configuration's key. The image is a function of everything it

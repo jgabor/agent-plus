@@ -1,4 +1,4 @@
-//! Downloads pinned files over HTTPS into the store.
+//! Downloads pinned files and layers over HTTPS into the store.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -6,12 +6,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ::store::Layers;
+use graviola::hashing::sha2::Sha256Context;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 use crate::store::Store;
 
 const KERNEL_PIN: &str = include_str!("../../../guest/kernel/pin.toml");
+const OS_PIN: &str = include_str!("../../../guest/os/pin.toml");
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HEAD_BYTES: u64 = 64 * 1024;
 /// Far above any file `ap` pins, and low enough that a bad server can't fill
@@ -26,9 +29,17 @@ pub struct Pin<'a> {
 
 /// The guest kernel named in `guest/kernel/pin.toml`.
 pub fn kernel() -> Pin<'static> {
+    pin(KERNEL_PIN)
+}
+
+/// The `OS minimal` layer named in `guest/os/pin.toml`.
+pub fn os() -> Pin<'static> {
+    pin(OS_PIN)
+}
+
+fn pin(toml: &'static str) -> Pin<'static> {
     let value = |key: &str| {
-        KERNEL_PIN
-            .lines()
+        toml.lines()
             .find_map(|line| {
                 let (name, value) = line.split_once(" = ")?;
                 (name == key).then(|| value.trim_matches('"'))
@@ -96,14 +107,45 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
-    let mut response = client.get(pin.url)?;
+    store.put(pin.sha256, download(client, pin.url)?)
+}
+
+/// Puts the layer `pin` names in `layers` at a zstd level, downloading it
+/// only if no layer has its digest yet, and returns whether it downloaded.
+/// A download whose digest isn't the pin's is an error, and isn't stored.
+pub fn layer(layers: &Layers, client: &Client, pin: &Pin, level: i8) -> io::Result<bool> {
+    if layers.level(pin.sha256)?.is_some() {
+        return Ok(false);
+    }
+    let mut data = Vec::new();
+    download(client, pin.url)?.read_to_end(&mut data)?;
+    let mut hash = Sha256Context::new();
+    hash.update(&data);
+    let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
+    if actual != pin.sha256 {
+        return Err(wrong_digest(&actual, pin.sha256));
+    }
+    layers.put(&data, level)?;
+    Ok(true)
+}
+
+/// The body at `url`, through at most one redirect.
+fn download(client: &Client, url: &str) -> io::Result<Body> {
+    let mut response = client.get(url)?;
     if let Some(location) = response.redirect() {
         response = client.get(&location?)?;
         if response.redirect().is_some() {
             return Err(bad_response("more than one redirect"));
         }
     }
-    store.put(pin.sha256, response.body()?)
+    response.body()
+}
+
+pub(crate) fn wrong_digest(actual: &str, pinned: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("the download has digest {actual}, not the pinned {pinned}"),
+    )
 }
 
 type Tls = BufReader<StreamOwned<ClientConnection, TcpStream>>;

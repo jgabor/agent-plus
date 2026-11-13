@@ -6,6 +6,8 @@
 //! Git credentials and the harness's own hosts aren't shown yet, because
 //! nothing fetches a source or resolves a harness.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -29,7 +31,9 @@ impl Scratch {
         let home = root.join("home");
         let other_home = root.join("other-home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         fs::create_dir_all(&other_home).unwrap();
+        common::seed_os(&other_home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -89,7 +93,7 @@ fn stderr(output: &Output) -> String {
 
 /// An Agentfile with two layers before the harness configuration, and a
 /// grant of each kind that `ap build` can build.
-const NOTES: &str = "AGENT claude\n\
+const NOTES: &str = "AGENT claude\nOS minimal\n\
                      ADD ./src /work/src\n\
                      ADD ./docs\n\
                      SHARE ../shared /work/shared\n\
@@ -142,17 +146,18 @@ fn inspect_shows_the_layers_in_order_and_the_approved_grants() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stderr(&output), "");
     let digests = scratch.digests("notes");
-    assert_eq!(digests.len(), 3);
+    assert_eq!(digests.len(), 4);
     let grants: String = grants.lines().map(|line| format!("  {line}\n")).collect();
     assert_eq!(
         stdout(&output),
         format!(
             "layers:\n  \
+             {} OS minimal\n  \
              {} ADD ./src /work/src\n  \
              {} ADD ./docs\n  \
              {} harness configuration\n\
              grants:\n{grants}",
-            digests[0], digests[1], digests[2]
+            digests[0], digests[1], digests[2], digests[3]
         )
     );
 }
@@ -183,7 +188,10 @@ fn inspect_grants_prints_what_approves_a_fresh_build() {
 #[test]
 fn inspect_grants_escapes_what_it_prints() {
     let scratch = Scratch::new("escapes");
-    let dir = scratch.project("notes", "AGENT claude\nSHARE ./a\u{202e}b /work/x rw\n");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nSHARE ./a\u{202e}b /work/x rw\n",
+    );
     fs::create_dir_all(dir.join("a\u{202e}b")).unwrap();
     let file = scratch.root.join("grants");
     fs::write(
@@ -206,10 +214,10 @@ fn inspect_grants_escapes_what_it_prints() {
 fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
     let scratch = Scratch::new("symlink");
     let file = scratch.root.join("grants");
-    let wide = scratch.project("wide", "AGENT claude\n");
+    let wide = scratch.project("wide", "AGENT claude\nOS minimal\n");
     fs::write(&file, "NETWORK +\nPOLICY +\n").unwrap();
     scratch.build(&scratch.home, &wide, &file);
-    let real = scratch.project("real", "AGENT claude\nNETWORK -\nPOLICY -\n");
+    let real = scratch.project("real", "AGENT claude\nOS minimal\nNETWORK -\nPOLICY -\n");
     let dir = scratch.root.join("notes");
     fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink(real.join("Agentfile"), dir.join("Agentfile")).unwrap();

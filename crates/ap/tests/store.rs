@@ -1,4 +1,4 @@
-//! The kernel download, against a real TLS server on localhost.
+//! The kernel and layer downloads, against a real TLS server on localhost.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -375,4 +375,63 @@ fn a_temporary_file_left_by_a_crash_is_neither_fatal_nor_deleted() {
 
     assert_eq!(fs::read(path).unwrap(), BODY);
     assert!(stale.iter().all(|path| path.exists()));
+}
+
+// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
+#[test]
+fn a_layer_is_downloaded_once_and_kept_by_its_digest() {
+    let server = Server::start(|_| vec![("/minimal.erofs", ok(BODY))]);
+    let root = empty_root("layer-once");
+    let layers = ::store::Layers::new(&root);
+    let url = server.url("/minimal.erofs");
+    let pin = Pin {
+        url: &url,
+        sha256: BODY_SHA256,
+    };
+
+    assert!(fetch::layer(&layers, &trusting_client(), &pin, 3).unwrap());
+    assert_eq!(server.requests(), 1);
+    assert_eq!(layers.get(BODY_SHA256).unwrap(), BODY);
+    assert_eq!(layers.level(BODY_SHA256).unwrap(), Some(3));
+    assert_eq!(
+        files(&root),
+        [root.join("zstd-layers").join(BODY_SHA256)],
+        "no temporary file may remain"
+    );
+
+    // Another agent, at any level, finds the layer in the store.
+    for level in [3, 19] {
+        assert!(!fetch::layer(&layers, &trusting_client(), &pin, level).unwrap());
+    }
+    assert_eq!(
+        server.requests(),
+        1,
+        "a layer in the store must not be downloaded again"
+    );
+    assert_eq!(layers.level(BODY_SHA256).unwrap(), Some(3));
+}
+
+#[test]
+fn a_layer_whose_digest_is_not_the_pin_is_refused_and_not_stored() {
+    let server = Server::start(|_| vec![("/minimal.erofs", ok(BODY))]);
+    let root = empty_root("layer-wrong-digest");
+    let url = server.url("/minimal.erofs");
+    let pin = Pin {
+        url: &url,
+        sha256: OTHER_SHA256,
+    };
+    let layers = ::store::Layers::new(&root);
+    let error = fetch::layer(&layers, &trusting_client(), &pin, 3).unwrap_err();
+    assert!(error.to_string().contains("digest"), "{error}");
+    assert_eq!(files(&root), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn the_pin_names_the_os_layer_in_pin_toml() {
+    let toml = include_str!("../../../guest/os/pin.toml");
+    let pin = fetch::os();
+    assert!(toml.contains(&format!("url = \"{}\"", pin.url)));
+    assert!(toml.contains(&format!("sha256 = \"{}\"", pin.sha256)));
+    assert!(pin.url.starts_with("https://"));
+    assert_eq!(pin.sha256.len(), 64);
 }

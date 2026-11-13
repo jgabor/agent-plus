@@ -9,6 +9,7 @@ echo "one" >notes/data
 echo "two" >shared/data
 cat >notes/Agentfile <<'EOF2'
 AGENT claude
+OS minimal
 ADD ./data
 ADD ../shared/data /shared
 NETWORK -
@@ -71,6 +72,7 @@ fi
 
 cat >notes/Agentfile <<'EOF2'
 AGENT claude
+OS minimal
 ADD ./data
 NETWORK -
 EOF2

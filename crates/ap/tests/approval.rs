@@ -2,6 +2,8 @@
 //! works" under SPEC.md's Grants section: on a terminal, without one, and
 //! with `--approve=<file>`.
 
+mod common;
+
 use std::ffi::CStr;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -34,6 +36,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -156,7 +159,7 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-const NOTES: &str = "AGENT claude\nADD ./data\nNETWORK -\nNETWORK +github.com\n";
+const NOTES: &str = "AGENT claude\nOS minimal\nADD ./data\nNETWORK -\nNETWORK +github.com\n";
 
 // spec(Grants): On the first `ap build` of an Agentfile, `ap` lists its grants and asks you to approve them.
 #[test]
@@ -201,7 +204,9 @@ fn no_on_a_terminal_builds_nothing() {
         assert!(!run.screen.contains("built ADD"), "{}", run.screen);
     }
     assert!(!scratch.built("notes"));
-    assert!(!scratch.store().join("zstd-layers").exists());
+    // The store holds only the OS layer it started with.
+    let layers = fs::read_dir(scratch.store().join("zstd-layers")).unwrap();
+    assert_eq!(layers.count(), 1);
     assert_eq!(scratch.approved(&dir), None);
 }
 
@@ -217,7 +222,7 @@ fn a_later_build_with_the_same_grants_does_not_ask() {
     assert!(!run.screen.contains("Approve"), "{}", run.screen);
     fs::write(
         dir.join("Agentfile"),
-        "AGENT claude\nADD ./data\nMODEL opus\nNETWORK -\n",
+        "AGENT claude\nOS minimal\nADD ./data\nMODEL opus\nNETWORK -\n",
     )
     .unwrap();
     let run = scratch.on_terminal(&dir, &["build"], "n\n");
@@ -357,7 +362,7 @@ fn the_prompt_escapes_what_would_hide() {
     fs::write(&hidden, "two").unwrap();
     scratch.project(
         "n\u{202e}otes",
-        "AGENT claude\nADD \"../\u{202e}txt.sh\" /x\nENV A \"$B\"\nNETWORK -\n",
+        "AGENT claude\nOS minimal\nADD \"../\u{202e}txt.sh\" /x\nENV A \"$B\"\nNETWORK -\n",
     );
     let args = ["build", "-t", "notes", "n\u{202e}otes"];
     let run = scratch.on_terminal(&scratch.root, &args, "n\n");

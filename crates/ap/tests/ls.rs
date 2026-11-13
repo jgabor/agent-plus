@@ -1,6 +1,8 @@
 //! `ap ls`, from SPEC.md's `ap ls` section: one line for each built agent,
 //! with its name and the directory it was built from.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -17,6 +19,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -39,7 +42,7 @@ impl Scratch {
     fn build(&self, path: &str) -> PathBuf {
         let dir = self.root.join(path);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("Agentfile"), "AGENT claude\n").unwrap();
+        fs::write(dir.join("Agentfile"), "AGENT claude\nOS minimal\n").unwrap();
         // Approval has tests of its own, so the build approves what it asks
         // for.
         let grants = self.root.join("approved-grants");

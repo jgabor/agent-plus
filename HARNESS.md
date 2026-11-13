@@ -185,7 +185,7 @@ each step as the last journey ran it.
 | Budget | Target | Band |
 |---|---|---|
 | Boot to guest init | under 150 ms | 10% or 5 ms, whichever is larger |
-| `ap run` to a ready harness, with layers cached | under 1 s | to be set |
+| `ap run` to a ready harness, with layers cached | under 1 s | 10% or 5 ms, whichever is larger |
 | Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
 | `ap build` with nothing changed | under 100 ms | 10% or 5 ms, whichever is larger |
 | Desktop cost until first use | disk only | none |
@@ -212,6 +212,13 @@ step 5, with its grants approved through `--approve`. Each build of `ap` has
 its own `HOME`, and builds the directory once first, so every timed run is a
 rebuild. A base with no `ap build`, or one from before `--approve`, is
 reported as no comparison.
+
+`ap run` is timed headless, with `-p`, from spawning it until the first byte
+of its output, on a fixed agent whose harness is the fake one. Each build of
+`ap` builds an agent of its own with its grants approved through `--approve`,
+and runs it once first. All runs share one `HOME`, so no build or download is
+timed. Every run has a timeout, and ends before the next starts. A base with no
+`ap run` is reported as no comparison.
 
 ## Floors
 

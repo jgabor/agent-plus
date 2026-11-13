@@ -2746,7 +2746,7 @@ fn a_refresh_built_from_an_older_main_proves_nothing() {
     );
 }
 
-const BUDGETS_NOT_YET: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"run_ms\"\nname = \"r\"\nband_pct = 20.0\nband_abs = 25.0\n";
+const BUDGETS_NOT_YET: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"idle_mib\"\nname = \"i\"\nband_pct = 20.0\nband_abs = 25.0\n";
 
 /// `land` runs `main`'s xtask, which can't measure what only the PR teaches
 /// it to measure.
@@ -2759,7 +2759,7 @@ fn land_sends_a_pr_that_may_add_a_measurer_to_prepare_on_its_branch() {
             ("harness/ledger/3.toml", base.as_str()),
             ("harness/budgets.toml", BUDGETS_NOT_YET),
         ],
-        &[("xtask/src/bench.rs", "// the run measurer\n")],
+        &[("xtask/src/bench.rs", "// the idle measurer\n")],
     )
     .on_main();
     repo.set_pr(&Pr {
@@ -2768,7 +2768,7 @@ fn land_sends_a_pr_that_may_add_a_measurer_to_prepare_on_its_branch() {
         ..Pr::default()
     });
     let output = repo.land();
-    assert_refused(&repo, &output, "doesn't measure `run_ms` yet");
+    assert_refused(&repo, &output, "doesn't measure `idle_mib` yet");
     let said = stderr(&output);
     assert!(
         said.contains("`cargo xtask prepare 9` from a checkout of its branch"),

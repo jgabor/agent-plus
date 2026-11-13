@@ -12,6 +12,8 @@ band_abs = 5.0
 key = "run_ms"
 name = "`ap run` to a ready harness, with layers cached"
 target = 1000.0
+band_pct = 10.0
+band_abs = 5.0
 
 [[budget]]
 key = "idle_mib"

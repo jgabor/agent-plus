@@ -10,7 +10,7 @@ use std::process::{Command, Output};
 
 mod common;
 
-const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"run_ms\"\nname = \"run\"\ntarget = 150.0\n";
+const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"idle_mib\"\nname = \"idle\"\ntarget = 150.0\n";
 const BOOT_BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\nband_pct = 10.0\nband_abs = 25.0\n";
 const BOOTS: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
 const SLOW_BOOT: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        std::thread::sleep(std::time::Duration::from_millis(150));\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
@@ -210,7 +210,7 @@ fn level_builds_pass() {
     let out = stdout(&output);
     assert!(out.contains("pass version_ms "), "{out}");
     assert!(out.contains("recorded binary_bytes "), "{out}");
-    assert!(out.contains("skip run_ms\n"), "{out}");
+    assert!(out.contains("skip idle_mib\n"), "{out}");
 }
 
 #[test]
@@ -423,6 +423,205 @@ fn a_base_whose_build_fails_is_a_problem() {
     let repo = Repo::with("build-broken", BUILD_BUDGETS, &broken, &[]);
     repo.plant(BUILDS);
     assert_problem(&repo.bench(), "broken store");
+}
+
+const RUN_BUDGETS: &str = "[[budget]]\nkey = \"run_ms\"\nname = \"run\"\ntarget = 1000.0\nband_pct = 10.0\nband_abs = 25.0\n";
+/// A fake harness for the workspace, which the bench builds and puts in the
+/// download cache.
+const FAKE_HARNESS: &[(&str, &str)] = &[
+    (
+        "crates/fake-harness/Cargo.toml",
+        "[package]\nname = \"fake-harness\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    ),
+    ("crates/fake-harness/src/main.rs", "fn main() {}\n"),
+];
+/// An `ap` whose `build` fails unless its grants are approved and its
+/// `HOME`'s download cache holds the harness the lockfile pins, and then
+/// marks the directory's agent built in `HOME`. Its `run <agent> -p <prompt>`
+/// fails unless that agent is built, prints a line, and counts the run in
+/// `HOME`, with the name of the process that started it.
+const RUNS: &str = r#"use std::io::Write;
+use std::path::Path;
+use std::process::ExitCode;
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let home = std::env::var("HOME").unwrap();
+    let home = Path::new(&home);
+    match args.first().map(String::as_str) {
+        Some("build") => {
+            let approved = args.iter().find_map(|a| a.strip_prefix("--approve=")).and_then(|f| std::fs::read_to_string(f).ok());
+            let dir = Path::new(args.last().unwrap());
+            if !approved.is_some_and(|a| a.contains("NETWORK -") && a.contains("POLICY +")) || !dir.join("Agentfile").is_file() {
+                eprintln!("ap: needs approval {args:?}");
+                return ExitCode::from(1);
+            }
+            let lock = std::fs::read_to_string(dir.join("Agentfile.lock")).unwrap_or_default();
+            let digest = lock.strip_prefix("HARNESS claude 0.0.0 ").map(str::trim_end).unwrap_or_default();
+            if digest.len() != 64 || !home.join(".cache/ap").join(digest).is_file() {
+                eprintln!("ap: Agentfile.lock locks no harness the cache holds");
+                return ExitCode::from(1);
+            }
+            let name = dir.file_name().unwrap().to_str().unwrap();
+            std::fs::write(home.join(format!("built-{name}")), "").unwrap();
+            ExitCode::SUCCESS
+        }
+        Some("run") => {
+            if args.len() != 4 || args[2] != "-p" {
+                eprintln!("usage: ap run agent -p prompt");
+                return ExitCode::from(2);
+            }
+            if !home.join(format!("built-{}", args[1])).is_file() {
+                eprintln!("ap: no agent {}", args[1]);
+                return ExitCode::from(125);
+            }
+            // before
+            println!("{{\"arguments\":[]}}");
+            // after
+            let parent = std::os::unix::process::parent_id();
+            let parent = std::fs::read_to_string(format!("/proc/{parent}/comm")).unwrap();
+            let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(home.join("runs")).unwrap();
+            write!(runs, "{} {parent}", args[1]).unwrap();
+            ExitCode::SUCCESS
+        }
+        Some("--version") => ExitCode::SUCCESS,
+        _ => {
+            eprintln!("usage: ap");
+            ExitCode::from(2)
+        }
+    }
+}
+"#;
+
+fn run_repo(name: &str, ap: &str) -> Repo {
+    Repo::with(name, RUN_BUDGETS, ap, FAKE_HARNESS)
+}
+
+fn slow_run(at: &str) -> String {
+    RUNS.replace(
+        at,
+        "std::thread::sleep(std::time::Duration::from_millis(150));",
+    )
+}
+
+#[test]
+fn run_is_measured_for_the_base_and_the_candidate() {
+    let repo = run_repo("run", RUNS);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass run_ms base "), "{out}");
+    assert!(!out.contains("skip run_ms"), "{out}");
+    assert!(repo.record().contains("run_ms = "));
+}
+
+#[test]
+fn a_planted_run_slowdown_fails() {
+    let repo = run_repo("run-slow", RUNS);
+    repo.set_gh("echo '[]'\n");
+    repo.plant(&slow_run("// before"));
+    let output = repo.bench();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("fail run_ms "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn run_is_timed_to_the_first_output_and_not_to_the_exit() {
+    let repo = run_repo("run-exit", RUNS);
+    repo.plant(&slow_run("// after"));
+    assert_passes(&repo.bench());
+}
+
+/// Each binary builds an agent of its own, so each runs what it built, and
+/// all runs share one `HOME`, so they share one store and download cache.
+#[test]
+fn each_binary_builds_its_agent_and_runs_it_once_to_warm_up_in_one_home() {
+    let repo = run_repo("run-warm", RUNS);
+    assert_passes(&repo.bench());
+    let home = repo.root.join("target/bench/run/home");
+    let runs = fs::read_to_string(home.join("runs")).unwrap();
+    for agent in ["base", "candidate"] {
+        assert!(home.join(format!("built-{agent}")).is_file(), "{agent}");
+        let count = runs
+            .lines()
+            .filter(|line| line.starts_with(&format!("{agent} ")))
+            .count();
+        assert_eq!(count, 1 + 15, "{runs}");
+    }
+}
+
+#[test]
+fn every_run_has_a_timeout() {
+    let repo = run_repo("run-timeout", RUNS);
+    assert_passes(&repo.bench());
+    let runs = fs::read_to_string(repo.root.join("target/bench/run/home/runs")).unwrap();
+    assert!(!runs.is_empty());
+    for line in runs.lines() {
+        assert!(line.ends_with(" timeout"), "{runs}");
+    }
+}
+
+#[test]
+fn a_base_with_no_run_command_is_no_comparison() {
+    let old = RUNS.replace("Some(\"run\") =>", "Some(\"gone\") =>");
+    let repo = run_repo("run-none", &old);
+    repo.plant(RUNS);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("no-comparison run_ms candidate "), "{out}");
+    assert!(repo.record().contains("run_ms = "));
+}
+
+/// A base from before `ap run` may not build today's Agentfile either, so it
+/// isn't asked to.
+#[test]
+fn a_base_with_no_run_command_is_not_asked_to_build() {
+    let repo = run_repo("run-none-build", NO_BOOT);
+    repo.plant(RUNS);
+    let output = repo.bench();
+    assert_passes(&output);
+    assert!(
+        stdout(&output).contains("no-comparison run_ms candidate "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_candidate_with_no_run_command_is_a_problem() {
+    let repo = run_repo("run-lost", RUNS);
+    repo.plant(&RUNS.replace("Some(\"run\") =>", "Some(\"gone\") =>"));
+    assert_problem(&repo.bench(), "run");
+}
+
+#[test]
+fn a_base_whose_run_fails_is_a_problem() {
+    let broken = RUNS.replace(
+        "// before",
+        "eprintln!(\"ap: no kvm\");\n            return ExitCode::from(125);",
+    );
+    let repo = run_repo("run-broken", &broken);
+    repo.plant(RUNS);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
+#[test]
+fn a_run_that_prints_nothing_is_a_problem() {
+    let silent = RUNS.replace("println!(\"{{\\\"arguments\\\":[]}}\");", "");
+    assert_ne!(silent, RUNS);
+    let repo = run_repo("run-silent", RUNS);
+    repo.plant(&silent);
+    assert_problem(&repo.bench(), "printed nothing");
+}
+
+#[test]
+fn run_needs_the_fake_harness_package() {
+    let repo = Repo::with("run-no-harness", RUN_BUDGETS, RUNS, &[]);
+    assert_problem(&repo.bench(), "fake-harness");
 }
 
 #[test]
@@ -655,7 +854,7 @@ fn bench_takes_no_arguments() {
 
 #[test]
 fn record_takes_the_measured_values_and_carries_the_rest() {
-    let previous = record_text("run_ms = 141.2\nversion_ms = 99999\n");
+    let previous = record_text("idle_mib = 141.2\nversion_ms = 99999\n");
     let repo = Repo::with(
         "takes",
         BUDGETS,
@@ -664,7 +863,7 @@ fn record_takes_the_measured_values_and_carries_the_rest() {
     );
     assert_passes(&repo.bench());
     let text = repo.record();
-    assert!(text.contains("run_ms = 141.2\n"), "{text}");
+    assert!(text.contains("idle_mib = 141.2\n"), "{text}");
     assert!(text.contains("binary_bytes = "), "{text}");
     assert!(text.contains("version_ms = "), "{text}");
     assert!(!text.contains("version_ms = 99999\n"), "{text}");
@@ -710,7 +909,7 @@ fn a_failed_bench_removes_an_earlier_result() {
 #[test]
 fn score_counts_the_budgets_met() {
     for (name, value, met) in [("met", "100", 1), ("missed", "200", 0), ("equal", "150", 0)] {
-        let previous = record_text(&format!("run_ms = {value}\n"));
+        let previous = record_text(&format!("idle_mib = {value}\n"));
         let repo = Repo::with(
             &format!("score-{name}"),
             BUDGETS,

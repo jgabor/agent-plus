@@ -266,19 +266,24 @@ fn build_static(root: &Path, target: &Path, package: &str) -> Result<PathBuf, Pr
     Ok(target.join(STATIC_TARGET).join("release").join(package))
 }
 
+/// Builds the fake harness for release, statically linked, or `None` if the
+/// workspace has no such package.
+pub fn build_fake_harness(root: &Path, target: &Path) -> Result<Option<PathBuf>, Problem> {
+    if !workspace::packages(root)?
+        .iter()
+        .any(|package| package.name == FAKE_HARNESS)
+    {
+        return Ok(None);
+    }
+    build_static(root, target, FAKE_HARNESS).map(Some)
+}
+
 /// Builds `ap` for release, and the fake harness if the workspace has it, and
 /// copies them where the steps will find them. A step puts the fake harness
 /// in an agent itself.
 fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     let built = build_ap(root, &root.join("target"))?;
-    let fake = if workspace::packages(root)?
-        .iter()
-        .any(|package| package.name == FAKE_HARNESS)
-    {
-        Some(build_static(root, &root.join("target"), FAKE_HARNESS)?)
-    } else {
-        None
-    };
+    let fake = build_fake_harness(root, &root.join("target"))?;
     let problem = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", journey.display()));
     if journey.exists() {
         fs::remove_dir_all(journey).map_err(problem)?;

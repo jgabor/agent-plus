@@ -34,6 +34,14 @@ impl Store {
         }
     }
 
+    /// A store that keeps its files in `dir` itself, as the download cache
+    /// does.
+    pub fn flat(dir: impl AsRef<Path>) -> Self {
+        Store {
+            layers: dir.as_ref().to_path_buf(),
+        }
+    }
+
     /// The store at the default location for this environment.
     pub fn from_env() -> io::Result<Self> {
         let xdg = std::env::var_os("XDG_DATA_HOME");

@@ -6,9 +6,11 @@
 //!
 //! The agent's bottom layer is the pinned `OS minimal` layer, downloaded only
 //! if the store doesn't have it. The harness layer comes from the file that
-//! `Agentfile.lock` pins, which the download cache must already hold. The
-//! other tiers, and the instructions that need any other fetch, fail, and no
-//! lockfile is written.
+//! `Agentfile.lock` pins. After approval, a lock that doesn't resolve `AGENT`
+//! resolves again, the file is downloaded into the download cache unless it
+//! holds it, and a changed lock is written, as `ap::lock::settle` says. The
+//! other tiers, Codex without a lock, and the instructions that need any
+//! other fetch, fail.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -191,7 +193,7 @@ fn build(args: &Args) -> Result<(), String> {
         lines.join("\n")
     };
     let instructions = agentfile::parse(&source).map_err(report)?;
-    let lock = read_lock(&path.with_extension("lock"), &context)?;
+    let mut lock = read_lock(&path.with_extension("lock"), &context)?;
     let cache = lock::cache(
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
         Some(home.as_os_str()),
@@ -254,7 +256,29 @@ fn build(args: &Args) -> Result<(), String> {
         })
         .collect();
 
-    let mut planned = Some(planned);
+    let agent_line = agent_line(&instructions);
+    let agent = Settings::read(&instructions).map_err(report)?.agent;
+    let cache = cache.ok_or("ap: HOME isn't an absolute path, so there's no download cache")?;
+    let changed = lock::settle(
+        &context.join("Agentfile.lock"),
+        &mut lock,
+        &agent,
+        &Client::new(),
+        lock::ANTHROPIC,
+        &cache,
+        |locked| {
+            stored(&agents, &layers, &harness_key(locked), BASE_LEVEL)
+                .is_ok_and(|found| found.is_some())
+        },
+    )
+    .map_err(|error| format!("{shown}:{agent_line}: {error}"))?;
+    let cached = Cached {
+        lock: &lock,
+        cache: Some(&cache),
+    };
+
+    // A changed lock plans the layers again, with the harness it locks.
+    let mut planned = (!changed).then_some(planned);
     let mut use_cache = true;
     let lines = loop {
         // The first try uses the planned layers. A retry plans them again.
@@ -336,15 +360,7 @@ fn store_layers(
             }
             content => content,
         };
-        let found = match use_cache {
-            true => agents.layer(&key).map_err(io)?,
-            false => None,
-        };
-        // Agents at other levels can share a layer, and the last to put it
-        // set its level.
-        if let Some(digest) = found
-            && layers.level(&digest).map_err(io)? == Some(level)
-        {
+        if use_cache && let Some(digest) = stored(agents, layers, &key, level).map_err(io)? {
             made.push((key, label, Made::Hit(digest)));
             continue;
         }
@@ -396,6 +412,21 @@ fn store_layers(
         built[index].digest = layers.put(&image, level).map_err(io)?;
     }
     Ok((built, lines))
+}
+
+/// The digest of the layer an agent recorded with `key`, if the store keeps
+/// it at `level`. Agents at other levels can share a layer, and the last to
+/// put it set its level.
+fn stored(
+    agents: &::store::Agents,
+    layers: &::store::Layers,
+    key: &str,
+    level: i8,
+) -> io::Result<Option<String>> {
+    match agents.layer(key)? {
+        Some(digest) if layers.level(&digest)? == Some(level) => Ok(Some(digest)),
+        _ => Ok(None),
+    }
 }
 
 /// Each host path a build resolved, by its text, so that approval and every
@@ -535,12 +566,15 @@ fn plan(
         level: BASE_LEVEL,
         content: Content::Fetch(fetch::os()),
     });
-    let agent_line = instructions
-        .iter()
-        .find(|instruction| instruction.name == "AGENT")
-        .map_or(1, |instruction| instruction.line);
-    match (&cached.lock.harness, cached.cache) {
-        (Some(locked), Some(cache)) if locked.resolves(&settings.agent) => {
+    let agent_line = agent_line(instructions);
+    let locked = (cached.lock.harness.as_ref()).filter(|locked| locked.resolves(&settings.agent));
+    match (locked, cached.cache) {
+        (_, None) => errors.push(fail(
+            agent_line,
+            "HOME isn't an absolute path, so there's no download cache to take the harness from"
+                .to_string(),
+        )),
+        (Some(locked), Some(cache)) => {
             planned.push(Planned {
                 line: agent_line,
                 label: locked.label(),
@@ -549,22 +583,15 @@ fn plan(
                 content: Content::Harness(locked.clone(), cache.join(&locked.sha256)),
             });
         }
-        (Some(locked), Some(_)) => errors.push(fail(
+        // `ap build` resolves Claude Code after approval, and plans again.
+        (None, Some(_)) if settings.agent.harness == Harness::Claude => {}
+        (None, Some(_)) => errors.push(fail(
             agent_line,
             format!(
-                "Agentfile.lock locks `{}`, and resolving a harness again is not built yet",
-                locked.label()
+                "Agentfile.lock locks no `AGENT {}:{}`, and resolving Codex is not built yet",
+                lock::name(settings.agent.harness),
+                settings.agent.version
             ),
-        )),
-        (None, _) => errors.push(fail(
-            agent_line,
-            "Agentfile.lock locks no harness, and resolving and downloading a harness is not built yet"
-                .to_string(),
-        )),
-        (Some(_), None) => errors.push(fail(
-            agent_line,
-            "HOME isn't an absolute path, so there's no download cache to take the harness from"
-                .to_string(),
         )),
     }
     for add in &sources.add {
@@ -616,6 +643,14 @@ fn plan(
     });
     warnings.sort_by_key(|warning| warning.line);
     Ok((planned, warnings))
+}
+
+/// The line of the `AGENT` instruction, or 1 if there is none.
+fn agent_line(instructions: &[Instruction]) -> usize {
+    instructions
+        .iter()
+        .find(|instruction| instruction.name == "AGENT")
+        .map_or(1, |instruction| instruction.line)
 }
 
 /// The value of `result`, or `None` after adding its errors to `errors`.
@@ -728,15 +763,15 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
         .map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound => io::Error::new(
-            error.kind(),
-            format!(
-                "`{}` isn't in the download cache at {shown}, and downloading a harness is not built yet",
-                locked.label()
+            io::ErrorKind::NotFound => io::Error::new(
+                error.kind(),
+                format!(
+                    "`{}` isn't in the download cache at {shown}",
+                    locked.label()
+                ),
             ),
-        ),
-        _ => io::Error::new(error.kind(), format!("{shown}: {error}")),
-    })?;
+            _ => io::Error::new(error.kind(), format!("{shown}: {error}")),
+        })?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(

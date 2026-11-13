@@ -820,56 +820,23 @@ fn a_cached_harness_with_the_wrong_digest_is_refused() {
 }
 
 #[test]
-fn a_build_with_no_locked_harness_fails() {
-    let scratch = Scratch::new("harness-unlocked");
-    let dir = scratch.project("notes", SIMPLE);
-    fs::write(dir.join("data"), "one").unwrap();
-    fs::remove_file(dir.join("Agentfile.lock")).unwrap();
+fn codex_without_a_lock_for_it_fails_as_not_built() {
+    let scratch = Scratch::new("harness-codex");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
+    fs::write(dir.join("Agentfile"), "AGENT codex\nOS minimal\n").unwrap();
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
     assert!(message.starts_with("Agentfile:1: "), "{message}");
-    assert!(message.contains("Agentfile.lock"), "{message}");
+    assert!(message.contains("codex:latest"), "{message}");
     assert!(message.contains("not built yet"), "{message}");
     assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
     assert!(scratch.agents().list().unwrap().is_empty());
-}
-
-#[test]
-fn a_lock_for_another_harness_or_version_is_not_reused() {
-    let scratch = Scratch::new("harness-stale");
-    for (name, agentfile) in [
-        ("other", "AGENT codex\nOS minimal\n"),
-        ("version", "AGENT claude:1.2.3\nOS minimal\n"),
-    ] {
-        let dir = scratch.project(name, "AGENT claude\nOS minimal\n");
-        fs::write(dir.join("Agentfile"), agentfile).unwrap();
-        let output = scratch.ap(&dir, &["build"]);
-        assert_eq!(output.status.code(), Some(1), "{name}");
-        let message = stderr(&output);
-        assert!(message.starts_with("Agentfile:1: "), "{message}");
-        assert!(message.contains("claude:0.0.0"), "{message}");
-        assert!(message.contains("not built yet"), "{message}");
-    }
-    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
-    assert!(scratch.agents().list().unwrap().is_empty());
-}
-
-#[test]
-fn a_locked_harness_missing_from_the_cache_fails() {
-    let scratch = Scratch::new("harness-uncached");
-    let dir = scratch.project("notes", SIMPLE);
-    fs::write(dir.join("data"), "one").unwrap();
-    let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
-    fs::remove_file(&path).unwrap();
-    let output = scratch.ap(&dir, &["build"]);
-    assert_eq!(output.status.code(), Some(1));
-    let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:1: "), "{message}");
-    assert!(message.contains(path.to_str().unwrap()), "{message}");
-    assert!(message.contains("not built yet"), "{message}");
-    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
-    assert!(scratch.agents().list().unwrap().is_empty());
+    assert_eq!(
+        fs::read_to_string(dir.join("Agentfile.lock")).unwrap(),
+        lock
+    );
 }
 
 #[test]
@@ -987,4 +954,311 @@ fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut message).unwrap();
     assert!(message.contains("isn't a file"), "{message}");
     assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+}
+
+/// The path under which [`anthropic`] serves Claude Code's releases.
+const RELEASES: &str = "/claude-code-releases";
+
+/// A Claude Code manifest that gives `sha256` for `linux-x64`, as Anthropic's
+/// does, with a different digest for the platforms around it.
+fn manifest(version: &str, sha256: &str) -> Vec<u8> {
+    let other = "1".repeat(64);
+    format!(
+        r#"{{
+  "version": "{version}",
+  "platforms": {{
+    "darwin-x64": {{ "binary": "claude", "checksum": "{other}", "size": 1 }},
+    "linux-x64": {{
+      "binary": "claude",
+      "checksum": "{sha256}",
+      "size": {}
+    }},
+    "linux-x64-musl": {{ "binary": "claude", "checksum": "{other}", "size": 1 }}
+  }}
+}}
+"#,
+        common::HARNESS.len()
+    )
+    .into_bytes()
+}
+
+/// Serves Claude Code 2.1.311 as Anthropic does, as its `stable` channel,
+/// with a manifest that gives `sha256` for its file, [`common::HARNESS`].
+fn anthropic(sha256: &str) -> common::Server {
+    let manifest = manifest("2.1.311", sha256);
+    common::Server::start(move |_| {
+        vec![
+            ("/claude-code-releases/stable", common::ok(b"2.1.311\n")),
+            ("/claude-code-releases/latest", common::ok(b"2.1.311\n")),
+            (
+                "/claude-code-releases/2.1.311/manifest.json",
+                common::ok(&manifest),
+            ),
+            (
+                "/claude-code-releases/2.1.311/linux-x64/claude",
+                common::ok(common::HARNESS),
+            ),
+        ]
+    })
+}
+
+/// A project with no lockfile, and the download cache it builds with.
+struct Settling {
+    scratch: Scratch,
+    dir: PathBuf,
+    cache: PathBuf,
+}
+
+impl Settling {
+    fn new(name: &str, agentfile: &str) -> Settling {
+        let scratch = Scratch::new(name);
+        let dir = scratch.project("notes", agentfile);
+        fs::remove_file(dir.join("Agentfile.lock")).unwrap();
+        let cache = scratch.home.join(".cache/ap");
+        fs::remove_dir_all(&cache).unwrap();
+        Settling {
+            scratch,
+            dir,
+            cache,
+        }
+    }
+
+    /// Settles the harness the Agentfile names against `server`, from the
+    /// lockfile on disk, as `ap build` does after approval.
+    fn settle(&self, server: &common::Server) -> std::io::Result<bool> {
+        self.settle_with(server, false)
+    }
+
+    /// Settles as [`Settling::settle`] does, when the store has the harness
+    /// layer if `stored`.
+    fn settle_with(&self, server: &common::Server, stored: bool) -> std::io::Result<bool> {
+        let source = fs::read_to_string(self.dir.join("Agentfile")).unwrap();
+        let instructions = agentfile::parse(&source).unwrap();
+        let agent = agentfile::Settings::read(&instructions).unwrap().agent;
+        let path = self.dir.join("Agentfile.lock");
+        let mut lock = match fs::read_to_string(&path) {
+            Ok(text) => ap::lock::Lock::read(&text).unwrap(),
+            Err(_) => ap::lock::Lock::default(),
+        };
+        ap::lock::settle(
+            &path,
+            &mut lock,
+            &agent,
+            &common::trusting_client(),
+            &server.url(RELEASES),
+            &self.cache,
+            |_| stored,
+        )
+    }
+
+    fn lockfile(&self) -> Option<String> {
+        fs::read_to_string(self.dir.join("Agentfile.lock")).ok()
+    }
+
+    /// The files in the download cache, by name.
+    fn cached(&self) -> Vec<String> {
+        let Ok(entries) = fs::read_dir(&self.cache) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn paths(server: &common::Server) -> Vec<String> {
+        server.paths.lock().unwrap().clone()
+    }
+}
+
+// spec(Build): **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile.
+// spec(AGENT): Channels resolve to an exact version at build time and are recorded in the lockfile.
+// spec(AGENT): `ap` downloads it from Anthropic on your machine during the build, verifies it against the lockfile, and never redistributes it.
+#[test]
+fn claude_stable_resolves_downloads_and_writes_the_lock() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-stable", "AGENT claude:stable\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS claude 2.1.311 {digest}\n")
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/stable",
+            "/claude-code-releases/2.1.311/manifest.json",
+            "/claude-code-releases/2.1.311/linux-x64/claude",
+        ]
+    );
+    assert_eq!(settling.cached(), [digest.as_str()]);
+    assert_eq!(
+        fs::read(settling.cache.join(&digest)).unwrap(),
+        common::HARNESS
+    );
+    // The build takes the harness from the cache, through the lock.
+    let out = settling.scratch.build(&settling.dir, &[]);
+    assert!(out.contains("built AGENT claude:2.1.311\n"), "{out}");
+}
+
+#[test]
+fn a_rebuild_reuses_the_lock_and_downloads_nothing() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-reuse", "AGENT claude:stable\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    let lock = settling.lockfile().unwrap();
+    let requests = server.requests();
+    assert!(!settling.settle(&server).unwrap());
+    assert_eq!(server.requests(), requests);
+    assert_eq!(settling.lockfile().unwrap(), lock);
+}
+
+#[test]
+fn a_download_with_the_wrong_digest_stores_nothing_and_writes_no_lock() {
+    let server = anthropic(&common::digest(b"another file"));
+    let settling = Settling::new("settle-digest", "AGENT claude:stable\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&common::digest(common::HARNESS)), "{error}");
+    assert!(error.contains("claude:2.1.311"), "{error}");
+    assert_eq!(settling.lockfile(), None);
+    assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+}
+
+// spec(AGENT): Without a version, `ap` uses `latest`.
+#[test]
+fn claude_without_a_version_resolves_latest() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-latest", "AGENT claude\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(Settling::paths(&server)[0], "/claude-code-releases/latest");
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS claude 2.1.311 {digest}\n")
+    );
+}
+
+#[test]
+fn an_exact_version_resolves_without_a_channel() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-exact", "AGENT claude:2.1.311\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/2.1.311/manifest.json",
+            "/claude-code-releases/2.1.311/linux-x64/claude",
+        ]
+    );
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS claude 2.1.311 {digest}\n")
+    );
+}
+
+#[test]
+fn a_lock_for_another_version_or_harness_resolves_again() {
+    let digest = common::digest(common::HARNESS);
+    for (name, lock) in [
+        ("settle-version", format!("HARNESS claude 2.1.3 {digest}\n")),
+        (
+            "settle-harness",
+            format!("HARNESS codex 2.1.311 {digest}\n"),
+        ),
+    ] {
+        let server = anthropic(&digest);
+        let settling = Settling::new(name, "AGENT claude:2.1.311\nOS minimal\n");
+        fs::write(settling.dir.join("Agentfile.lock"), lock).unwrap();
+        assert!(settling.settle(&server).unwrap(), "{name}");
+        assert_eq!(
+            settling.lockfile().unwrap(),
+            format!("HARNESS claude 2.1.311 {digest}\n"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_locked_harness_missing_from_the_cache_is_downloaded_by_its_lock() {
+    let digest = common::digest(common::HARNESS);
+    // The manifest disagrees with the lock, and the lock wins.
+    let server = anthropic(&common::digest(b"another file"));
+    let settling = Settling::new("settle-uncached", "AGENT claude:stable\nOS minimal\n");
+    let lock = format!("HARNESS claude 2.1.311 {digest}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &lock).unwrap();
+    assert!(!settling.settle(&server).unwrap());
+    assert_eq!(
+        Settling::paths(&server),
+        ["/claude-code-releases/2.1.311/linux-x64/claude"]
+    );
+    assert_eq!(settling.cached(), [digest]);
+    assert_eq!(settling.lockfile().unwrap(), lock);
+}
+
+// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
+#[test]
+fn a_harness_layer_in_the_store_is_not_downloaded_again() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-stored", "AGENT claude:stable\nOS minimal\n");
+    assert!(settling.settle_with(&server, true).unwrap());
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/stable",
+            "/claude-code-releases/2.1.311/manifest.json",
+        ]
+    );
+    assert!(settling.cached().is_empty());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS claude 2.1.311 {digest}\n")
+    );
+}
+
+#[test]
+fn a_cached_file_with_the_wrong_digest_writes_no_lock() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-corrupt", "AGENT claude:stable\nOS minimal\n");
+    fs::create_dir_all(&settling.cache).unwrap();
+    fs::write(settling.cache.join(&digest), "something else\n").unwrap();
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(
+        error.contains(&common::digest(b"something else\n")),
+        "{error}"
+    );
+    assert_eq!(settling.lockfile(), None);
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/stable",
+            "/claude-code-releases/2.1.311/manifest.json",
+        ]
+    );
+}
+
+#[test]
+fn a_channel_anthropic_does_not_publish_fails_and_writes_no_lock() {
+    let server = anthropic(&common::digest(common::HARNESS));
+    let settling = Settling::new("settle-unknown", "AGENT claude:beta\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains("claude:beta"), "{error}");
+    assert!(error.contains("404"), "{error}");
+    assert_eq!(settling.lockfile(), None);
+    assert!(settling.cached().is_empty());
+}
+
+#[test]
+fn a_version_that_is_not_one_path_segment_is_refused() {
+    let server = anthropic(&common::digest(common::HARNESS));
+    let settling = Settling::new("settle-path", "AGENT claude:../stable\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains("isn't a version"), "{error}");
+    assert_eq!(server.requests(), 0);
+    assert_eq!(settling.lockfile(), None);
 }

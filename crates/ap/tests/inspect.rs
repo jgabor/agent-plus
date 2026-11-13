@@ -64,6 +64,8 @@ impl Scratch {
         let dir = self.root.join(path);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        common::pin_harness(&self.home, &dir);
+        common::pin_harness(&self.other_home, &dir);
         dir
     }
 
@@ -146,18 +148,19 @@ fn inspect_shows_the_layers_in_order_and_the_approved_grants() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stderr(&output), "");
     let digests = scratch.digests("notes");
-    assert_eq!(digests.len(), 4);
+    assert_eq!(digests.len(), 5);
     let grants: String = grants.lines().map(|line| format!("  {line}\n")).collect();
     assert_eq!(
         stdout(&output),
         format!(
             "layers:\n  \
              {} OS minimal\n  \
+             {} AGENT claude:0.0.0\n  \
              {} ADD ./src /work/src\n  \
              {} ADD ./docs\n  \
              {} harness configuration\n\
              grants:\n{grants}",
-            digests[0], digests[1], digests[2], digests[3]
+            digests[0], digests[1], digests[2], digests[3], digests[4]
         )
     );
 }
@@ -221,6 +224,7 @@ fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
     let dir = scratch.root.join("notes");
     fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink(real.join("Agentfile"), dir.join("Agentfile")).unwrap();
+    common::pin_harness(&scratch.home, &dir);
     fs::write(&file, "NETWORK -\nPOLICY -\n").unwrap();
     scratch.build(&scratch.home, &dir, &file);
 

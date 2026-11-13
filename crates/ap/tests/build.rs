@@ -39,6 +39,7 @@ impl Scratch {
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        common::pin_harness(&self.home, &dir);
         dir
     }
 
@@ -211,9 +212,9 @@ fn build_reads_the_agentfile_in_path() {
     assert!(out.ends_with("agent notes\n"), "{out}");
     let agent = scratch.agent("notes");
     assert_eq!(agent.directory, dir.to_str().unwrap());
-    // The OS, the `ADD` layer, and the harness configuration.
-    assert_eq!(agent.layers.len(), 3);
-    assert_eq!(scratch.layer_files().len(), 3);
+    // The OS, the harness, the `ADD` layer, and the harness configuration.
+    assert_eq!(agent.layers.len(), 4);
+    assert_eq!(scratch.layer_files().len(), 4);
 }
 
 // spec(Build): `ap build [path]` reads the Agentfile in `path` (default: the current directory) and writes an image into the local store.
@@ -382,7 +383,7 @@ fn a_rebuild_with_nothing_changed_is_a_hit_and_writes_nothing() {
     fs::create_dir(dir.join("out")).unwrap();
 
     let first = layer_lines(&scratch.build(&dir, &[]));
-    assert_eq!(first.len(), 4, "{first:?}");
+    assert_eq!(first.len(), 5, "{first:?}");
     // The store already has the OS layer.
     assert_eq!(first[0], ("hit".to_string(), "OS minimal".to_string()));
     assert!(
@@ -416,14 +417,13 @@ fn changing_one_added_file_rebuilds_only_its_layer() {
     fs::write(dir.join("b"), "three").unwrap();
     let lines = layer_lines(&scratch.build(&dir, &[]));
     let statuses: Vec<&str> = lines.iter().map(|(status, _)| status.as_str()).collect();
-    assert_eq!(statuses, ["hit", "hit", "built", "hit"], "{lines:?}");
+    assert_eq!(statuses, ["hit", "hit", "hit", "built", "hit"], "{lines:?}");
     let after = scratch.agent("notes").layers;
-    assert_eq!(after[0], before[0]);
-    assert_eq!(after[1], before[1]);
-    assert_ne!(after[2], before[2]);
-    assert_eq!(after[3], before[3]);
+    assert_eq!(after[..3], before[..3]);
+    assert_ne!(after[3], before[3]);
+    assert_eq!(after[4], before[4]);
     // The layer nothing uses any more is freed.
-    assert_eq!(scratch.layer_files().len(), 4);
+    assert_eq!(scratch.layer_files().len(), 5);
 }
 
 // spec(Build): **Store.** Layers are stored by the digest of their uncompressed content and shared across every agent in the store.
@@ -438,7 +438,7 @@ fn agents_share_their_layers() {
     let lines = layer_lines(&scratch.build(&two, &[]));
     assert!(lines.iter().all(|(status, _)| status == "hit"), "{lines:?}");
     assert_eq!(scratch.agent("one").layers, scratch.agent("two").layers);
-    assert_eq!(scratch.layer_files().len(), 3);
+    assert_eq!(scratch.layer_files().len(), 4);
 }
 
 // spec(Text values): The file is read at build time on the host and its content is captured into the image.
@@ -462,11 +462,15 @@ fn a_text_path_is_read_at_build_time() {
         fs::write(dir.join(file), "Something else.\n").unwrap();
         let lines = layer_lines(&scratch.build(&dir, &[]));
         let statuses: Vec<&str> = lines.iter().map(|(status, _)| status.as_str()).collect();
-        assert_eq!(statuses, ["hit", "hit", "built"], "{file}: {lines:?}");
+        assert_eq!(
+            statuses,
+            ["hit", "hit", "hit", "built"],
+            "{file}: {lines:?}"
+        );
     }
     let after = scratch.agent("notes").layers;
-    assert_eq!(after[..2], before[..2]);
-    assert_ne!(after[2], before[2]);
+    assert_eq!(after[..3], before[..3]);
+    assert_ne!(after[3], before[3]);
 }
 
 // spec(SYSTEM): The values concatenate in file order, separated by a blank line.
@@ -709,6 +713,7 @@ fn settings_and_run_instructions_are_recorded() {
     );
     fs::write(dir.join("data"), "one").unwrap();
     fs::create_dir(dir.join("out")).unwrap();
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
     scratch.build(&dir, &[]);
     let agent = scratch.agent("notes");
     assert_eq!(
@@ -726,14 +731,176 @@ fn settings_and_run_instructions_are_recorded() {
             declared("NETWORK", &["+example.com"]),
         ]
     );
-    // Nothing is resolved, so nothing is locked.
-    assert!(!dir.join("Agentfile.lock").exists());
+    // Nothing is resolved, so the lockfile is only read.
+    assert_eq!(
+        fs::read_to_string(dir.join("Agentfile.lock")).unwrap(),
+        lock
+    );
     let mut names: Vec<String> = fs::read_dir(&dir)
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
     names.sort();
-    assert_eq!(names, ["Agentfile", "data", "out"]);
+    assert_eq!(names, ["Agentfile", "Agentfile.lock", "data", "out"]);
+}
+
+/// The line `ap build` printed for the harness layer.
+fn harness_line(out: &str) -> (String, String) {
+    layer_lines(out)
+        .into_iter()
+        .find(|(_, label)| label.starts_with("AGENT "))
+        .expect("no harness layer")
+}
+
+// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
+#[test]
+fn agents_that_lock_one_harness_share_its_layer() {
+    let scratch = Scratch::new("harness-shared");
+    let one = scratch.project("one", "AGENT claude\nOS minimal\nSYSTEM One.\n");
+    let two = scratch.project("two", "AGENT claude\nOS minimal\nSYSTEM Two.\n");
+    let first = scratch.build(&one, &[]);
+    assert_eq!(
+        harness_line(&first),
+        ("built".to_string(), "AGENT claude:0.0.0".to_string())
+    );
+    let second = scratch.build(&two, &[]);
+    assert_eq!(
+        harness_line(&second),
+        ("hit".to_string(), "AGENT claude:0.0.0".to_string())
+    );
+    let (one, two) = (scratch.agent("one").layers, scratch.agent("two").layers);
+    assert_eq!(one[1], two[1]);
+    assert_eq!(one[1].instruction, "AGENT claude:0.0.0");
+    // The OS, one harness layer, and each agent's own configuration.
+    assert_eq!(scratch.layer_files().len(), 4);
+    let image = Layers::new(scratch.store()).get(&one[1].digest).unwrap();
+    assert!(holds(&image, std::str::from_utf8(common::HARNESS).unwrap()));
+    assert!(holds(&image, "claude"));
+}
+
+#[test]
+fn a_rebuild_reuses_the_locked_harness() {
+    let scratch = Scratch::new("harness-rebuild");
+    let dir = scratch.project("notes", SIMPLE);
+    fs::write(dir.join("data"), "one").unwrap();
+    scratch.build(&dir, &[]);
+    let before = scratch.agent("notes").layers;
+    // The store has the layer, so the build doesn't need the cached file.
+    fs::remove_file(common::cached(
+        &scratch.home,
+        &common::digest(common::HARNESS),
+    ))
+    .unwrap();
+    let out = scratch.build(&dir, &[]);
+    assert_eq!(harness_line(&out).0, "hit", "{out}");
+    assert_eq!(scratch.agent("notes").layers, before);
+}
+
+#[test]
+fn a_cached_harness_with_the_wrong_digest_is_refused() {
+    let scratch = Scratch::new("harness-digest");
+    let dir = scratch.project("notes", SIMPLE);
+    fs::write(dir.join("data"), "one").unwrap();
+    let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
+    fs::write(&path, "something else\n").unwrap();
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:1: "), "{message}");
+    assert!(
+        message.contains(&common::digest(b"something else\n")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&common::digest(common::HARNESS)),
+        "{message}"
+    );
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+#[test]
+fn a_build_with_no_locked_harness_fails() {
+    let scratch = Scratch::new("harness-unlocked");
+    let dir = scratch.project("notes", SIMPLE);
+    fs::write(dir.join("data"), "one").unwrap();
+    fs::remove_file(dir.join("Agentfile.lock")).unwrap();
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:1: "), "{message}");
+    assert!(message.contains("Agentfile.lock"), "{message}");
+    assert!(message.contains("not built yet"), "{message}");
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+#[test]
+fn a_lock_for_another_harness_or_version_is_not_reused() {
+    let scratch = Scratch::new("harness-stale");
+    for (name, agentfile) in [
+        ("other", "AGENT codex\nOS minimal\n"),
+        ("version", "AGENT claude:1.2.3\nOS minimal\n"),
+    ] {
+        let dir = scratch.project(name, "AGENT claude\nOS minimal\n");
+        fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        let output = scratch.ap(&dir, &["build"]);
+        assert_eq!(output.status.code(), Some(1), "{name}");
+        let message = stderr(&output);
+        assert!(message.starts_with("Agentfile:1: "), "{message}");
+        assert!(message.contains("claude:0.0.0"), "{message}");
+        assert!(message.contains("not built yet"), "{message}");
+    }
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+#[test]
+fn a_locked_harness_missing_from_the_cache_fails() {
+    let scratch = Scratch::new("harness-uncached");
+    let dir = scratch.project("notes", SIMPLE);
+    fs::write(dir.join("data"), "one").unwrap();
+    let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
+    fs::remove_file(&path).unwrap();
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:1: "), "{message}");
+    assert!(message.contains(path.to_str().unwrap()), "{message}");
+    assert!(message.contains("not built yet"), "{message}");
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+#[test]
+fn a_bad_lockfile_fails() {
+    let scratch = Scratch::new("harness-bad-lock");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
+    for lock in [
+        "HARNESS claude 0.0.0\n",
+        "HARNESS claude 0.0.0 abc\n",
+        "HARNESS cursor 0.0.0 0000000000000000000000000000000000000000000000000000000000000000\n",
+        "NOPE x\n",
+    ] {
+        fs::write(dir.join("Agentfile.lock"), lock).unwrap();
+        let output = scratch.ap(&dir, &["build"]);
+        assert_eq!(output.status.code(), Some(1), "{lock}");
+        let message = stderr(&output);
+        assert!(
+            message.starts_with("Agentfile.lock:1: "),
+            "{lock}: {message}"
+        );
+    }
+    let sha256 = common::digest(common::HARNESS);
+    fs::write(
+        dir.join("Agentfile.lock"),
+        format!("HARNESS claude 0.0.0 {sha256}\nHARNESS claude 0.0.0 {sha256}\n"),
+    )
+    .unwrap();
+    let message = stderr(&scratch.ap(&dir, &["build"]));
+    assert!(message.starts_with("Agentfile.lock:2: "), "{message}");
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
+    assert!(scratch.agents().list().unwrap().is_empty());
 }
 
 /// Only `OS minimal` is built. Any other tier fails before anything is
@@ -780,4 +947,44 @@ fn the_os_layer_is_the_bottom_layer() {
     let bottom = &scratch.agent("notes").layers[0];
     assert_eq!(bottom.digest, ap::fetch::os().sha256);
     assert_eq!(bottom.instruction, "OS minimal");
+}
+
+#[test]
+fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
+    let scratch = Scratch::new("harness-fifo");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
+    let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
+    fs::remove_file(&path).unwrap();
+    let made = Command::new("mkfifo").arg(&path).status().unwrap();
+    assert!(made.success());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ap"))
+        .arg("build")
+        .arg(format!(
+            "--approve={}",
+            scratch.approval(&dir, &[]).unwrap().display()
+        ))
+        .current_dir(&dir)
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("ap build waited on a FIFO in the download cache");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(1));
+    let mut message = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut message).unwrap();
+    assert!(message.contains("isn't a file"), "{message}");
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
 }

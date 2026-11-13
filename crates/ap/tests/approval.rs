@@ -49,6 +49,7 @@ impl Scratch {
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        common::pin_harness(&self.home, &dir);
         fs::write(dir.join("data"), "one").unwrap();
         dir
     }

@@ -55,6 +55,7 @@ impl Scratch {
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        common::pin_harness(&self.home, &dir);
         fs::write(dir.join("data"), data).unwrap();
         dir
     }
@@ -99,8 +100,9 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// One layer from `ADD`, and the harness configuration, which agents with
-/// the same harness settings share.
+/// The OS and the locked harness, which every agent here shares, one layer
+/// from `ADD`, and the harness configuration, which agents with the same
+/// harness settings share.
 const SIMPLE: &str = "AGENT claude\nOS minimal\nADD ./data\nNETWORK -\nPOLICY -\n";
 
 /// The grants that `SIMPLE` asks for.
@@ -121,11 +123,12 @@ fn rm_removes_the_agent_and_frees_only_its_own_layers() {
     scratch.build(&two, SIMPLE_GRANTS);
     let ones = scratch.digests("one");
     let twos = scratch.digests("two");
-    // The OS, the `ADD` layer, and the harness configuration.
-    assert_eq!(ones.len(), 3);
+    // The OS, the harness, the `ADD` layer, and the harness configuration.
+    assert_eq!(ones.len(), 4);
     assert_eq!(ones[0], twos[0]);
-    assert_ne!(ones[1], twos[1]);
-    assert_eq!(ones[2], twos[2]);
+    assert_eq!(ones[1], twos[1]);
+    assert_ne!(ones[2], twos[2]);
+    assert_eq!(ones[3], twos[3]);
 
     let output = scratch.ap(&["rm", "one"]);
 
@@ -134,11 +137,12 @@ fn rm_removes_the_agent_and_frees_only_its_own_layers() {
     assert_eq!(stderr(&output), "");
     let listed = scratch.ok_in(&scratch.root, &["ls"]);
     assert_eq!(listed, format!("two {}\n", two.display()));
-    // The layer only it used is freed, and the one it shared stays.
+    // The layer only it used is freed, and the ones it shared stay.
     assert!(scratch.has_layer(&ones[0]));
-    assert!(!scratch.has_layer(&ones[1]));
-    assert!(scratch.has_layer(&ones[2]));
-    assert!(scratch.has_layer(&twos[1]));
+    assert!(scratch.has_layer(&ones[1]));
+    assert!(!scratch.has_layer(&ones[2]));
+    assert!(scratch.has_layer(&ones[3]));
+    assert!(scratch.has_layer(&twos[2]));
     assert_eq!(scratch.digests("two"), twos);
 }
 

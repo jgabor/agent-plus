@@ -37,6 +37,7 @@ impl Scratch {
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("data"), data()).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        common::pin_harness(&self.home, &dir);
         dir
     }
 
@@ -74,8 +75,9 @@ impl Scratch {
         self.home.join(".local/share/ap")
     }
 
-    /// Each layer the agent `notes` built: its digest, its uncompressed bytes,
-    /// and the file the store keeps it in. The OS layer isn't built.
+    /// Each layer the agent `notes` built from its own instructions: its
+    /// digest, its uncompressed bytes, and the file the store keeps it in.
+    /// The OS and harness layers aren't among them.
     fn layers(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
         self.layers_of("notes")
     }
@@ -86,7 +88,9 @@ impl Scratch {
         agent
             .layers
             .iter()
-            .filter(|layer| layer.instruction != "OS minimal")
+            .filter(|layer| {
+                layer.instruction != "OS minimal" && !layer.instruction.starts_with("AGENT ")
+            })
             .map(|layer| {
                 let data = layers.get(&layer.digest).unwrap();
                 let path = self.store().join("zstd-layers").join(&layer.digest);
@@ -171,7 +175,8 @@ fn changing_the_level_recompresses_layers_under_the_same_digests() {
     // The added data compresses differently at the new level.
     assert_ne!(after[0].2, before[0].2);
     let files = fs::read_dir(scratch.store().join("zstd-layers")).unwrap();
-    assert_eq!(files.count(), before.len() + 1);
+    // The OS and harness layers, and the agent's own.
+    assert_eq!(files.count(), before.len() + 2);
 }
 
 // spec(COMPRESSION): Layers are addressed by their uncompressed content, so changing the level recompresses layers without changing what is inside them.
@@ -211,4 +216,21 @@ fn compression_leaves_the_os_layer_as_it_is() {
     let agent = Agents::new(scratch.store()).get("notes").unwrap().unwrap();
     assert_eq!(agent.layers[0].digest, ap::fetch::os().sha256);
     assert_eq!(fs::read(&os).unwrap(), before);
+}
+
+// spec(COMPRESSION): Base layers (the OS and the harness) keep the level their publisher chose.
+#[test]
+fn compression_leaves_the_harness_layer_at_level_3() {
+    let scratch = Scratch::new("harness");
+    let dir = scratch.project("AGENT claude\nOS minimal\nCOMPRESSION 19\nADD ./data\n");
+
+    scratch.build(&dir);
+
+    let agent = Agents::new(scratch.store()).get("notes").unwrap().unwrap();
+    let harness = &agent.layers[1];
+    assert_eq!(harness.instruction, "AGENT claude:0.0.0");
+    let data = Layers::new(scratch.store()).get(&harness.digest).unwrap();
+    let file = fs::read(scratch.store().join("zstd-layers").join(&harness.digest)).unwrap();
+    assert!(file.starts_with(&store::compress(&data, 3)));
+    scratch.assert_level(19);
 }

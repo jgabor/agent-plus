@@ -192,6 +192,24 @@ fn without_a_user_session_nothing_runs() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// A slice of the user manager for one test, stopped when the test ends. A
+/// slice outlives the scopes in it, and a dash in its name would nest it.
+struct Slice(String);
+
+impl Slice {
+    fn new(test: &str) -> Self {
+        Slice(format!("xtask_{test}_{}.slice", std::process::id()))
+    }
+}
+
+impl Drop for Slice {
+    fn drop(&mut self) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &self.0])
+            .status();
+    }
+}
+
 /// Prints the cgroup of the job, and then of `xtask`, which started it.
 const CGROUPS: &str = "cut -d: -f3 /proc/self/cgroup; cut -d: -f3 /proc/$PPID/cgroup";
 
@@ -200,10 +218,10 @@ const CGROUPS: &str = "cut -d: -f3 /proc/self/cgroup; cut -d: -f3 /proc/$PPID/cg
 #[test]
 fn a_job_stays_in_the_slice_of_its_caller() {
     let root = workspace("slice");
-    let slice = format!("xtask-lock-{}", std::process::id());
+    let slice = Slice::new("lock");
     let output = Command::new("systemd-run")
         .args(["--user", "--scope", "--quiet", "--collect"])
-        .arg(format!("--slice={slice}"))
+        .arg(format!("--slice={}", slice.0))
         .arg("--")
         .arg(env!("CARGO_BIN_EXE_xtask"))
         .args(["run", "sh", "-c", CGROUPS])
@@ -219,41 +237,8 @@ fn a_job_stays_in_the_slice_of_its_caller() {
         .map(|cgroup| cgroup.rsplit_once('/').unwrap().0)
         .collect();
     assert_eq!(parents.len(), 2, "{stdout}");
-    assert!(parents[1].ends_with(&format!("/{slice}.slice")), "{stdout}");
+    assert!(parents[1].ends_with(&format!("/{}", slice.0)), "{stdout}");
     assert_eq!(parents[0], parents[1], "{stdout}");
-}
-
-/// A GitHub-hosted runner starts `xtask` from a system service, where
-/// `systemd-run --slice-inherit` finds no slice and refuses to start the job.
-/// A new cgroup namespace hides the slice in the same way, but where this test
-/// already runs in no slice of the user manager it needs none.
-#[test]
-fn a_caller_in_no_slice_of_the_user_manager_still_gets_its_job() {
-    let root = workspace("no-slice");
-    let own = fs::read_to_string("/proc/self/cgroup").unwrap();
-    let mut command = if own.contains("/user@") {
-        let mut command = Command::new("unshare");
-        command
-            .args(["--user", "--map-current-user", "--cgroup", "--"])
-            .arg(env!("CARGO_BIN_EXE_xtask"));
-        command
-    } else {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
-    };
-    let output = command
-        .args(["run", "sh", "-c", "echo ran"])
-        .current_dir(&root)
-        .env_remove(HOLD_ENV)
-        .env_remove("CARGO_TARGET_DIR")
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "ran\n",
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]

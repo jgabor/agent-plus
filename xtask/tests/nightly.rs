@@ -1776,6 +1776,24 @@ sleep 30
     );
 }
 
+/// A slice of the user manager for one test, stopped when the test ends. A
+/// slice outlives the scopes in it, and a dash in its name would nest it.
+struct Slice(String);
+
+impl Slice {
+    fn new(test: &str) -> Self {
+        Slice(format!("xtask_{test}_{}.slice", std::process::id()))
+    }
+}
+
+impl Drop for Slice {
+    fn drop(&mut self) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &self.0])
+            .status();
+    }
+}
+
 /// A test binary's job stays in the slice of the job that runs `cargo mutants`,
 /// and stops when that job stops. This job starts one with the runner that
 /// `cargo` would use.
@@ -1795,11 +1813,11 @@ sleep 30
 "#,
     );
     repo.touch(&["ap"]);
-    let slice = format!("xtask-nightly-{}", std::process::id());
+    let slice = Slice::new("nightly");
     let output = repo
         .command("systemd-run")
         .args(["--user", "--scope", "--quiet", "--collect"])
-        .arg(format!("--slice={slice}"))
+        .arg(format!("--slice={}", slice.0))
         .args(["--", env!("CARGO_BIN_EXE_xtask"), "nightly"])
         .env("XTASK_MUTATION_SECONDS", "1")
         .output()
@@ -1815,7 +1833,7 @@ sleep 30
     let outer = repo.read_bin("outer");
     let parent = |path: &str| path.trim().rsplit_once('/').unwrap().0.to_string();
     assert!(
-        parent(&outer).ends_with(&format!("/{slice}.slice")),
+        parent(&outer).ends_with(&format!("/{}", slice.0)),
         "{outer}"
     );
     assert_eq!(parent(cgroup), parent(&outer), "{cgroup}");

@@ -30,13 +30,18 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
-/// or of the worker itself once `land` restarts.
+/// or of the worker itself once it runs the xtask of `main`.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 /// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
 /// reaches only the supervisor's process group. Only the supervisor holds the
 /// other end of its input, so the input ends when the supervisor does. It runs
 /// the same `kill` as `stop_group`, because dash's builtin refuses `--`.
 const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
+/// Set in a merge that runs the xtask of `main`, to that `main`.
+const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
+/// Where a PR's own xtask, run in its rebased tree, finds the record whose
+/// budgets it keeps, and leaves its result.
+const OWN: &str = "target/xtask-own";
 
 enum Decision {
     Merged,
@@ -182,12 +187,6 @@ fn sequence(
     }
     let slot = lock::merge_slot(&root)?;
     report_slot()?;
-    // After the slot, because a merge during the wait can change the checks.
-    if mode == Mode::Land
-        && let Some(verdict) = use_the_newest_checks(&root, number)?
-    {
-        return Ok(verdict);
-    }
     let (pr, issue) = match decide(&gh, number, mode, thread)? {
         Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
@@ -199,6 +198,11 @@ fn sequence(
     };
 
     let fetched = fetch(&root, &pr.head_ref)?;
+    // After the slot and the fetch, because a merge during the wait can change
+    // the checks.
+    if env::var(CHECKS_OF).ok().as_deref() != Some(fetched.main.as_str()) {
+        return run_the_checks_of(&root, &fetched.main);
+    }
     let tree = Tree::create(&root, number, &fetched.branch)?;
     // Nothing was pushed, so this is the head that the PR shows.
     let unproven = |why: &str| {
@@ -206,12 +210,6 @@ fn sequence(
         refuse(why)
     };
     let kept = if keep_budgets {
-        // xtask compiled from this checkout, so these checks are for its `main`.
-        if head(&root)? != fetched.main {
-            return unproven(&format!(
-                "these checks were built from an older `main`, so they can't prove PR {number} on the newest one"
-            ));
-        }
         if !record_at_tip(&tree.path, issue)? {
             return unproven(&format!(
                 "the tip of PR {number} has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare {number}`"
@@ -225,11 +223,6 @@ fn sequence(
     if !rebase(&tree.path, &fetched.main)? {
         return unproven("the branch doesn't rebase onto `main`. Rebase it by hand, and push it");
     }
-    if mode == Mode::Land
-        && let Some(why) = needs_its_own_measurer(&tree.path, &fetched.main, number)?
-    {
-        return refuse(&why);
-    }
     let gated = head(&tree.path)?;
     let scoring = Scoring {
         number,
@@ -241,13 +234,30 @@ fn sequence(
         kept: kept.as_ref(),
     };
     let mut status = Status::begin(&gh, &fetched.branch);
-    let Proof { record, accepted } = match prove(&tree.path, &scoring, &status)? {
+    let starting = |check: &str| status.proving(check);
+    let mut proof = match prove(&tree.path, &scoring, &starting)? {
         Ok(proof) => proof,
         Err(failed) => {
             status.failed(&format!("Failed: {}", failed.join(", ")));
             return Ok(Verdict::Fail);
         }
     };
+    // The xtask of the rebased tree is what measures `main` after the merge.
+    // An exact revert puts back an xtask that was already measured, and that
+    // may not know how to `prove`.
+    if changes_xtask(&tree.path, &fetched.main)?
+        && !(mode != Mode::Merge && base::is_exact_revert(&tree.path, &fetched.main)?)
+    {
+        status.proving("its own xtask");
+        match prove_with_its_own(&tree.path, &scoring)? {
+            Ok(own) => proof = own.after(proof),
+            Err(failed) => {
+                status.failed(&format!("Failed in its own xtask: {}", failed.join(", ")));
+                return Ok(Verdict::Fail);
+            }
+        }
+    }
+    let Proof { record, accepted } = proof;
 
     if let Some(why) = changed_during_proof(&gh, &root, &scoring, &fetched.main)? {
         status.failed(&why);
@@ -297,48 +307,55 @@ fn sequence(
     Ok(Verdict::Pass)
 }
 
-/// xtask compiles from this checkout, so an old one would run old checks. If
-/// `main` is behind, this updates it and starts `land` again from the new
-/// code, which takes the slot again. Returns a verdict if `land` must stop.
-fn use_the_newest_checks(root: &Path, number: u64) -> Result<Option<Verdict>, Problem> {
-    let stop = |why: &str| refuse(why).map(Some);
-    base::git_text(
-        root,
-        &["fetch", "-q", "origin", &format!("+refs/heads/main:{MAIN}")],
-    )?;
-    if exit_code(root, &["diff", "--quiet", "HEAD"])? != 0 {
-        return stop(
-            "this checkout has changes to tracked files, and the checks run from it. Commit or discard them",
-        );
-    }
-    let newest = base::git_text(root, &["rev-parse", MAIN])?;
-    if head(root)? == newest.trim() {
-        return Ok(None);
-    }
-    if base::git_text(root, &["branch", "--show-current"])?.trim() != "main" {
-        return stop(
-            "this checkout isn't on `main`, and isn't at `origin/main`. Run this on `main`",
-        );
-    }
-    if exit_code(root, &["merge-base", "--is-ancestor", "HEAD", MAIN])? != 0 {
-        return stop(
-            "`main` here has local commits, and the checks run from it. Push or drop them",
-        );
-    }
-    base::git_text(root, &["merge", "-q", "--ff-only", MAIN])?;
-    // Rustup sets this for its children, and it would outrank a toolchain file
-    // that the update just changed.
-    let problem = process::Command::new("cargo")
-        .args(["xtask", "land", &number.to_string()])
+/// The checks are those of the xtask that runs them, and the checkout this one
+/// was built from can be anything. So this builds the xtask of `main` and runs
+/// the merge again in it, which takes the slot again. If `main` moves before
+/// that one fetches, it builds again.
+fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
+    let directory = bench::temp_outside(root)?.join(format!("xtask-checks-{}", repository(root)?));
+    let tree = Tree::at(root, directory.join("tree"), main)?;
+    let program = build_xtask(&tree.path, &directory.join("target"))?;
+    drop(tree);
+    let problem = process::Command::new(program)
+        .args(env::args_os().skip(1))
         .current_dir(root)
+        // Rustup sets this for its children, and it would outrank the
+        // toolchain file of the tree that the checks build.
         .env_remove("RUSTUP_TOOLCHAIN")
-        // `cargo` keeps this process's id, and runs the new worker either as
-        // its child or, on Unix, in its place.
         .env(WORKER_OF, process::id().to_string())
+        .env(CHECKS_OF, main)
         .exec();
     Err(Problem(format!(
-        "couldn't restart `cargo xtask land`: {problem}"
+        "couldn't run the xtask of `main`: {problem}"
     )))
+}
+
+/// Builds the xtask of a tree, and says where it is. A build shares the
+/// activity lock, so that it doesn't slow a bench.
+fn build_xtask(tree: &Path, target: &Path) -> Result<PathBuf, Problem> {
+    let _hold = lock::shared(tree)?;
+    let target_dir = target.to_string_lossy();
+    let output = process::Command::new("cargo")
+        .args([
+            "build",
+            "--quiet",
+            "--package",
+            "xtask",
+            "--target-dir",
+            &target_dir,
+        ])
+        .current_dir(tree)
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .output()
+        .map_err(workspace::no_cargo)?;
+    if !output.status.success() {
+        return Err(Problem(format!(
+            "couldn't build the xtask of {}: {}",
+            tree.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(target.join("debug/xtask"))
 }
 
 /// For the git commands that answer yes or no by exiting 0 or 1. Anything else
@@ -436,15 +453,15 @@ fn acceptance(head: &str, accepted: &[String]) -> String {
 }
 
 /// Whether this process is the worker that a supervisor started. The variable
-/// names the worker's parent, or the worker itself after `land` restarts, so
-/// it means nothing to a merge that the worker's own tests start.
+/// names the worker's parent, or the worker itself once it runs the xtask of
+/// `main`, so it means nothing to a merge that the worker's own tests start.
 fn is_worker() -> bool {
     let ids = [std::os::unix::process::parent_id(), process::id()];
     env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))
 }
 
 /// Tells the supervisor that the worker holds the slot, so that the timeout
-/// starts. A `land` that restarts says so again, and gets a new timeout.
+/// starts. The xtask of `main` says so again, and gets a new timeout.
 fn report_slot() -> Result<(), Problem> {
     let couldnt = |e: io::Error| Problem(format!("couldn't tell the supervisor: {e}"));
     let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
@@ -651,16 +668,17 @@ impl Tree {
     /// Named by repository, so that a rerun from another of its worktrees
     /// finds and clears what an earlier attempt left.
     fn path(root: &Path, number: u64) -> Result<PathBuf, Problem> {
-        let mut hasher = DefaultHasher::new();
-        lock::directory(root)?.hash(&mut hasher);
-        let name = format!("xtask-merge-{:016x}-{number}", hasher.finish());
+        let name = format!("xtask-merge-{}-{number}", repository(root)?);
         Ok(bench::temp_outside(root)?.join(name))
+    }
+
+    pub fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
+        Tree::at(root, Tree::path(root, number)?, commit)
     }
 
     /// Starts from nothing, because an earlier attempt may have died at any
     /// point in this worktree.
-    pub fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
-        let path = Tree::path(root, number)?;
+    fn at(root: &Path, path: PathBuf, commit: &str) -> Result<Tree, Problem> {
         Tree::clear(root, &path);
         let name = path.to_string_lossy();
         base::git_text(root, &["worktree", "add", "-q", "--detach", &name, commit])?;
@@ -680,6 +698,13 @@ impl Tree {
         let _ = fs::remove_dir_all(path);
         let _ = base::git(root, &["worktree", "prune"]);
     }
+}
+
+/// Names the repository, whichever of its worktrees this is.
+fn repository(root: &Path) -> Result<String, Problem> {
+    let mut hasher = DefaultHasher::new();
+    lock::directory(root)?.hash(&mut hasher);
+    Ok(format!("{:016x}", hasher.finish()))
 }
 
 impl Drop for Tree {
@@ -743,7 +768,7 @@ struct Proof {
 fn prove(
     tree: &Path,
     scoring: &Scoring,
-    status: &Status,
+    starting: &dyn Fn(&str),
 ) -> Result<Result<Proof, Failed>, Problem> {
     let Scoring { mode, pr, .. } = *scoring;
     let prepare = mode != Mode::Merge;
@@ -751,13 +776,13 @@ fn prove(
     let merging = Merging {
         labels: &pr.labels,
         prepare,
-        starting: &|check| status.proving(check),
+        starting,
     };
     let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
     if !failed.is_empty() {
         return Ok(Err(failed));
     }
-    status.proving("journey");
+    starting("journey");
     let (passing, steps) = journey::count(tree)?;
     drop(hold);
 
@@ -767,7 +792,7 @@ fn prove(
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
     if !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)? {
-        status.proving("bench");
+        starting("bench");
         if bench::compare(tree, Some(&pr.body))? == Verdict::Fail {
             return Ok(Err(vec!["bench"]));
         }
@@ -879,24 +904,124 @@ fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
     }))
 }
 
-/// `land` runs `main`'s xtask, so it can't measure a budget that only the PR
-/// teaches xtask to measure. Returns why it refuses a PR that may do that.
-fn needs_its_own_measurer(tree: &Path, main: &str, number: u64) -> Result<Option<String>, Problem> {
-    let args = ["diff", "--name-only", "--no-renames", "-z", main, "HEAD"];
-    let changed = base::git_text(tree, &args)?;
-    if !changed.split('\0').any(|path| path == "xtask/src/bench.rs") {
-        return Ok(None);
+/// Whether the PR changes the xtask that proves it.
+fn changes_xtask(tree: &Path, main: &str) -> Result<bool, Problem> {
+    let args = ["diff", "--name-only", main, "HEAD", "--", "xtask/"];
+    Ok(!base::git_text(tree, &args)?.trim().is_empty())
+}
+
+impl Proof {
+    /// This proof, by the PR's own xtask, after `main`'s. Its record is the
+    /// one kept, and it names what `main`'s xtask accepted that it didn't.
+    fn after(mut self, mains: Proof) -> Proof {
+        for item in mains.accepted {
+            if !self.accepted.contains(&item) {
+                self.accepted.push(format!("by `main`'s xtask, {item}"));
+            }
+        }
+        self
     }
-    let budgets = bench::budgets_at(tree, main)?;
-    let keys: Vec<String> = bench::not_yet_measured(&budgets)
-        .iter()
-        .map(|key| format!("`{key}`"))
-        .collect();
-    if keys.is_empty() {
-        return Ok(None);
+}
+
+/// Builds the xtask of the rebased tree, and proves the PR with it. Its
+/// `prove` writes the record into the tree, and its result into a file.
+fn prove_with_its_own(
+    tree: &Path,
+    scoring: &Scoring,
+) -> Result<Result<Proof, Vec<String>>, Problem> {
+    let program = build_xtask(tree, &tree.join("target"))?;
+    let own = tree.join(OWN);
+    let couldnt = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", own.display()));
+    if own.exists() {
+        fs::remove_dir_all(&own).map_err(couldnt)?;
     }
-    Ok(Some(format!(
-        "PR {number} changes how budgets are measured, and `main`'s xtask, which `land` runs, doesn't measure {} yet. Run `cargo xtask prepare {number}` from a checkout of its branch, so that its own xtask measures it, then use a merge button",
-        keys.join(" or ")
-    )))
+    fs::create_dir_all(&own).map_err(couldnt)?;
+    let mut command = process::Command::new(program);
+    command
+        .args(["prove", &scoring.number.to_string(), scoring.mode.command()])
+        .current_dir(tree);
+    if let Some(kept) = scoring.kept {
+        let file = own.join("kept.toml");
+        ledger::write_file(&file, kept)?;
+        command.arg("--keep").arg(file);
+    }
+    let status = command
+        .status()
+        .map_err(|e| Problem(format!("couldn't run its own xtask: {e}")))?;
+    if !matches!(status.code(), Some(0 | 1)) {
+        return Err(Problem(format!("its own xtask stopped: {status}")));
+    }
+    let result = own.join("result");
+    let text = fs::read_to_string(&result)
+        .map_err(|e| Problem(format!("couldn't read {}: {e}", result.display())))?;
+    let mut failed = Vec::new();
+    let mut accepted = Vec::new();
+    for line in text.lines() {
+        if let Some(item) = line.strip_prefix("accepted ") {
+            accepted.push(item.to_string());
+        } else if let Some(check) = line.strip_prefix("failed ") {
+            failed.push(check.to_string());
+        }
+    }
+    if !status.success() {
+        return Ok(Err(failed));
+    }
+    let record = ledger::read(tree, scoring.issue as usize)?;
+    Ok(Ok(Proof { record, accepted }))
+}
+
+/// `prove`, run in a PR's rebased tree by the xtask of `main`: proves the PR
+/// with this xtask, as the merge sequence would, and writes the record into
+/// the tree. Its result goes to `target/xtask-own/result`, a line per check
+/// that failed or thing that merging accepts.
+pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, Problem> {
+    let number: u64 = pr
+        .parse()
+        .map_err(|_| Problem(format!("`prove` takes a PR number, but got `{pr}`")))?;
+    let mode = match mode {
+        "merge" => Mode::Merge,
+        "prepare" => Mode::Prepare,
+        "land" => Mode::Land,
+        other => {
+            return Err(Problem(format!(
+                "`prove` takes `merge`, `prepare`, or `land`, but got `{other}`"
+            )));
+        }
+    };
+    let tree = workspace::root()?;
+    let pr = Gh::new(&tree).pull_request(number)?;
+    let [issue] = pr.closing_issues[..] else {
+        return Err(Problem(format!(
+            "PR {number} needs to close exactly one issue"
+        )));
+    };
+    let kept = keep
+        .map(|file| ledger::read_file(Path::new(file)))
+        .transpose()?;
+    let gated = head(&tree)?;
+    let scoring = Scoring {
+        number,
+        issue,
+        mode,
+        thread: None,
+        pr: &pr,
+        gated: &gated,
+        kept: kept.as_ref(),
+    };
+    let (lines, verdict) = match prove(&tree, &scoring, &|_| {})? {
+        Ok(Proof { record, accepted }) => {
+            ledger::store(&tree, &record)?;
+            let lines: Vec<String> = accepted.iter().map(|a| format!("accepted {a}\n")).collect();
+            (lines, Verdict::Pass)
+        }
+        Err(failed) => {
+            let lines: Vec<String> = failed.iter().map(|f| format!("failed {f}\n")).collect();
+            (lines, Verdict::Fail)
+        }
+    };
+    let result = tree.join(OWN).join("result");
+    fs::create_dir_all(tree.join(OWN))
+        .and_then(|()| fs::write(&result, lines.concat()))
+        .map_err(|e| Problem(format!("couldn't write {}: {e}", result.display())))?;
+    Ok(verdict)
 }

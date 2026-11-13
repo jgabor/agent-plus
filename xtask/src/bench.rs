@@ -654,7 +654,13 @@ fn runs(
         let lock = format!("HARNESS claude 0.0.0 {digest}\n");
         fs::write(agent.join("Agentfile.lock"), lock).map_err(problem)?;
     }
-    let agent_of = |binary: &Path| if binary == base { &agents[0] } else { &agents[1] };
+    let agent_of = |binary: &Path| {
+        if binary == base {
+            &agents[0]
+        } else {
+            &agents[1]
+        }
+    };
     let name_of = |binary: &Path| if binary == base { "base" } else { "candidate" };
     let timed = |binary: &Path| {
         run_once_headless(binary, name_of(binary), &home)?.ok_or_else(|| no_run(binary))
@@ -761,7 +767,12 @@ fn sha256(path: &Path) -> Result<String, Problem> {
     let output = Command::new("sha256sum")
         .arg(path)
         .output()
-        .or_else(|_| Command::new("shasum").args(["-a", "256"]).arg(path).output())
+        .or_else(|_| {
+            Command::new("shasum")
+                .args(["-a", "256"])
+                .arg(path)
+                .output()
+        })
         .map_err(|e| Problem(format!("couldn't hash {shown}: {e}")))?;
     let text = String::from_utf8_lossy(&output.stdout);
     let digest = text.split(' ').next().unwrap_or_default();

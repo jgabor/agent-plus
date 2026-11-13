@@ -13,5 +13,5 @@ mod kvm;
 mod memory;
 mod sys;
 
-pub use kvm::{Dtable, Interrupt, Ports, Regs, Segment, Sregs, Stop, Vcpu, Vm};
+pub use kvm::{Dtable, Interrupt, Ports, Regs, Segment, Sregs, Stop, Vcpu, Vm, Waker};
 pub use memory::{GuestMemory, OutOfBounds};

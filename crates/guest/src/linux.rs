@@ -1,12 +1,13 @@
 //! The real system calls.
 
+use crate::protocol::Size;
 use crate::{MOUNTS, Mount, System, root};
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_short, c_ulong, c_void};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::mem::size_of;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::{self as unix_fs, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
@@ -25,6 +26,19 @@ const FIONREAD: c_ulong = 0x541B;
 const FOREVER: c_int = -1;
 const MS_RDONLY: c_ulong = 1;
 const MS_MOVE: c_ulong = 8192;
+const MS_NOSUID: c_ulong = 2;
+const MS_NOEXEC: c_ulong = 8;
+const O_RDWR: c_int = 2;
+const O_NOCTTY: c_int = 0o400;
+const O_CLOEXEC: c_int = 0o2000000;
+const TIOCSCTTY: c_ulong = 0x540E;
+const TIOCSWINSZ: c_ulong = 0x5414;
+// _IOW('T', 0x31, int)
+const TIOCSPTLCK: c_ulong = 0x4004_5431;
+// _IO('T', 0x41)
+const TIOCGPTPEER: c_ulong = 0x5441;
+/// Where terminals live. The guest mounts them on first use.
+const TERMINALS: &str = "/dev/pts";
 const COMMAND_LINE: &str = "/proc/cmdline";
 /// Where the init stacks the layers, in the initramfs. Once the stack is the
 /// root, nothing in the guest can reach these.
@@ -41,6 +55,15 @@ struct VsockAddress {
     cid: u32,
     flags: u8,
     zero: [u8; 3],
+}
+
+/// `struct winsize`.
+#[repr(C)]
+struct WindowSize {
+    rows: u16,
+    columns: u16,
+    x_pixels: u16,
+    y_pixels: u16,
 }
 
 /// `struct pollfd`.
@@ -62,6 +85,7 @@ unsafe extern "C" {
         data: *const c_void,
     ) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    fn setsid() -> c_int;
     fn sync();
     fn reboot(command: c_int) -> c_int;
     fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
@@ -244,6 +268,82 @@ pub fn connect_to_host(port: u32) -> io::Result<File> {
     // SAFETY: `address` outlives the call, and `length` is its size.
     checked(unsafe { connect(fd, &address, length) })?;
     Ok(stream)
+}
+
+/// Opens a new terminal of this size. Returns its controlling side, which
+/// stands in for the screen and the keyboard, and the side a program runs
+/// in.
+pub fn open_terminal(size: Size) -> io::Result<(File, File)> {
+    if !Path::new(TERMINALS).join("ptmx").exists() {
+        fs::create_dir_all(TERMINALS)?;
+        mount_with(
+            "devpts",
+            TERMINALS,
+            "devpts",
+            MS_NOSUID | MS_NOEXEC,
+            "mode=0620,ptmxmode=0666",
+        )?;
+    }
+    let controller = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(O_NOCTTY)
+        .open("/dev/ptmx")?;
+    let unlocked: c_int = 0;
+    // SAFETY: `TIOCSPTLCK` reads one `int` through this pointer, which is
+    // valid for the whole call.
+    checked(unsafe {
+        ioctl(
+            controller.as_raw_fd(),
+            TIOCSPTLCK,
+            &unlocked as *const c_int,
+        )
+    })?;
+    resize(controller.as_fd(), size)?;
+    // SAFETY: `TIOCGPTPEER` takes open flags, not a pointer.
+    let fd = checked(unsafe {
+        ioctl(
+            controller.as_raw_fd(),
+            TIOCGPTPEER,
+            (O_RDWR | O_NOCTTY | O_CLOEXEC) as c_ulong,
+        )
+    })?;
+    // SAFETY: the call returned a new descriptor that nothing else owns.
+    let terminal = unsafe { File::from_raw_fd(fd) };
+    Ok((controller, terminal))
+}
+
+/// Sets the size of the terminal that `terminal` is either side of. The
+/// program in it gets `SIGWINCH`.
+pub fn resize(terminal: BorrowedFd, size: Size) -> io::Result<()> {
+    let window = WindowSize {
+        rows: size.rows,
+        columns: size.columns,
+        x_pixels: 0,
+        y_pixels: 0,
+    };
+    // SAFETY: `TIOCSWINSZ` reads one `struct winsize` through this pointer,
+    // which is valid for the whole call.
+    checked(unsafe {
+        ioctl(
+            terminal.as_raw_fd(),
+            TIOCSWINSZ,
+            &window as *const WindowSize,
+        )
+    })?;
+    Ok(())
+}
+
+/// Starts a session whose controlling terminal is standard input, as a
+/// login does. It runs in a child between fork and exec, so it only makes
+/// system calls.
+pub fn take_terminal() -> io::Result<()> {
+    // SAFETY: neither call takes a pointer.
+    unsafe {
+        checked(setsid())?;
+        checked(ioctl(0, TIOCSCTTY, 0 as c_ulong))?;
+    }
+    Ok(())
 }
 
 /// Every virtio-blk disk, with its serial.

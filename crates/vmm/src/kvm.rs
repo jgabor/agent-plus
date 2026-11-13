@@ -14,6 +14,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::ptr;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 
@@ -298,6 +299,57 @@ pub trait Ports {
     fn mmio_read(&mut self, _address: u64, data: &mut [u8]) {
         data.fill(0xff);
     }
+    /// A [`Waker`] woke the vCPU. It runs on the vCPU's thread, between the
+    /// guest's exits, so it can do what the guest's own accesses do.
+    fn woken(&mut self) {}
+}
+
+/// Wakes a vCPU that [`Vcpu::run_waking`] runs, from any thread, so that
+/// [`Ports::woken`] runs on the vCPU's thread soon after. Wakes coalesce, and
+/// one that comes before the run starts is handled when it does.
+#[derive(Default)]
+pub struct Waker {
+    /// Whether a wake is waiting to be handled.
+    pending: AtomicBool,
+    /// The running vCPU's thread, and the address of its `immediate_exit`
+    /// byte, for as long as it runs.
+    running: Mutex<Option<(usize, usize)>>,
+}
+
+impl Waker {
+    /// Asks the vCPU's thread to call [`Ports::woken`].
+    pub fn wake(&self) {
+        self.pending.store(true, Ordering::SeqCst);
+        let running = self.running.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((thread, exit)) = *running {
+            // SAFETY: `Running` clears these under this lock before the run
+            // ends, so the thread and its run area outlive this use. The byte
+            // is only ever accessed atomically, and the signal's handler does
+            // nothing. As with the watchdog, the byte covers a vCPU that
+            // isn't in the guest yet, and the signal one that is.
+            unsafe {
+                AtomicU8::from_ptr(exit as *mut u8).store(1, Ordering::SeqCst);
+                sys::pthread_kill(thread, KICK_SIGNAL);
+            }
+        }
+    }
+}
+
+/// Lets a [`Waker`] reach the vCPU's thread until it drops.
+struct Running<'a>(&'a Waker);
+
+impl<'a> Running<'a> {
+    fn start(waker: &'a Waker, thread: usize, exit: &AtomicU8) -> Self {
+        let mut running = waker.running.lock().unwrap_or_else(PoisonError::into_inner);
+        *running = Some((thread, exit.as_ptr() as usize));
+        Running(waker)
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        *self.0.running.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
 }
 
 /// Port writes go to a callback, and reads have no answer.
@@ -523,34 +575,57 @@ impl Vcpu {
     /// Runs the guest as [`Vcpu::run`] does, with `ports` answering port
     /// reads as well as taking port writes.
     pub fn run_ports(&mut self, timeout: Duration, ports: &mut impl Ports) -> io::Result<Stop> {
+        self.run_waking(timeout, ports, &Waker::default())
+    }
+
+    /// Runs the guest as [`Vcpu::run_ports`] does, and calls
+    /// [`Ports::woken`] on this thread whenever `waker` wakes it.
+    pub fn run_waking(
+        &mut self,
+        timeout: Duration,
+        ports: &mut impl Ports,
+        waker: &Waker,
+    ) -> io::Result<Stop> {
         ignore_kick_signal()?;
         let _mask = unblock_kick_signal()?;
         let this = &*self;
         let kick = this.immediate_exit();
         kick.store(0, Ordering::SeqCst);
         let done = AtomicBool::new(false);
+        let timed_out = AtomicBool::new(false);
         // SAFETY: this call has no preconditions. The thread stays alive for
         // as long as the watchdog can use the handle, because the scope below
-        // joins the watchdog before this function returns.
+        // joins the watchdog before this function returns, and as long as
+        // the waker can, because `Running` lets go of it first.
         let vcpu_thread = unsafe { sys::pthread_self() };
+        let _running = Running::start(waker, vcpu_thread, kick);
 
         thread::scope(|scope| {
-            let watchdog = scope.spawn(|| watch(timeout, &done, kick, vcpu_thread));
+            let watchdog = scope.spawn(|| watch(timeout, &done, &timed_out, kick, vcpu_thread));
             let _cancel = CancelWatchdog {
                 done: &done,
                 watchdog: watchdog.thread(),
             };
-            this.run_until_stop(kick, ports)
+            this.run_until_stop(kick, &timed_out, waker, ports)
         })
     }
 
-    fn run_until_stop(&self, kick: &AtomicU8, ports: &mut impl Ports) -> io::Result<Stop> {
+    fn run_until_stop(
+        &self,
+        kick: &AtomicU8,
+        timed_out: &AtomicBool,
+        waker: &Waker,
+        ports: &mut impl Ports,
+    ) -> io::Result<Stop> {
         loop {
+            if waker.pending.swap(false, Ordering::SeqCst) {
+                ports.woken();
+            }
             // SAFETY: KVM_RUN takes no argument. It writes only to the run
             // area, which this value owns, and to guest memory.
             let stop = match unsafe { ioctl_value(self.fd.as_raw_fd(), KVM_RUN, 0) } {
                 Ok(_) => self.handle_exit(ports)?,
-                Err(error) => interrupted(error, kick)?,
+                Err(error) => interrupted(error, kick, timed_out)?,
             };
             if let Some(stop) = stop {
                 return Ok(stop);
@@ -631,12 +706,22 @@ impl Vcpu {
 
 /// Why a `KVM_RUN` that failed with `error` stops the vCPU, or `None` if the
 /// guest can go on. Only the watchdog's kick ends a run that a signal
-/// interrupted.
-fn interrupted(error: io::Error, kick: &AtomicU8) -> io::Result<Option<Stop>> {
+/// interrupted. A waker's kick is cleared, so the guest can go on. The
+/// watchdog marks the timeout before it kicks, so a kick cleared here can't
+/// hide one: either the mark is seen now, or the kick lands after the clear
+/// and stops the next `KVM_RUN`.
+fn interrupted(
+    error: io::Error,
+    kick: &AtomicU8,
+    timed_out: &AtomicBool,
+) -> io::Result<Option<Stop>> {
     if error.raw_os_error() != Some(EINTR) {
         return Err(error);
     }
-    Ok((kick.load(Ordering::SeqCst) != 0).then_some(Stop::TimedOut))
+    kick.store(0, Ordering::SeqCst);
+    Ok(timed_out
+        .load(Ordering::SeqCst)
+        .then_some(Stop::TimedOut))
 }
 
 /// Ends the watchdog on drop, so that a panic in the port callback doesn't
@@ -701,7 +786,13 @@ fn unblock_kick_signal() -> io::Result<RestoreSignalMask> {
 /// `immediate_exit` covers a vCPU that isn't in the guest yet, and the signal
 /// covers one that is. `immediate_exit` is set first, so whichever side of
 /// KVM's checks the signal lands on, the vCPU can't re-enter the guest.
-fn watch(timeout: Duration, done: &AtomicBool, kick: &AtomicU8, vcpu_thread: usize) {
+fn watch(
+    timeout: Duration,
+    done: &AtomicBool,
+    timed_out: &AtomicBool,
+    kick: &AtomicU8,
+    vcpu_thread: usize,
+) {
     let start = Instant::now();
     loop {
         if done.load(Ordering::SeqCst) {
@@ -713,6 +804,7 @@ fn watch(timeout: Duration, done: &AtomicBool, kick: &AtomicU8, vcpu_thread: usi
         }
         thread::park_timeout(left);
     }
+    timed_out.store(true, Ordering::SeqCst);
     kick.store(1, Ordering::SeqCst);
     // SAFETY: `Vcpu::run` keeps `vcpu_thread` alive until this thread is
     // joined, and its handler for this signal does nothing.
@@ -984,12 +1076,37 @@ mod tests {
     #[test]
     fn only_the_watchdog_ends_a_run_that_a_signal_interrupted() {
         let signal = || io::Error::from_raw_os_error(EINTR);
-        let kick = AtomicU8::new(0);
-        assert_eq!(interrupted(signal(), &kick).unwrap(), None);
-        kick.store(1, Ordering::SeqCst);
-        assert_eq!(interrupted(signal(), &kick).unwrap(), Some(Stop::TimedOut));
+        let kick = AtomicU8::new(1);
+        let timed_out = AtomicBool::new(false);
+        // A waker's kick is cleared, so the next `KVM_RUN` enters the guest.
+        assert_eq!(interrupted(signal(), &kick, &timed_out).unwrap(), None);
+        assert_eq!(kick.load(Ordering::SeqCst), 0);
+        timed_out.store(true, Ordering::SeqCst);
+        assert_eq!(
+            interrupted(signal(), &kick, &timed_out).unwrap(),
+            Some(Stop::TimedOut)
+        );
         let other = io::Error::from_raw_os_error(EINTR + 1);
-        assert!(interrupted(other, &kick).is_err());
+        assert!(interrupted(other, &kick, &timed_out).is_err());
+    }
+
+    #[test]
+    fn a_wake_before_the_run_waits_for_it_and_one_during_kicks_the_vcpu() {
+        ignore_kick_signal().unwrap();
+        let waker = Waker::default();
+        waker.wake();
+        assert!(waker.pending.load(Ordering::SeqCst));
+
+        let kick = AtomicU8::new(0);
+        // SAFETY: this call has no preconditions.
+        let this_thread = unsafe { sys::pthread_self() };
+        let running = Running::start(&waker, this_thread, &kick);
+        waker.wake();
+        assert_eq!(kick.load(Ordering::SeqCst), 1);
+        drop(running);
+        kick.store(0, Ordering::SeqCst);
+        waker.wake();
+        assert_eq!(kick.load(Ordering::SeqCst), 0, "a run that ended was kicked");
     }
 
     /// This thread's signal mask.
@@ -1029,11 +1146,19 @@ mod tests {
     fn the_watchdog_kicks_a_vcpu_that_outlives_the_timeout() {
         ignore_kick_signal().unwrap();
         let done = AtomicBool::new(false);
+        let timed_out = AtomicBool::new(false);
         let kick = AtomicU8::new(0);
         // SAFETY: this call has no preconditions.
         let this_thread = unsafe { sys::pthread_self() };
-        watch(Duration::from_millis(1), &done, &kick, this_thread);
+        watch(
+            Duration::from_millis(1),
+            &done,
+            &timed_out,
+            &kick,
+            this_thread,
+        );
         assert_eq!(kick.load(Ordering::SeqCst), 1);
+        assert!(timed_out.load(Ordering::SeqCst));
     }
 
     #[test]

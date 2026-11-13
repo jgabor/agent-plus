@@ -4,7 +4,7 @@
 //! the process, so a second test here could have its children taken.
 
 use guest::System;
-use guest::agent::serve;
+use guest::agent::{Split, serve};
 use guest::linux::Linux;
 use guest::protocol::{ToGuest, ToHost};
 use std::ffi::{c_int, c_ulong};
@@ -46,6 +46,8 @@ impl Read for FakeChannel {
         self.from_host.read(buffer)
     }
 }
+
+impl Split for FakeChannel {}
 
 impl Write for FakeChannel {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

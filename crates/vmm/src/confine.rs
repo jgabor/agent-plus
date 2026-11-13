@@ -4,12 +4,14 @@
 //!
 //! What is left can't start a process or a program, or reach a host file:
 //! every call that takes a path is missing, and memory can be mapped only
-//! anonymously, so a file left open can't be read either. Calls that could
+//! anonymously, so a file left open can't be read either. The one exception
+//! is a descriptor the caller names, which may be read and nothing else. Calls that could
 //! reach past this process are narrowed by their arguments, as the kernel
 //! reads them.
 
 use std::ffi::{c_int, c_long, c_ulong};
 use std::io;
+use std::os::fd::RawFd;
 
 use crate::kvm::{KVM_IRQ_LINE, KVM_RUN};
 
@@ -39,6 +41,7 @@ const F_GETFD: u32 = 1;
 const MAP_ANONYMOUS: u32 = 0x20;
 
 // x86_64 system call numbers.
+const READ: u32 = 0;
 const WRITE: u32 = 1;
 const CLOSE: u32 = 3;
 const MMAP: u32 = 9;
@@ -115,10 +118,11 @@ enum Rule {
 
 /// The calls that the VMM, its watchdog, and the output relay make while a
 /// guest runs, on glibc and musl. `pid` and `tid` are this process's and the
-/// vCPU thread's, the only targets the watchdog signals.
-fn rules(pid: u32, tid: u32) -> Vec<Rule> {
+/// vCPU thread's, the only targets the watchdog signals. `readable` is the
+/// one descriptor that may be read, if any.
+fn rules(pid: u32, tid: u32, readable: Option<RawFd>) -> Vec<Rule> {
     use Rule::{Allow, AllowIf, AllowIfSet, Refuse};
-    vec![
+    let mut rules = vec![
         AllowIf(IOCTL, 1, vec![KVM_RUN as u32, KVM_IRQ_LINE as u32]),
         Allow(FUTEX),
         Allow(WRITE),
@@ -150,7 +154,11 @@ fn rules(pid: u32, tid: u32) -> Vec<Rule> {
         Allow(RSEQ),
         Allow(EXIT),
         Allow(EXIT_GROUP),
-    ]
+    ];
+    if let Some(fd) = readable {
+        rules.push(AllowIf(READ, 0, vec![fd as u32]));
+    }
+    rules
 }
 
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
@@ -192,11 +200,12 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
 /// Confines every thread of this process, for the rest of its life. Call it
 /// from the thread that will run the vCPU, once the VM is set up, because the
 /// watchdog may signal only that thread, and no file can be opened after.
-pub fn confine() -> io::Result<()> {
+/// Only `readable` may be read, if it is given.
+pub fn confine(readable: Option<RawFd>) -> io::Result<()> {
     let pid = std::process::id();
     // SAFETY: gettid takes no arguments and can't fail.
     let tid = unsafe { syscall(GETTID as c_long) } as u32;
-    let instructions = compile(&rules(pid, tid));
+    let instructions = compile(&rules(pid, tid, readable));
     let program = Program {
         len: instructions.len() as u16,
         instructions: instructions.as_ptr(),
@@ -252,7 +261,11 @@ mod tests {
     /// Runs the program the way the kernel does, on `struct seccomp_data`
     /// with the low halves of the arguments.
     fn run(arch: u32, number: u32, args: [u32; 6]) -> u32 {
-        let program = compile(&rules(PID, TID));
+        run_reading(None, arch, number, args)
+    }
+
+    fn run_reading(readable: Option<RawFd>, arch: u32, number: u32, args: [u32; 6]) -> u32 {
+        let program = compile(&rules(PID, TID, readable));
         let mut accumulator = 0;
         let mut pc = 0;
         loop {
@@ -338,6 +351,15 @@ mod tests {
         assert_eq!(call(TGKILL, [1, 1, 9, 0, 0, 0]), RET_KILL_PROCESS);
         assert_eq!(call(TKILL, [1, 9, 0, 0, 0, 0]), RET_KILL_PROCESS);
         assert_eq!(call(FCNTL, [3, F_SETOWN, 1, 0, 0, 0]), RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn only_the_named_descriptor_can_be_read() {
+        assert_eq!(call(READ, [0, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        let reading = |fd| run_reading(Some(7), AUDIT_ARCH_X86_64, READ, [fd, 0, 0, 0, 0, 0]);
+        assert_eq!(reading(7), RET_ALLOW);
+        assert_eq!(reading(0), RET_KILL_PROCESS);
+        assert_eq!(reading(8), RET_KILL_PROCESS);
     }
 
     #[test]

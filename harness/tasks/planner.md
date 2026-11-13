@@ -79,7 +79,6 @@ Draft model: `claude-fable-5-2`, at effort `high`
    - `Touches` names real paths in backticks, so that the queue can tell which
      issues overlap.
    - End with `Blocked by #<n>.` when one issue needs another first.
-   - Add the parent's `auto:*` label. If the work needs a change to SPEC.md, a
-     budget, a waiver, or a journey step, add `auto:pr` instead, so that a
-     worker prepares the PR and the owner merges it.
+   - Add the parent's `auto:*` label, whatever paths the work will touch.
+     `merge` decides from the diff whether the PR waits for the owner.
 9. List the drafts and the issues you filed, then stop.

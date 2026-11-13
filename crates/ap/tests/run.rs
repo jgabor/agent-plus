@@ -1,6 +1,7 @@
-//! What `ap run` refuses before its VM starts. Nothing here boots, because a
-//! test binary is GNU-linked, so a run that got as far as booting would fail
-//! on that instead. The boots themselves are in the package `t1`.
+//! What `ap run` refuses before its VM starts. Nothing here boots, because
+//! the store holds only a stand-in for the `OS minimal` layer, so a run that
+//! got past its checks fails when it reads that layer. The boots themselves
+//! are in the package `t1`.
 
 mod common;
 
@@ -10,6 +11,9 @@ use std::process::{Command, Output};
 
 /// The status `ap run` exits with when it fails before the harness starts.
 const FAILED: i32 = 125;
+
+/// What a run that got past its checks says, when it reads the stand-in layer.
+const PAST_CHECKS: &str = "can't read the layer for OS minimal";
 
 /// An agent that `ap run` can start, apart from the boot.
 const RUNNABLE: &str = "AGENT claude:0.0.0\nOS minimal\nNETWORK -\n";
@@ -28,6 +32,7 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             root: root.canonicalize().unwrap(),
             home: home.canonicalize().unwrap(),
@@ -78,7 +83,7 @@ fn refused(output: &Output, says: &str) {
     assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(stderr.contains(says), "{stderr}");
-    assert!(!stderr.contains("dynamically linked"), "{stderr}");
+    assert!(!stderr.contains(PAST_CHECKS), "{stderr}");
 }
 
 #[test]
@@ -111,7 +116,7 @@ fn an_argument_that_isnt_a_path_names_a_built_agent() {
     let built = scratch.ap(&["run", "runnable", "-p", "hi"], &[]);
     assert_eq!(built.status.code(), Some(FAILED), "{built:?}");
     let stderr = String::from_utf8_lossy(&built.stderr);
-    assert!(stderr.contains("dynamically linked"), "{stderr}");
+    assert!(stderr.contains(PAST_CHECKS), "{stderr}");
 
     for path in ["./runnable", "../runnable", "/runnable", "~/runnable"] {
         let output = scratch.ap(&["run", path, "-p", "hi"], &[]);
@@ -134,7 +139,7 @@ fn a_run_that_fails_before_the_harness_starts_exits_125() {
     // With the variable set, the run gets as far as the boot.
     let set = scratch.ap(&["run", "needs", "-p", "hi"], &[("WHO", "you")]);
     assert!(
-        String::from_utf8_lossy(&set.stderr).contains("dynamically linked"),
+        String::from_utf8_lossy(&set.stderr).contains(PAST_CHECKS),
         "{set:?}"
     );
     refused(

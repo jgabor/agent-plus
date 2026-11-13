@@ -25,8 +25,8 @@ if command -v sha256sum >/dev/null; then
 else
   digest=$(shasum -a 256 "$fake" | cut -d ' ' -f 1)
 fi
-mkdir -p "$HOME/.cache/ap"
-cp "$fake" "$HOME/.cache/ap/$digest"
+mkdir -p "$XDG_CACHE_HOME/ap"
+cp "$fake" "$XDG_CACHE_HOME/ap/$digest"
 echo "HARNESS claude 0.0.0 $digest" >notes/Agentfile.lock
 # The approval of these grants is step 6's.
 printf 'NETWORK +\nPOLICY +\n' >grants

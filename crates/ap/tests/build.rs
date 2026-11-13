@@ -1093,7 +1093,7 @@ fn claude_stable_resolves_downloads_and_writes_the_lock() {
             "/claude-code-releases/2.1.311/linux-x64/claude",
         ]
     );
-    assert_eq!(settling.cached(), [digest.clone()]);
+    assert_eq!(settling.cached(), [digest.as_str()]);
     assert_eq!(
         fs::read(settling.cache.join(&digest)).unwrap(),
         common::HARNESS

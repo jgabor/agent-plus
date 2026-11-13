@@ -70,7 +70,7 @@ fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = boot::boot(guest, |report| match report {
-        Report::Ready(_) => {}
+        Report::Ready(_) | Report::Exec(..) | Report::ExecTook(_) => {}
         Report::Stdout(bytes) => stdout.extend_from_slice(bytes),
         Report::Stderr(bytes) => stderr.extend_from_slice(bytes),
     })

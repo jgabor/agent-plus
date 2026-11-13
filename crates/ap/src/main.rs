@@ -9,6 +9,7 @@ use ap::boot;
 
 mod commands {
     pub mod build;
+    pub mod exec;
     pub mod fmt;
     pub mod init;
     pub mod inspect;
@@ -27,6 +28,7 @@ const USAGE: &str = "usage: ap --version
        ap rm agent
        ap run [-i] [-p prompt] agent
        ap ps
+       ap exec run command [arg...]
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -46,6 +48,14 @@ fn main() -> ExitCode {
         eprintln!("ap: can't start the harness: {error}");
         // The harness never started, so this is `ap`'s failure, not its.
         return ExitCode::from(125);
+    }
+    if program.as_deref() == Some(OsStr::new(guest::agent::EXEC_AS_AGENT)) {
+        // The guest's init started this to become `agent` and exec a command
+        // beside the harness, which fails as a shell's would.
+        let error = guest::agent::exec_as_agent(&args);
+        let name = args.first().map(|name| name.to_string_lossy());
+        eprintln!("ap exec: {}: {error}", name.unwrap_or_default());
+        return ExitCode::from(guest::agent::status_of_failure(&error));
     }
     if program.as_deref() == Some(OsStr::new(ap::runs::RUN_PROCESS)) {
         return ExitCode::from(ap::runs::run_process(&args));
@@ -96,6 +106,11 @@ fn main() -> ExitCode {
         && let Some(all) = commands::ps::parse(&args[1..])
     {
         return ExitCode::from(commands::ps::run(all));
+    }
+    if args.first().is_some_and(|command| command == "exec")
+        && let Some(exec) = commands::exec::parse(&args[1..])
+    {
+        return ExitCode::from(commands::exec::run(&exec));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

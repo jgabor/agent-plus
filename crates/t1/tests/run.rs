@@ -125,6 +125,35 @@ impl Scratch {
             .unwrap()
     }
 
+    /// Runs `ap exec` in the run `name` with these arguments, as `ap` does,
+    /// with `input` as its standard input.
+    fn exec(&self, name: &str, args: &[&str], input: &[u8]) -> Output {
+        let mut child = self
+            .exec_command(name, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    /// `ap exec` in the run `name`, with only `HOME` and `XDG_RUNTIME_DIR`
+    /// in its environment, under a timeout.
+    fn exec_command(&self, name: &str, args: &[&str]) -> Command {
+        let mut command = Command::new("timeout");
+        command
+            .args(["-k", "10", TIMEOUT])
+            .arg(&shared().0)
+            .args(["exec", name])
+            .args(args)
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("XDG_RUNTIME_DIR", &self.runtime);
+        command
+    }
+
     /// The rows `ap ps` prints after its header.
     fn ps(&self) -> Vec<String> {
         let output = self.ap(&["ps"]);
@@ -712,4 +741,166 @@ fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
 
     signal("-CONT", run.0.id());
     assert_eq!(run.0.wait().unwrap().code(), Some(STATUS));
+}
+
+/// Fails unless `output` is a success that printed `stdout` and nothing on
+/// standard error.
+fn printed(output: &Output, stdout: &str) {
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        stdout,
+        "{output:?}"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// Runs `ap exec` in the run `name` with a terminal of this size on both
+/// standard input and standard output, and returns its status and what the
+/// terminal showed.
+fn exec_in_terminal(scratch: &Scratch, name: &str, args: &[&str], size: Size) -> (i32, String) {
+    let (mut controller, terminal) = open_terminal(size).unwrap();
+    let mut command = scratch.exec_command(name, args);
+    command
+        .stdin(terminal.try_clone().unwrap())
+        .stdout(terminal.try_clone().unwrap())
+        .stderr(terminal);
+    // SAFETY: `take_terminal` only makes system calls.
+    unsafe { command.pre_exec(take_terminal) };
+    let mut child = Started(command.spawn().unwrap());
+    // The terminal ends with `ap exec`'s last use of it.
+    drop(command);
+    let shown = thread::spawn(move || {
+        let mut shown = Vec::new();
+        let mut buffer = [0; 4096];
+        while let Ok(count @ 1..) = controller.read(&mut buffer) {
+            shown.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8_lossy(&shown).into_owned()
+    });
+    let status = child.0.wait().unwrap().code().unwrap();
+    (status, shown.join().unwrap())
+}
+
+// spec(ap exec): `ap exec <run> <command> [<arg>...]` runs a command inside an active run, and exits with the command's status.
+// spec(ap exec): The command runs directly, not through a shell, with the harness's user, environment, and working directory.
+// spec(ap exec): Its standard input, output, and error are those of `ap exec`.
+// spec(ap exec): When both standard input and standard output of `ap exec` are terminals, the command gets a terminal too.
+// spec(ap exec): Its output isn't part of the run's log.
+// spec(ap exec): If the command isn't found, `ap exec` exits with status 127, and if it can't be run, with status 126.
+// spec(ap exec): If the run has finished or doesn't exist, `ap exec` says so on standard error and exits with status 125.
+// spec(ap exec): If the run ends while the command runs, `ap exec` exits with status 125.
+#[test]
+fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
+    let scratch = Scratch::new("exec");
+    scratch.build(
+        "busy",
+        &fake("ENV FAKE_HARNESS_SLEEP 300\nENV GREETING \"hello, $GREETED\"\nWORKDIR /tmp\n"),
+    );
+    let mut run = Started(
+        Command::new("timeout")
+            .args(["-k", "10", TIMEOUT])
+            .arg(&shared().0)
+            .args(["run", "busy", "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .env("GREETED", "the host")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut log = BufReader::new(run.0.stdout.take().unwrap());
+    let mut report = String::new();
+    log.read_line(&mut report).unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+
+    // The harness's user, environment, and directory, and no shell to
+    // expand what a shell would.
+    printed(&scratch.exec(&name, &["id", "-un"], b""), "agent\n");
+    printed(
+        &scratch.exec(&name, &["printenv", "GREETING", "HOME"], b""),
+        "hello, the host\n/home/agent\n",
+    );
+    printed(&scratch.exec(&name, &["pwd"], b""), "/tmp\n");
+    printed(
+        &scratch.exec(&name, &["echo", "$GREETING", "*", "a;b"], b""),
+        "$GREETING * a;b\n",
+    );
+
+    // Input, output, error, and status, with no terminal on pipes.
+    let script = "cat; echo oops >&2; test -t 0 || test -t 1 || exit 3";
+    let output = scratch.exec(&name, &["sh", "-c", script], b"typed\nlines");
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(output.stdout, b"typed\nlines", "{output:?}");
+    assert_eq!(output.stderr, b"oops\n", "{output:?}");
+
+    // A terminal on both ends gives the command one, of the same size.
+    let script = "test -t 0 && test -t 1 && stty size";
+    let (status, shown) = exec_in_terminal(&scratch, &name, &["sh", "-c", script], size(33, 101));
+    assert_eq!(status, 0, "{shown:?}");
+    assert!(shown.contains("33 101"), "{shown:?}");
+
+    let missing = scratch.exec(&name, &["no-such-command"], b"");
+    assert_eq!(missing.status.code(), Some(127), "{missing:?}");
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("no-such-command"), "{stderr}");
+    let unrunnable = scratch.exec(&name, &["/etc/passwd"], b"");
+    assert_eq!(unrunnable.status.code(), Some(126), "{unrunnable:?}");
+
+    // An `ap exec` that goes away mid-command leaves the run as it was.
+    let mut abandoned = Started(
+        scratch
+            .exec_command(&name, &["sh", "-c", "echo reading; cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut reading = String::new();
+    BufReader::new(abandoned.0.stdout.take().unwrap())
+        .read_line(&mut reading)
+        .unwrap();
+    assert_eq!(reading, "reading\n");
+    // `timeout` passes the signal on to `ap exec`.
+    signal("-TERM", abandoned.0.id());
+    wait_within(&mut abandoned, Duration::from_secs(10));
+    printed(&scratch.exec(&name, &["id", "-un"], b""), "agent\n");
+
+    // The run ends while a command runs.
+    let mut sleeper = Started(
+        scratch
+            .exec_command(&name, &["sh", "-c", "echo asleep; exec sleep 600"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut asleep = String::new();
+    BufReader::new(sleeper.0.stdout.take().unwrap())
+        .read_line(&mut asleep)
+        .unwrap();
+    assert_eq!(asleep, "asleep\n");
+    run.0.kill().unwrap();
+    run.0.wait().unwrap();
+    let status = wait_within(&mut sleeper, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(FAILED), "{status:?}");
+
+    // Nothing the commands printed reached the run's output.
+    let mut rest = String::new();
+    log.read_to_string(&mut rest).unwrap();
+    assert_eq!(rest, "", "{report}");
+
+    let finished = scratch.exec(&name, &["true"], b"");
+    assert_eq!(finished.status.code(), Some(FAILED), "{finished:?}");
+    let stderr = String::from_utf8_lossy(&finished.stderr);
+    assert!(
+        stderr.contains(&format!("run {name} has finished")),
+        "{stderr}"
+    );
 }

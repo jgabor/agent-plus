@@ -78,7 +78,7 @@ fn orphans_of_a_running_program_are_reaped_and_its_status_still_arrives() {
         to_host: Vec::new(),
     };
 
-    serve(&mut channel).unwrap();
+    serve(&mut channel, None).unwrap();
 
     let mut reports = Vec::new();
     let mut frames = channel.to_host.as_slice();

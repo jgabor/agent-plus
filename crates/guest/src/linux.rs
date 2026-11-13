@@ -2,6 +2,7 @@
 
 use crate::protocol::Size;
 use crate::{MOUNTS, Mount, System, root};
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_short, c_ulong, c_void};
 use std::fs::{File, OpenOptions};
 use std::mem::size_of;
@@ -10,8 +11,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{self as unix_fs, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::ExitStatus;
-use std::{env, fs, io, ptr};
+use std::process::{Child, Command, ExitStatus};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::{env, fs, io, mem, ptr, thread};
 
 const WNOHANG: c_int = 1;
 const ECHILD: i32 = 10;
@@ -192,22 +195,68 @@ impl System for Linux {
     }
 }
 
-/// Reaps children until `pid` ends, and returns its status. Any other child
-/// that ends first is reaped too, which is how orphans go while a program runs.
-pub fn reap_until(pid: u32) -> io::Result<ExitStatus> {
+/// The children [`spawn`] started that haven't ended, each with where its
+/// status goes, and whether a thread is reaping.
+struct Children {
+    waiting: BTreeMap<u32, SyncSender<io::Result<ExitStatus>>>,
+    reaping: bool,
+}
+
+static CHILDREN: Mutex<Children> = Mutex::new(Children {
+    waiting: BTreeMap::new(),
+    reaping: false,
+});
+
+fn children() -> MutexGuard<'static, Children> {
+    CHILDREN.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Starts `command`, and returns it with where its status arrives.
+///
+/// While a child started here runs, one thread reaps every child of the
+/// process, and hands each of these its own status. Any other child it
+/// reaps is an orphan, which is how orphans go while a program runs.
+pub fn spawn(command: &mut Command) -> io::Result<(Child, Receiver<io::Result<ExitStatus>>)> {
+    // Held from before the fork until the child is listed, so the reaper
+    // can't take the child's status before it knows where to send it.
+    let mut children = children();
+    let child = command.spawn()?;
+    let (sender, status) = sync_channel(1);
+    children.waiting.insert(child.id(), sender);
+    if !children.reaping {
+        children.reaping = true;
+        thread::spawn(reap);
+    }
+    Ok((child, status))
+}
+
+/// Reaps children until none that [`spawn`] started is left. If the process
+/// has no child left at all, each that is still listed gets the error.
+fn reap() {
     loop {
         let mut status: c_int = 0;
         // SAFETY: `waitpid` writes one `int` through this pointer, which is
         // valid for the whole call.
-        match unsafe { waitpid(-1, &mut status, 0) } {
-            -1 => {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
+        let reaped = unsafe { waitpid(-1, &mut status, 0) };
+        let error = (reaped == -1).then(io::Error::last_os_error);
+        let mut children = children();
+        match error {
+            None => {
+                if let Some(sender) = children.waiting.remove(&(reaped as u32)) {
+                    let _ = sender.send(Ok(ExitStatus::from_raw(status)));
                 }
             }
-            reaped if reaped as u32 == pid => return Ok(ExitStatus::from_raw(status)),
-            _ => {}
+            Some(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Some(error) => {
+                let code = error.raw_os_error().unwrap_or(ECHILD);
+                for (_, sender) in mem::take(&mut children.waiting) {
+                    let _ = sender.send(Err(io::Error::from_raw_os_error(code)));
+                }
+            }
+        }
+        if children.waiting.is_empty() {
+            children.reaping = false;
+            return;
         }
     }
 }

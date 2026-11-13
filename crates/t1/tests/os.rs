@@ -116,7 +116,7 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = boot::boot(guest, |report| match report {
-        Report::Ready(_) => {}
+        Report::Ready(_) | Report::Exec(..) | Report::ExecTook(_) => {}
         Report::Stdout(bytes) => stdout.extend_from_slice(bytes),
         Report::Stderr(bytes) => stderr.extend_from_slice(bytes),
     });

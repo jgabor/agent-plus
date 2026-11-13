@@ -30,7 +30,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// For the whole job. A process that takes it over the limit is killed, and the
-/// others go on, so a mutant's test fails and the mutant counts as caught.
+/// others go on, so a runaway test fails. A job from `job_script` dies whole.
 const MEMORY: &str = "8G";
 /// Replaces `MEMORY`, so that a test needn't allocate that much.
 const MEMORY_OVERRIDE: &str = "XTASK_MEMORY_MAX";
@@ -64,20 +64,54 @@ pub fn scope(
 ) -> Result<Command, Problem> {
     let mut command = Command::new("systemd-run");
     command
-        .args(["--user", "--scope", "--quiet", "--collect"])
-        .arg("--expand-environment=no")
-        .arg("-p")
-        .arg(format!("MemoryMax={}", memory()?))
-        .args(["-p", "MemorySwapMax=0", "-p", "OOMPolicy=continue"]);
-    if let Some(limit) = limit {
-        command
-            .arg("-p")
-            .arg(format!("RuntimeMaxSec={limit}"))
-            .arg("-p")
-            .arg(format!("TimeoutStopSec={STOP_SECONDS}"));
-    }
-    command.arg("--").arg(program).args(arguments);
+        .args(options(limit, "continue")?)
+        .arg("--")
+        .arg(program)
+        .args(arguments);
     Ok(command)
+}
+
+/// A shell script that runs its arguments as a job of its own. Going over the
+/// job's memory limit kills the whole job at once. Otherwise the kernel can
+/// kill a process and leave its children running, or pick the script's caller.
+/// The job is stopped with the job that ran the script, which keeps its time
+/// limit.
+pub fn job_script() -> Result<String, Problem> {
+    let options: Vec<String> = options(None, "kill")?.iter().map(|o| quote(o)).collect();
+    Ok(format!(
+        "#!/bin/sh\nouter=\"$(basename \"$(cut -d: -f3 /proc/self/cgroup)\")\"\nexec systemd-run {} -p \"BindsTo=$outer\" -p \"After=$outer\" -- \"$@\"\n",
+        options.join(" ")
+    ))
+}
+
+fn options(limit: Option<u64>, out_of_memory: &str) -> Result<Vec<String>, Problem> {
+    let mut options: Vec<String> = ["--user", "--scope", "--quiet", "--collect"]
+        .map(String::from)
+        .to_vec();
+    options.push("--expand-environment=no".to_string());
+    for property in [
+        format!("MemoryMax={}", memory()?),
+        "MemorySwapMax=0".to_string(),
+        format!("OOMPolicy={out_of_memory}"),
+    ] {
+        options.push("-p".to_string());
+        options.push(property);
+    }
+    if let Some(limit) = limit {
+        for property in [
+            format!("RuntimeMaxSec={limit}"),
+            format!("TimeoutStopSec={STOP_SECONDS}"),
+        ] {
+            options.push("-p".to_string());
+            options.push(property);
+        }
+    }
+    Ok(options)
+}
+
+/// Quotes `word` for `sh`.
+fn quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// An empty `MemoryMax=` would mean no limit at all, so it's refused.

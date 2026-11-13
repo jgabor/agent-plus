@@ -14,7 +14,7 @@ use ap::boot::{self, Guest, Report};
 use ap::fetch;
 use ap::store::Store;
 use std::env;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -35,9 +35,12 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 const SIGSYS: i32 = 31;
 const TARGET_CONTENTS: &str = "a host file the VMM doesn't need";
 
+const PR_SET_DUMPABLE: c_int = 4;
+
 unsafe extern "C" {
     fn fork() -> c_int;
     fn _exit(status: c_int) -> !;
+    fn prctl(option: c_int, ...) -> c_int;
 }
 
 /// What the confined process tries, once its guest is running.
@@ -184,6 +187,9 @@ fn confined_owner_process() {
     let Some(log) = env::var_os(LOG_VARIABLE) else {
         return;
     };
+    // The filter kills this process on purpose, so it doesn't dump core.
+    // SAFETY: the call matches the prctl signature for this option.
+    assert_eq!(unsafe { prctl(PR_SET_DUMPABLE, 0 as c_ulong) }, 0);
     let attempt = Attempt::from_name(&env::var(ATTEMPT_VARIABLE).unwrap());
     let kernel = fs::read(env::var_os(KERNEL_VARIABLE).unwrap()).unwrap();
     let init = fs::read(env::var_os(INIT_VARIABLE).unwrap()).unwrap();

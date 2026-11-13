@@ -382,6 +382,25 @@ fn claude_code_starts_with_its_adapters_configuration() {
     );
 }
 
+// The adapter's directories in the home are in a layer, which root owns. The
+// harness keeps its own state beside its configuration, so it needs to write
+// there.
+#[test]
+fn the_agent_can_write_in_the_directories_its_adapter_makes() {
+    let scratch = Scratch::new("adapter-directories");
+    scratch.build(
+        "writes",
+        &format!(
+            "AGENT claude:0.0.0\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_WRITE /home/agent/.claude/written\nENV FAKE_HARNESS_STATUS {STATUS}\n"
+        ),
+    );
+    let report = scratch.run(&["writes", "-p", PROMPT]);
+    assert!(
+        array(&report, "files").contains(&"\".claude/settings.json\""),
+        "{report}"
+    );
+}
+
 #[test]
 fn the_harness_starts_in_the_workdir_which_must_be_a_directory() {
     let scratch = Scratch::new("workdir");

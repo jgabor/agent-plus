@@ -12,11 +12,8 @@
 //!
 //! | Versions | Changes |
 //! |---|---|
-//! | before 0.39.0 | refuse the configuration, or read `SYSTEM` from another file |
-//! | 0.39.0 | `model_reasoning_effort` takes `low`, `medium`, and `high` |
-//! | 0.59.0 | and `xhigh` |
-//! | 0.115.0 | `approvals_reviewer`, with `user` and `guardian_subagent` |
-//! | 0.124.0 | `approvals_reviewer` takes `auto_review` for `guardian_subagent` |
+//! | before 0.137.0 | `codex exec` asks no reviewer, so a headless `auto` is denied what it would review |
+//! | 0.137.0 | `model_reasoning_effort` takes `low` to `xhigh`, and `approvals_reviewer` takes `auto_review` |
 //! | 0.138.0 | `model_reasoning_effort` takes `max` |
 //! | 0.147.0 | `codex exec` has `--approve-for-me` |
 //! | 0.156.0 | the interactive `codex` has `--no-daemon` |
@@ -25,9 +22,10 @@
 //! server, which installs a package of its own and updates it. An
 //! interactive run passes `--no-daemon` wherever the version has it.
 //!
-//! A version without `approvals_reviewer` has no reviewer, so `auto` there
-//! asks in an interactive run, as `edit` does, and is denied in a headless
-//! one.
+//! Older versions differ more: before 0.115.0 there is no reviewer, before
+//! 0.59.0 no `xhigh`, before 0.39.0 the configuration is refused, and before
+//! 0.15.0 `SYSTEM` would go to another file. So the adapter starts at
+//! 0.137.0, where every mode means what SPEC.md says.
 
 use agentfile::{Effort, Mode};
 
@@ -38,16 +36,9 @@ pub const INSTRUCTIONS: &str = "/home/agent/.codex/AGENTS.md";
 /// The user configuration.
 pub const CONFIGURATION: &str = "/home/agent/.codex/config.toml";
 
-/// The oldest version the adapter configures. Every release from it on
-/// takes the configuration and each command line.
-pub const OLDEST: &str = "0.39.0";
+/// The oldest version the adapter configures.
+pub const OLDEST: &str = "0.137.0";
 
-/// The first version whose `model_reasoning_effort` takes `xhigh`.
-const XHIGH_FROM: [u64; 3] = [0, 59, 0];
-/// The first version that has `approvals_reviewer`.
-const REVIEWER_FROM: [u64; 3] = [0, 115, 0];
-/// The first version whose `approvals_reviewer` takes `auto_review`.
-const AUTO_REVIEW_FROM: [u64; 3] = [0, 124, 0];
 /// The first version whose `model_reasoning_effort` takes `max`.
 const MAX_FROM: [u64; 3] = [0, 138, 0];
 /// The first version whose `codex exec` has `--approve-for-me`.
@@ -86,13 +77,12 @@ pub fn unsupported(version_text: &str) -> Option<String> {
 
 /// The level this version of Codex gets for `effort`, and a warning when
 /// that isn't the level asked for. A level the version doesn't accept
-/// becomes the nearest lower one it does.
+/// becomes the nearest lower one it does. The version is one the adapter
+/// configures.
 pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<String>) {
     let at_least = |from: &[u64]| version(version_text).as_slice() >= from;
     let level = match effort {
-        Effort::Max if at_least(&MAX_FROM) => Effort::Max,
-        Effort::Max | Effort::Xhigh if at_least(&XHIGH_FROM) => Effort::Xhigh,
-        Effort::Max | Effort::Xhigh => Effort::High,
+        Effort::Max if !at_least(&MAX_FROM) => Effort::Xhigh,
         effort => effort,
     };
     let (asked, given) = (effort_name(effort), effort_name(level));
@@ -106,9 +96,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// then the mode, the model, and the effort. `model` is passed unchanged.
 /// Without a model or an effort, Codex uses its own default.
 ///
-/// The mode is the sandbox, the approval policy, and the reviewer where the
-/// version has one, and for the `workspace-write` sandbox its network
-/// access, each set every time. A
+/// The mode is the sandbox, the approval policy, and the reviewer, and for
+/// the `workspace-write` sandbox its network access, each set every time. A
 /// headless run in `auto` uses `--approve-for-me`, which sets the same
 /// sandbox, approval policy, and reviewer, where the version has it.
 pub fn arguments(
@@ -135,16 +124,13 @@ pub fn arguments(
                 Mode::Read => ("read-only", "never", "user"),
                 Mode::Ask => ("read-only", "on-request", "user"),
                 Mode::Edit => ("workspace-write", "on-request", "user"),
-                _ if at_least(&AUTO_REVIEW_FROM) => {
-                    ("workspace-write", "on-request", "auto_review")
-                }
-                _ => ("workspace-write", "on-request", "guardian_subagent"),
+                _ => ("workspace-write", "on-request", "auto_review"),
             };
-            let mut settings = vec![("sandbox_mode", sandbox), ("approval_policy", approval)];
-            if at_least(&REVIEWER_FROM) {
-                settings.push(("approvals_reviewer", reviewer));
-            }
-            for (key, value) in settings {
+            for (key, value) in [
+                ("sandbox_mode", sandbox),
+                ("approval_policy", approval),
+                ("approvals_reviewer", reviewer),
+            ] {
                 arguments.extend(["-c".to_owned(), format!("{key}=\"{value}\"")]);
             }
         }

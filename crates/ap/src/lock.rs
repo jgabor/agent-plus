@@ -14,11 +14,14 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use agentfile::{Agent, Harness, read_arguments};
+
+use graviola::hashing::sha2::Sha256Context;
 
 use crate::fetch::{self, Client, Pin};
 use crate::store::Store;
@@ -125,8 +128,8 @@ impl Lock {
 /// the lock gets that version and the digest Anthropic publishes for its
 /// file. The file is downloaded from `base` into `cache`, unless `cache`
 /// holds it or `stored` says the store has its layer. A file whose digest
-/// isn't the lock's is an error, and isn't stored. Only then does a changed
-/// lock replace the lockfile `path`.
+/// isn't the lock's is an error, and isn't stored. A changed lock checks a
+/// file the cache already holds, and only then replaces the lockfile `path`.
 pub fn settle(
     path: &Path,
     lock: &mut Lock,
@@ -141,8 +144,14 @@ pub fn settle(
         _ => resolve(agent, client, base)?,
     };
     let store = Store::flat(cache);
-    // Whatever is at the path, the build checks it is the locked file.
-    let cached = fs::symlink_metadata(store.path(&locked.sha256)?).is_ok();
+    let file = store.path(&locked.sha256)?;
+    let changed = lock.harness.as_ref() != Some(&locked);
+    // The build checks that whatever is at the path is the locked file, but
+    // only after a changed lock is written.
+    let cached = fs::symlink_metadata(&file).is_ok();
+    if cached && changed && !stored(&locked) {
+        check_file(&file, &locked)?;
+    }
     if !cached && !stored(&locked) {
         if locked.harness != Harness::Claude {
             return Err(io::Error::other(format!(
@@ -167,12 +176,51 @@ pub fn settle(
             )
         })?;
     }
-    if lock.harness.as_ref() == Some(&locked) {
+    if !changed {
         return Ok(false);
     }
     lock.harness = Some(locked);
     write(path, &lock.text())?;
     Ok(true)
+}
+
+/// Checks that `path` is a file with the digest `locked` names.
+fn check_file(path: &Path, locked: &Locked) -> io::Result<()> {
+    let shown = path.display();
+    let failed = |error: io::Error| io::Error::new(error.kind(), format!("{shown}: {error}"));
+    // Nonblocking, so that a FIFO fails the check instead of waiting.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(failed)?;
+    if !file.metadata().map_err(failed)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{shown} isn't a file"),
+        ));
+    }
+    let mut hash = Sha256Context::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(failed)?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
+    if actual != locked.sha256 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{shown} has digest {actual}, not the {} of `{}`",
+                locked.sha256,
+                locked.label()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// The exact version and digest that Anthropic publishes for what `agent`

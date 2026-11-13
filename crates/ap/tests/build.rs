@@ -1072,9 +1072,9 @@ impl Settling {
     }
 }
 
-// spec(Build): `ap build` writes `Agentfile.lock` next to the Agentfile.
+// spec(Build): **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile.
 // spec(AGENT): Channels resolve to an exact version at build time and are recorded in the lockfile.
-// spec(AGENT): **Redistribution.** Claude Code is proprietary. `ap` downloads it from Anthropic on your machine during the build, verifies it against the lockfile, and never redistributes it.
+// spec(AGENT): `ap` downloads it from Anthropic on your machine during the build, verifies it against the lockfile, and never redistributes it.
 #[test]
 fn claude_stable_resolves_downloads_and_writes_the_lock() {
     let digest = common::digest(common::HARNESS);
@@ -1103,7 +1103,6 @@ fn claude_stable_resolves_downloads_and_writes_the_lock() {
     assert!(out.contains("built AGENT claude:2.1.311\n"), "{out}");
 }
 
-// spec(Build): Builds reuse locked resolutions;
 #[test]
 fn a_rebuild_reuses_the_lock_and_downloads_nothing() {
     let digest = common::digest(common::HARNESS);
@@ -1218,6 +1217,28 @@ fn a_harness_layer_in_the_store_is_not_downloaded_again() {
     assert_eq!(
         settling.lockfile().unwrap(),
         format!("HARNESS claude 2.1.311 {digest}\n")
+    );
+}
+
+#[test]
+fn a_cached_file_with_the_wrong_digest_writes_no_lock() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic(&digest);
+    let settling = Settling::new("settle-corrupt", "AGENT claude:stable\nOS minimal\n");
+    fs::create_dir_all(&settling.cache).unwrap();
+    fs::write(settling.cache.join(&digest), "something else\n").unwrap();
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(
+        error.contains(&common::digest(b"something else\n")),
+        "{error}"
+    );
+    assert_eq!(settling.lockfile(), None);
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/stable",
+            "/claude-code-releases/2.1.311/manifest.json",
+        ]
     );
 }
 

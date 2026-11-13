@@ -4,7 +4,7 @@
 //! later PRs are held to, or changes what this file decides. Everything else
 //! merges under `auto:merge`. A count that fell is compared in `merge.rs`.
 
-use crate::bench::{self, Budget};
+use crate::toml::{self, Table, Value};
 use crate::{Problem, base, spec};
 use std::collections::HashSet;
 use std::path::Path;
@@ -17,7 +17,9 @@ const GATE_TESTS: &str = "xtask/";
 /// A workflow runs with a token that can write, and a leaked token can't be
 /// changed afterwards.
 const WORKFLOWS: &str = ".github/";
-/// The code that decides what waits, and what a SPEC.md unit is.
+/// The code that decides what waits, and what a SPEC.md unit is. This file
+/// reads the budgets itself, so that a change to how they are measured doesn't
+/// wait.
 const DEFINES: [&str; 4] = [
     "xtask/src/waits.rs",
     "xtask/src/merge.rs",
@@ -47,8 +49,8 @@ pub fn reasons(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
         }
     }
     if touched(BUDGETS) {
-        let before = bench::budgets_at(root, commit)?;
-        let after = bench::budgets_at(root, "HEAD")?;
+        let before = budgets_at(root, commit)?;
+        let after = budgets_at(root, "HEAD")?;
         reasons.extend(loosened(&before, &after));
     }
     if touched(BUILD_SCRIPTS) {
@@ -140,8 +142,43 @@ fn added_entries(
         .collect())
 }
 
-/// Each budget that HEAD removes, or whose target it raises or band it
-/// widens. A budget's value is better lower, so raising a target loosens it.
+/// What a budget holds a value to. A value is better lower, so raising a
+/// target or a band loosens it. A budget with no band can't fail.
+struct Budget {
+    key: String,
+    target: Option<f64>,
+    /// The percentage and the absolute amount, either of which may be missing.
+    band: Option<(f64, f64)>,
+}
+
+/// The budgets as a commit has them, as `bench.rs` reads them.
+fn budgets_at(root: &Path, commit: &str) -> Result<Vec<Budget>, Problem> {
+    let text = file_at(root, commit, BUDGETS)?.unwrap_or_default();
+    let bad = |e: String| Problem(format!("{BUDGETS} at {commit}: {e}"));
+    let number = |table: &Table, field: &str| match table.get(field) {
+        Some(Value::Int(number)) => Some(*number as f64),
+        Some(Value::Float(number)) => Some(*number),
+        _ => None,
+    };
+    toml::array_of_tables(&text, "budget")
+        .map_err(bad)?
+        .iter()
+        .map(|table| {
+            let key = table
+                .str("key")
+                .ok_or_else(|| bad("a budget has no `key`".to_string()))?;
+            let (pct, abs) = (number(table, "band_pct"), number(table, "band_abs"));
+            Ok(Budget {
+                key: key.to_string(),
+                target: number(table, "target"),
+                band: (pct.is_some() || abs.is_some())
+                    .then(|| (pct.unwrap_or(0.0), abs.unwrap_or(0.0))),
+            })
+        })
+        .collect()
+}
+
+/// Each budget that HEAD removes, or whose target it raises or band it widens.
 fn loosened(before: &[Budget], after: &[Budget]) -> Vec<String> {
     let mut reasons = Vec::new();
     for old in before {
@@ -159,10 +196,9 @@ fn loosened(before: &[Budget], after: &[Budget]) -> Vec<String> {
         }
         match (old.band, new.band) {
             (Some(_), None) => reasons.push(format!("it removes the band of `{key}`")),
-            (Some(from), Some(to)) if to.pct > from.pct || to.abs > from.abs => {
+            (Some((pct, abs)), Some((to_pct, to_abs))) if to_pct > pct || to_abs > abs => {
                 reasons.push(format!(
-                    "it widens the band of `{key}` from {}% and {} to {}% and {}",
-                    from.pct, from.abs, to.pct, to.abs
+                    "it widens the band of `{key}` from {pct}% and {abs} to {to_pct}% and {to_abs}"
                 ));
             }
             _ => {}

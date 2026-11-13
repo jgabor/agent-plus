@@ -52,16 +52,16 @@ const RUN_PROMPT: &str = "Say what you can see.";
 const RUN_TIMEOUT: [&str; 3] = ["-k", "10", "120"];
 
 pub struct Budget {
-    pub key: String,
+    key: String,
     name: String,
-    pub target: Option<f64>,
-    pub band: Option<Band>,
+    target: Option<f64>,
+    band: Option<Band>,
 }
 
 #[derive(Clone, Copy)]
-pub struct Band {
-    pub pct: f64,
-    pub abs: f64,
+struct Band {
+    pct: f64,
+    abs: f64,
 }
 
 #[derive(Clone, Copy)]

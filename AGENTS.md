@@ -69,8 +69,8 @@ work starts from this label, so treat it as the owner's written permission.
   under a parent inherits the parent's label. Never widen a label.
 - Both labels let you push your own branch, force-push it with
   `--force-with-lease` after a rebase, and run the tests the work needs.
-- Neither label lets you merge a `spec-change` PR the owner hasn't approved,
-  change repository settings, publish a release, install software on the
+- Neither label lets you merge a PR that waits for the owner, change
+  repository settings, publish a release, install software on the
   machine, or touch another agent's branch while its lease is live.
 - The one release you may publish is a guest artifact. Copy its build inputs
   to `jgabor/agent-plus-guest` and push its tag, and that repository's
@@ -117,7 +117,6 @@ the parent's plan. Don't fix it in this PR.
 | `in-progress` | An agent holds the issue |
 | `land-needed` | The issue's PR is ready for a person to merge |
 | `answer-needed` | The issue is waiting for an answer |
-| `spec-change` | The PR touches SPEC.md, AGENTS.md, HARNESS.md, `xtask/`, `.github/`, or `harness/` outside its ledger and journey scripts |
 
 ### Claiming work
 
@@ -296,7 +295,10 @@ All of these must be true on the latest commit:
 - Reviews have finished, and each finding is fixed or declined in writing.
 - No human review still requests changes.
 - The branch is up to date with `main`, and you hold the merge slot.
-- The PR isn't labeled `spec-change`, unless the owner has approved it.
+- The PR doesn't wait for the owner. A PR waits when it could lower the bar
+  for later PRs, or can't be taken back.
+  [HARNESS.md](HARNESS.md#what-waits-for-the-owner) lists each reason, and
+  `merge` names the ones it finds.
 
 Merge with `cargo xtask merge <pr>`. Never use `--admin` or any other bypass. On
 any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
@@ -320,10 +322,9 @@ it, and never silently pick one.
 
 - If the code disagrees with the spec, fix the code.
 - If the spec is wrong, ambiguous, or impossible, open a separate PR that
-  changes only the spec and the quotes and waivers that follow from it, label
-  it `spec-change`, and park the issue that depends on it.
-- Any change to SPEC.md carries the label, even a typo, because a program
-  can't tell the difference.
+  changes only the spec and the quotes and waivers that follow from it, and
+  park the issue that depends on it. A PR that rewrites a sentence waits for
+  the owner, even for a typo, because a program can't tell the difference.
 
 ## Verifying
 

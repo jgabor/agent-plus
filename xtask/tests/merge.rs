@@ -213,15 +213,15 @@ fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
     binary
 }
 
-/// An xtask whose list of protected paths leaves out `xtask/`.
+/// An xtask that lets a change to `.github/` through.
 fn unprotected() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
         variant(
             "unprotected",
-            "base.rs",
-            "const PROTECTED: [&str; 6] = [\n    \"SPEC.md\",\n    \"AGENTS.md\",\n    \"HARNESS.md\",\n    \"xtask/\",\n",
-            "const PROTECTED: [&str; 5] = [\n    \"SPEC.md\",\n    \"AGENTS.md\",\n    \"HARNESS.md\",\n",
+            "waits.rs",
+            "const WORKFLOWS: &str = \".github/\";",
+            "const WORKFLOWS: &str = \".nothing/\";",
         )
     })
 }
@@ -599,15 +599,6 @@ exit $code
             .unwrap()
     }
 
-    fn prepare_running(&self, on: &str, command: &str) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(["prepare", "9"])
-            .env("RUN_ON", on)
-            .env("RUN_COMMAND", command)
-            .output()
-            .unwrap()
-    }
-
     fn merge_killed(&self, on: &str, when: &str) -> Output {
         self.command(env!("CARGO_BIN_EXE_xtask"))
             .args(["merge", "9"])
@@ -767,57 +758,193 @@ fn a_pr_without_auto_merge_needs_the_owner() {
     assert_prepared(&repo, &repo.prepare());
 }
 
-#[test]
-fn a_spec_change_pr_needs_the_owner() {
-    let repo = Repo::new("spec-change");
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
-    assert_refused(&repo, &repo.merge(), "prepare");
-    assert_prepared(&repo, &repo.prepare());
+/// A repository whose `main` also holds `on_main`, and whose branch holds
+/// `on_branch`.
+fn changing(name: &str, on_main: &[(&str, &str)], on_branch: &[(&str, &str)]) -> Repo {
+    let base = record(0, 1, "");
+    let mut main = vec![("harness/ledger/3.toml", base.as_str())];
+    main.extend_from_slice(on_main);
+    Repo::with(name, &main, on_branch)
 }
 
-#[test]
-fn a_protected_path_needs_the_label_even_for_the_owner() {
-    let repo = Repo::new("protected");
-    let changed = format!("{BUDGETS}\n# changed\n");
-    repo.change_branch("harness/budgets.toml", &changed);
-    let output = repo.prepare();
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
-    assert!(
-        stdout(&output).contains("fail labels"),
-        "{}",
-        stdout(&output)
-    );
-    assert!(!repo.calls().contains("gh pr merge"));
-
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
-    assert_prepared(&repo, &repo.prepare());
-}
-
-#[test]
-fn a_change_to_the_harness_itself_is_only_for_the_owner() {
-    let repo = Repo::new("protected-xtask");
-    repo.change_branch("xtask/notes.txt", "A way to weaken the gate.\n");
+/// `merge` refuses the PR and names why, and `prepare` takes it and says
+/// that merging accepts it.
+#[track_caller]
+fn assert_waits(repo: &Repo, reason: &str) {
     let output = repo.merge();
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
     assert!(
-        stdout(&output).contains("fail labels"),
+        stdout(&output).contains("fail owner"),
         "{}",
         stdout(&output)
     );
-    assert!(!repo.calls().contains("gh pr merge"));
+    assert!(stderr(&output).contains(reason), "{}", stderr(&output));
+    assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+    assert_eq!(last_post(repo), "failure Failed: owner");
+    assert_prepared(repo, &repo.prepare());
+    let comments = repo.pr_comments();
+    let heading = format!("Merging this PR at `{}` accepts:", repo.head());
+    assert!(comments.contains(&heading), "{comments}");
+    assert!(comments.contains(reason), "{comments}");
+}
 
-    repo.set_pr(&Pr {
-        labels: &["auto:merge", "spec-change"],
-        ..Pr::default()
-    });
-    assert_refused(&repo, &repo.merge(), "prepare");
-    assert_prepared(&repo, &repo.prepare());
+#[test]
+fn a_pr_that_rewrites_a_spec_sentence_waits() {
+    let repo = changing("waits-spec", &[], &[("SPEC.md", "# A\n\nOne. Three.\n")]);
+    assert_waits(
+        &repo,
+        "it changes or removes this sentence of SPEC.md under `A`: Two.",
+    );
+}
+
+#[test]
+fn a_pr_that_adds_a_waiver_waits() {
+    let repo = changing(
+        "waits-waiver",
+        &[],
+        &[("harness/waived.txt", "A\tTwo.\tClaims nothing.\n")],
+    );
+    assert_waits(
+        &repo,
+        "it adds a waiver to harness/waived.txt under `A`: Two.",
+    );
+}
+
+#[test]
+fn a_pr_that_widens_a_band_waits() {
+    let wider = BUDGETS.replace("band_pct = 20.0", "band_pct = 30.0");
+    let repo = changing("waits-band", &[], &[("harness/budgets.toml", &wider)]);
+    assert_waits(
+        &repo,
+        "it widens the band of `version_ms` from 20% and 25 to 30% and 25",
+    );
+}
+
+#[test]
+fn a_pr_that_raises_a_target_waits() {
+    let tight = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 1000.0\n";
+    let loose = tight.replace("1000.0", "2000.0");
+    let repo = changing(
+        "waits-target",
+        &[("harness/budgets.toml", tight)],
+        &[("harness/budgets.toml", &loose)],
+    );
+    assert_waits(
+        &repo,
+        "it raises the target of `version_ms` from 1000 to 2000",
+    );
+}
+
+#[test]
+fn a_pr_that_removes_a_budget_waits() {
+    let repo = changing("waits-budget", &[], &[("harness/budgets.toml", "")]);
+    assert_waits(&repo, "it removes the budget `version_ms`");
+}
+
+#[test]
+fn a_pr_that_audits_a_build_script_waits() {
+    let repo = changing(
+        "waits-build-script",
+        &[],
+        &[(
+            "harness/build-scripts.txt",
+            "# Audited.\nfoo 1.0.0 Sets one cfg.\n",
+        )],
+    );
+    assert_waits(&repo, "it adds `foo 1.0.0` to harness/build-scripts.txt");
+}
+
+const TWO_GATE_TESTS: &str = "#[test]\nfn one() {}\n\n#[test]\nfn two() {}\n";
+
+#[test]
+fn a_pr_that_lowers_the_number_of_gate_tests_waits() {
+    let repo = changing(
+        "waits-gate-tests",
+        &[("xtask/tests/a.rs", TWO_GATE_TESTS)],
+        &[("xtask/tests/a.rs", "#[test]\nfn one() {}\n")],
+    );
+    assert_waits(&repo, "the number of tests under `xtask/` fell from 2 to 1");
+}
+
+#[test]
+fn a_pr_that_changes_github_waits() {
+    let repo = changing(
+        "waits-github",
+        &[],
+        &[(".github/workflows/x.yml", "name: x\n")],
+    );
+    assert_waits(&repo, "it changes `.github/workflows/x.yml`");
+}
+
+#[test]
+fn a_pr_that_changes_what_waits_waits() {
+    let repo = changing(
+        "waits-defines",
+        &[],
+        &[("xtask/src/waits.rs", "// fewer\n")],
+    );
+    assert_waits(
+        &repo,
+        "it changes `xtask/src/waits.rs`, which decides what waits for the owner",
+    );
+}
+
+#[test]
+fn a_pr_that_adds_a_spec_sentence_with_its_check_merges() {
+    let check = "// spec(A): Three.\n#[test]\nfn three() {}\n";
+    let repo = changing(
+        "free-spec",
+        &[],
+        &[
+            ("SPEC.md", "# A\n\nOne. Two. Three.\n"),
+            ("crates/demo/src/lib.rs", check),
+        ],
+    );
+    assert_merged(&repo, &repo.merge());
+}
+
+#[test]
+fn a_pr_that_reflows_a_spec_paragraph_merges() {
+    let repo = changing("free-reflow", &[], &[("SPEC.md", "# A\n\nOne.\nTwo.\n")]);
+    assert_merged(&repo, &repo.merge());
+}
+
+#[test]
+fn a_pr_that_edits_the_rules_merges() {
+    let repo = changing(
+        "free-rules",
+        &[("AGENTS.md", "# Rules\n"), ("HARNESS.md", "# Harness\n")],
+        &[
+            ("AGENTS.md", "# Rules\n\nOne more.\n"),
+            ("HARNESS.md", "# Harness\n\nOne more.\n"),
+            ("harness/tasks/worker.md", "# Worker\n"),
+        ],
+    );
+    assert_merged(&repo, &repo.merge());
+}
+
+/// Tests are counted, not named, so one can be renamed or moved.
+#[test]
+fn a_pr_that_changes_xtask_and_keeps_its_tests_merges() {
+    let repo = changing(
+        "free-xtask",
+        &[("xtask/tests/a.rs", TWO_GATE_TESTS)],
+        &[
+            ("xtask/tests/a.rs", "#[test]\nfn two() {}\n"),
+            (
+                "xtask/src/b.rs",
+                "#[cfg(test)]\nmod tests {\n    #[test]\n    fn first() {}\n}\n",
+            ),
+            ("xtask/src/bench.rs", "// a better measurer\n"),
+        ],
+    );
+    assert_merged(&repo, &repo.merge());
 }
 
 #[test]
@@ -1054,7 +1181,7 @@ fn the_bench_runs_only_when_a_budget_can_be_affected() {
     }
 }
 
-/// These paths are protected, so only `prepare` can take them.
+/// Neither change loosens a budget, so each merges.
 #[test]
 fn a_change_to_how_budgets_are_measured_runs_the_bench() {
     for (index, (path, content)) in [
@@ -1070,12 +1197,8 @@ fn a_change_to_how_budgets_are_measured_runs_the_bench() {
             &[("harness/ledger/3.toml", base.as_str())],
             &[(path, content)],
         );
-        repo.set_pr(&Pr {
-            labels: &["spec-change"],
-            ..Pr::default()
-        });
-        let output = repo.prepare();
-        assert_prepared(&repo, &output);
+        let output = repo.merge();
+        assert_merged(&repo, &output);
         assert!(
             stdout(&output).contains("bench: pass"),
             "{path}: {}",
@@ -1232,12 +1355,12 @@ fn the_pr_is_read_again_after_the_slot() {
         thread::sleep(Duration::from_millis(10));
     }
     repo.set_pr(&Pr {
-        labels: &["spec-change"],
+        base: "release",
         ..Pr::default()
     });
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
-    assert_refused(&repo, &output, "prepare");
+    assert_refused(&repo, &output, "targets `release`");
 }
 
 #[test]
@@ -1270,12 +1393,12 @@ fn a_main_that_moved_during_the_proof_stops_the_merge() {
 fn a_pr_that_changed_during_the_proof_is_refused() {
     let cases = [
         (
-            "label-refused",
+            "base-refused",
             Pr {
-                labels: &["spec-change"],
+                base: "release",
                 ..Pr::default()
             },
-            "prepare",
+            "targets `release`",
         ),
         (
             "body-changed",
@@ -1311,11 +1434,11 @@ fn a_long_reason_is_cut_to_what_github_keeps() {
     assert_eq!(last_post(&repo), format!("failure {cut}"));
 }
 
-/// The checks read only `spec-change`, and a person can park or unpark the
-/// issue at any moment.
+/// The checks read no PR label, and a person can park or unpark the issue at
+/// any moment.
 #[test]
 fn a_label_the_checks_do_not_read_can_change_during_the_proof() {
-    for label in ["land-needed", "answer-needed", "other"] {
+    for label in ["land-needed", "answer-needed", "spec-change", "other"] {
         let repo = Repo::new(&format!("unread-{label}"));
         repo.set_next_pr(&Pr {
             labels: &[label],
@@ -1324,18 +1447,6 @@ fn a_label_the_checks_do_not_read_can_change_during_the_proof() {
         let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
         assert_merged(&repo, &repo.merge_running("cargo build --release", &swap));
     }
-}
-
-#[test]
-fn spec_change_appearing_during_a_prepare_is_refused() {
-    let repo = Repo::new("prepare-gains-spec-change");
-    repo.set_next_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
-    let swap = format!("cp '{0}/pr-next.json' '{0}/pr.json'", repo.bin.display());
-    let output = repo.prepare_running("cargo build --release", &swap);
-    assert_refused(&repo, &output, "changed");
 }
 
 #[test]
@@ -1748,13 +1859,10 @@ fn with_no_live_claim_any_thread_prepares() {
 }
 
 #[test]
-fn prepare_needs_no_auto_merge_and_takes_a_spec_change_pr() {
-    let repo = Repo::new("prepare-labels");
+fn prepare_needs_no_auto_merge_and_takes_a_pr_that_waits() {
+    let repo = Repo::new("prepare-waits");
     repo.set_issue(&[]);
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
+    repo.change_branch(".github/workflows/x.yml", "name: x\n");
     assert_prepared(&repo, &repo.prepare());
 }
 
@@ -2106,10 +2214,6 @@ fn a_revert_without_the_owner_is_benched() {
 fn land_squashes_what_only_the_owner_may_merge() {
     let repo = Repo::new("land-owner").on_main();
     repo.set_issue(&[]);
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     let output = repo.land();
     assert_merged(&repo, &output);
 
@@ -2700,25 +2804,6 @@ fn a_refresh_proves_a_pr_whose_queue_position_can_not_be_posted() {
     assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
 }
 
-#[test]
-fn a_change_to_github_workflows_needs_the_label() {
-    let repo = Repo::new("protected-github");
-    repo.change_branch(".github/workflows/x.yml", "name: x\n");
-    let output = repo.prepare();
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
-    assert!(
-        stdout(&output).contains("fail labels"),
-        "{}",
-        stdout(&output)
-    );
-
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
-    assert_prepared(&repo, &repo.prepare());
-}
-
 /// Every `prepare` builds the xtask of the newest `main`, whatever `refresh`
 /// was built from.
 #[test]
@@ -2758,10 +2843,6 @@ fn land_proves_a_pr_that_may_add_a_measurer_with_its_own_xtask() {
         &[("xtask/src/bench.rs", "// the idle measurer\n")],
     )
     .on_main();
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     assert_merged(&repo, &repo.land());
     assert_eq!(builds(&repo), 2, "{}", repo.calls());
 }
@@ -2775,10 +2856,6 @@ fn land_takes_a_change_to_a_measurer_when_every_budget_is_measured() {
         &[("xtask/src/bench.rs", "// the boot measurer\n")],
     )
     .on_main();
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     assert_merged(&repo, &repo.land());
 }
 
@@ -2848,14 +2925,16 @@ fn a_checkout_of_main_proves_a_pr_with_the_xtask_of_main() {
     });
 }
 
-/// The PR's own xtask doesn't protect `xtask/`, but `main`'s does.
+/// The PR's own xtask lets `.github/` through, but `main`'s decides.
 #[test]
-fn a_pr_that_unprotects_a_path_it_changes_still_needs_the_label() {
-    let base = record(0, 1, "");
-    let repo = Repo::with(
+fn a_pr_that_lets_itself_through_still_waits() {
+    let repo = changing(
         "checks-unprotect",
-        &[("harness/ledger/3.toml", base.as_str())],
-        &[("xtask/src/base.rs", "// variant: unprotected\n")],
+        &[],
+        &[
+            ("xtask/src/base.rs", "// variant: unprotected\n"),
+            (".github/workflows/x.yml", "name: x\n"),
+        ],
     );
     let output = repo.run_as(unprotected(), &["merge", "9"]);
     assert_eq!(
@@ -2866,12 +2945,17 @@ fn a_pr_that_unprotects_a_path_it_changes_still_needs_the_label() {
         stderr(&output)
     );
     assert!(
-        stdout(&output).contains("fail labels"),
+        stdout(&output).contains("fail owner"),
         "{}",
         stdout(&output)
     );
+    assert!(
+        stderr(&output).contains("it changes `.github/workflows/x.yml`"),
+        "{}",
+        stderr(&output)
+    );
     assert!(!repo.bin.join("merged").exists());
-    assert_eq!(last_post(&repo), "failure Failed: labels");
+    assert_eq!(last_post(&repo), "failure Failed: owner");
 }
 
 /// What `main` measures after the merge is what its own runner says.
@@ -2884,10 +2968,6 @@ fn a_pr_that_changes_the_journey_runner_is_recorded_by_its_own() {
         &[("harness/ledger/3.toml", base.as_str())],
         &[("xtask/src/journey.rs", "// variant: failing\n")],
     );
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     let output = repo.prepare();
     assert_prepared(&repo, &output);
     let record = repo.record_at_head();
@@ -2901,6 +2981,7 @@ fn a_pr_that_changes_the_journey_runner_is_recorded_by_its_own() {
     assert_eq!(builds(&repo), 2, "{}", repo.calls());
 }
 
+/// It also waits for the owner, which a refresh proves like any other.
 #[test]
 fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
     failing();
@@ -2908,12 +2989,11 @@ fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
     let repo = Repo::with(
         "refresh-own-runner",
         &[("harness/ledger/3.toml", base.as_str())],
-        &[("xtask/src/journey.rs", "// variant: failing\n")],
+        &[
+            ("xtask/src/journey.rs", "// variant: failing\n"),
+            ("xtask/src/merge.rs", "// what waits\n"),
+        ],
     );
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     repo.prepared(BRANCH, 7, "");
     repo.advance_main("later.txt", "x\n");
     repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
@@ -2930,6 +3010,10 @@ fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
     assert_eq!(last_post(&repo), "success spec 0 of 2, journey 0 of 1");
     let comments = repo.pr_comments();
     assert!(comments.contains("journey fell from 1 to 0"), "{comments}");
+    assert!(
+        comments.contains("it changes `xtask/src/merge.rs`, which decides"),
+        "{comments}"
+    );
 }
 
 /// A merge that lands while this one builds the checks changes them.
@@ -2960,10 +3044,6 @@ fn an_exact_revert_of_a_change_to_xtask_is_proven_by_mains_alone() {
         ("xtask/src/journey.rs", "// before\n", "// after\n"),
         None,
     );
-    repo.set_pr(&Pr {
-        labels: &["spec-change"],
-        ..Pr::default()
-    });
     repo.forget_calls();
     let output = repo.prepare();
     assert_prepared(&repo, &output);

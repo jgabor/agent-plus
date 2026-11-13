@@ -54,7 +54,6 @@ pub struct PullRequest {
     pub head_ref: String,
     pub base_ref: String,
     pub body: String,
-    pub labels: Vec<String>,
     /// The issues in this repository that GitHub will close when this merges,
     /// from any closing word.
     pub closing_issues: Vec<u64>,
@@ -165,7 +164,7 @@ impl Gh {
             "view",
             &number.to_string(),
             "--json",
-            "url,isCrossRepository,state,headRefName,baseRefName,body,labels,closingIssuesReferences,reviews",
+            "url,isCrossRepository,state,headRefName,baseRefName,body,closingIssuesReferences,reviews",
         ])?;
         read_pull_request(&value).ok_or_else(|| unexpected("gh pr view"))
     }
@@ -379,19 +378,10 @@ impl Gh {
 
     /// Returns the new PR's number. It targets `main`, and the branch must
     /// already be pushed.
-    pub fn create_pr(
-        &self,
-        branch: &str,
-        title: &str,
-        body: &str,
-        label: Option<&str>,
-    ) -> Result<u64, Problem> {
-        let mut args = vec![
+    pub fn create_pr(&self, branch: &str, title: &str, body: &str) -> Result<u64, Problem> {
+        let args = [
             "pr", "create", "--base", "main", "--head", branch, "--title", title, "--body", body,
         ];
-        if let Some(label) = label {
-            args.extend(["--label", label]);
-        }
         let url = self.text(&args, None)?;
         url.trim()
             .rsplit_once("/pull/")
@@ -668,7 +658,6 @@ fn read_pull_request(value: &Json) -> Option<PullRequest> {
         head_ref: text("headRefName")?,
         base_ref: text("baseRefName")?,
         body: text("body")?,
-        labels: read_labels(value)?,
         closing_issues: closing_here(value)?,
         changes_requested: has_standing_request(value.get("reviews")?.as_arr()?)?,
     })

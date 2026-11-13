@@ -25,6 +25,7 @@ mod score;
 mod spec;
 mod testrun;
 mod toml;
+mod waits;
 mod work;
 mod workspace;
 

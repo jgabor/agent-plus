@@ -8,18 +8,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 pub const MAIN: &str = "refs/remotes/origin/main";
-pub const SPEC_CHANGE: &str = "spec-change";
 const LEDGER: &str = "harness/ledger";
-/// A path that ends in `/` covers everything under it.
-const PROTECTED: [&str; 6] = [
-    "SPEC.md",
-    "AGENTS.md",
-    "HARNESS.md",
-    "xtask/",
-    "harness/",
-    ".github/",
-];
-const NOT_PROTECTED: [&str; 2] = ["harness/ledger/", "harness/journey/"];
 
 /// The commit where this branch left `origin/main`, or `None` if there is no
 /// `origin/main` to compare with. The workspace must be the top of its own
@@ -76,7 +65,7 @@ pub fn removed_checks(root: &Path, base: &str, score: &Score) -> Result<Vec<Stri
         })
         .map(|((heading, text), _)| {
             format!(
-                "a check quoting this sentence under `{heading}` was removed: {text}. Restore the check, or remove the sentence in a `{SPEC_CHANGE}` PR"
+                "a check quoting this sentence under `{heading}` was removed: {text}. Restore the check, or remove the sentence"
             )
         })
         .collect();
@@ -118,77 +107,6 @@ fn reverted_commit(line: &str) -> Option<&str> {
         .strip_prefix("This reverts commit ")?
         .strip_suffix('.')?;
     (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())).then_some(commit)
-}
-
-/// Names each protected path changed without the label. `None` means a
-/// protected path changed, but the branch has no open PR to read a label from.
-pub fn missing_label(root: &Path, base: &str) -> Result<Option<Vec<String>>, Problem> {
-    let touched = protected_changes(root, base)?;
-    if touched.is_empty() {
-        return Ok(Some(Vec::new()));
-    }
-    let branch = git_text(root, &["branch", "--show-current"])?;
-    let branch = branch.trim();
-    if branch.is_empty() {
-        return Err(Problem(format!(
-            "{} changed on a detached HEAD, so no PR can be found. Check out the PR's branch",
-            touched.join(", ")
-        )));
-    }
-    let prs = open_prs(root, branch)?;
-    if prs.is_empty() {
-        return Ok(None);
-    }
-    if prs
-        .iter()
-        .all(|labels| labels.iter().any(|label| label == SPEC_CHANGE))
-    {
-        return Ok(Some(Vec::new()));
-    }
-    Ok(Some(label_findings(&touched)))
-}
-
-/// The same check for a PR whose labels the caller has already read.
-pub fn missing_label_on(
-    root: &Path,
-    base: &str,
-    labels: &[String],
-) -> Result<Vec<String>, Problem> {
-    if labels.iter().any(|label| label == SPEC_CHANGE) {
-        return Ok(Vec::new());
-    }
-    Ok(label_findings(&protected_changes(root, base)?))
-}
-
-pub fn protected_changes(root: &Path, base: &str) -> Result<Vec<String>, Problem> {
-    let changed = git_text(root, &["diff", "--name-only", "--no-renames", "-z", base])?;
-    Ok(changed
-        .split('\0')
-        .filter(|path| is_protected(path))
-        .map(str::to_string)
-        .collect())
-}
-
-fn is_protected(path: &str) -> bool {
-    let covered = |entry: &&str| {
-        if entry.ends_with('/') {
-            path.starts_with(*entry)
-        } else {
-            path == *entry
-        }
-    };
-    PROTECTED.iter().any(covered) && !NOT_PROTECTED.iter().any(covered)
-}
-
-fn label_findings(touched: &[String]) -> Vec<String> {
-    touched
-        .iter()
-        .map(|path| {
-            format!(
-                "{path} changed, but this branch's PR doesn't have the `{SPEC_CHANGE}` label. Add the label, or undo the change"
-            )
-        })
-        .collect()
 }
 
 /// The text of a `Budget reason: <text>` line in the body of this branch's
@@ -241,27 +159,6 @@ fn pr_list(root: &Path, branch: &str, field: &str) -> Result<Vec<Json>, Problem>
     let value = json::parse(&String::from_utf8_lossy(&output.stdout))
         .map_err(|e| Problem(format!("couldn't read `gh pr list` output: {e}")))?;
     Ok(value.as_arr().ok_or_else(unexpected)?.to_vec())
-}
-
-/// The labels of each open PR from this branch.
-fn open_prs(root: &Path, branch: &str) -> Result<Vec<Vec<String>>, Problem> {
-    pr_list(root, branch, "labels")?
-        .iter()
-        .map(|pr| {
-            pr.get("labels")
-                .and_then(Json::as_arr)
-                .ok_or_else(unexpected)?
-                .iter()
-                .map(|label| {
-                    label
-                        .get("name")
-                        .and_then(Json::as_str)
-                        .map(str::to_string)
-                        .ok_or_else(unexpected)
-                })
-                .collect()
-        })
-        .collect()
 }
 
 pub fn git(root: &Path, args: &[&str]) -> Result<Output, Problem> {

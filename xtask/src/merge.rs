@@ -7,7 +7,7 @@
 use crate::forge::{Forge, Gh, PullRequest};
 use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
-use crate::{Problem, Verdict, base, bench, journey, lock, work, workspace};
+use crate::{Problem, Verdict, base, bench, journey, lock, waits, work, workspace};
 use std::cell::Cell;
 use std::env;
 use std::fs;
@@ -47,11 +47,6 @@ enum Decision {
     Merged,
     Refused(String),
     Ready { pr: PullRequest, issue: u64 },
-}
-
-/// The one PR label that the checks read.
-fn has_spec_change(pr: &PullRequest) -> bool {
-    pr.labels.iter().any(|label| label == base::SPEC_CHANGE)
 }
 
 /// Whether this PR may merge, from what GitHub says now. It writes nothing.
@@ -100,18 +95,10 @@ fn decide(gh: &Gh, number: u64, mode: Mode, thread: Option<&str>) -> Result<Deci
     {
         return refused(why);
     }
-    if !prepare {
-        if has_spec_change(&pr) {
-            return refused(format!(
-                "PR {number} is labeled `{}`, so the owner merges it. Run `cargo xtask prepare {number}` instead",
-                base::SPEC_CHANGE
-            ));
-        }
-        if !gh.issue(issue)?.labels.iter().any(|l| l == AUTO_MERGE) {
-            return refused(format!(
-                "issue {issue} has no `{AUTO_MERGE}` label, so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
-            ));
-        }
+    if !prepare && !gh.issue(issue)?.labels.iter().any(|l| l == AUTO_MERGE) {
+        return refused(format!(
+            "issue {issue} has no `{AUTO_MERGE}` label, so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
+        ));
     }
     Ok(Decision::Ready { pr, issue })
 }
@@ -616,7 +603,7 @@ pub fn remote_commit(root: &Path, name: &str) -> Result<Option<String>, Problem>
     Ok(listing.split_whitespace().next().map(str::to_string))
 }
 
-/// The proof takes minutes, and meanwhile a label or a review can change, or
+/// The proof takes minutes, and meanwhile the PR or a review can change, or
 /// an earlier merge that was killed can land. Nothing on GitHub enforces these
 /// rules afterwards, so this is the last place to stop. Says why, if it must.
 fn changed_during_proof(
@@ -635,11 +622,7 @@ fn changed_during_proof(
         }
         Decision::Ready { pr, issue } => {
             let was = scoring.pr;
-            if issue != scoring.issue
-                || pr.head_ref != was.head_ref
-                || pr.body != was.body
-                || has_spec_change(&pr) != has_spec_change(was)
-            {
+            if issue != scoring.issue || pr.head_ref != was.head_ref || pr.body != was.body {
                 return Ok(Some(format!(
                     "PR {number} changed during the merge, and the checks read what it said before. Run it again"
                 )));
@@ -770,14 +753,27 @@ fn prove(
     scoring: &Scoring,
     starting: &dyn Fn(&str),
 ) -> Result<Result<Proof, Failed>, Problem> {
-    let Scoring { mode, pr, .. } = *scoring;
+    let Scoring {
+        number, mode, pr, ..
+    } = *scoring;
     let prepare = mode != Mode::Merge;
+    let commit = base::find(tree)?
+        .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
+    // Before the gate, so that a PR that waits for the owner fails fast.
+    let waiting = waits::reasons(tree, &commit)?;
+    if !prepare && !waiting.is_empty() {
+        for reason in &waiting {
+            eprintln!("owner: {reason}");
+        }
+        eprintln!(
+            "owner: so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
+        );
+        let mut failed = Failed::new();
+        gate::record("owner", false, &mut failed);
+        return Ok(Err(failed));
+    }
     let hold = lock::shared(tree)?;
-    let merging = Merging {
-        labels: &pr.labels,
-        prepare,
-        starting,
-    };
+    let merging = Merging { prepare, starting };
     let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
     if !failed.is_empty() {
         return Ok(Err(failed));
@@ -786,8 +782,6 @@ fn prove(
     let (passing, steps) = journey::count(tree)?;
     drop(hold);
 
-    let commit = base::find(tree)?
-        .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
     // The base of a revert may be what doesn't build, and a revert puts back a
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
@@ -815,10 +809,11 @@ fn prove(
         record.budgets.extend(kept.budgets.clone());
         record.reason = kept.reason.clone();
     }
-    let mut accepted = match compare_counts(tree, &commit, &record, scoring)? {
-        Ok(accepted) => accepted,
+    let mut accepted = waiting;
+    match compare_counts(tree, &commit, &record, scoring)? {
+        Ok(fell) => accepted.extend(fell),
         Err(failed) => return Ok(Err(failed)),
-    };
+    }
     if revert {
         accepted
             .push("an exact revert, so it can remove checks, and the bench didn't run".to_string());

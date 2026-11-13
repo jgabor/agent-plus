@@ -587,23 +587,6 @@ fn an_issue_with_no_response_is_picked_up() {
 }
 
 #[test]
-fn a_revert_of_a_protected_path_carries_the_label() {
-    let repo = Repo::new("protected", FAST);
-    repo.mark_passing(&repo.head());
-    repo.write("crates/ap/src/main.rs", BROKEN);
-    repo.write("harness/journey.toml", &format!("# A note.\n{JOURNEY}"));
-    repo.commit("Plant the break");
-    repo.push();
-    let output = repo.nightly();
-    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        repo.calls().contains(" --label spec-change"),
-        "{}",
-        repo.calls()
-    );
-}
-
-#[test]
 fn an_ordinary_revert_carries_no_label() {
     let repo = Repo::new("no-label", FAST);
     repo.plant(1, 0);

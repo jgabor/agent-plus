@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
-use guest::protocol::{MAX_BODY, PORT, ToGuest, ToHost};
+use guest::protocol::{MAX_BODY, PORT, Start, ToGuest, ToHost};
 use guest::{Channel, Event, agent, root};
 use vmm::block::Block;
 use vmm::initramfs::{self, Entry};
@@ -68,9 +68,9 @@ pub struct Guest<'a> {
     /// An agent's layers, bottom first. With any, the guest's root is these
     /// layers stacked under a writable layer that ends with the machine.
     pub layers: Vec<Layer>,
-    /// A program to run once the init is ready. Without one, the machine
-    /// powers off as soon as the init reports.
-    pub command: Option<&'a [Vec<u8>]>,
+    /// What to ask of the init once it is ready. Without a request, the
+    /// machine powers off as soon as the init reports.
+    pub request: Option<ToGuest>,
     /// How long the guest may run, from entry to power-off.
     pub timeout: Duration,
     /// Whether this process confines itself before the guest's first
@@ -172,6 +172,22 @@ pub fn check_kvm(device: &Path) -> Result<(), Error> {
 /// it, and returns 0. With one it relays the command's output, filtered, and
 /// returns its status.
 pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
+    let request = (!command.is_empty()).then(|| ToGuest::Run {
+        argv: command.to_vec(),
+    });
+    relayed(timeout, Vec::new(), request)
+}
+
+/// `ap run`'s machine: the agent's layers, with its harness started as
+/// `start` says. It relays the harness's output, filtered, and returns its
+/// status.
+pub fn boot_agent(timeout: Duration, layers: Vec<Layer>, start: Start) -> Result<u8, Error> {
+    relayed(timeout, layers, Some(ToGuest::Start(start)))
+}
+
+/// Boots the pinned kernel with this program as its init, and relays what
+/// the guest reports. Without a request it prints the kernel's release.
+fn relayed(timeout: Duration, layers: Vec<Layer>, request: Option<ToGuest>) -> Result<u8, Error> {
     let init = fs::read("/proc/self/exe").map_err(|error| failed("can't read ap itself", error))?;
     if !is_static(&init) {
         return Err(Error::DynamicallyLinked);
@@ -187,18 +203,19 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         path: "usr/bin/ap",
         target: INIT_PATH,
     }];
+    let print_release = request.is_none();
     let guest = Guest {
         kernel: &kernel,
         init: &init,
         files: &files,
-        layers: Vec::new(),
-        command: (!command.is_empty()).then_some(command),
+        layers,
+        request,
         timeout,
         confine: true,
     };
     let mut relay = Relay::start(Instant::now() + timeout);
     let result = boot(guest, |report| match report {
-        Report::Ready(release) if command.is_empty() => {
+        Report::Ready(release) if print_release => {
             relay.send(Piece::Release(release.to_owned()));
         }
         Report::Ready(_) => {}
@@ -299,7 +316,7 @@ fn print(pieces: &Receiver<Piece>, written: &Sender<()>) {
 /// reason, the VM is gone.
 pub fn boot(guest: Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, Error> {
     let command_line = command_line(&guest.layers)?;
-    let run_frame = guest.command.map(run_frame).transpose()?;
+    let run_frame = guest.request.as_ref().map(request_frame).transpose()?;
     let wants_status = run_frame.is_some();
     let mut entries = vec![Entry::File {
         path: "init",
@@ -396,13 +413,11 @@ fn command_line(layers: &[Layer]) -> Result<String, Error> {
     Ok(line)
 }
 
-fn run_frame(argv: &[Vec<u8>]) -> Result<Vec<u8>, Error> {
+fn request_frame(request: &ToGuest) -> Result<Vec<u8>, Error> {
     let mut frame = Vec::new();
-    ToGuest::Run {
-        argv: argv.to_vec(),
-    }
-    .write(&mut frame)
-    .map_err(|error| Error::Failed(format!("can't send the command: {error:?}")))?;
+    request
+        .write(&mut frame)
+        .map_err(|error| Error::Failed(format!("can't send the command: {error:?}")))?;
     Ok(frame)
 }
 
@@ -471,6 +486,9 @@ impl<F: FnMut(Report)> Machine<'_, F> {
                 self.status = Some(status);
                 self.hang_up(connection);
             }
+            Ok(Some(ToHost::Failed(reason))) if running => {
+                self.give_up(connection, shown(&reason));
+            }
             _ => self.give_up(
                 connection,
                 "the guest's init didn't report ready".to_owned(),
@@ -515,6 +533,15 @@ fn frame_is_complete(bytes: &[u8]) -> bool {
     };
     let length = u32::from_le_bytes(*header) as usize;
     length > MAX_BODY || bytes.len() >= HEADER_SIZE + length
+}
+
+/// A reason the guest gave, for the user's terminal. Control characters
+/// become `?`, so the guest can't send the terminal an escape sequence.
+fn shown(reason: &[u8]) -> String {
+    String::from_utf8_lossy(reason)
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
 }
 
 /// The release in a guest's `Ready` frame. It reaches the user's terminal, so

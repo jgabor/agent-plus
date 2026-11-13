@@ -712,7 +712,7 @@ fn insert(root: &mut erofs::Dir, path: &str, node: erofs::Node) {
 }
 
 /// Where the harness layer puts the harness, which its adapter starts.
-fn harness_path(harness: Harness) -> String {
+pub fn harness_path(harness: Harness) -> String {
     format!("/usr/local/bin/{}", lock::name(harness))
 }
 

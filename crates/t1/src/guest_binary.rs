@@ -17,6 +17,11 @@ pub fn ap() -> PathBuf {
     build_in("ap", "ap")
 }
 
+/// Builds the fake harness, which stands in for a coding agent in the guest.
+pub fn fake_harness() -> PathBuf {
+    build_in("fake-harness", "fake-harness")
+}
+
 fn build_in(package: &str, name: &str) -> PathBuf {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let target_directory = root.join("target/t1-guest");

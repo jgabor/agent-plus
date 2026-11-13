@@ -19,6 +19,8 @@ const STDOUT: u8 = 2;
 const STDERR: u8 = 3;
 const EXITED: u8 = 4;
 const READY: u8 = 5;
+const START: u8 = 6;
+const FAILED: u8 = 7;
 
 /// Why a frame was refused. The stream can't be trusted after any of these.
 #[derive(Debug)]
@@ -41,6 +43,23 @@ pub enum ToGuest {
     /// Runs a program. The first argument names it. Arguments are bytes,
     /// because Linux's are, and can't contain a NUL.
     Run { argv: Vec<Vec<u8>> },
+    /// Starts the harness as the user `agent`, as [`crate::agent`] says.
+    Start(Start),
+}
+
+/// How to start the harness. No value holds a NUL, because each one reaches
+/// `execve` or `chdir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Start {
+    /// The harness and its arguments, without the prompt.
+    pub argv: Vec<Vec<u8>>,
+    /// The harness's whole environment. A key is not empty and has no `=`.
+    pub env: Vec<(Vec<u8>, Vec<u8>)>,
+    /// The directory the harness starts in.
+    pub directory: Vec<u8>,
+    /// The prompt, which follows the last argument. `None` takes the one the
+    /// agent was built with.
+    pub prompt: Option<Vec<u8>>,
 }
 
 /// What the guest tells the host.
@@ -53,6 +72,8 @@ pub enum ToHost {
     Exited(u8),
     /// The init is up, on a kernel with this release.
     Ready(Vec<u8>),
+    /// The harness couldn't start, for this reason.
+    Failed(Vec<u8>),
 }
 
 impl ToGuest {
@@ -68,23 +89,96 @@ impl ToGuest {
                 let argv = args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
                 Ok(Some(ToGuest::Run { argv }))
             }
+            START => Ok(Some(ToGuest::Start(read_start(payload)?))),
             tag => Err(ProtocolError::UnknownTag(tag)),
         }
     }
 
     pub fn write(&self, writer: &mut impl Write) -> Result<(), ProtocolError> {
-        let ToGuest::Run { argv } = self;
-        let unsendable = |arg: &Vec<u8>| arg.contains(&0);
-        if argv.is_empty() || argv.iter().any(unsendable) {
+        match self {
+            ToGuest::Run { argv } => {
+                if argv.is_empty() || argv.iter().any(|arg| arg.contains(&0)) {
+                    return Err(ProtocolError::Malformed);
+                }
+                let mut payload = Vec::new();
+                for arg in argv {
+                    payload.extend_from_slice(arg);
+                    payload.push(0);
+                }
+                write_frame(writer, RUN, &payload)
+            }
+            ToGuest::Start(start) => write_frame(writer, START, &start_payload(start)?),
+        }
+    }
+}
+
+/// A start's payload: the number of arguments and the number of variables,
+/// each a little-endian `u32`, then the arguments, the variables as
+/// `key=value`, the directory, and the prompt if there is one. Every string
+/// ends with a NUL.
+fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
+    if start.argv.is_empty() || start.env.iter().any(|(key, _)| !is_key(key)) {
+        return Err(ProtocolError::Malformed);
+    }
+    let count = |n: usize| u32::try_from(n).map_err(|_| ProtocolError::Malformed);
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&count(start.argv.len())?.to_le_bytes());
+    payload.extend_from_slice(&count(start.env.len())?.to_le_bytes());
+    let variables = start
+        .env
+        .iter()
+        .map(|(key, value)| [key.as_slice(), b"=", value].concat());
+    let strings = (start.argv.iter().cloned())
+        .chain(variables)
+        .chain([start.directory.clone()])
+        .chain(start.prompt.clone());
+    for text in strings {
+        if text.contains(&0) {
             return Err(ProtocolError::Malformed);
         }
-        let mut payload = Vec::new();
-        for arg in argv {
-            payload.extend_from_slice(arg);
-            payload.push(0);
-        }
-        write_frame(writer, RUN, &payload)
+        payload.extend_from_slice(&text);
+        payload.push(0);
     }
+    Ok(payload)
+}
+
+fn read_start(payload: &[u8]) -> Result<Start, ProtocolError> {
+    let (argc, rest) = payload
+        .split_first_chunk::<4>()
+        .ok_or(ProtocolError::Malformed)?;
+    let (envc, rest) = rest
+        .split_first_chunk::<4>()
+        .ok_or(ProtocolError::Malformed)?;
+    let (argc, envc) = (u32::from_le_bytes(*argc), u32::from_le_bytes(*envc));
+    let strings = rest.strip_suffix(&[0]).ok_or(ProtocolError::Malformed)?;
+    let mut strings = strings.split(|byte| *byte == 0).map(<[u8]>::to_vec);
+    // The counts come from the other side, so nothing is reserved for them.
+    let argv: Vec<Vec<u8>> = strings.by_ref().take(argc as usize).collect();
+    let mut env = Vec::new();
+    for variable in strings.by_ref().take(envc as usize) {
+        let at = variable.iter().position(|byte| *byte == b'=');
+        let at = at.ok_or(ProtocolError::Malformed)?;
+        env.push((variable[..at].to_vec(), variable[at + 1..].to_vec()));
+    }
+    let directory = strings.next().ok_or(ProtocolError::Malformed)?;
+    let prompt = strings.next();
+    let complete = argv.len() == argc as usize && env.len() == envc as usize;
+    if !complete || argv.is_empty() || strings.next().is_some() {
+        return Err(ProtocolError::Malformed);
+    }
+    if env.iter().any(|(key, _)| !is_key(key)) {
+        return Err(ProtocolError::Malformed);
+    }
+    Ok(Start {
+        argv,
+        env,
+        directory,
+        prompt,
+    })
+}
+
+fn is_key(key: &[u8]) -> bool {
+    !key.is_empty() && !key.contains(&b'=')
 }
 
 impl ToHost {
@@ -100,6 +194,7 @@ impl ToHost {
             (EXITED, [status]) => Ok(Some(ToHost::Exited(*status))),
             (EXITED, _) => Err(ProtocolError::Malformed),
             (READY, release) => Ok(Some(ToHost::Ready(release.to_vec()))),
+            (FAILED, reason) => Ok(Some(ToHost::Failed(reason.to_vec()))),
             (tag, _) => Err(ProtocolError::UnknownTag(tag)),
         }
     }
@@ -110,6 +205,7 @@ impl ToHost {
             ToHost::Stderr(output) => write_frame(writer, STDERR, output),
             ToHost::Exited(status) => write_frame(writer, EXITED, &[*status]),
             ToHost::Ready(release) => write_frame(writer, READY, release),
+            ToHost::Failed(reason) => write_frame(writer, FAILED, reason),
         }
     }
 }

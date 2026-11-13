@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentfile::{Files, Instruction, Network, Os, Part, Secrets, Settings, Sign};
+use agentfile::{Files, Harness, Instruction, Network, Os, Part, Secrets, Settings, Sign};
 use ap::boot::Error;
 use ap::filter::Filter;
 use ap::runs::{self, End, FromRun, LayerName};
@@ -309,10 +309,30 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         .workdir
         .map_or_else(|| HOME.to_owned(), |workdir| guest_path(&workdir.path));
     let harness = super::build::harness_path(settings.agent.harness);
+    // `--` keeps a prompt that starts with `-` from reading as a flag.
     let argv = match settings.agent.harness {
-        // `--` keeps a prompt that starts with `-` from reading as a flag.
-        agentfile::Harness::Claude => vec![harness, "-p".to_owned(), "--".to_owned()],
-        agentfile::Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
+        Harness::Claude => {
+            // The harness layer is named for the version the build locked.
+            let version = record
+                .layers
+                .iter()
+                .find_map(|layer| ap::lock::labeled_version(&layer.instruction, Harness::Claude))
+                .ok_or_else(|| fail(format!("agent {name} has no Claude Code layer")))?;
+            // The adapter's variables come after `ENV`'s, so they win.
+            for (key, value) in ap::adapter::claude::environment(version, settings.effort) {
+                env.insert(key.into_bytes(), value.into_bytes());
+            }
+            let mut argv = vec![harness, "-p".to_owned()];
+            argv.extend(ap::adapter::claude::arguments(
+                version,
+                settings.model.as_deref(),
+                settings.effort,
+                settings.mode,
+            ));
+            argv.push("--".to_owned());
+            argv
+        }
+        Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
     };
 
     let layers = record

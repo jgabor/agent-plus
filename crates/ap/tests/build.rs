@@ -490,6 +490,69 @@ fn system_values_concatenate_with_a_blank_line() {
 }
 
 #[test]
+fn the_adapter_layer_is_the_same_for_two_builds() {
+    let agentfile =
+        "AGENT claude:2.1.323\nOS minimal\nSYSTEM Be careful.\nMODEL opus\nEFFORT max\nMODE full\n";
+    let images: Vec<(String, Vec<u8>)> = ["adapter-one", "adapter-two"]
+        .into_iter()
+        .map(|name| {
+            let scratch = Scratch::new(name);
+            let dir = scratch.project("notes", agentfile);
+            scratch.build(&dir, &[]);
+            let digest = scratch.agent("notes").layers.last().unwrap().digest.clone();
+            (digest, scratch.configuration("notes"))
+        })
+        .collect();
+    assert_eq!(images[0].0, images[1].0);
+    let image = &images[0].1;
+    for text in [
+        "CLAUDE.md",
+        "Be careful.\n",
+        "settings.json",
+        "\"DISABLE_AUTOUPDATER\": \"1\"",
+        "\"skipDangerousModePermissionPrompt\": true",
+        ".claude.json",
+        "\"hasCompletedOnboarding\": true",
+    ] {
+        assert!(holds(image, text), "the layer doesn't hold {text}");
+    }
+}
+
+// spec(EFFORT): A level the harness doesn't accept is a build warning, and the adapter uses the nearest lower level, or the harness's lowest level if none is lower.
+// spec(EFFORT): `ap build --strict` makes that an error.
+#[test]
+fn an_effort_the_locked_version_doesnt_take_is_a_warning() {
+    let scratch = Scratch::new("effort-warning");
+    let dir = scratch.project("notes", "AGENT claude:2.1.110\nOS minimal\nEFFORT xhigh\n");
+    let output = scratch.ap(&dir, &["build", "--strict"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert_eq!(
+        message,
+        "Agentfile:3: Claude Code 2.1.110 doesn't accept `EFFORT xhigh`, so it uses `high`\n"
+    );
+    assert!(scratch.agents().get("notes").unwrap().is_none());
+
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "Agentfile:3: warning: Claude Code 2.1.110 doesn't accept `EFFORT xhigh`, so it uses `high`\n"
+    );
+
+    // A version that takes the level builds without a word.
+    fs::write(
+        dir.join("Agentfile"),
+        "AGENT claude:2.1.111\nOS minimal\nEFFORT xhigh\n",
+    )
+    .unwrap();
+    common::pin_harness(&scratch.home, &dir);
+    let output = scratch.ap(&dir, &["build", "--strict"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
 fn literal_text_is_captured_too() {
     let scratch = Scratch::new("text-literal");
     let dir = scratch.project("notes", "AGENT claude\nOS minimal\nSYSTEM Be careful.\n");

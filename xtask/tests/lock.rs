@@ -192,6 +192,55 @@ fn without_a_user_session_nothing_runs() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+/// A slice of the user manager for one test, stopped when the test ends. A
+/// slice outlives the scopes in it, and a dash in its name would nest it.
+struct Slice(String);
+
+impl Slice {
+    fn new(test: &str) -> Self {
+        Slice(format!("xtask_{test}_{}.slice", std::process::id()))
+    }
+}
+
+impl Drop for Slice {
+    fn drop(&mut self) {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &self.0])
+            .status();
+    }
+}
+
+/// Prints the cgroup of the job, and then of `xtask`, which started it.
+const CGROUPS: &str = "cut -d: -f3 /proc/self/cgroup; cut -d: -f3 /proc/$PPID/cgroup";
+
+/// Limits set on the caller's slice must reach the job, so it can't land in
+/// the user manager's `app.slice` instead.
+#[test]
+fn a_job_stays_in_the_slice_of_its_caller() {
+    let root = workspace("slice");
+    let slice = Slice::new("lock");
+    let output = Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--slice={}", slice.0))
+        .arg("--")
+        .arg(env!("CARGO_BIN_EXE_xtask"))
+        .args(["run", "sh", "-c", CGROUPS])
+        .current_dir(&root)
+        .env_remove(HOLD_ENV)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    let parents: Vec<&str> = stdout
+        .lines()
+        .map(|cgroup| cgroup.rsplit_once('/').unwrap().0)
+        .collect();
+    assert_eq!(parents.len(), 2, "{stdout}");
+    assert!(parents[1].ends_with(&format!("/{}", slice.0)), "{stdout}");
+    assert_eq!(parents[0], parents[1], "{stdout}");
+}
+
 #[test]
 fn a_program_that_is_not_executable_is_a_problem() {
     let root = workspace("not-executable");

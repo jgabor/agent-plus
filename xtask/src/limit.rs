@@ -17,8 +17,9 @@
 //!
 //! That cost buys little. A runaway still dies at its own job's limit, and
 //! only the total can pass one limit: it can reach one for each job alive at
-//! once. Jobs nest when a test of `xtask` runs `xtask`, which is small, or
-//! when someone wraps a step, as in `cargo xtask run cargo xtask gate`.
+//! once. Jobs nest when a test of `xtask` runs `xtask`, which is small, when
+//! someone wraps a step, as in `cargo xtask run cargo xtask gate`, and when the
+//! mutation step runs each test binary as a job of its own.
 
 use crate::Problem;
 use crate::lock::Hold;

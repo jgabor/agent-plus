@@ -335,8 +335,8 @@ pub fn resize(terminal: BorrowedFd, size: Size) -> io::Result<()> {
 }
 
 /// Starts a session whose controlling terminal is standard input, as a
-/// login does. It runs in a child between fork and exec, so it only makes
-/// system calls.
+/// login does. It only makes system calls, so it can run between fork and
+/// exec too.
 pub fn take_terminal() -> io::Result<()> {
     // SAFETY: neither call takes a pointer.
     unsafe {

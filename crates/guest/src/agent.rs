@@ -151,15 +151,16 @@ fn harness(start: &Start) -> Result<Command, String> {
 }
 
 /// Becomes `agent`, with no other groups, and execs `argv`. A terminal on
-/// standard input becomes the agent's first, as a login's does. Returns only
-/// if that fails.
+/// standard input becomes the controlling terminal of a new session, and the
+/// agent's, as a login's does. Returns only if that fails.
 pub fn exec_as_agent(argv: &[OsString]) -> io::Error {
     let Some((program, args)) = argv.split_first() else {
         return io::Error::new(io::ErrorKind::InvalidInput, "no program to run");
     };
     let stdin = io::stdin();
     if stdin.is_terminal()
-        && let Err(error) = fchown(stdin.as_fd(), Some(ID), Some(ID))
+        && let Err(error) =
+            linux::take_terminal().and_then(|()| fchown(stdin.as_fd(), Some(ID), Some(ID)))
     {
         return error;
     }
@@ -263,13 +264,13 @@ fn run_in_terminal(
         }
     };
     let (ended, ended_writer) = io::pipe()?;
+    // The harness takes the terminal as its controlling one itself, in
+    // `exec_as_agent`. Doing it here, between fork and exec, would make std
+    // fork through a Unix socket, which the guest kernel doesn't have.
     command
         .stdin(terminal.try_clone()?)
         .stdout(terminal.try_clone()?)
         .stderr(terminal);
-    // SAFETY: `take_terminal` only makes system calls, which is all a child
-    // may do between fork and exec.
-    unsafe { command.pre_exec(linux::take_terminal) };
     let spawned = command.spawn();
     // The terminal must close here, so that it ends with the program's last
     // use of it.

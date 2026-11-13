@@ -411,8 +411,10 @@ fn feed(mut from_host: Box<dyn Read + Send>, mut stdin: Option<ChildStdin>, pid:
                     }
                 }
                 ToGuest::EndOfInput => stdin = None,
-                // A program that has ended has nothing to stop.
-                ToGuest::Terminate => drop(linux::terminate(pid)),
+                ToGuest::Terminate => {
+                    // A program that has ended has nothing to stop.
+                    let _ = linux::terminate(pid);
+                }
                 _ => return,
             }
         }
@@ -477,8 +479,11 @@ fn type_into(mut from_host: impl Read + Send + 'static, mut terminal: File, pid:
                 ToGuest::Input(bytes) => terminal.write_all(&bytes),
                 ToGuest::Resize(size) => linux::resize(terminal.as_fd(), size),
                 ToGuest::EndOfInput => Ok(()),
-                // A program that has ended has nothing to stop.
-                ToGuest::Terminate => Ok(drop(linux::terminate(pid))),
+                ToGuest::Terminate => {
+                    // A program that has ended has nothing to stop.
+                    let _ = linux::terminate(pid);
+                    Ok(())
+                }
                 _ => return,
             };
             if typed.is_err() {
@@ -751,7 +756,13 @@ mod tests {
         };
         // `cat` exits only once its input ends.
         let input: Box<dyn Read + Send> = Box::new(io::Cursor::new(sent));
-        run(Command::new("cat"), &mut host, FromHost::Input(input), exec_refused).unwrap();
+        run(
+            Command::new("cat"),
+            &mut host,
+            FromHost::Input(input),
+            exec_refused,
+        )
+        .unwrap();
 
         let mut wire = host.received.as_slice();
         let mut shown = Vec::new();

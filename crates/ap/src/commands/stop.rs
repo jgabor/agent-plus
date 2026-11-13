@@ -45,18 +45,20 @@ fn stop(name: &str) -> Result<(), String> {
     if !runs.active(name).map_err(|error| error.to_string())? {
         return Ok(());
     }
-    // From here, a run that ends first takes its socket with it, and has
-    // stopped as asked.
+    // A run that ends first takes its socket with it, and has stopped as
+    // asked, so only a run still active after a failure is an error.
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), &root);
-    let Ok(opened) = File::open(&dir) else {
-        return Ok(());
+    let ask = || -> io::Result<u64> {
+        // The path names the open directory, so it must stay open.
+        let opened = File::open(&dir)?;
+        let mut stream = UnixStream::connect(runs::short_path(&opened, &runs::socket_name(name)))?;
+        runs::send_stop(&mut stream)?;
+        io::copy(&mut stream, &mut io::sink())
     };
-    let socket = runs::short_path(&opened, &runs::socket_name(name));
-    let Ok(mut stream) = UnixStream::connect(socket) else {
-        return Ok(());
-    };
-    if runs::send_stop(&mut stream).is_ok() {
-        let _ = io::copy(&mut stream, &mut io::sink());
+    match ask() {
+        Err(error) if runs.active(name).map_err(|error| error.to_string())? => {
+            Err(format!("can't reach run {name}: {error}"))
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }

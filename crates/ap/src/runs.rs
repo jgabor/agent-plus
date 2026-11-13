@@ -645,61 +645,71 @@ fn serve(
 }
 
 /// What the run process writes to `ap run`: what the run does, then how it
-/// ended. Only the first end is written, and nothing after it.
+/// ended. Only the first end is written, and nothing after it. Whether the
+/// run has ended has a lock of its own, so a write that waits for `ap run`
+/// holds back no stop.
 struct ToRun {
-    /// The stream, and whether the end has been written.
-    state: Mutex<(File, bool)>,
-    ended: Condvar,
+    file: Mutex<File>,
+    ended: Mutex<bool>,
+    changed: Condvar,
 }
 
 impl ToRun {
     fn new(file: File) -> ToRun {
         ToRun {
-            state: Mutex::new((file, false)),
-            ended: Condvar::new(),
+            file: Mutex::new(file),
+            ended: Mutex::new(false),
+            changed: Condvar::new(),
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, (File, bool)> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn ended(&self) -> MutexGuard<'_, bool> {
+        self.ended.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Writes a message about the run, unless it has ended.
     fn send(&self, message: &[u8]) {
-        let mut state = self.lock();
-        if !state.1 {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*self.ended() {
             // If `ap run` is gone, so is this process, any moment now.
-            let _ = state.0.write_all(message);
+            let _ = file.write_all(message);
         }
     }
 
-    /// Writes how the run ended, unless an end was written already. Returns
-    /// whether this one was.
-    fn end(&self, message: &[u8]) -> bool {
-        let mut state = self.lock();
-        if state.1 {
+    /// Marks the run ended, unless it was already. Returns whether this call
+    /// did.
+    fn claim_end(&self) -> bool {
+        let mut ended = self.ended();
+        if *ended {
             return false;
         }
-        // A write fails only if `ap run` is gone, and then nobody is left to
-        // tell.
-        let _ = state.0.write_all(message);
-        state.1 = true;
-        self.ended.notify_all();
+        *ended = true;
+        self.changed.notify_all();
         true
     }
 
-    /// Waits up to `limit` for an end to be written. Returns whether one was.
+    /// Writes how the run ended, unless an end was claimed already.
+    fn end(&self, message: &[u8]) {
+        if self.claim_end() {
+            let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+            // A write fails only if `ap run` is gone, and then nobody is left
+            // to tell.
+            let _ = file.write_all(message);
+        }
+    }
+
+    /// Waits up to `limit` for the run to end. Returns whether it did.
     fn wait_for_end(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
-        let mut state = self.lock();
-        while !state.1 {
+        let mut ended = self.ended();
+        while !*ended {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return false;
             }
-            state = self
-                .ended
-                .wait_timeout(state, left)
+            ended = self
+                .changed
+                .wait_timeout(ended, left)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         }
@@ -709,19 +719,21 @@ impl ToRun {
 
 /// Stops the run, as `ap stop` asked: the harness gets `SIGTERM`, and if the
 /// run hasn't ended [`GRACE`] later, this process reports [`KILLED`] and
-/// exits, and the VM goes with it.
+/// exits, and the VM goes with it. A write that waits for `ap run` can't
+/// hold back the exit, so then `ap run` may not learn the status.
 fn stop(input: &Input, output: &ToRun) {
     // Without the guest, nothing reaches the harness, and the grace runs out.
     let _ = input.send(&ToGuest::Terminate);
-    if output.wait_for_end(GRACE) {
+    if output.wait_for_end(GRACE) || !output.claim_end() {
         return;
     }
-    let mut message = Vec::new();
-    push_frame(&mut message, EXITED, &[KILLED]);
-    if output.end(&message) {
-        // SAFETY: `_exit` ends the process at once, which is what's wanted.
-        unsafe { libc::_exit(KILLED.into()) };
+    if let Ok(mut file) = output.file.try_lock() {
+        let mut message = Vec::new();
+        push_frame(&mut message, EXITED, &[KILLED]);
+        let _ = file.write_all(&message);
     }
+    // SAFETY: `_exit` ends the process at once, which is what's wanted.
+    unsafe { libc::_exit(KILLED.into()) };
 }
 
 /// Passes what `ap run` sends from `source` on to the guest, until it sends

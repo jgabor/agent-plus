@@ -768,6 +768,18 @@ fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
     // 128 + 15.
     let (mut run, name) = start_headless(&scratch, "sleepy");
     let vm = run_process(run.0.id());
+    // An `ap stop` that can't reach the run doesn't say it stopped.
+    let elsewhere = scratch.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let unreached = Command::new(&shared().0)
+        .args(["stop", &name])
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .env("XDG_RUNTIME_DIR", &elsewhere)
+        .output()
+        .unwrap();
+    assert_eq!(unreached.status.code(), Some(1), "{unreached:?}");
+    assert!(running(vm), "{unreached:?}");
     printed(&scratch.ap(&["stop", &name]), "");
     // The VM lives in the run process, which has ended by now.
     assert!(!running(vm), "the VM outlived ap stop");

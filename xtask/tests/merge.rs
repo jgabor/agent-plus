@@ -599,15 +599,6 @@ exit $code
             .unwrap()
     }
 
-    fn prepare_running(&self, on: &str, command: &str) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(["prepare", "9"])
-            .env("RUN_ON", on)
-            .env("RUN_COMMAND", command)
-            .output()
-            .unwrap()
-    }
-
     fn merge_killed(&self, on: &str, when: &str) -> Output {
         self.command(env!("CARGO_BIN_EXE_xtask"))
             .args(["merge", "9"])

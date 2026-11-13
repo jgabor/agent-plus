@@ -643,8 +643,8 @@ first, and change the file in a later PR.
 
 1. `merge` refuses a PR unless its issue has `auto:merge`. All three commands
    refuse a PR that comes from a fork, doesn't close exactly one issue, doesn't
-   target `main`, or has changes requested. `merge` and `prepare` refuse a thread that doesn't hold the
-   issue's live claim.
+   target `main`, or has changes requested. `merge` and `prepare` refuse a
+   thread that doesn't hold the issue's live claim.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.

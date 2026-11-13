@@ -171,14 +171,12 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .spawn()
         .map_err(fail("can't start the run's cleanup"))?;
     let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
-    // Connecting before the run process starts makes this connection the
-    // first it accepts.
-    let mut stream = UnixStream::connect(&socket).map_err(fail("can't connect to the run"))?;
+    let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
     let mut process = Command::new(exe)
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
         .arg(&run.name)
-        .stdin(OwnedFd::from(listener))
+        .stdin(OwnedFd::from(theirs))
         .stdout(held.try_clone().map_err(fail("can't start the run"))?)
         .process_group(0)
         .spawn()
@@ -186,20 +184,21 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
 
     let interactive = start.terminal.is_some();
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;
+    let writer = stream.try_clone().map_err(fail("can't start the run"))?;
+    let writer = Arc::new(Mutex::new(writer));
+    let execs = runs::Execs::serve(listener, Arc::clone(&writer));
     let raw = match interactive {
         true => {
             // Raw mode comes first, so a signal taken from here on finds the
             // modes to put back, and nothing changes them after.
             let raw = RawMode::start().map_err(fail("can't set up your terminal"))?;
-            let writer = stream.try_clone().map_err(fail("can't start the run"))?;
-            let writer = Arc::new(Mutex::new(writer));
-            pass_keys(Arc::clone(&writer));
+            pass_keys(Arc::clone(&writer), false);
             take_signals(writer);
             Some(raw)
         }
         false => None,
     };
-    let end = relay(&mut stream).map_err(fail("lost the run"));
+    let end = relay(&mut stream, &execs).map_err(fail("lost the run"));
     drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
     let _ = process.wait();
@@ -216,8 +215,8 @@ fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
     move |error| Error::Failed(format!("{context}: {error}"))
 }
 
-/// Your terminal's modes before `ap run` changed them, for the thread that
-/// puts them back if a signal ends `ap run`.
+/// Your terminal's modes before `ap` changed them, for the thread that puts
+/// them back if a signal ends `ap`.
 static SAVED_MODES: OnceLock<libc::termios> = OnceLock::new();
 
 /// The signals that end `ap run`, which an interactive run takes itself so
@@ -226,10 +225,10 @@ const ENDING: [libc::c_int; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, lib
 
 /// Your terminal in raw mode, until this drops: every key goes to the run as
 /// it is typed, and nothing turns a key into a signal.
-struct RawMode(libc::termios);
+pub(super) struct RawMode(libc::termios);
 
 impl RawMode {
-    fn start() -> io::Result<RawMode> {
+    pub(super) fn start() -> io::Result<RawMode> {
         let mut saved = MaybeUninit::uninit();
         // SAFETY: `tcgetattr` fills the whole struct when it returns 0.
         let saved = unsafe {
@@ -265,14 +264,21 @@ fn restore(modes: &libc::termios) {
 }
 
 /// Passes what you type to the run, until your input ends. The run goes on,
-/// and ends when the harness does.
-fn pass_keys(writer: Arc<Mutex<UnixStream>>) {
+/// and ends when the harness does. With `end`, the end of your input is
+/// passed on too.
+pub(super) fn pass_keys(writer: Arc<Mutex<UnixStream>>, end: bool) {
     thread::spawn(move || {
         let mut keys = [0; KEYS];
         let mut stdin = io::stdin();
         loop {
             let count = match stdin.read(&mut keys) {
-                Ok(0) => return,
+                Ok(0) => {
+                    if end {
+                        let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+                        let _ = runs::send_end_of_input(&mut *writer);
+                    }
+                    return;
+                }
                 Ok(count) => count,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => return,
@@ -290,7 +296,7 @@ fn pass_keys(writer: Arc<Mutex<UnixStream>>) {
 /// your terminal back first, then ends it as it would have. A resize goes to
 /// a thread of its own, because sending it can wait behind your keys, and
 /// this thread must stay free to take the next signal.
-fn take_signals(writer: Arc<Mutex<UnixStream>>) {
+pub(super) fn take_signals(writer: Arc<Mutex<UnixStream>>) {
     let (resizes, resized) = mpsc::channel();
     thread::spawn(move || {
         while resized.recv().is_ok() {
@@ -337,7 +343,7 @@ fn end_by(signal: libc::c_int) {
 }
 
 /// `SIGWINCH`, and the signals that end `ap run`.
-fn taken_signals() -> libc::sigset_t {
+pub(super) fn taken_signals() -> libc::sigset_t {
     let mut set = MaybeUninit::uninit();
     // SAFETY: `sigemptyset` initializes the set, and `sigaddset` takes it
     // initialized.
@@ -351,7 +357,7 @@ fn taken_signals() -> libc::sigset_t {
 }
 
 /// The size of your terminal, or [`DEFAULT_SIZE`] if it reports none.
-fn terminal_size() -> Size {
+pub(super) fn terminal_size() -> Size {
     let mut window = MaybeUninit::<libc::winsize>::zeroed();
     // SAFETY: `TIOCGWINSZ` writes one `struct winsize` through this pointer,
     // which is valid for the whole call.
@@ -367,10 +373,11 @@ fn terminal_size() -> Size {
     }
 }
 
-/// Writes the run's output to this process's, filtered, until the run ends.
-/// Write errors are ignored: a reader that went away shouldn't change what
-/// the harness does or how it ends.
-fn relay(stream: &mut UnixStream) -> io::Result<End> {
+/// Writes the run's output to this process's, filtered, and hands each
+/// `ap exec` what is for it, until the run ends. Write errors are ignored: a
+/// reader that went away shouldn't change what the harness does or how it
+/// ends.
+fn relay(stream: &mut UnixStream, execs: &runs::Execs) -> io::Result<End> {
     let mut stdout_filter = Filter::default();
     let mut stderr_filter = Filter::default();
     loop {
@@ -383,6 +390,7 @@ fn relay(stream: &mut UnixStream) -> io::Result<End> {
             Some(FromRun::Stderr(bytes)) => {
                 let _ = io::stderr().write_all(&stderr_filter.push(&bytes));
             }
+            Some(FromRun::ForExec(id, tag, body)) => execs.deliver(id, tag, body),
             Some(FromRun::End(end)) => return Ok(end),
             None => {
                 return Err(io::Error::new(

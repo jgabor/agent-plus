@@ -15,28 +15,39 @@
 //!   socket itself.
 //!
 //! Between the two, `ap run` binds the run's socket, `<name>.sock`, in the
-//! runtime directory, and connects to it, so the first connection the run
-//! process accepts is always its own.
+//! runtime directory, and keeps it until it exits. It talks to the run
+//! process over a socket pair of its own.
 //!
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes. The
 //! run process sends the harness's output, unfiltered, then how the run
 //! ended. Each message is a tag byte, a body length as a little-endian
 //! `u32`, and the body.
+//!
+//! Each `ap exec` connects to the run's socket, sends the command, then its
+//! input, and reads the command's output and status, as `ap run` reads the
+//! harness's. The run process is confined, so it can't take a connection of
+//! its own: [`Execs`] in `ap run` takes each one, and passes its messages on
+//! to the run process with the id it gave it. Each command has a window
+//! both ways, so one whose `ap exec` doesn't keep up holds back only itself.
 
 use std::ffi::{OsStr, OsString};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use guest::protocol::{Size, Start, ToGuest};
+use guest::protocol::{Exec, MAX_OUTPUT, Size, Start, ToGuest, ToHost};
 
-use crate::boot::{self, Error, Input, Layer, Report};
+use crate::boot::{self, EXEC_WINDOW, Error, Input, Layer, Report};
 
 /// The `argv[0]` that starts `ap` as a run process.
 pub const RUN_PROCESS: &str = "ap-run-process";
@@ -58,6 +69,20 @@ const EXITED: u8 = 5;
 const FAILED: u8 = 6;
 const INPUT: u8 = 7;
 const RESIZE: u8 = 8;
+/// An `ap exec`'s command.
+const EXEC: u8 = 9;
+const END_OF_INPUT: u8 = 10;
+/// A message for or from the `ap exec` whose id leads the body.
+const FOR_EXEC: u8 = 11;
+/// `ap exec` has written one more message of its command's output.
+const TAKEN: u8 = 12;
+/// `ap exec` is gone.
+const HUNG_UP: u8 = 13;
+/// The guest has taken one more message for the command.
+const TOOK: u8 = 14;
+
+/// The status `ap exec` exits with when `ap` fails.
+const FAILED_STATUS: u8 = 125;
 
 /// The directory that holds the sockets of active runs: `ap` in
 /// `XDG_RUNTIME_DIR`, or, if that isn't an absolute path, `runtime` in the
@@ -96,12 +121,14 @@ pub enum End {
     Failed(u8, String),
 }
 
-/// What `ap run` reads from the run process.
+/// What `ap run` reads from the run process, and `ap exec` from `ap run`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FromRun {
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
     End(End),
+    /// A message for the `ap exec` with this id: its tag and its body.
+    ForExec(u32, u8, Vec<u8>),
 }
 
 /// Sends the run process what to run.
@@ -135,6 +162,71 @@ pub fn send_resize(stream: &mut impl Write, size: Size) -> io::Result<()> {
     stream.write_all(&message)
 }
 
+/// Sends `ap run` the command `ap exec` runs. What you type, and your
+/// terminal's sizes, follow as [`send_input`] and [`send_resize`] send them
+/// to the run process.
+pub fn send_exec(stream: &mut impl Write, exec: Exec) -> io::Result<()> {
+    let mut body = Vec::new();
+    ToGuest::Exec(exec)
+        .write(&mut body)
+        .map_err(|error| io::Error::other(format!("can't send the command: {error:?}")))?;
+    let mut message = Vec::new();
+    push_frame(&mut message, EXEC, &body);
+    stream.write_all(&message)
+}
+
+/// Sends `ap run` the end of the command's input.
+pub fn send_end_of_input(stream: &mut impl Write) -> io::Result<()> {
+    let mut message = Vec::new();
+    push_frame(&mut message, END_OF_INPUT, &[]);
+    stream.write_all(&message)
+}
+
+/// What `ap exec` sends `ap run`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FromExec {
+    Exec(Exec),
+    Input(Vec<u8>),
+    EndOfInput,
+    Resize(Size),
+}
+
+/// Reads what `ap exec` sends next. The end of the stream is `None`.
+pub fn read_from_exec(stream: &mut impl Read) -> io::Result<Option<FromExec>> {
+    let Some((tag, body)) = read_frame(stream)? else {
+        return Ok(None);
+    };
+    Ok(Some(match (tag, body.as_slice()) {
+        (EXEC, _) => match ToGuest::read(&mut body.as_slice()) {
+            Ok(Some(ToGuest::Exec(exec))) => FromExec::Exec(exec),
+            _ => return Err(bad_message()),
+        },
+        // What doesn't fit in one message to the guest is refused here.
+        (INPUT, _) if body.len() <= MAX_OUTPUT => FromExec::Input(body),
+        (END_OF_INPUT, []) => FromExec::EndOfInput,
+        (RESIZE, [a, b, c, d]) => FromExec::Resize(Size {
+            rows: u16::from_le_bytes([*a, *b]),
+            columns: u16::from_le_bytes([*c, *d]),
+        }),
+        _ => return Err(bad_message()),
+    }))
+}
+
+/// Sends `ap exec` what its command did.
+pub fn send_to_exec(stream: &mut impl Write, message: &FromRun) -> io::Result<()> {
+    let mut frame = Vec::new();
+    match message {
+        FromRun::Stdout(bytes) => push_frame(&mut frame, STDOUT, bytes),
+        FromRun::Stderr(bytes) => push_frame(&mut frame, STDERR, bytes),
+        FromRun::End(End::Exited(status)) => push_frame(&mut frame, EXITED, &[*status]),
+        FromRun::End(End::Failed(status, reason)) => {
+            push_frame(&mut frame, FAILED, &[&[*status], reason.as_bytes()].concat());
+        }
+        FromRun::ForExec(..) => return Err(bad_message()),
+    }
+    stream.write_all(&frame)
+}
+
 /// Reads what the run process sends next. The end of the stream before the
 /// run ended is `None`.
 pub fn read_from_run(stream: &mut impl Read) -> io::Result<Option<FromRun>> {
@@ -149,15 +241,208 @@ pub fn read_from_run(stream: &mut impl Read) -> io::Result<Option<FromRun>> {
             *status,
             String::from_utf8_lossy(message).into_owned(),
         )),
+        (FOR_EXEC, [a, b, c, d, tag, rest @ ..]) => {
+            FromRun::ForExec(u32::from_le_bytes([*a, *b, *c, *d]), *tag, rest.to_vec())
+        }
         _ => return Err(bad_message()),
     }))
 }
 
+/// A frame for or from the `ap exec` with this id.
+fn push_exec_frame(message: &mut Vec<u8>, id: u32, tag: u8, body: &[u8]) {
+    push_frame(message, FOR_EXEC, &[&id.to_le_bytes()[..], &[tag], body].concat());
+}
+
+/// The `ap exec`s of a run, which `ap run` takes from the run's socket and
+/// relays to the run process.
+pub struct Execs {
+    /// The stream to the run process, which `ap run` writes to as well.
+    to_run: Arc<Mutex<UnixStream>>,
+    clients: Mutex<BTreeMap<u32, Client>>,
+    next: AtomicU32,
+}
+
+/// One `ap exec`.
+struct Client {
+    /// Output for the thread that writes to `ap exec`.
+    output: mpsc::Sender<FromRun>,
+    window: Arc<Window>,
+}
+
+/// How many of an `ap exec`'s messages the guest hasn't taken.
+#[derive(Default)]
+struct Window {
+    unsent: Mutex<(usize, bool)>,
+    room: Condvar,
+}
+
+impl Window {
+    fn lock(&self) -> MutexGuard<'_, (usize, bool)> {
+        self.unsent.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits for room for one more message. False once the command ended.
+    fn take(&self) -> bool {
+        let mut unsent = self.lock();
+        while unsent.0 >= EXEC_WINDOW && !unsent.1 {
+            unsent = self.room.wait(unsent).unwrap_or_else(PoisonError::into_inner);
+        }
+        unsent.0 += 1;
+        !unsent.1
+    }
+
+    fn give(&self) {
+        let mut unsent = self.lock();
+        unsent.0 = unsent.0.saturating_sub(1);
+        self.room.notify_all();
+    }
+
+    fn close(&self) {
+        self.lock().1 = true;
+        self.room.notify_all();
+    }
+}
+
+impl Execs {
+    /// Takes each `ap exec` that connects to `listener`, on a thread of its
+    /// own, for as long as this process lives.
+    pub fn serve(listener: UnixListener, to_run: Arc<Mutex<UnixStream>>) -> Arc<Execs> {
+        let execs = Arc::new(Execs {
+            to_run,
+            clients: Mutex::new(BTreeMap::new()),
+            next: AtomicU32::new(1),
+        });
+        let serving = Arc::clone(&execs);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    continue;
+                };
+                let execs = Arc::clone(&serving);
+                thread::spawn(move || execs.take(stream));
+            }
+        });
+        execs
+    }
+
+    /// Hands on what the run process sent for the `ap exec` with this id.
+    /// What arrives for one that is gone is dropped.
+    pub fn deliver(&self, id: u32, tag: u8, body: Vec<u8>) {
+        let mut clients = self.clients();
+        let Some(client) = clients.get(&id) else {
+            return;
+        };
+        let message = match (tag, body.as_slice()) {
+            (TOOK, []) => return client.window.give(),
+            (STDOUT, _) => FromRun::Stdout(body),
+            (STDERR, _) => FromRun::Stderr(body),
+            (EXITED, [status]) => FromRun::End(End::Exited(*status)),
+            (FAILED, [status, reason @ ..]) => FromRun::End(End::Failed(
+                *status,
+                String::from_utf8_lossy(reason).into_owned(),
+            )),
+            _ => FromRun::End(End::Failed(
+                FAILED_STATUS,
+                bad_message().to_string(),
+            )),
+        };
+        let ended = matches!(message, FromRun::End(_));
+        let _ = client.output.send(message);
+        if ended && let Some(client) = clients.remove(&id) {
+            client.window.close();
+        }
+    }
+
+    fn clients(&self) -> MutexGuard<'_, BTreeMap<u32, Client>> {
+        self.clients.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends the run process a message for the command with this id.
+    fn send(&self, id: u32, tag: u8, body: &[u8]) -> io::Result<()> {
+        let mut message = Vec::new();
+        push_exec_frame(&mut message, id, tag, body);
+        let mut to_run = self.to_run.lock().unwrap_or_else(PoisonError::into_inner);
+        to_run.write_all(&message)
+    }
+
+    /// Relays one `ap exec`: its command and input to the run process, and
+    /// what the command does back. If the run is gone, `ap exec` reads the
+    /// end of the stream.
+    fn take(self: Arc<Execs>, stream: UnixStream) {
+        let mut reader = &stream;
+        let Ok(Some(FromExec::Exec(exec))) = read_from_exec(&mut reader) else {
+            return;
+        };
+        let Ok(writer) = stream.try_clone() else {
+            return;
+        };
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let window = Arc::new(Window::default());
+        let (output, written) = mpsc::channel();
+        self.clients().insert(
+            id,
+            Client {
+                output,
+                window: Arc::clone(&window),
+            },
+        );
+        let mut request = Vec::new();
+        let sent = ToGuest::Exec(exec)
+            .write(&mut request)
+            .map_err(|_| bad_message())
+            .and_then(|()| {
+                window.take();
+                self.send(id, EXEC, &request)
+            });
+        if sent.is_err() {
+            self.clients().remove(&id);
+            return;
+        }
+        let execs = Arc::clone(&self);
+        thread::spawn(move || execs.write_to(id, writer, &written));
+        loop {
+            let (tag, body) = match read_from_exec(&mut reader) {
+                Ok(Some(FromExec::Input(bytes))) => (INPUT, bytes),
+                Ok(Some(FromExec::EndOfInput)) => (END_OF_INPUT, Vec::new()),
+                Ok(Some(FromExec::Resize(size))) => {
+                    let mut body = size.rows.to_le_bytes().to_vec();
+                    body.extend_from_slice(&size.columns.to_le_bytes());
+                    (RESIZE, body)
+                }
+                _ => break,
+            };
+            if !window.take() || self.send(id, tag, &body).is_err() {
+                return;
+            }
+        }
+        let _ = self.send(id, HUNG_UP, &[]);
+    }
+
+    /// Writes what the command does to its `ap exec`, and tells the run
+    /// process as each message is written, until the command ends.
+    fn write_to(&self, id: u32, mut stream: UnixStream, written: &Receiver<FromRun>) {
+        for message in written {
+            if send_to_exec(&mut stream, &message).is_err() {
+                break;
+            }
+            match message {
+                FromRun::End(_) => break,
+                _ => {
+                    if self.send(id, TAKEN, &[]).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+}
+
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
 /// process id is the first argument, for the run named by the second, with
-/// the run's listening socket as its standard input. It returns the status
-/// to exit with, which nobody reads, because it reports how the run ended
-/// over the socket.
+/// its end of a socket pair with `ap run` as its standard input. It returns
+/// the status to exit with, which nobody reads, because it reports how the
+/// run ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
     let parent = args
         .first()
@@ -171,12 +456,9 @@ pub fn run_process(args: &[OsString]) -> u8 {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
-    // SAFETY: `ap run` passes the listening socket as standard input, and
-    // nothing else in this process uses it.
-    let listener = UnixListener::from(unsafe { OwnedFd::from_raw_fd(0) });
-    let Ok((stream, _)) = listener.accept() else {
-        return 125;
-    };
+    // SAFETY: `ap run` passes its socket as standard input, and nothing else
+    // in this process uses it.
+    let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
     // Confined, this process can `write` but not `send`, which a socket's
     // own writes use, so it writes to `ap run` as to a file.
     let Ok(mut output) = stream
@@ -202,9 +484,6 @@ pub fn run_process(args: &[OsString]) -> u8 {
     }
     // A write fails only if `ap run` is gone, and then nobody is left to tell.
     let _ = output.write_all(&message);
-    // The listener and the lock last until here, so the socket accepts
-    // connections for as long as the run is active.
-    drop(listener);
     drop(record);
     match end {
         End::Exited(status) => status,
@@ -272,29 +551,38 @@ fn serve(
         })
         .collect::<Result<_, Error>>()?;
 
-    let input = match start.terminal {
-        // Confined, this process can `read` but not `recv`, so it reads
-        // `ap run` as a file too.
-        Some(_) => {
-            let source = stream
-                .try_clone()
-                .map(|clone| File::from(OwnedFd::from(clone)))
-                .map_err(lost)?;
-            let input = Arc::new(Input::new(source.as_raw_fd()));
-            pass_input(source, Arc::clone(&input));
-            Some(input)
-        }
-        None => None,
-    };
+    // Confined, this process can `read` but not `recv`, so it reads `ap run`
+    // as a file too.
+    let source = stream
+        .try_clone()
+        .map(|clone| File::from(OwnedFd::from(clone)))
+        .map_err(lost)?;
+    let input = Arc::new(Input::new(source.as_raw_fd()));
+    pass_input(source, Arc::clone(&input), start.terminal.is_some());
     let mut output = output
         .try_clone()
         .map_err(|error| Error::Failed(format!("can't send the run's output: {error}")))?;
-    boot::boot_agent(TIMEOUT, layers, start, input.as_deref(), move |report| {
+    boot::boot_agent(TIMEOUT, layers, start, Some(&input), move |report| {
         let mut message = Vec::new();
         match report {
             Report::Ready(_) => return,
             Report::Stdout(bytes) => push_frame(&mut message, STDOUT, bytes),
             Report::Stderr(bytes) => push_frame(&mut message, STDERR, bytes),
+            Report::Exec(id, ToHost::Stdout(bytes)) => {
+                push_exec_frame(&mut message, id, STDOUT, bytes);
+            }
+            Report::Exec(id, ToHost::Stderr(bytes)) => {
+                push_exec_frame(&mut message, id, STDERR, bytes);
+            }
+            Report::Exec(id, ToHost::Exited(status)) => {
+                push_exec_frame(&mut message, id, EXITED, &[*status]);
+            }
+            Report::Exec(id, ToHost::Failed(reason)) => {
+                let body = [&[FAILED_STATUS], &boot::shown(reason).into_bytes()[..]].concat();
+                push_exec_frame(&mut message, id, FAILED, &body);
+            }
+            Report::Exec(_, ToHost::Ready(_)) => return,
+            Report::ExecTook(id) => push_exec_frame(&mut message, id, TOOK, &[]),
         }
         // If `ap run` is gone, so is this process, any moment now.
         let _ = output.write_all(&message);
@@ -302,24 +590,54 @@ fn serve(
 }
 
 /// Passes what `ap run` sends from `source` on to the guest, until it sends
-/// something else or is gone. `ap run` exits when the run ends, so this
-/// thread ends with this process.
-fn pass_input(mut source: File, input: Arc<Input>) {
+/// something else or is gone: keys and resizes for a harness in a
+/// `terminal`, and what each `ap exec` sends. `ap run` exits when the run
+/// ends, so this thread ends with this process.
+fn pass_input(mut source: File, input: Arc<Input>, terminal: bool) {
     thread::spawn(move || {
         while let Ok(Some((tag, body))) = read_frame(&mut source) {
-            let message = match (tag, body.as_slice()) {
-                (INPUT, _) => ToGuest::Input(body),
-                (RESIZE, [a, b, c, d]) => ToGuest::Resize(Size {
+            let passed = match (tag, body.as_slice()) {
+                (INPUT, _) if terminal => input.send(&ToGuest::Input(body)),
+                (RESIZE, [a, b, c, d]) if terminal => input.send(&ToGuest::Resize(Size {
                     rows: u16::from_le_bytes([*a, *b]),
                     columns: u16::from_le_bytes([*c, *d]),
-                }),
+                })),
+                (FOR_EXEC, [a, b, c, d, tag, rest @ ..]) => {
+                    pass_to_exec(&input, u32::from_le_bytes([*a, *b, *c, *d]), *tag, rest)
+                }
                 _ => return,
             };
-            if input.send(&message).is_err() {
+            if passed.is_err() {
                 return;
             }
         }
     });
+}
+
+/// Passes on a message from the `ap exec` with this id.
+fn pass_to_exec(input: &Input, id: u32, tag: u8, body: &[u8]) -> Result<(), Error> {
+    let message = match (tag, body) {
+        (EXEC, _) => match ToGuest::read(&mut &body[..]) {
+            Ok(Some(exec @ ToGuest::Exec(_))) => exec,
+            _ => return Err(Error::Failed(bad_message().to_string())),
+        },
+        (INPUT, _) => ToGuest::Input(body.to_vec()),
+        (END_OF_INPUT, []) => ToGuest::EndOfInput,
+        (RESIZE, [a, b, c, d]) => ToGuest::Resize(Size {
+            rows: u16::from_le_bytes([*a, *b]),
+            columns: u16::from_le_bytes([*c, *d]),
+        }),
+        (TAKEN, []) => {
+            input.exec_taken(id);
+            return Ok(());
+        }
+        (HUNG_UP, []) => {
+            input.exec_hung_up(id);
+            return Ok(());
+        }
+        _ => return Err(Error::Failed(bad_message().to_string())),
+    };
+    input.send_exec(id, &message)
 }
 
 /// The cleanup process: `ap` started as [`CLEANUP`] with the run's socket as

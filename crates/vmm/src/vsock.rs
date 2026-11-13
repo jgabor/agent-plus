@@ -54,6 +54,13 @@ pub struct Connection {
     generation: u64,
 }
 
+impl Connection {
+    /// The host port the guest connected to.
+    pub fn port(&self) -> u32 {
+        self.host_port
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Header {
     src_cid: u64,
@@ -849,7 +856,7 @@ mod tests {
         assert_eq!((reply.src_port, reply.dst_port), (PORT, GUEST_PORT));
         assert_eq!(reply.kind, TYPE_STREAM);
         assert_eq!(reply.buf_alloc, BUFFER);
-        assert!(driver.device.accept().is_some());
+        assert_eq!(driver.device.accept().map(|c| c.port()), Some(PORT));
         assert!(driver.device.accept().is_none());
     }
 

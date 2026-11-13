@@ -9,6 +9,7 @@ use ap::boot;
 
 mod commands {
     pub mod build;
+    pub mod exec;
     pub mod fmt;
     pub mod init;
     pub mod inspect;
@@ -27,6 +28,7 @@ const USAGE: &str = "usage: ap --version
        ap rm agent
        ap run [-i] [-p prompt] agent
        ap ps
+       ap exec run command [arg...]
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -104,6 +106,11 @@ fn main() -> ExitCode {
         && let Some(all) = commands::ps::parse(&args[1..])
     {
         return ExitCode::from(commands::ps::run(all));
+    }
+    if args.first().is_some_and(|command| command == "exec")
+        && let Some(exec) = commands::exec::parse(&args[1..])
+    {
+        return ExitCode::from(commands::exec::run(&exec));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

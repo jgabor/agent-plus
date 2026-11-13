@@ -1118,7 +1118,7 @@ fn vm_owner_process() {
     let (mut stdout_filter, mut stderr_filter) = (Filter::default(), Filter::default());
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let result = boot::boot(guest, |report| match report {
-        Report::Ready(_) => {}
+        Report::Ready(_) | Report::Exec(..) | Report::ExecTook(_) => {}
         Report::Stdout(bytes) => {
             plant(vmm, bytes);
             out.extend(stdout_filter.push(bytes));

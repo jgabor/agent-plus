@@ -1,6 +1,7 @@
 //! Boots a machine: the host's side in [`boot`], and the guest's in [`init`].
 
 use std::ffi::OsStr;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -53,6 +54,9 @@ const OUTPUT_WINDOW: usize = 16;
 /// How many bytes of input may wait for the guest. Past this the sender
 /// waits too.
 const INPUT_WINDOW: usize = 64 << 10;
+/// How many messages of a command beside the harness may be on their way to
+/// `ap exec`. Past this, only that command waits.
+pub const EXEC_WINDOW: usize = 8;
 
 /// What the guest reports while it runs.
 pub enum Report<'a> {
@@ -60,6 +64,11 @@ pub enum Report<'a> {
     Ready(&'a str),
     Stdout(&'a [u8]),
     Stderr(&'a [u8]),
+    /// What the guest reports about the command beside the harness that has
+    /// this id.
+    Exec(u32, &'a ToHost),
+    /// The guest took one more message for the command with this id.
+    ExecTook(u32),
 }
 
 /// What a machine boots.
@@ -86,9 +95,10 @@ pub struct Guest<'a> {
     pub input: Option<&'a Input>,
 }
 
-/// What a harness in a terminal gets while it runs: keys and resizes, sent
-/// from a thread other than the vCPU's. They reach the guest after the
-/// request that started the harness.
+/// What a run gets while it runs, sent from a thread other than the vCPU's:
+/// keys and resizes for a harness in a terminal, which reach the guest after
+/// the request that started the harness, and the commands beside the
+/// harness, with their input.
 pub struct Input {
     /// Frames for the guest, not yet handed to the vsock device.
     queued: Mutex<Vec<u8>>,
@@ -97,6 +107,20 @@ pub struct Input {
     /// The descriptor the sender reads its input from. A confined process
     /// may read it, and no other.
     source: RawFd,
+    /// The commands beside the harness, by the id `ap run` gave each.
+    execs: Mutex<BTreeMap<u32, Exec>>,
+}
+
+/// A command beside the harness, until it ends.
+#[derive(Default)]
+struct Exec {
+    /// Frames for the guest, the request first, not yet handed to the vsock
+    /// device. The sender holds back what it sends, so this stays small.
+    frames: VecDeque<Vec<u8>>,
+    /// How many messages of its output are on their way to `ap exec`.
+    unread: usize,
+    /// `ap exec` is gone.
+    hung_up: bool,
 }
 
 impl Input {
@@ -107,7 +131,53 @@ impl Input {
             room: Condvar::new(),
             waker: Waker::default(),
             source,
+            execs: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Queues `message` for the command beside the harness that has this id.
+    /// An [`ToGuest::Exec`] starts that command, and nothing else reaches one
+    /// that hasn't started or has ended.
+    pub fn send_exec(&self, id: u32, message: &ToGuest) -> Result<(), Error> {
+        let mut frame = Vec::new();
+        message
+            .write(&mut frame)
+            .map_err(|error| Error::Failed(format!("can't send to the command: {error:?}")))?;
+        let mut execs = self.execs();
+        match (message, execs.get_mut(&id)) {
+            (ToGuest::Exec(_), None) => {
+                let mut exec = Exec::default();
+                exec.frames.push_back(frame);
+                execs.insert(id, exec);
+            }
+            (ToGuest::Exec(_), Some(_)) | (_, None) => return Ok(()),
+            (_, Some(exec)) => exec.frames.push_back(frame),
+        }
+        drop(execs);
+        self.waker.wake();
+        Ok(())
+    }
+
+    /// Says that `ap exec` has written one more message of the command with
+    /// this id.
+    pub fn exec_taken(&self, id: u32) {
+        if let Some(exec) = self.execs().get_mut(&id) {
+            exec.unread = exec.unread.saturating_sub(1);
+        }
+        self.waker.wake();
+    }
+
+    /// Says that the `ap exec` of the command with this id is gone, so the
+    /// command's connection closes.
+    pub fn exec_hung_up(&self, id: u32) {
+        if let Some(exec) = self.execs().get_mut(&id) {
+            exec.hung_up = true;
+        }
+        self.waker.wake();
+    }
+
+    fn execs(&self) -> MutexGuard<'_, BTreeMap<u32, Exec>> {
+        self.execs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Queues `message` for the guest, and waits while too much is queued
@@ -249,6 +319,7 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         Report::Stderr(bytes) => {
             let _ = io::stderr().write_all(&stderr_filter.push(bytes));
         }
+        Report::Exec(..) | Report::ExecTook(_) => {}
     };
     relayed(timeout, Vec::new(), request, None, print)
 }
@@ -306,6 +377,8 @@ fn relayed(
         Report::Ready(release) => relay.send(Piece::Release(release.to_owned())),
         Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
         Report::Stderr(bytes) => relay.send(Piece::Stderr(bytes.to_vec())),
+        Report::Exec(id, message) => relay.send(Piece::Exec(id, message.clone())),
+        Report::ExecTook(id) => relay.send(Piece::ExecTook(id)),
     });
     relay.finish();
     result.map(|status| status.unwrap_or(0))
@@ -315,6 +388,8 @@ enum Piece {
     Release(String),
     Stdout(Vec<u8>),
     Stderr(Vec<u8>),
+    Exec(u32, ToHost),
+    ExecTook(u32),
 }
 
 /// Hands output to a thread of its own, so that a reader that doesn't read
@@ -373,6 +448,8 @@ fn forward(pieces: &Receiver<Piece>, written: &Sender<()>, mut output: impl FnMu
             Piece::Release(release) => output(Report::Ready(release)),
             Piece::Stdout(bytes) => output(Report::Stdout(bytes)),
             Piece::Stderr(bytes) => output(Report::Stderr(bytes)),
+            Piece::Exec(id, message) => output(Report::Exec(*id, message)),
+            Piece::ExecTook(id) => output(Report::ExecTook(*id)),
         }
         if written.send(()).is_err() {
             return;
@@ -416,9 +493,14 @@ pub fn boot(guest: Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, E
             (Block::new(layer.disk, &name), vm.interrupt(line))
         })
         .collect();
+    // Only a run has commands beside its harness.
+    let ports: &[u32] = match guest.input {
+        Some(_) => &[PORT, EXEC_PORT],
+        None => &[PORT],
+    };
     let mut machine = Machine {
         serial: Serial::new(),
-        vsock: Vsock::new(GUEST_CID, &[PORT]),
+        vsock: Vsock::new(GUEST_CID, ports),
         disks,
         memory: vm.memory(),
         interrupt: vm.interrupt(LINE),
@@ -431,6 +513,8 @@ pub fn boot(guest: Guest, on_report: impl FnMut(Report)) -> Result<Option<u8>, E
         failure: None,
         on_report,
         input: guest.input,
+        spares: VecDeque::new(),
+        bound: BTreeMap::new(),
     };
     if guest.confine {
         let readable = guest.input.map(|input| input.source);
@@ -521,14 +605,24 @@ struct Machine<'vm, F> {
     failure: Option<String>,
     on_report: F,
     input: Option<&'vm Input>,
+    /// Connections the guest opened for commands beside the harness, which
+    /// no command has yet.
+    spares: VecDeque<Connection>,
+    /// Each command's connection, and what it has sent of a frame so far.
+    bound: BTreeMap<u32, (Connection, Vec<u8>)>,
+}
+
+/// What the guest reported about a command beside the harness, kept until the
+/// lock on the commands is let go.
+enum ExecReport {
+    Message(u32, ToHost),
+    Took(u32),
 }
 
 impl<F: FnMut(Report)> Machine<'_, F> {
     /// Takes what the guest has sent. Hanging up powers it off.
     fn run_host(&mut self) {
-        if self.connection.is_none() {
-            self.connection = self.vsock.accept();
-        }
+        self.accept();
         let Some(connection) = self.connection else {
             return;
         };
@@ -541,6 +635,77 @@ impl<F: FnMut(Report)> Machine<'_, F> {
             self.frame.extend_from_slice(&buffer[..len]);
             while !self.finished && frame_is_complete(&self.frame) {
                 self.handle_frame(connection);
+            }
+        }
+    }
+
+    /// Takes the connections the guest has opened: the first to [`PORT`] is
+    /// the init's, and each to [`EXEC_PORT`] waits for a command.
+    fn accept(&mut self) {
+        while let Some(connection) = self.vsock.accept() {
+            match connection.port() {
+                EXEC_PORT => self.spares.push_back(connection),
+                _ if self.connection.is_none() => self.connection = Some(connection),
+                _ => self.vsock.close(connection),
+            }
+        }
+    }
+
+    /// Gives each new command beside the harness a connection, passes on
+    /// what was sent to each, and reports what each has done, as far as its
+    /// window allows.
+    fn serve_execs(&mut self) {
+        let Some(input) = self.input else {
+            return;
+        };
+        let mut reports = Vec::new();
+        let mut execs = input.execs();
+        let Machine {
+            vsock,
+            spares,
+            bound,
+            ..
+        } = self;
+        let mut ended = Vec::new();
+        for (id, exec) in execs.iter_mut() {
+            if exec.hung_up {
+                ended.push(*id);
+                continue;
+            }
+            if !bound.contains_key(id) {
+                let Some(spare) = spares.pop_front() else {
+                    continue;
+                };
+                bound.insert(*id, (spare, Vec::new()));
+            }
+            let Some((connection, frame)) = bound.get_mut(id) else {
+                continue;
+            };
+            while let Some(front) = exec.frames.front_mut() {
+                let taken = vsock.send(*connection, front);
+                front.drain(..taken);
+                if !front.is_empty() {
+                    break;
+                }
+                exec.frames.pop_front();
+                reports.push(ExecReport::Took(*id));
+            }
+            if let Some(end) = receive_exec(vsock, *connection, frame, exec, *id, &mut reports) {
+                reports.push(ExecReport::Message(*id, end));
+                ended.push(*id);
+            }
+        }
+        for id in ended {
+            execs.remove(&id);
+            if let Some((connection, _)) = bound.remove(&id) {
+                vsock.close(connection);
+            }
+        }
+        drop(execs);
+        for report in reports {
+            match &report {
+                ExecReport::Message(id, message) => (self.on_report)(Report::Exec(*id, message)),
+                ExecReport::Took(id) => (self.on_report)(Report::ExecTook(*id)),
             }
         }
     }
@@ -621,6 +786,49 @@ impl<F: FnMut(Report)> Machine<'_, F> {
     }
 }
 
+/// Reads what the command on `connection` has sent, while its window has
+/// room, into `reports`. Returns how it ended, if it has: its status, or why
+/// the host gave up on it.
+fn receive_exec(
+    vsock: &mut Vsock,
+    connection: Connection,
+    frame: &mut Vec<u8>,
+    exec: &mut Exec,
+    id: u32,
+    reports: &mut Vec<ExecReport>,
+) -> Option<ToHost> {
+    let mut buffer = [0; 4096];
+    while exec.unread < EXEC_WINDOW {
+        if !frame_is_complete(frame) {
+            let len = vsock.recv(connection, &mut buffer);
+            if len == 0 {
+                return vsock.guest_finished(connection).then(|| {
+                    ToHost::Failed(b"the guest closed the command's connection".to_vec())
+                });
+            }
+            frame.extend_from_slice(&buffer[..len]);
+            continue;
+        }
+        let mut rest = frame.as_slice();
+        let message = ToHost::read(&mut rest);
+        let used = frame.len() - rest.len();
+        frame.drain(..used);
+        match message {
+            Ok(Some(output @ (ToHost::Stdout(_) | ToHost::Stderr(_)))) => {
+                exec.unread += 1;
+                reports.push(ExecReport::Message(id, output));
+            }
+            Ok(Some(end @ (ToHost::Exited(_) | ToHost::Failed(_)))) => return Some(end),
+            _ => {
+                return Some(ToHost::Failed(
+                    b"the guest sent a malformed message for the command".to_vec(),
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Whether `bytes` hold a whole frame, or a length that can't be one. The
 /// guest chooses the length, so nothing waits for more than a frame can hold.
 fn frame_is_complete(bytes: &[u8]) -> bool {
@@ -633,7 +841,7 @@ fn frame_is_complete(bytes: &[u8]) -> bool {
 
 /// A reason the guest gave, for the user's terminal. Control characters
 /// become `?`, so the guest can't send the terminal an escape sequence.
-fn shown(reason: &[u8]) -> String {
+pub(crate) fn shown(reason: &[u8]) -> String {
     String::from_utf8_lossy(reason)
         .chars()
         .map(|c| if c.is_control() { '?' } else { c })
@@ -673,6 +881,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
         let mut interrupt = self.vsock.write(self.memory, offset, data);
         self.run_host();
         self.pass_input();
+        self.serve_execs();
         interrupt |= self.vsock.service(self.memory);
         if interrupt {
             // A failed pulse leaves the guest waiting, and the timeout ends it.
@@ -682,6 +891,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
 
     fn woken(&mut self) {
         self.pass_input();
+        self.serve_execs();
         if self.vsock.service(self.memory) {
             // A failed pulse leaves the guest waiting, and the timeout ends it.
             let _ = self.interrupt.pulse();

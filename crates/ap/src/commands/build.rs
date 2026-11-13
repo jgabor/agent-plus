@@ -799,7 +799,10 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
             };
             let mut counting = unzstd(&frame[..]).map_err(unpacking)?;
             let size = io::copy(&mut counting, &mut io::sink()).map_err(unpacking)?;
-            (size, Box::new(unzstd(Cursor::new(frame)).map_err(unpacking)?))
+            (
+                size,
+                Box::new(unzstd(Cursor::new(frame)).map_err(unpacking)?),
+            )
         }
     };
     insert(

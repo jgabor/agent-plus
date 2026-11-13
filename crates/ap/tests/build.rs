@@ -1426,7 +1426,10 @@ fn a_cached_codex_file_that_is_not_zstd_fails_the_build() {
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
     assert!(message.starts_with("Agentfile:1: "), "{message}");
-    assert!(message.contains("unpacking `AGENT codex:0.169.0`"), "{message}");
+    assert!(
+        message.contains("unpacking `AGENT codex:0.169.0`"),
+        "{message}"
+    );
     assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
     assert!(scratch.agents().list().unwrap().is_empty());
 }

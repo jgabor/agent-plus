@@ -33,7 +33,6 @@ const CHECKS: &[Check] = &[
 
 /// What a merge already knows, which changes two of the checks.
 pub struct Merging<'a> {
-    pub labels: &'a [String],
     /// `prepare` leaves these to the owner, who decides by merging.
     pub prepare: bool,
     /// Hears the name of a slow check as it starts.
@@ -122,22 +121,6 @@ fn compare_with_base(
         );
     }
     record("hills", score.proven >= floor || allowed, failed);
-    let missing = match merging {
-        Some(merging) => Some(base::missing_label_on(root, &commit, merging.labels)?),
-        None => base::missing_label(root, &commit)?,
-    };
-    match missing {
-        Some(findings) => {
-            for finding in &findings {
-                eprintln!("labels: {finding}");
-            }
-            record("labels", findings.is_empty(), failed);
-        }
-        None => {
-            println!("skip labels");
-            eprintln!("labels: this branch has no open PR yet, so its label wasn't checked");
-        }
-    }
     Ok(())
 }
 

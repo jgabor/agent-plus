@@ -11,9 +11,6 @@ mod common;
 const SPEC: &str = "# A\n\nOne. Two.\n\n## B\n\nThree.\n";
 const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
 const NO_CHECK: &str = "pub fn f() {}\n";
-const NOT_LABELED: &str = r#"[{"labels":[{"name":"auto:merge","color":"ff0000"}]}]"#;
-const LABELED: &str = r#"[{"labels":[{"name":"auto:merge"},{"name":"spec-change"}]}]"#;
-const NO_PR: &str = "[]";
 
 fn package_manifest(name: &str) -> String {
     format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n")
@@ -129,15 +126,6 @@ impl Repo {
     fn set_gh(&self, body: &str) {
         let path = self.bin.join("gh");
         common::write_tool(&path, &format!("#!/bin/sh\n{body}"));
-    }
-
-    /// Makes `gh pr list` print this JSON, and record its arguments.
-    fn set_prs(&self, json: &str) {
-        let args = self.bin.join("args");
-        self.set_gh(&format!(
-            "echo \"$*\" > '{}'\ncat <<'END'\n{json}\nEND\n",
-            args.display()
-        ));
     }
 
     fn gate_command(&self) -> Command {
@@ -260,7 +248,6 @@ fn a_check_moved_to_another_file_passes() {
 #[test]
 fn removing_the_sentence_too_passes() {
     let repo = Repo::new("sentence", CHECK_ONE, &[]);
-    repo.set_prs(LABELED);
     repo.write("crates/demo/src/lib.rs", NO_CHECK);
     repo.write("SPEC.md", "# A\n\nTwo.\n\n## B\n\nThree.\n");
     repo.commit();
@@ -333,8 +320,10 @@ fn an_unrelated_history_is_a_problem() {
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
 }
 
+/// What waits for the owner is for `merge` to decide from the diff, so the
+/// gate reads no label, and never asks GitHub.
 #[test]
-fn each_protected_path_needs_the_label() {
+fn any_path_passes_without_asking_github() {
     for (index, path) in [
         "SPEC.md",
         "AGENTS.md",
@@ -344,12 +333,12 @@ fn each_protected_path_needs_the_label() {
         "harness/budgets.toml",
         "harness/tasks/nightly.md",
         "xtask/src/gate.rs",
+        ".github/workflows/x.yml",
     ]
     .iter()
     .enumerate()
     {
-        let repo = Repo::new(&format!("protected-{index}"), NO_CHECK, &[]);
-        repo.set_prs(NOT_LABELED);
+        let repo = Repo::new(&format!("any-path-{index}"), NO_CHECK, &[]);
         let content = if *path == "SPEC.md" {
             format!("{SPEC}\nFour.\n")
         } else {
@@ -357,134 +346,10 @@ fn each_protected_path_needs_the_label() {
         };
         repo.write(path, &content);
         repo.commit();
-        assert_fails(&repo.gate(), "labels", path);
-    }
-}
-
-#[test]
-fn the_ledger_and_journey_scripts_need_no_label() {
-    for (index, path) in [
-        "harness/ledger/1.toml",
-        "harness/journey/step.sh",
-        "harnessed.txt",
-        "docs/xtask/notes.txt",
-        "SPEC.md.orig",
-        "README.md",
-        "docs/AGENTS.md",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let repo = Repo::new(&format!("open-{index}"), NO_CHECK, &[]);
-        repo.set_prs(NOT_LABELED);
-        repo.write(path, "# comment\n");
-        repo.commit();
         let output = repo.gate();
-        assert!(
-            stdout(&output).contains("pass labels"),
-            "{path}: {}",
-            stdout(&output)
-        );
+        assert_passes(&output);
+        assert!(!stdout(&output).contains("labels"), "{}", stdout(&output));
     }
-}
-
-#[test]
-fn the_label_allows_a_protected_path() {
-    let repo = Repo::new("labeled", NO_CHECK, &[]);
-    repo.set_prs(LABELED);
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    let output = repo.gate();
-    assert_passes(&output);
-    assert!(stdout(&output).contains("pass labels\n"));
-}
-
-#[test]
-fn the_label_is_read_from_the_open_pr_of_this_branch() {
-    let repo = Repo::new("query", NO_CHECK, &[]);
-    repo.set_prs(LABELED);
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    assert_passes(&repo.gate());
-    let args = fs::read_to_string(repo.bin.join("args")).unwrap();
-    assert!(args.contains("--head work"), "{args}");
-    assert!(args.contains("--state open"), "{args}");
-}
-
-#[test]
-fn every_open_pr_of_the_branch_needs_the_label() {
-    let repo = Repo::new("two-prs", NO_CHECK, &[]);
-    repo.set_prs(&format!(
-        "[{},{}]",
-        &LABELED[1..LABELED.len() - 1],
-        &NOT_LABELED[1..NOT_LABELED.len() - 1]
-    ));
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    assert_fails(&repo.gate(), "labels", "SPEC.md");
-}
-
-#[test]
-fn renaming_a_protected_file_away_needs_the_label() {
-    let repo = Repo::new(
-        "renamed-away",
-        NO_CHECK,
-        &[("harness/journey.toml", "# steps\n")],
-    );
-    repo.set_prs(NOT_LABELED);
-    repo.git(&["mv", "harness/journey.toml", "harness/steps.toml"]);
-    repo.commit();
-    assert_fails(&repo.gate(), "labels", "harness/journey.toml");
-}
-
-#[test]
-fn a_branch_with_no_pr_skips_the_label_rule() {
-    let repo = Repo::new("no-pr", NO_CHECK, &[]);
-    repo.set_prs(NO_PR);
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    let output = repo.gate();
-    assert_passes(&output);
-    assert!(
-        stdout(&output).contains("skip labels\n"),
-        "{}",
-        stdout(&output)
-    );
-}
-
-#[test]
-fn other_paths_never_ask_github() {
-    let repo = Repo::new("other-paths", NO_CHECK, &[]);
-    repo.write("crates/demo/src/lib.rs", "pub fn g() {}\n");
-    repo.commit();
-    let output = repo.gate();
-    assert_passes(&output);
-    assert!(stdout(&output).contains("pass labels\n"));
-}
-
-#[test]
-fn a_gh_failure_is_a_problem() {
-    let repo = Repo::new("gh-fails", NO_CHECK, &[]);
-    repo.set_gh("echo 'not logged in' >&2\nexit 1\n");
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    let output = repo.gate();
-    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
-    assert!(
-        stderr(&output).contains("not logged in"),
-        "{}",
-        stderr(&output)
-    );
-}
-
-#[test]
-fn unreadable_gh_output_is_a_problem() {
-    let repo = Repo::new("gh-garbage", NO_CHECK, &[]);
-    repo.set_prs("not json");
-    repo.write("SPEC.md", &format!("{SPEC}\nFour.\n"));
-    repo.commit();
-    let output = repo.gate();
-    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
 }
 
 fn record_with_proven(proven: u32) -> String {

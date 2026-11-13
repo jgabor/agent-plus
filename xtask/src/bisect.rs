@@ -202,9 +202,8 @@ fn open_revert(
     let target = format!("HEAD:refs/heads/{branch}");
     // The name is this issue's, so all that can be there is a killed run's work.
     base::git_text(path, &["push", "-q", "--force", "origin", &target])?;
-    let label = (!base::protected_changes(path, head)?.is_empty()).then_some(base::SPEC_CHANGE);
     let body = format!(
         "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and took `{head}` as bad from its own run. If the bisect blames only the newest commit, that run may have hit a flaky check.\n\n## Decisions\nThe owner merges this. Once `xtask/gate` is green, a comment on this PR says what merging accepts.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
     );
-    gh.create_pr(&branch, &title, &body, label)
+    gh.create_pr(&branch, &title, &body)
 }

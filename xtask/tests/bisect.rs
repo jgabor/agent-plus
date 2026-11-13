@@ -91,6 +91,20 @@ impl Repo {
         fs::create_dir_all(&repo.temp).unwrap();
         let gh = repo.bin.join("gh");
         common::write_tool(&gh, &format!("#!/bin/sh\n{GH}"));
+        // The fixture has no xtask, so a `prepare` that builds the xtask of
+        // `main` gets the test's own binary.
+        let real = Command::new("sh")
+            .args(["-c", "command -v cargo"])
+            .output()
+            .unwrap();
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        common::write_tool(
+            &repo.bin.join("cargo"),
+            &format!(
+                "#!/bin/sh\nif [ \"$1 $2 $3 $4 $5\" = \"build --quiet --package xtask --target-dir\" ]; then\n  mkdir -p \"$6/debug\" && rm -f \"$6/debug/xtask\" && exec cp '{}' \"$6/debug/xtask\"\nfi\nexec '{real}' \"$@\"\n",
+                env!("CARGO_BIN_EXE_xtask")
+            ),
+        );
         let mutants = repo.bin.join("cargo-mutants");
         common::write_tool(&mutants, "#!/bin/sh\nexit 0\n");
         let systemd = repo.bin.join("systemd-run");

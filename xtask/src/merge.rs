@@ -243,7 +243,11 @@ fn sequence(
         }
     };
     // The xtask of the rebased tree is what measures `main` after the merge.
-    if changes_xtask(&tree.path, &fetched.main)? {
+    // An exact revert puts back an xtask that was already measured, and that
+    // may not know how to `prove`.
+    if changes_xtask(&tree.path, &fetched.main)?
+        && !(mode != Mode::Merge && base::is_exact_revert(&tree.path, &fetched.main)?)
+    {
         status.proving("its own xtask");
         match prove_with_its_own(&tree.path, &scoring)? {
             Ok(own) => proof = own.after(proof),
@@ -326,8 +330,10 @@ fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
     )))
 }
 
-/// Builds the xtask of a tree, and says where it is.
+/// Builds the xtask of a tree, and says where it is. A build shares the
+/// activity lock, so that it doesn't slow a bench.
 fn build_xtask(tree: &Path, target: &Path) -> Result<PathBuf, Problem> {
+    let _hold = lock::shared(tree)?;
     let target_dir = target.to_string_lossy();
     let output = process::Command::new("cargo")
         .args([

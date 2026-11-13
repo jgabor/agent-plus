@@ -1926,6 +1926,7 @@ fn revert_of(
 ) -> (Repo, String) {
     let repo = Repo::new(name);
     repo.git(&["checkout", "-q", "main"]);
+    repo.write(path, before);
     repo.write("order.txt", "a\nb\n");
     repo.commit();
     repo.git(&["push", "-q", "origin", "main"]);
@@ -2948,4 +2949,23 @@ fn a_merge_builds_the_xtask_of_main_again_if_main_moves() {
     assert_merged(&repo, &output);
     assert_eq!(builds(&repo), 2, "{}", repo.calls());
     repo.origin(&["merge-base", "--is-ancestor", &later, &repo.head()]);
+}
+
+/// The xtask that a revert puts back was measured already, and may not know
+/// how to `prove`.
+#[test]
+fn an_exact_revert_of_a_change_to_xtask_is_proven_by_mains_alone() {
+    let (repo, _) = revert_of(
+        "checks-revert",
+        ("xtask/src/journey.rs", "// before\n", "// after\n"),
+        None,
+    );
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    repo.forget_calls();
+    let output = repo.prepare();
+    assert_prepared(&repo, &output);
+    assert_eq!(builds(&repo), 1, "{}", repo.calls());
 }

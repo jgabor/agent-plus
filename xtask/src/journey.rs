@@ -313,7 +313,10 @@ fn run_step(
     let directory = journey.join(format!("step-{}", step.id));
     let home = directory.join("home");
     let work = directory.join("work");
-    for path in [&home, &work] {
+    // Downloads outlast a step, so a harness is downloaded once per journey.
+    // The store lives under each step's own home, so it starts empty.
+    let cache = journey.join("cache");
+    for path in [&home, &work, &cache] {
         fs::create_dir_all(path)
             .map_err(|e| Problem(format!("couldn't create {}: {e}", path.display())))?;
     }
@@ -323,6 +326,7 @@ fn run_step(
         .current_dir(&work)
         .env_clear()
         .env("HOME", &home)
+        .env("XDG_CACHE_HOME", &cache)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
     if let Some(key) = key {
         command.env("ANTHROPIC_API_KEY", key);

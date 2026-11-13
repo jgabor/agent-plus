@@ -544,6 +544,19 @@ fn the_codex_adapter_layer_is_the_same_for_two_builds() {
     }
 }
 
+#[test]
+fn a_codex_older_than_the_adapter_configures_fails() {
+    let scratch = Scratch::new("codex-too-old");
+    let dir = scratch.project("notes", "AGENT codex:0.38.0\nOS minimal\n");
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "Agentfile:1: Codex 0.38.0 is older than 0.39.0, the oldest version `ap` configures\n"
+    );
+    assert!(scratch.agents().get("notes").unwrap().is_none());
+}
+
 // spec(EFFORT): A level the harness doesn't accept is a build warning, and the adapter uses the nearest lower level, or the harness's lowest level if none is lower.
 #[test]
 fn an_effort_the_locked_codex_doesnt_take_is_a_warning() {

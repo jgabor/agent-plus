@@ -31,9 +31,9 @@ const VERSIONS: [&str; 11] = [
 
 /// The current version, and the versions on either side of each change in
 /// what Codex accepts.
-const CODEX_VERSIONS: [&str; 12] = [
-    "0.2.0", "0.58.0", "0.59.0", "0.123.0", "0.124.0", "0.137.0", "0.138.0", "0.146.1", "0.147.0",
-    "0.155.1", "0.156.0", "0.169.0",
+const CODEX_VERSIONS: [&str; 14] = [
+    "0.39.0", "0.58.0", "0.59.0", "0.114.0", "0.115.0", "0.123.0", "0.124.0", "0.137.0", "0.138.0",
+    "0.146.1", "0.147.0", "0.155.1", "0.156.0", "0.169.0",
 ];
 
 /// Fails unless `actual` is what the Claude Code golden file `name` holds.
@@ -215,6 +215,18 @@ fn an_agentfile_without_mode_starts_in_auto() {
     let settings = agentfile::Settings::read(&instructions).unwrap();
     let arguments = claude::arguments("2.1.323", None, None, settings.mode);
     assert_eq!(arguments, ["--permission-mode", "auto"]);
+}
+
+#[test]
+fn codex_older_than_the_oldest_it_configures_is_unsupported() {
+    assert_eq!(codex::OLDEST, "0.39.0");
+    assert_eq!(
+        codex::unsupported("0.38.0").as_deref(),
+        Some("Codex 0.38.0 is older than 0.39.0, the oldest version `ap` configures")
+    );
+    for version in CODEX_VERSIONS {
+        assert_eq!(codex::unsupported(version), None, "{version}");
+    }
 }
 
 /// The file the Codex adapter renders at `path`, for these values.

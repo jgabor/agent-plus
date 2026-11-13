@@ -264,6 +264,10 @@ fn build(args: &Args) -> Result<(), String> {
         },
     )
     .map_err(|error| format!("{shown}:{agent_line}: {error}"))?;
+    let codex = (lock.harness.as_ref()).filter(|locked| locked.harness == Harness::Codex);
+    if let Some(error) = codex.and_then(|locked| ap::adapter::codex::unsupported(&locked.version)) {
+        return Err(format!("{shown}:{agent_line}: {error}"));
+    }
     if let Some(warning) = effort_warning(&instructions, &lock) {
         if args.strict {
             return Err(report(vec![warning]));

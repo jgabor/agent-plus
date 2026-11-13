@@ -321,6 +321,31 @@ fn claude_code_starts_with_its_adapters_configuration() {
             "the harness can't see {file}: {report}"
         );
     }
+
+    // A version older than `--effort` gets the effort from its variable,
+    // which `ENV` can't change.
+    scratch.build(
+        "older",
+        &format!(
+            "AGENT claude:2.1.37\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_STATUS {STATUS}\nENV CLAUDE_CODE_EFFORT_LEVEL low\nEFFORT max\n"
+        ),
+    );
+    let report = scratch.run(&["older", "-p", PROMPT]);
+    assert_eq!(
+        array(&report, "arguments"),
+        [
+            "\"-p\"",
+            "\"--permission-mode\"",
+            "\"default\"",
+            "\"--\"",
+            &format!("\"{PROMPT}\""),
+        ],
+        "{report}"
+    );
+    assert!(
+        report.contains("\"CLAUDE_CODE_EFFORT_LEVEL\":\"max\""),
+        "{report}"
+    );
 }
 
 #[test]

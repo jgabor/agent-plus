@@ -318,6 +318,10 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
                 .iter()
                 .find_map(|layer| ap::lock::labeled_version(&layer.instruction, Harness::Claude))
                 .ok_or_else(|| fail(format!("agent {name} has no Claude Code layer")))?;
+            // The adapter's variables come after `ENV`'s, so they win.
+            for (key, value) in ap::adapter::claude::environment(version, settings.effort) {
+                env.insert(key.into_bytes(), value.into_bytes());
+            }
             let mut argv = vec![harness, "-p".to_owned()];
             argv.extend(ap::adapter::claude::arguments(
                 version,

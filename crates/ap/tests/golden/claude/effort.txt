@@ -1,35 +1,55 @@
-2.1.37 low: None ["--permission-mode", "default"], warning: Claude Code 2.1.37 has no `--effort`, so `EFFORT low` does nothing
-2.1.37 medium: None ["--permission-mode", "default"], warning: Claude Code 2.1.37 has no `--effort`, so `EFFORT medium` does nothing
-2.1.37 high: None ["--permission-mode", "default"], warning: Claude Code 2.1.37 has no `--effort`, so `EFFORT high` does nothing
-2.1.37 xhigh: None ["--permission-mode", "default"], warning: Claude Code 2.1.37 has no `--effort`, so `EFFORT xhigh` does nothing
-2.1.37 max: None ["--permission-mode", "default"], warning: Claude Code 2.1.37 has no `--effort`, so `EFFORT max` does nothing
-2.1.38 low: Some("low") ["--effort", "low", "--permission-mode", "default"]
-2.1.38 medium: Some("medium") ["--effort", "medium", "--permission-mode", "default"]
-2.1.38 high: Some("high") ["--effort", "high", "--permission-mode", "default"]
-2.1.38 xhigh: Some("high") ["--effort", "high", "--permission-mode", "default"], warning: Claude Code 2.1.38 doesn't accept `EFFORT xhigh`, so it uses `high`
-2.1.38 max: Some("max") ["--effort", "max", "--permission-mode", "default"]
-2.1.70 low: Some("low") ["--effort", "low", "--permission-mode", "default"]
-2.1.70 medium: Some("medium") ["--effort", "medium", "--permission-mode", "default"]
-2.1.70 high: Some("high") ["--effort", "high", "--permission-mode", "default"]
-2.1.70 xhigh: Some("high") ["--effort", "high", "--permission-mode", "default"], warning: Claude Code 2.1.70 doesn't accept `EFFORT xhigh`, so it uses `high`
-2.1.70 max: Some("max") ["--effort", "max", "--permission-mode", "default"]
-2.1.71 low: Some("low") ["--effort", "low", "--permission-mode", "auto"]
-2.1.71 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"]
-2.1.71 high: Some("high") ["--effort", "high", "--permission-mode", "auto"]
-2.1.71 xhigh: Some("high") ["--effort", "high", "--permission-mode", "auto"], warning: Claude Code 2.1.71 doesn't accept `EFFORT xhigh`, so it uses `high`
-2.1.71 max: Some("max") ["--effort", "max", "--permission-mode", "auto"]
-2.1.110 low: Some("low") ["--effort", "low", "--permission-mode", "auto"]
-2.1.110 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"]
-2.1.110 high: Some("high") ["--effort", "high", "--permission-mode", "auto"]
-2.1.110 xhigh: Some("high") ["--effort", "high", "--permission-mode", "auto"], warning: Claude Code 2.1.110 doesn't accept `EFFORT xhigh`, so it uses `high`
-2.1.110 max: Some("max") ["--effort", "max", "--permission-mode", "auto"]
-2.1.111 low: Some("low") ["--effort", "low", "--permission-mode", "auto"]
-2.1.111 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"]
-2.1.111 high: Some("high") ["--effort", "high", "--permission-mode", "auto"]
-2.1.111 xhigh: Some("xhigh") ["--effort", "xhigh", "--permission-mode", "auto"]
-2.1.111 max: Some("max") ["--effort", "max", "--permission-mode", "auto"]
-2.1.323 low: Some("low") ["--effort", "low", "--permission-mode", "auto"]
-2.1.323 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"]
-2.1.323 high: Some("high") ["--effort", "high", "--permission-mode", "auto"]
-2.1.323 xhigh: Some("xhigh") ["--effort", "xhigh", "--permission-mode", "auto"]
-2.1.323 max: Some("max") ["--effort", "max", "--permission-mode", "auto"]
+2.0.45 low: None ["--permission-mode", "default"] [], warning: Claude Code 2.0.45 has no effort setting, so `EFFORT low` does nothing
+2.0.45 medium: None ["--permission-mode", "default"] [], warning: Claude Code 2.0.45 has no effort setting, so `EFFORT medium` does nothing
+2.0.45 high: None ["--permission-mode", "default"] [], warning: Claude Code 2.0.45 has no effort setting, so `EFFORT high` does nothing
+2.0.45 xhigh: None ["--permission-mode", "default"] [], warning: Claude Code 2.0.45 has no effort setting, so `EFFORT xhigh` does nothing
+2.0.45 max: None ["--permission-mode", "default"] [], warning: Claude Code 2.0.45 has no effort setting, so `EFFORT max` does nothing
+2.0.46 low: Some("low") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "low")]
+2.0.46 medium: Some("medium") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "medium")]
+2.0.46 high: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")]
+2.0.46 xhigh: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.0.46 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.0.46 max: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.0.46 doesn't accept `EFFORT max`, so it uses `high`
+2.1.22 low: Some("low") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "low")]
+2.1.22 medium: Some("medium") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "medium")]
+2.1.22 high: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")]
+2.1.22 xhigh: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.1.22 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.22 max: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.1.22 doesn't accept `EFFORT max`, so it uses `high`
+2.1.23 low: Some("low") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "low")]
+2.1.23 medium: Some("medium") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "medium")]
+2.1.23 high: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")]
+2.1.23 xhigh: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.1.23 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.23 max: Some("max") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "max")]
+2.1.37 low: Some("low") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "low")]
+2.1.37 medium: Some("medium") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "medium")]
+2.1.37 high: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")]
+2.1.37 xhigh: Some("high") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "high")], warning: Claude Code 2.1.37 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.37 max: Some("max") ["--permission-mode", "default"] [("CLAUDE_CODE_EFFORT_LEVEL", "max")]
+2.1.38 low: Some("low") ["--effort", "low", "--permission-mode", "default"] []
+2.1.38 medium: Some("medium") ["--effort", "medium", "--permission-mode", "default"] []
+2.1.38 high: Some("high") ["--effort", "high", "--permission-mode", "default"] []
+2.1.38 xhigh: Some("high") ["--effort", "high", "--permission-mode", "default"] [], warning: Claude Code 2.1.38 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.38 max: Some("max") ["--effort", "max", "--permission-mode", "default"] []
+2.1.70 low: Some("low") ["--effort", "low", "--permission-mode", "default"] []
+2.1.70 medium: Some("medium") ["--effort", "medium", "--permission-mode", "default"] []
+2.1.70 high: Some("high") ["--effort", "high", "--permission-mode", "default"] []
+2.1.70 xhigh: Some("high") ["--effort", "high", "--permission-mode", "default"] [], warning: Claude Code 2.1.70 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.70 max: Some("max") ["--effort", "max", "--permission-mode", "default"] []
+2.1.71 low: Some("low") ["--effort", "low", "--permission-mode", "auto"] []
+2.1.71 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"] []
+2.1.71 high: Some("high") ["--effort", "high", "--permission-mode", "auto"] []
+2.1.71 xhigh: Some("high") ["--effort", "high", "--permission-mode", "auto"] [], warning: Claude Code 2.1.71 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.71 max: Some("max") ["--effort", "max", "--permission-mode", "auto"] []
+2.1.110 low: Some("low") ["--effort", "low", "--permission-mode", "auto"] []
+2.1.110 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"] []
+2.1.110 high: Some("high") ["--effort", "high", "--permission-mode", "auto"] []
+2.1.110 xhigh: Some("high") ["--effort", "high", "--permission-mode", "auto"] [], warning: Claude Code 2.1.110 doesn't accept `EFFORT xhigh`, so it uses `high`
+2.1.110 max: Some("max") ["--effort", "max", "--permission-mode", "auto"] []
+2.1.111 low: Some("low") ["--effort", "low", "--permission-mode", "auto"] []
+2.1.111 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"] []
+2.1.111 high: Some("high") ["--effort", "high", "--permission-mode", "auto"] []
+2.1.111 xhigh: Some("xhigh") ["--effort", "xhigh", "--permission-mode", "auto"] []
+2.1.111 max: Some("max") ["--effort", "max", "--permission-mode", "auto"] []
+2.1.323 low: Some("low") ["--effort", "low", "--permission-mode", "auto"] []
+2.1.323 medium: Some("medium") ["--effort", "medium", "--permission-mode", "auto"] []
+2.1.323 high: Some("high") ["--effort", "high", "--permission-mode", "auto"] []
+2.1.323 xhigh: Some("xhigh") ["--effort", "xhigh", "--permission-mode", "auto"] []
+2.1.323 max: Some("max") ["--effort", "max", "--permission-mode", "auto"] []

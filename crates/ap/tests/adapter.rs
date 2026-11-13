@@ -23,8 +23,9 @@ const MODES: [Mode; 5] = [Mode::Read, Mode::Ask, Mode::Edit, Mode::Auto, Mode::F
 
 /// The current version, and the versions on either side of each change in
 /// what Claude Code accepts.
-const VERSIONS: [&str; 7] = [
-    "2.1.37", "2.1.38", "2.1.70", "2.1.71", "2.1.110", "2.1.111", "2.1.323",
+const VERSIONS: [&str; 11] = [
+    "2.0.45", "2.0.46", "2.1.22", "2.1.23", "2.1.37", "2.1.38", "2.1.70", "2.1.71", "2.1.110",
+    "2.1.111", "2.1.323",
 ];
 
 /// Fails unless `actual` is what the golden file `name` holds.
@@ -163,8 +164,9 @@ fn each_effort_maps_to_a_level_the_version_accepts() {
         for effort in EFFORTS {
             let (level, warning) = claude::effort(version, effort);
             let arguments = claude::arguments(version, None, Some(effort), Mode::Auto);
+            let environment = claude::environment(version, Some(effort));
             lines.push_str(&format!(
-                "{version} {}: {level:?} {arguments:?}{}\n",
+                "{version} {}: {level:?} {arguments:?} {environment:?}{}\n",
                 effort_name(effort),
                 warning.map_or(String::new(), |warning| format!(", warning: {warning}"))
             ));

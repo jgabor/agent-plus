@@ -484,6 +484,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask prepare <pr> [--keep-budgets] [--thread <link>]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
 | `cargo xtask refresh` | Runs the [refresh](#refresh) of `land-needed` PRs that are behind `main` |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
+| `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
@@ -607,16 +608,20 @@ squash, and leaves the owner a complete PR to merge with any button. `cargo
 xtask land` follows `prepare`'s rules, and goes on through the squash. Only
 these three commands post a green `xtask/gate`, so green means complete.
 
-`land` takes the merge slot first, and then makes sure the newest checks run,
-because xtask compiles from the checkout. If `main` is behind `origin/main`, it
-fast-forwards and starts again through `cargo`. It refuses local commits,
-changes to tracked files, and any other branch that isn't at `origin/main`.
+The checkout that a command starts from doesn't judge the PR, so it can be
+any branch, with any changes. Once the command holds the merge slot and has
+fetched, it builds the xtask of the fetched `main` in a worktree of its own,
+and runs the sequence again in that xtask, which fetches again. If `main` has
+moved by then, it builds again.
 
-Because `land` runs `main`'s xtask, it can't measure a budget that only the PR
-teaches xtask to measure. It refuses a PR that changes `xtask/src/bench.rs`
-while `main` has a budget it doesn't measure yet. Such a PR merges by running
-`cargo xtask prepare <pr>` from a checkout of the PR's own branch, so that the
-PR's xtask measures it, and then the owner uses a merge button.
+A PR that changes `xtask/` is proven twice. `main`'s xtask proves it, so that
+it can't pass by changing its judge. The xtask of its rebased tree proves it
+too, through its `prove` command, so that the record says what `main` will
+measure after the merge. It must pass both, and its record is its own xtask's.
+Merging accepts what either accepts, and the comment marks what only `main`'s
+accepts. A PR that changes a file xtask reads together with the code that
+reads it, or how `prove` is called, still has to be staged: teach the reader
+first, and change the file in a later PR.
 
 1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
    `spec-change` PR. All three commands refuse a PR that comes from a fork,
@@ -628,10 +633,11 @@ PR's xtask measures it, and then the owner uses a merge button.
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased
    head, the journey without `spend` steps, and the bench if a budget can be
-   affected. A lowered count fails `merge`, and passes `prepare`. An exact
-   revert under `prepare` skips the bench, because its base may be what doesn't
-   build. If the rebase or this proof fails, the command posts `failure` on
-   the branch's current head and pushes nothing.
+   affected. If the PR changes `xtask/`, its own xtask then runs them too. A
+   lowered count fails `merge`, and passes `prepare`. An exact revert under
+   `prepare` skips the bench, because its base may be what doesn't build. If
+   the rebase or this proof fails, the command posts `failure` on the branch's
+   current head and pushes nothing.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
    Commit the ledger record, whose `commit` is the gated head and whose `base`
    is the `main` it was tested on, and push with `--force-with-lease`.
@@ -649,16 +655,17 @@ ended:
 |---|---|---|
 | The proof starts | `pending` | `Proving: lint` |
 | The tests, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: journey`, `Proving: bench` |
+| The PR's own xtask starts | `pending` | `Proving: its own xtask` |
 | The PR is proven | `success` | The counts, as `spec 417 of 812, journey 7 of 19` |
 | A check failed | `failure` | The checks that failed, as `Failed: lint, tests` |
+| A check of the PR's own xtask failed | `failure` | As `Failed in its own xtask: journey` |
 | The branch doesn't rebase, or the PR or `main` changed during the proof | `failure` | Why, in its first 140 characters |
 | An error stopped the proof | `failure` | `Stopped by an error` |
 
 The status goes on the head that GitHub shows for the PR: the fetched head
 until the push, and the new head after it. So proving a green PR again turns
-it yellow until the proof ends. `land` posts nothing when it sends a PR to
-`prepare` on its own branch, because that PR may be green already. In a GitHub
-Actions run, each status links to the run. A `pending` or `failure` that can't
+it yellow until the proof ends. In a GitHub Actions run, each status links to
+the run. A `pending` or `failure` that can't
 be posted is reported, and changes nothing else.
 
 A merge past the merge timeout stops, with every command it started, and
@@ -711,9 +718,10 @@ Actions, each proof sits in a `::group::PR 5 (1 of 2): <title>` fold, and
 PR, the verdict, the status description, and how long the proof took.
 Elsewhere it prints no fold markers and writes no summary.
 
-If `main` moves during a run, `prepare --keep-budgets` refuses the rest,
-because `xtask` was built from the older `main`. Those PRs go red until the
-run that the new push started proves them again.
+Each `prepare` proves its PR with the xtask of the `main` it fetched, as in
+the [merge sequence](#merge-sequence), so a PR that changes `xtask/` is proven
+both ways here too. If `main` moves during a run, the rest are proven on the
+newer `main`.
 
 ### Nightly job
 

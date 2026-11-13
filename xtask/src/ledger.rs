@@ -267,10 +267,20 @@ pub fn store(root: &Path, record: &Record) -> Result<String, Problem> {
 
 /// The record for this issue that the tree holds.
 pub fn read(root: &Path, issue: usize) -> Result<Record, Problem> {
-    let path = path(issue);
-    let text = fs::read_to_string(root.join(&path))
-        .map_err(|e| Problem(format!("couldn't read {path}: {e}")))?;
-    Record::parse(&text).map_err(|e| Problem(format!("{path}: {e}")))
+    read_file(&root.join(path(issue)))
+}
+
+pub fn read_file(path: &Path) -> Result<Record, Problem> {
+    let shown = path.display();
+    let text =
+        fs::read_to_string(path).map_err(|e| Problem(format!("couldn't read {shown}: {e}")))?;
+    Record::parse(&text).map_err(|e| Problem(format!("{shown}: {e}")))
+}
+
+/// Writes a record to a file of its own, outside the ledger.
+pub fn write_file(path: &Path, record: &Record) -> Result<(), Problem> {
+    fs::write(path, record.render())
+        .map_err(|e| Problem(format!("couldn't write {}: {e}", path.display())))
 }
 
 /// How the tree differs from HEAD, leaving out the ledger, where an earlier

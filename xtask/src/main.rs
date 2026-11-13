@@ -57,6 +57,8 @@ commands:
                    rebase, gate, and record a PR, for the owner to merge
   refresh          prove each land-needed PR again that is behind main
   land <pr>        run prepare, then squash-merge the PR, for the owner
+  prove <pr> <merge|prepare|land> [--keep <file>]
+                   prove a PR with this xtask in its rebased tree, for a merge
   mirror <number> <label>
                    copy a parking label from an issue or PR to its other side
 
@@ -124,6 +126,11 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
             "`prepare` takes `<pr> [--keep-budgets] [--thread <link>]`\n\n{USAGE}"
         ))),
         ["refresh"] => refresh::run(),
+        ["prove", pr, mode] => merge::prove_here(pr, mode, None),
+        ["prove", pr, mode, "--keep", kept] => merge::prove_here(pr, mode, Some(kept)),
+        ["prove", ..] => Err(Problem(format!(
+            "`prove` takes `<pr> <merge|prepare|land> [--keep <file>]`\n\n{USAGE}"
+        ))),
         ["land", pr] => merge::land(pr),
         ["land", ..] => Err(Problem(format!("`land` takes `<pr>`\n\n{USAGE}"))),
         ["mirror", number, label] => mirror::run(number, label),

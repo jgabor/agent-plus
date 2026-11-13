@@ -357,9 +357,8 @@ maybe_kill before
             } else {
                 String::new()
             };
-            let script = format!(
-                "{prelude}{built}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n"
-            );
+            let script =
+                format!("{prelude}{built}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n");
             let file = self.bin.join(tool);
             common::write_tool(&file, &script);
         }

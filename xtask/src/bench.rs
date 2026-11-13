@@ -88,15 +88,6 @@ fn measure_of(key: &str) -> Option<Measure> {
     }
 }
 
-/// The keys of the budgets that this program can't measure yet.
-pub fn not_yet_measured(budgets: &[Budget]) -> Vec<&str> {
-    budgets
-        .iter()
-        .filter(|budget| matches!(measure_of(&budget.key), Some(Measure::NotYet)))
-        .map(|budget| budget.key.as_str())
-        .collect()
-}
-
 pub fn read_budgets(root: &Path) -> Result<Vec<Budget>, Problem> {
     let text = fs::read_to_string(root.join(BUDGETS_FILE))
         .map_err(|e| Problem(format!("couldn't read {BUDGETS_FILE}: {e}")))?;

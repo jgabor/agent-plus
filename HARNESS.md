@@ -750,8 +750,11 @@ does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
 2. Run the gate, T2, T3, the journey, fuzzing, and mutation testing.
-3. Post the report to one pinned issue: the three scores, what merged, what
-   regressed and why, and what waits on the owner.
+3. Post the report to one pinned issue. It leads with what needs the owner:
+   a verdict that names each failed check, the three scores, what regressed
+   and why, commits not in the ledger, and what waits on the owner. What
+   merged and the checks fold below that, each with its count in the summary.
+   A section with nothing in it is left out.
 4. Post status `xtask/nightly` on the tested commit.
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad

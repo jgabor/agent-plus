@@ -247,21 +247,6 @@ fn build(args: &Args) -> Result<(), String> {
     let Some(agentfile_path) = agentfile.path().to_str().map(str::to_string) else {
         return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
     };
-    // Text stays in the layers. Only that there is a prompt is kept, which
-    // makes a run headless.
-    let declared: Vec<::store::Declared> = instructions
-        .iter()
-        .filter(|instruction| {
-            instruction.text.is_none() || (instruction.name == "PROMPT" && prompted)
-        })
-        .map(|instruction| ::store::Declared {
-            name: instruction.name.clone(),
-            arguments: match instruction.text {
-                Some(_) => Vec::new(),
-                None => instruction.arguments.clone(),
-            },
-        })
-        .collect();
 
     let agent_line = agent_line(&instructions);
     let agent = Settings::read(&instructions).map_err(report)?.agent;
@@ -291,25 +276,41 @@ fn build(args: &Args) -> Result<(), String> {
     };
 
     // A changed lock plans the layers again, with the harness it locks.
-    let mut planned = (!changed).then_some(planned);
+    let mut planned = (!changed).then_some((planned, prompted));
     let mut use_cache = true;
     let lines = loop {
         // The first try uses the planned layers. A retry plans them again.
-        let current = match planned.take() {
+        let (current, prompted) = match planned.take() {
             Some(current) => current,
             None => {
-                plan(&instructions, &mut resolved, &cached, dir_name)
-                    .map_err(report)?
-                    .0
+                let (layers, _, prompted) =
+                    plan(&instructions, &mut resolved, &cached, dir_name).map_err(report)?;
+                (layers, prompted)
             }
         };
+        // Text stays in the layers. Only that there is a prompt is kept, which
+        // makes a run headless.
+        let declared: Vec<::store::Declared> = instructions
+            .iter()
+            .filter(|instruction| {
+                instruction.text.is_none() || (instruction.name == "PROMPT" && prompted)
+            })
+            .map(|instruction| ::store::Declared {
+                name: instruction.name.clone(),
+                arguments: match instruction.text {
+                    Some(_) => Vec::new(),
+                    None => instruction.arguments.clone(),
+                },
+            })
+            .collect();
+
         let (built, lines) = store_layers(&agents, &layers, current, use_cache, &report)?;
         let agent = ::store::Agent {
             name: name.clone(),
             directory: directory.to_string(),
             agentfile: agentfile_path.clone(),
             layers: built,
-            declared: declared.clone(),
+            declared,
         };
         // A build that put no layer leaves an unchanged record as it is. The
         // record is read again, because another `ap` may have changed it.

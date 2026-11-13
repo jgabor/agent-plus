@@ -34,7 +34,6 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
-use std::time::{Duration, Instant};
 
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
@@ -59,9 +58,10 @@ const QUEUE: usize = 4;
 /// How long a terminal must stay quiet, once its program has ended, before
 /// what it shows is taken as complete, in milliseconds.
 const QUIET: i32 = 50;
-/// The longest a terminal is read once its program has ended, so a
-/// background job that keeps writing can't hold back the status.
-const LAST_OUTPUT: Duration = Duration::from_secs(1);
+/// The most a terminal is read once its program has ended, so a background
+/// job that keeps writing can't hold back the status. It counts bytes, not
+/// time, so a host that reads slowly loses nothing.
+const LAST_OUTPUT: usize = 1 << 20;
 
 /// What is left to read once a program has ended.
 #[derive(Clone, Copy)]
@@ -386,11 +386,13 @@ fn forward(
             }
         }
         if let Left::UntilQuiet = left {
-            let deadline = Instant::now() + LAST_OUTPUT;
-            while Instant::now() < deadline
-                && readable_within(pipe.as_fd(), QUIET).unwrap_or(false)
-                && send_some(&mut pipe, &mut buffer, wrap, &updates).is_some()
-            {}
+            let mut allowed = LAST_OUTPUT;
+            while allowed > 0 && readable_within(pipe.as_fd(), QUIET).unwrap_or(false) {
+                match send_some(&mut pipe, &mut buffer, wrap, &updates) {
+                    Some(count) => allowed = allowed.saturating_sub(count),
+                    None => return,
+                }
+            }
             return;
         }
         let Ok(mut left) = bytes_waiting(pipe.as_fd()) else {
@@ -563,7 +565,7 @@ mod tests {
     /// its byte count sees only the first.
     #[test]
     fn everything_a_finished_program_left_in_a_terminal_is_delivered() {
-        const WRITTEN: usize = 10_000;
+        const WRITTEN: usize = 40_000;
         let size = Size {
             rows: 24,
             columns: 80,
@@ -576,6 +578,8 @@ mod tests {
         let (ended, program_ended) = pipe().unwrap();
         drop(program_ended);
         forward(controller, ToHost::Stdout, Left::UntilQuiet, updates, ended);
+        // A host that reads slowly still gets it all.
+        thread::sleep(Duration::from_millis(1500));
         assert_eq!(delivered(&received), WRITTEN);
         writer.join().unwrap();
     }

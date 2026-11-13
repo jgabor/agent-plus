@@ -24,7 +24,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -188,11 +188,14 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;
     let raw = match interactive {
         true => {
+            // Raw mode comes first, so a signal taken from here on finds the
+            // modes to put back, and nothing changes them after.
+            let raw = RawMode::start().map_err(fail("can't set up your terminal"))?;
             let writer = stream.try_clone().map_err(fail("can't start the run"))?;
             let writer = Arc::new(Mutex::new(writer));
             pass_keys(Arc::clone(&writer));
             take_signals(writer);
-            Some(RawMode::start().map_err(fail("can't set up your terminal"))?)
+            Some(raw)
         }
         false => None,
     };
@@ -283,10 +286,22 @@ fn pass_keys(writer: Arc<Mutex<UnixStream>>) {
 }
 
 /// Takes the signals of [`taken_signals`], which are blocked already, so
-/// this thread is the one that gets them. It passes each new size of your
-/// terminal to the run. A signal that ends `ap run` puts your terminal back
-/// first, then ends it as it would have.
+/// this thread is the one that gets them. A signal that ends `ap run` puts
+/// your terminal back first, then ends it as it would have. A resize goes to
+/// a thread of its own, because sending it can wait behind your keys, and
+/// this thread must stay free to take the next signal.
 fn take_signals(writer: Arc<Mutex<UnixStream>>) {
+    let (resizes, resized) = mpsc::channel();
+    thread::spawn(move || {
+        while resized.recv().is_ok() {
+            // Only the latest size matters.
+            while resized.try_recv().is_ok() {}
+            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
+            if runs::send_resize(&mut *writer, terminal_size()).is_err() {
+                return;
+            }
+        }
+    });
     thread::spawn(move || {
         let set = taken_signals();
         loop {
@@ -298,10 +313,7 @@ fn take_signals(writer: Arc<Mutex<UnixStream>>) {
             if signal != libc::SIGWINCH {
                 end_by(signal);
             }
-            let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
-            if runs::send_resize(&mut *writer, terminal_size()).is_err() {
-                return;
-            }
+            let _ = resizes.send(());
         }
     });
 }

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use ap::boot::{self, Guest, Layer, Report};
 use ap::fetch;
+use guest::protocol::ToGuest;
 use store::{Agents, Layers};
 use t1::{guest_binary, kernel};
 
@@ -101,13 +102,14 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
 
     let kernel = fs::read(kernel::vmlinux()).unwrap();
     let init = fs::read(guest_binary::ap()).unwrap();
-    let command: Vec<Vec<u8>> = COMMAND.iter().map(|arg| arg.as_bytes().to_vec()).collect();
     let guest = Guest {
         kernel: &kernel,
         init: &init,
         files: &[],
         layers: disks,
-        command: Some(&command),
+        request: Some(ToGuest::Run {
+            argv: COMMAND.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+        }),
         timeout: TIMEOUT,
         confine: false,
     };

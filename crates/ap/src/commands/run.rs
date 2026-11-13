@@ -1,7 +1,8 @@
-//! `ap run <agent> [-p <prompt>]`, from SPEC.md's Run section. It boots the
-//! agent's layers in a new microVM, in this process, and starts the harness
-//! there headless, as the user `agent`. It streams the harness's output and
-//! exits with its status, or with 125 if the harness never started.
+//! `ap run <agent> [-p <prompt>]`, from SPEC.md's Run section. It names the
+//! run, and starts a run process that boots the agent's layers in a new
+//! microVM and starts the harness there headless, as the user `agent`, as
+//! [`ap::runs`] says. It streams the harness's output and exits with its
+//! status, or with 125 if the harness never started.
 //!
 //! Only a headless run of an agent with `NETWORK -` is built. Everything else
 //! on #297's list of what isn't built yet fails with 125 and says so, before
@@ -10,17 +11,22 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::fs::{DirBuilder, File};
+use std::io::{self, Write};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentfile::{Files, Instruction, Network, Os, Part, Secrets, Settings, Sign};
-use ap::boot::{self, Error, Layer};
+use ap::boot::Error;
+use ap::filter::Filter;
+use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
 use guest::protocol::Start;
-
-/// How long a run may last. A headless run ends with its harness, so this
-/// only stops one that never does.
-const TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The `PATH` the harness gets, unless `ENV` sets one.
 const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -99,8 +105,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
-    let result = start(args).and_then(|(layers, start)| boot::boot_agent(TIMEOUT, layers, start));
-    match result {
+    match start(args).and_then(|(root, layers, start)| run_agent(&root, args, &layers, start)) {
         Ok(status) => status,
         Err(error) => {
             eprintln!("ap: {error}");
@@ -109,9 +114,100 @@ pub fn run(args: &Args) -> u8 {
     }
 }
 
-/// Everything the run needs before its VM starts: the agent's layers, and
-/// how to start its harness.
-fn start(args: &Args) -> Result<(Vec<Layer>, Start), Error> {
+/// Names the run, starts its processes, and relays its output, filtered,
+/// until it ends.
+fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Result<u8, Error> {
+    let started = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let (run, record) = ::store::Runs::new(root)
+        .create(&args.agent.to_string_lossy(), started)
+        .map_err(fail("can't record the run"))?;
+    // The lock lasts as long as this process, and marks the run active.
+    record.lock().map_err(fail("can't lock the run's record"))?;
+
+    let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), root);
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(fail(&format!("can't create {}", dir.display())))?;
+    let opened = File::open(&dir).map_err(fail(&format!("can't open {}", dir.display())))?;
+    let socket_name = runs::socket_name(&run.name);
+    let socket = runs::short_path(&opened, &socket_name);
+    let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
+    // Connecting before the run process starts makes this connection the
+    // first it accepts.
+    let mut stream = UnixStream::connect(&socket).map_err(fail("can't connect to the run"))?;
+
+    let (lifeline, held) = io::pipe().map_err(fail("can't start the run"))?;
+    let exe = Path::new("/proc/self/exe");
+    Command::new(exe)
+        .arg0(runs::CLEANUP)
+        .arg(dir.join(&socket_name))
+        .stdin(lifeline)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(fail("can't start the run's cleanup"))?;
+    let mut process = Command::new(exe)
+        .arg0(runs::RUN_PROCESS)
+        .arg(std::process::id().to_string())
+        .stdin(OwnedFd::from(listener))
+        .stdout(held.try_clone().map_err(fail("can't start the run"))?)
+        .process_group(0)
+        .spawn()
+        .map_err(fail("can't start the run process"))?;
+
+    let lost = fail("lost the run");
+    runs::send_request(&mut stream, layers, start).map_err(lost)?;
+    let end = relay(&mut stream).map_err(fail("lost the run"));
+    // The run process exits once it has reported, so this doesn't wait long.
+    let _ = process.wait();
+    drop(held);
+    match end? {
+        End::Exited(status) => Ok(status),
+        End::Failed(status, _) if status == Error::TimedOut.exit_code() => Err(Error::TimedOut),
+        End::Failed(_, reason) => Err(Error::Failed(reason)),
+    }
+}
+
+/// An error from `ap run`'s own work, in this context.
+fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
+    move |error| Error::Failed(format!("{context}: {error}"))
+}
+
+/// Writes the run's output to this process's, filtered, until the run ends.
+/// Write errors are ignored: a reader that went away shouldn't change what
+/// the harness does or how it ends.
+fn relay(stream: &mut UnixStream) -> io::Result<End> {
+    let mut stdout_filter = Filter::default();
+    let mut stderr_filter = Filter::default();
+    loop {
+        match runs::read_from_run(stream)? {
+            Some(FromRun::Stdout(bytes)) => {
+                let mut stdout = io::stdout();
+                let _ = stdout.write_all(&stdout_filter.push(&bytes));
+                let _ = stdout.flush();
+            }
+            Some(FromRun::Stderr(bytes)) => {
+                let _ = io::stderr().write_all(&stderr_filter.push(&bytes));
+            }
+            Some(FromRun::End(end)) => return Ok(end),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the run process ended before the run did",
+                ));
+            }
+        }
+    }
+}
+
+/// Everything the run needs before its VM starts: the store's root, the
+/// agent's layers, and how to start its harness.
+fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
     let fail = |message: String| Error::Failed(message);
     if let Some(flag) = args.not_built {
         return Err(fail(format!("`ap run {flag}` is not built yet")));
@@ -219,30 +315,21 @@ fn start(args: &Args) -> Result<(Vec<Layer>, Start), Error> {
         agentfile::Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
     };
 
-    let layers = ::store::Layers::new(&root);
     let layers = record
         .layers
         .iter()
-        .map(|layer| {
-            let disk = layers.get(&layer.digest).map_err(|error| {
-                fail(format!(
-                    "can't read the layer for {}: {error}",
-                    layer.instruction
-                ))
-            })?;
-            Ok(Layer {
-                digest: layer.digest.clone(),
-                disk,
-            })
+        .map(|layer| LayerName {
+            digest: layer.digest.clone(),
+            instruction: layer.instruction.clone(),
         })
-        .collect::<Result<_, Error>>()?;
+        .collect();
     let start = Start {
         argv: argv.into_iter().map(String::into_bytes).collect(),
         env: env.into_iter().collect(),
         directory: directory.into_bytes(),
         prompt,
     };
-    Ok((layers, start))
+    Ok((root, layers, start))
 }
 
 /// An `ENV` value with its variables read from this process's environment,

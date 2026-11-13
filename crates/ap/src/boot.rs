@@ -175,19 +175,48 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
     let request = (!command.is_empty()).then(|| ToGuest::Run {
         argv: command.to_vec(),
     });
-    relayed(timeout, Vec::new(), request)
+    let print_release = request.is_none();
+    let mut stdout_filter = Filter::default();
+    let mut stderr_filter = Filter::default();
+    // Write errors are ignored: a reader that went away shouldn't change what
+    // the guest's command does or how it ends.
+    let print = move |report: Report| match report {
+        Report::Ready(release) if print_release => {
+            let _ = writeln!(io::stdout(), "{release}");
+        }
+        Report::Ready(_) => {}
+        Report::Stdout(bytes) => {
+            let mut stdout = io::stdout();
+            let _ = stdout.write_all(&stdout_filter.push(bytes));
+            let _ = stdout.flush();
+        }
+        Report::Stderr(bytes) => {
+            let _ = io::stderr().write_all(&stderr_filter.push(bytes));
+        }
+    };
+    relayed(timeout, Vec::new(), request, print)
 }
 
-/// `ap run`'s machine: the agent's layers, with its harness started as
-/// `start` says. It relays the harness's output, filtered, and returns its
-/// status.
-pub fn boot_agent(timeout: Duration, layers: Vec<Layer>, start: Start) -> Result<u8, Error> {
-    relayed(timeout, layers, Some(ToGuest::Start(start)))
+/// A run's machine: the agent's layers, with its harness started as `start`
+/// says. It hands the harness's output to `output`, unfiltered, on a thread
+/// of its own, and returns the harness's status.
+pub fn boot_agent(
+    timeout: Duration,
+    layers: Vec<Layer>,
+    start: Start,
+    output: impl FnMut(Report) + Send + 'static,
+) -> Result<u8, Error> {
+    relayed(timeout, layers, Some(ToGuest::Start(start)), output)
 }
 
 /// Boots the pinned kernel with this program as its init, and relays what
-/// the guest reports. Without a request it prints the kernel's release.
-fn relayed(timeout: Duration, layers: Vec<Layer>, request: Option<ToGuest>) -> Result<u8, Error> {
+/// the guest reports to `output`.
+fn relayed(
+    timeout: Duration,
+    layers: Vec<Layer>,
+    request: Option<ToGuest>,
+    output: impl FnMut(Report) + Send + 'static,
+) -> Result<u8, Error> {
     let init = fs::read("/proc/self/exe").map_err(|error| failed("can't read ap itself", error))?;
     if !is_static(&init) {
         return Err(Error::DynamicallyLinked);
@@ -203,7 +232,6 @@ fn relayed(timeout: Duration, layers: Vec<Layer>, request: Option<ToGuest>) -> R
         path: "usr/bin/ap",
         target: INIT_PATH,
     }];
-    let print_release = request.is_none();
     let guest = Guest {
         kernel: &kernel,
         init: &init,
@@ -213,12 +241,9 @@ fn relayed(timeout: Duration, layers: Vec<Layer>, request: Option<ToGuest>) -> R
         timeout,
         confine: true,
     };
-    let mut relay = Relay::start(Instant::now() + timeout);
+    let mut relay = Relay::start(Instant::now() + timeout, output);
     let result = boot(guest, |report| match report {
-        Report::Ready(release) if print_release => {
-            relay.send(Piece::Release(release.to_owned()));
-        }
-        Report::Ready(_) => {}
+        Report::Ready(release) => relay.send(Piece::Release(release.to_owned())),
         Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
         Report::Stderr(bytes) => relay.send(Piece::Stderr(bytes.to_vec())),
     });
@@ -232,9 +257,9 @@ enum Piece {
     Stderr(Vec<u8>),
 }
 
-/// Hands output to a thread of its own, so that a terminal nobody reads can't
-/// hold the VM past its timeout. Each piece is acknowledged once written, and
-/// no wait goes past the deadline.
+/// Hands output to a thread of its own, so that a reader that doesn't read
+/// can't hold the VM past its timeout. Each piece is acknowledged once
+/// written, and no wait goes past the deadline.
 struct Relay {
     pieces: Sender<Piece>,
     written: Receiver<()>,
@@ -243,10 +268,10 @@ struct Relay {
 }
 
 impl Relay {
-    fn start(deadline: Instant) -> Self {
+    fn start(deadline: Instant, output: impl FnMut(Report) + Send + 'static) -> Self {
         let (pieces, received) = mpsc::channel();
         let (acknowledge, written) = mpsc::channel();
-        thread::spawn(move || print(&received, &acknowledge));
+        thread::spawn(move || forward(&received, &acknowledge, output));
         Relay {
             pieces,
             written,
@@ -282,24 +307,12 @@ impl Relay {
     }
 }
 
-/// Write errors are ignored: a reader that went away shouldn't change what
-/// the guest's command does or how it ends.
-fn print(pieces: &Receiver<Piece>, written: &Sender<()>) {
-    let mut stdout_filter = Filter::default();
-    let mut stderr_filter = Filter::default();
+fn forward(pieces: &Receiver<Piece>, written: &Sender<()>, mut output: impl FnMut(Report)) {
     for piece in pieces {
-        match piece {
-            Piece::Release(release) => {
-                let _ = writeln!(io::stdout(), "{release}");
-            }
-            Piece::Stdout(bytes) => {
-                let mut stdout = io::stdout();
-                let _ = stdout.write_all(&stdout_filter.push(&bytes));
-                let _ = stdout.flush();
-            }
-            Piece::Stderr(bytes) => {
-                let _ = io::stderr().write_all(&stderr_filter.push(&bytes));
-            }
+        match &piece {
+            Piece::Release(release) => output(Report::Ready(release)),
+            Piece::Stdout(bytes) => output(Report::Stdout(bytes)),
+            Piece::Stderr(bytes) => output(Report::Stderr(bytes)),
         }
         if written.send(()).is_err() {
             return;

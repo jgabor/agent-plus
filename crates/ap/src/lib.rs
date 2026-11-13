@@ -10,6 +10,7 @@ pub mod filter;
 pub mod gitignore;
 pub mod lock;
 pub mod paths;
+pub mod runs;
 pub mod store;
 
 /// A running guest. The real implementation is the VMM, and lanes that need

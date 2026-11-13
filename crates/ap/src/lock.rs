@@ -10,7 +10,8 @@
 //! line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
-//! download cache, and writes the lockfile.
+//! download cache, and writes the lockfile, from the [`ORIGINS`] each
+//! harness is published at.
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -24,6 +25,7 @@ use agentfile::{Agent, Harness, read_arguments};
 use graviola::hashing::sha2::Sha256Context;
 
 use crate::fetch::{self, Client, Pin};
+use crate::json::{self, Value};
 use crate::store::Store;
 
 /// Where Anthropic publishes Claude Code. `<base>/<channel>` holds a
@@ -34,6 +36,44 @@ pub const ANTHROPIC: &str = "https://downloads.claude.ai/claude-code-releases";
 
 /// The platform the guest runs Claude Code on.
 const PLATFORM: &str = "linux-x64";
+
+/// Where OpenAI publishes Codex's releases in GitHub's API.
+/// `<api>/releases/latest` is the newest release, and
+/// `<api>/releases/tags/rust-v<version>` a version's. Each lists its assets,
+/// with the SHA-256 digest of each.
+pub const OPENAI_API: &str = "https://api.github.com/repos/openai/codex";
+
+/// Where OpenAI publishes Codex's files.
+/// `<base>/releases/download/rust-v<version>/<asset>` is a release's asset.
+pub const OPENAI: &str = "https://github.com/openai/codex";
+
+/// The asset the guest runs Codex from: the static Linux x86_64 binary, in
+/// one zstd frame.
+pub const CODEX_ASSET: &str = "codex-x86_64-unknown-linux-musl.zst";
+
+/// The prefix of a Codex release's tag, before its version.
+const CODEX_TAG: &str = "rust-v";
+
+/// The most a GitHub release may hold. Codex's are about 350 KiB, most of
+/// it the list of assets.
+const MAX_RELEASE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Where [`settle`] resolves and downloads each harness.
+pub struct Origins<'a> {
+    /// Claude Code's releases, as [`ANTHROPIC`].
+    pub claude: &'a str,
+    /// Codex's releases in GitHub's API, as [`OPENAI_API`].
+    pub codex_api: &'a str,
+    /// Codex's files, as [`OPENAI`].
+    pub codex: &'a str,
+}
+
+/// Where each harness is published.
+pub const ORIGINS: Origins<'static> = Origins {
+    claude: ANTHROPIC,
+    codex_api: OPENAI_API,
+    codex: OPENAI,
+};
 
 /// The most a version or a manifest may hold. Both are far smaller.
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
@@ -124,10 +164,11 @@ impl Lock {
 
 /// Settles the harness that `agent` names, and returns whether `lock`
 /// changed. A lock that resolves `agent` is kept. Any other resolves again:
-/// a channel resolves to the exact version Anthropic publishes for it, and
-/// the lock gets that version and the digest Anthropic publishes for its
-/// file. The file is downloaded from `base` into `cache`, unless `cache`
-/// holds it or `stored` says the store has its layer. A file whose digest
+/// a channel resolves to the exact version the harness's publisher
+/// publishes for it, and the lock gets that version and the digest the
+/// publisher publishes for its file. The file is downloaded from `origins`
+/// into `cache`, unless `cache` holds it or `stored` says the store has its
+/// layer. A file whose digest
 /// isn't the lock's is an error, and isn't stored. A changed lock checks a
 /// file the cache already holds, and only then replaces the lockfile `path`.
 pub fn settle(
@@ -135,13 +176,14 @@ pub fn settle(
     lock: &mut Lock,
     agent: &Agent,
     client: &Client,
-    base: &str,
+    origins: &Origins,
     cache: &Path,
     stored: impl Fn(&Locked) -> bool,
 ) -> io::Result<bool> {
     let locked = match &lock.harness {
         Some(locked) if locked.resolves(agent) => locked.clone(),
-        _ => resolve(agent, client, base)?,
+        _ if agent.harness == Harness::Codex => resolve_codex(agent, client, origins.codex_api)?,
+        _ => resolve(agent, client, origins.claude)?,
     };
     let store = Store::flat(cache);
     let file = store.path(&locked.sha256)?;
@@ -153,14 +195,14 @@ pub fn settle(
         check_file(&file, &locked)?;
     }
     if !cached && !stored(&locked) {
-        if locked.harness != Harness::Claude {
-            return Err(io::Error::other(format!(
-                "`{}` isn't in the download cache, and downloading Codex is not built yet",
-                locked.label()
-            )));
-        }
         check_version(&locked.version)?;
-        let url = format!("{base}/{}/{PLATFORM}/claude", locked.version);
+        let url = match locked.harness {
+            Harness::Claude => format!("{}/{}/{PLATFORM}/claude", origins.claude, locked.version),
+            Harness::Codex => format!(
+                "{}/releases/download/{CODEX_TAG}{}/{CODEX_ASSET}",
+                origins.codex, locked.version
+            ),
+        };
         fetch::fetch(
             &store,
             client,
@@ -226,13 +268,6 @@ fn check_file(path: &Path, locked: &Locked) -> io::Result<()> {
 /// The exact version and digest that Anthropic publishes for what `agent`
 /// names.
 fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
-    if agent.harness != Harness::Claude {
-        return Err(io::Error::other(format!(
-            "resolving `AGENT {}:{}` is not built yet",
-            name(agent.harness),
-            agent.version
-        )));
-    }
     let failed = |error: io::Error| {
         io::Error::new(
             error.kind(),
@@ -265,6 +300,56 @@ fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
     })?;
     Ok(Locked {
         harness: Harness::Claude,
+        version,
+        sha256,
+    })
+}
+
+/// The exact version and digest that GitHub's API at `api` publishes for
+/// the Codex that `agent` names. Codex publishes one channel, `latest`, its
+/// newest release.
+fn resolve_codex(agent: &Agent, client: &Client, api: &str) -> io::Result<Locked> {
+    let failed = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!("resolving `AGENT codex:{}`: {error}", agent.version),
+        )
+    };
+    let invalid = |what: String| failed(io::Error::new(io::ErrorKind::InvalidData, what));
+    check_version(&agent.version)?;
+    let url = match agent.version.as_str() {
+        version if is_exact(version) => format!("{api}/releases/tags/{CODEX_TAG}{version}"),
+        "latest" => format!("{api}/releases/latest"),
+        _ => {
+            return Err(failed(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Codex publishes no channel but `latest`".to_string(),
+            )));
+        }
+    };
+    let release = fetch::text(client, &url, MAX_RELEASE_BYTES).map_err(failed)?;
+    let release = json::parse(&release)
+        .ok_or_else(|| invalid("GitHub sent a release that isn't JSON".to_string()))?;
+    let version = (release.get("tag_name").and_then(Value::as_str))
+        .and_then(|tag| tag.strip_prefix(CODEX_TAG))
+        .filter(|version| is_exact(version) && check_version(version).is_ok())
+        .filter(|version| !is_exact(&agent.version) || *version == agent.version)
+        .ok_or_else(|| invalid("GitHub sent a release that isn't the one asked for".to_string()))?
+        .to_string();
+    let sha256 = (release.get("assets").and_then(Value::as_array))
+        .unwrap_or_default()
+        .iter()
+        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(CODEX_ASSET))
+        .and_then(|asset| asset.get("digest")?.as_str()?.strip_prefix("sha256:"))
+        .filter(|digest| is_digest(digest))
+        .ok_or_else(|| {
+            invalid(format!(
+                "Codex {version} has no SHA-256 digest for {CODEX_ASSET}"
+            ))
+        })?
+        .to_string();
+    Ok(Locked {
+        harness: Harness::Codex,
         version,
         sha256,
     })

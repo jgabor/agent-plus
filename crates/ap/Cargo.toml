@@ -12,6 +12,7 @@ agentfile = { path = "../agentfile" }
 erofs = { path = "../erofs" }
 guest = { path = "../guest" }
 store = { path = "../store" }
+ruzstd = "0.9"
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-graviola = "0.4"
 vmm = { path = "../vmm" }

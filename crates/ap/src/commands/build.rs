@@ -9,8 +9,7 @@
 //! `Agentfile.lock` pins. After approval, a lock that doesn't resolve `AGENT`
 //! resolves again, the file is downloaded into the download cache unless it
 //! holds it, and a changed lock is written, as `ap::lock::settle` says. The
-//! other tiers, Codex without a lock, and the instructions that need any
-//! other fetch, fail.
+//! other tiers, and the instructions that need any other fetch, fail.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -31,6 +30,7 @@ use ap::fetch::{self, Client, Pin};
 use ap::lock::{self, Lock, Locked};
 use ap::paths::HostPath;
 use graviola::hashing::sha2::Sha256Context;
+use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 
 /// The instructions that need a fetch or a harness, which `ap build` can't
 /// build yet.
@@ -264,7 +264,7 @@ fn build(args: &Args) -> Result<(), String> {
         &mut lock,
         &agent,
         &Client::new(),
-        lock::ANTHROPIC,
+        &lock::ORIGINS,
         &cache,
         |locked| {
             stored(&agents, &layers, &harness_key(locked), BASE_LEVEL)
@@ -583,16 +583,8 @@ fn plan(
                 content: Content::Harness(locked.clone(), cache.join(&locked.sha256)),
             });
         }
-        // `ap build` resolves Claude Code after approval, and plans again.
-        (None, Some(_)) if settings.agent.harness == Harness::Claude => {}
-        (None, Some(_)) => errors.push(fail(
-            agent_line,
-            format!(
-                "Agentfile.lock locks no `AGENT {}:{}`, and resolving Codex is not built yet",
-                lock::name(settings.agent.harness),
-                settings.agent.version
-            ),
-        )),
+        // `ap build` resolves the harness after approval, and plans again.
+        (None, Some(_)) => {}
     }
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
@@ -751,9 +743,11 @@ pub fn harness_path(harness: Harness) -> String {
     format!("/usr/local/bin/{}", lock::name(harness))
 }
 
-/// The harness layer, as an uncompressed EROFS image: the cached file at
-/// `path`, as an executable at [`harness_path`]. The file is hashed as it is
-/// read, and a digest that isn't the locked one is an error.
+/// The harness layer, as an uncompressed EROFS image: the binary in the
+/// cached file at `path`, as an executable at [`harness_path`]. Claude
+/// Code's file is the binary, and Codex's holds it in one zstd frame. The
+/// file is hashed as it is read, and a digest that isn't the locked one is
+/// an error.
 fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
     let shown = path.display();
     // Nonblocking, so that a FIFO fails the check below instead of waiting
@@ -788,13 +782,36 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
         file,
         hash: Rc::clone(&hash),
     };
+    let (size, content): (u64, Box<dyn Read>) = match locked.harness {
+        Harness::Claude => (metadata.len(), Box::new(content)),
+        Harness::Codex => {
+            // The frame is read whole and checked before it is unpacked, so
+            // only the locked file is. Unpacking it once first gives the
+            // binary's size without holding the binary.
+            let mut frame = Vec::new();
+            { content }.read_to_end(&mut frame)?;
+            check_digest(locked, path, &hash)?;
+            let unpacking = |error: io::Error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{shown}: unpacking `{}`: {error}", locked.label()),
+                )
+            };
+            let mut counting = unzstd(&frame[..]).map_err(unpacking)?;
+            let size = io::copy(&mut counting, &mut io::sink()).map_err(unpacking)?;
+            (
+                size,
+                Box::new(unzstd(Cursor::new(frame)).map_err(unpacking)?),
+            )
+        }
+    };
     insert(
         &mut root,
         &harness_path(locked.harness),
         erofs::Node::File(erofs::File {
             mode: 0o755,
-            size: metadata.len(),
-            content: Box::new(content),
+            size,
+            content,
         }),
     );
     let mut image = Vec::new();
@@ -802,9 +819,17 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
         erofs::Error::Io(error) => io::Error::new(error.kind(), format!("{shown}: {error}")),
         error => io::Error::new(io::ErrorKind::InvalidData, format!("{shown}: {error}")),
     })?;
-    let actual: String = Rc::into_inner(hash)
-        .ok_or_else(|| io::Error::other("the harness is still being read"))?
-        .into_inner()
+    if locked.harness == Harness::Claude {
+        check_digest(locked, path, &hash)?;
+    }
+    Ok(image)
+}
+
+/// Checks that the file at `path`, read whole into `hash`, has the digest
+/// `locked` names.
+fn check_digest(locked: &Locked, path: &Path, hash: &RefCell<Sha256Context>) -> io::Result<()> {
+    let actual: String = hash
+        .replace(Sha256Context::new())
         .finish()
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -813,12 +838,19 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{shown} has digest {actual}, not the {} that Agentfile.lock locks",
+                "{} has digest {actual}, not the {} that Agentfile.lock locks",
+                path.display(),
                 locked.sha256
             ),
         ));
     }
-    Ok(image)
+    Ok(())
+}
+
+/// A reader of the binary in the zstd frame that `frame` reads.
+fn unzstd<R: Read>(frame: R) -> io::Result<StreamingDecoder<R, FrameDecoder>> {
+    StreamingDecoder::new(frame)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))
 }
 
 /// A file that adds what is read from it to a hash.

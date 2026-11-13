@@ -25,8 +25,9 @@ can't continue alone, park the issue as AGENTS.md says.
    change nothing more.
 5. For the independent review, load `mcp__t3-code__delegate_task` and call it
    with `role` set to `review`, `mode` set to `wait`, and `timeoutMs` set to
-   600000. Give it a `target`, using the first of these that works, and say
-   in the PR which one ran:
+   600000. Ask it to confirm that no decision a user could observe is left
+   only in the PR body. Give it a `target`, using the first of these that
+   works, and say in the PR which one ran:
 
    ```json
    {"providerInstanceId": "acpRegistry_factory_droid", "model": "gpt-6.1-sol"}

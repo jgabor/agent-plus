@@ -1,0 +1,4 @@
+check_for_update_on_startup = false
+
+[tui]
+screen_reader_detection_done = true

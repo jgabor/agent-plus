@@ -553,8 +553,24 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
             argv.push("--".to_owned());
             argv
         }
-        Harness::Codex if interactive => vec![harness, "--".to_owned()],
-        Harness::Codex => vec![harness, "exec".to_owned(), "--".to_owned()],
+        Harness::Codex => {
+            // The harness layer is named for the version the build locked.
+            let version = record
+                .layers
+                .iter()
+                .find_map(|layer| ap::lock::labeled_version(&layer.instruction, Harness::Codex))
+                .ok_or_else(|| fail(format!("agent {name} has no Codex layer")))?;
+            let mut argv = vec![harness];
+            argv.extend(ap::adapter::codex::arguments(
+                version,
+                settings.model.as_deref(),
+                settings.effort,
+                settings.mode,
+                interactive,
+            ));
+            argv.push("--".to_owned());
+            argv
+        }
     };
 
     let layers = record

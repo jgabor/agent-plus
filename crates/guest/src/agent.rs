@@ -264,8 +264,10 @@ pub fn exec_as_agent(argv: &[OsString]) -> io::Error {
 }
 
 /// Adds the user `agent` to the root at `root`, unless it has one, and gives
-/// it its home directory. Only the directory itself changes owner, because
-/// changing a file in a layer copies it to the writable layer.
+/// it its home directory and the directories directly in it, such as the
+/// harness configuration directories its adapter makes, so the harness can
+/// keep its state there. Files don't change owner, because changing a file in
+/// a layer copies it to the writable layer.
 pub fn add_account(root: &Path) -> io::Result<()> {
     let etc = root.join("etc");
     fs::create_dir_all(&etc)?;
@@ -286,7 +288,16 @@ pub fn add_account(root: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(&home)?.is_dir() {
         return Err(io::Error::other(format!("{HOME} isn't a directory")));
     }
-    chown(&home, Some(ID), Some(ID))
+    chown(&home, Some(ID), Some(ID))?;
+    for entry in fs::read_dir(&home)? {
+        let entry = entry?;
+        // `file_type` doesn't follow a symlink, which would hand its target
+        // to the agent.
+        if entry.file_type()?.is_dir() {
+            chown(entry.path(), Some(ID), Some(ID))?;
+        }
+    }
+    Ok(())
 }
 
 /// `passwd` or `group` with `line` added, or `None` if it already names

@@ -518,6 +518,58 @@ fn the_adapter_layer_is_the_same_for_two_builds() {
     }
 }
 
+#[test]
+fn the_codex_adapter_layer_is_the_same_for_two_builds() {
+    let agentfile = "AGENT codex:0.169.0\nOS minimal\nSYSTEM Be careful.\nMODEL gpt-5.5-codex\nEFFORT max\nMODE edit\n";
+    let images: Vec<(String, Vec<u8>)> = ["codex-adapter-one", "codex-adapter-two"]
+        .into_iter()
+        .map(|name| {
+            let scratch = Scratch::new(name);
+            let dir = scratch.project("notes", agentfile);
+            scratch.build(&dir, &[]);
+            let digest = scratch.agent("notes").layers.last().unwrap().digest.clone();
+            (digest, scratch.configuration("notes"))
+        })
+        .collect();
+    assert_eq!(images[0].0, images[1].0);
+    let image = &images[0].1;
+    for text in [
+        "AGENTS.md",
+        "Be careful.\n",
+        "config.toml",
+        "check_for_update_on_startup = false",
+        "screen_reader_detection_done = true",
+    ] {
+        assert!(holds(image, text), "the layer doesn't hold {text}");
+    }
+}
+
+#[test]
+fn a_codex_older_than_the_adapter_configures_fails() {
+    let scratch = Scratch::new("codex-too-old");
+    let dir = scratch.project("notes", "AGENT codex:0.136.0\nOS minimal\n");
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "Agentfile:1: Codex 0.136.0 is older than 0.137.0, the oldest version `ap` configures\n"
+    );
+    assert!(scratch.agents().get("notes").unwrap().is_none());
+}
+
+// spec(EFFORT): A level the harness doesn't accept is a build warning, and the adapter uses the nearest lower level, or the harness's lowest level if none is lower.
+#[test]
+fn an_effort_the_locked_codex_doesnt_take_is_a_warning() {
+    let scratch = Scratch::new("codex-effort-warning");
+    let dir = scratch.project("notes", "AGENT codex:0.137.0\nOS minimal\nEFFORT max\n");
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        "Agentfile:3: warning: Codex 0.137.0 doesn't accept `EFFORT max`, so it uses `xhigh`\n"
+    );
+}
+
 // spec(EFFORT): A level the harness doesn't accept is a build warning, and the adapter uses the nearest lower level, or the harness's lowest level if none is lower.
 // spec(EFFORT): `ap build --strict` makes that an error.
 #[test]

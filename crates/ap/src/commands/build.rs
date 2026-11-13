@@ -264,6 +264,10 @@ fn build(args: &Args) -> Result<(), String> {
         },
     )
     .map_err(|error| format!("{shown}:{agent_line}: {error}"))?;
+    let codex = (lock.harness.as_ref()).filter(|locked| locked.harness == Harness::Codex);
+    if let Some(error) = codex.and_then(|locked| ap::adapter::codex::unsupported(&locked.version)) {
+        return Err(format!("{shown}:{agent_line}: {error}"));
+    }
     if let Some(warning) = effort_warning(&instructions, &lock) {
         if args.strict {
             return Err(report(vec![warning]));
@@ -653,16 +657,17 @@ fn plan(
     Ok((planned, warnings, prompt.is_some()))
 }
 
-/// The warning for an `EFFORT` that the locked Claude Code doesn't take, on
-/// the line of the `EFFORT`. The lock is settled, so it locks the harness
-/// that `AGENT` names.
+/// The warning for an `EFFORT` that the locked harness doesn't take, on the
+/// line of the `EFFORT`. The lock is settled, so it locks the harness that
+/// `AGENT` names.
 fn effort_warning(instructions: &[Instruction], lock: &Lock) -> Option<Error> {
     let settings = Settings::read(instructions).ok()?;
     let locked = lock.harness.as_ref()?;
-    if settings.agent.harness != Harness::Claude {
-        return None;
-    }
-    let (_, warning) = ap::adapter::claude::effort(&locked.version, settings.effort?);
+    let effort = settings.effort?;
+    let warning = match settings.agent.harness {
+        Harness::Claude => ap::adapter::claude::effort(&locked.version, effort).1,
+        Harness::Codex => ap::adapter::codex::effort(&locked.version, effort).1,
+    };
     let line = instructions
         .iter()
         .find(|instruction| instruction.name == "EFFORT")?
@@ -709,8 +714,7 @@ fn configuration(
     };
     let files = match settings.agent.harness {
         Harness::Claude => ap::adapter::claude::files(system, settings.mode),
-        Harness::Codex if system.is_empty() => Vec::new(),
-        Harness::Codex => vec![("/home/agent/.codex/AGENTS.md", ap::adapter::system(system))],
+        Harness::Codex => ap::adapter::codex::files(system),
     };
     for (path, content) in files {
         insert(&mut root, path, text_file(content));

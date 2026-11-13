@@ -6,6 +6,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -134,6 +135,110 @@ fn pr_json(pr: &Pr, state: &str) -> String {
     )
 }
 
+/// Where a variant of this xtask is built.
+fn variant_binary(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("variants")
+        .join(name)
+        .join("target/debug/xtask")
+}
+
+/// The fixture has no xtask to build, so a merge that builds one in a tree
+/// gets the test's own binary, or the variant that a marker in the tree names.
+fn stand_in_build() -> String {
+    format!(
+        r#"if [ "$1 $2 $3 $4 $5" = "build --quiet --package xtask --target-dir" ]; then
+  built='{own}'
+  if grep -qs 'variant: unprotected' xtask/src/base.rs; then built='{unprotected}'; fi
+  if grep -qs 'variant: failing' xtask/src/journey.rs; then built='{failing}'; fi
+  mkdir -p "$6/debug" && rm -f "$6/debug/xtask" && cp "$built" "$6/debug/xtask"
+  code=$?
+  maybe_kill after
+  exit $code
+fi
+"#,
+        own = env!("CARGO_BIN_EXE_xtask"),
+        unprotected = variant_binary("unprotected").display(),
+        failing = variant_binary("failing").display(),
+    )
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// This xtask with one edit, built once per run of these tests. It judges a
+/// PR differently from the xtask that `main` holds in a test.
+fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
+    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("variants")
+        .join(name);
+    if directory.exists() {
+        fs::remove_dir_all(&directory).unwrap();
+    }
+    copy_tree(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &directory.join("src"),
+    );
+    let manifest = directory.join("Cargo.toml");
+    fs::write(
+        &manifest,
+        "[package]\nname = \"xtask\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    let source = directory.join("src").join(file);
+    let text = fs::read_to_string(&source).unwrap();
+    assert_eq!(text.matches(from).count(), 1, "{file}: {from}");
+    fs::write(&source, text.replace(from, to)).unwrap();
+    let output = Command::new("cargo")
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(&manifest)
+        .arg("--target-dir")
+        .arg(directory.join("target"))
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let binary = variant_binary(name);
+    assert!(binary.is_file(), "{}", binary.display());
+    binary
+}
+
+/// An xtask whose list of protected paths leaves out `xtask/`.
+fn unprotected() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        variant(
+            "unprotected",
+            "base.rs",
+            "const PROTECTED: [&str; 6] = [\n    \"SPEC.md\",\n    \"AGENTS.md\",\n    \"HARNESS.md\",\n    \"xtask/\",\n",
+            "const PROTECTED: [&str; 5] = [\n    \"SPEC.md\",\n    \"AGENTS.md\",\n    \"HARNESS.md\",\n",
+        )
+    })
+}
+
+/// An xtask whose journey runner fails every step that passes.
+fn failing() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        variant(
+            "failing",
+            "journey.rs",
+            "Ok(status.success())",
+            "Ok(!status.success())",
+        )
+    })
+}
+
 struct Repo {
     root: PathBuf,
     origin: PathBuf,
@@ -247,8 +352,14 @@ maybe_kill before
         );
         for tool in ["git", "cargo"] {
             let path = real(tool);
-            let script =
-                format!("{prelude}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n");
+            let built = if tool == "cargo" {
+                stand_in_build()
+            } else {
+                String::new()
+            };
+            let script = format!(
+                "{prelude}{built}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n"
+            );
             let file = self.bin.join(tool);
             common::write_tool(&file, &script);
         }
@@ -2041,33 +2152,6 @@ fn land_waits_for_the_merge_slot() {
     assert!(repo.bin.join("merged").exists());
 }
 
-/// A merge that lands during the wait can change the checks themselves.
-#[test]
-fn land_restarts_if_main_moves_while_it_waits_for_the_slot() {
-    let repo = Repo::new("land-slot-moved").on_main();
-    let directory = repo.root.join(".git/xtask");
-    fs::create_dir_all(&directory).unwrap();
-    let held = fs::File::create(directory.join("merge.lock")).unwrap();
-    held.lock().unwrap();
-    let child = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["land", "9"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    thread::sleep(Duration::from_millis(500));
-    let newest = repo.head();
-    repo.origin(&["update-ref", "refs/heads/main", &newest]);
-    held.unlock().unwrap();
-    child.wait_with_output().unwrap();
-
-    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), newest);
-    let calls = repo.calls();
-    assert!(calls.contains("cargo xtask land 9"), "{calls}");
-    assert!(!calls.contains("gh pr merge"), "{calls}");
-}
-
 #[test]
 fn land_keeps_the_slot_until_its_squash_finishes() {
     let repo = Repo::new("land-outlives").on_main();
@@ -2148,80 +2232,6 @@ fn land_succeeds_on_an_already_merged_pr_without_merging_again() {
     let output = repo.land();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!repo.calls().contains("gh pr merge"));
-}
-
-#[test]
-fn land_updates_a_checkout_behind_main_and_restarts() {
-    let repo = Repo::new("land-behind");
-    repo.advance_main("other.txt", "y\n");
-    let repo = repo.on_main();
-    repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
-    repo.forget_calls();
-    let newest = repo.origin(&["rev-parse", "refs/heads/main"]);
-    let seen = repo.bin.join("restart");
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["land", "9"])
-        .env(
-            "RUSTUP_TOOLCHAIN",
-            env::var("RUSTUP_TOOLCHAIN").unwrap_or_default(),
-        )
-        .env("RUN_ON", "cargo xtask land 9")
-        .env(
-            "RUN_COMMAND",
-            // The fixture has no xtask to build, so the test's binary stands
-            // in for the rebuilt one.
-            format!(
-                "echo \"toolchain=$RUSTUP_TOOLCHAIN\" > '{}'; exec '{}' land 9",
-                seen.display(),
-                env!("CARGO_BIN_EXE_xtask")
-            ),
-        )
-        .output()
-        .unwrap();
-
-    assert_merged(&repo, &output);
-    assert_eq!(repo.git(&["rev-parse", "HEAD"]).trim(), newest);
-    let calls = repo.calls();
-    let restart = calls.find("cargo xtask land 9").expect(&calls);
-    let first_gh = calls.find("gh ").expect(&calls);
-    assert!(restart < first_gh, "{calls}");
-    // Rustup sets this for its children, and it would outrank a toolchain
-    // file that the update just changed.
-    assert_eq!(fs::read_to_string(seen).unwrap(), "toolchain=\n");
-}
-
-#[track_caller]
-fn assert_checkout_refused(repo: &Repo, output: &Output, message: &str) {
-    assert_eq!(output.status.code(), Some(1), "{}", stdout(output));
-    assert!(stderr(output).contains(message), "{}", stderr(output));
-    let calls = repo.calls();
-    for forbidden in ["gh ", "--ff-only", "cargo xtask"] {
-        assert!(!calls.contains(forbidden), "{forbidden}: {calls}");
-    }
-}
-
-#[test]
-fn land_refuses_local_commits_on_main() {
-    let repo = Repo::new("land-ahead").on_main();
-    repo.write("local.txt", "x\n");
-    repo.commit();
-    repo.forget_calls();
-    assert_checkout_refused(&repo, &repo.land(), "local commits");
-}
-
-#[test]
-fn land_refuses_changes_to_tracked_files() {
-    let repo = Repo::new("land-changed").on_main();
-    repo.write("SPEC.md", "# Changed\n");
-    assert_checkout_refused(&repo, &repo.land(), "tracked files");
-}
-
-#[test]
-fn land_refuses_another_branch_that_is_not_at_main() {
-    let repo = Repo::new("land-branch");
-    repo.forget_calls();
-    assert_checkout_refused(&repo, &repo.land(), "isn't at `origin/main`");
 }
 
 #[test]
@@ -2709,49 +2719,35 @@ fn a_change_to_github_workflows_needs_the_label() {
     assert_prepared(&repo, &repo.prepare());
 }
 
-/// The checks compile from the checkout, so older checks can't prove a newer
-/// `main`. The run that the newer push started proves this PR instead.
+/// Every `prepare` builds the xtask of the newest `main`, whatever `refresh`
+/// was built from.
 #[test]
-fn a_refresh_built_from_an_older_main_proves_nothing() {
+fn a_refresh_built_from_an_older_main_proves_with_the_newest() {
     let repo = Repo::new("refresh-older-checks");
     repo.prepared(BRANCH, 7, "");
     repo.advance_main("later.txt", "x\n");
     repo.git(&["checkout", "-q", "main"]);
     repo.git(&["reset", "-q", "--hard", "HEAD~1"]);
-    let head = repo.head();
-    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
     repo.set_land_needed(&[7]);
 
-    let output = repo.refresh();
+    let output = repo.xtask(&["refresh"]);
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(0),
         "{}{}",
         stdout(&output),
         stderr(&output)
     );
-    assert!(
-        stderr(&output).contains("older `main`"),
-        "{}",
-        stderr(&output)
-    );
-    assert_eq!(repo.head(), head);
-    assert_eq!(
-        posts(&repo).pop().unwrap(),
-        (
-            head,
-            "failure these checks were built from an older `main`, so they can't prove PR 9 on the newest one"
-                .to_string()
-        )
-    );
+    assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
 }
 
 const BUDGETS_NOT_YET: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"idle_mib\"\nname = \"i\"\nband_pct = 20.0\nband_abs = 25.0\n";
 
-/// `land` runs `main`'s xtask, which can't measure what only the PR teaches
-/// it to measure.
+/// The PR's own xtask measures what `main`'s can't yet, so `land` takes it
+/// from any checkout.
 #[test]
-fn land_sends_a_pr_that_may_add_a_measurer_to_prepare_on_its_branch() {
+fn land_proves_a_pr_that_may_add_a_measurer_with_its_own_xtask() {
     let base = record(0, 1, "");
     let repo = Repo::with(
         "land-measurer",
@@ -2763,19 +2759,11 @@ fn land_sends_a_pr_that_may_add_a_measurer_to_prepare_on_its_branch() {
     )
     .on_main();
     repo.set_pr(&Pr {
-        body: "Closes #7.\n",
         labels: &["spec-change"],
         ..Pr::default()
     });
-    let output = repo.land();
-    assert_refused(&repo, &output, "doesn't measure `idle_mib` yet");
-    let said = stderr(&output);
-    assert!(
-        said.contains("`cargo xtask prepare 9` from a checkout of its branch"),
-        "{said}"
-    );
-    assert!(!said.contains("Hill: none"), "{said}");
-    assert_eq!(posts(&repo), [], "{}", repo.calls());
+    assert_merged(&repo, &repo.land());
+    assert_eq!(builds(&repo), 2, "{}", repo.calls());
 }
 
 #[test]
@@ -2792,4 +2780,173 @@ fn land_takes_a_change_to_a_measurer_when_every_budget_is_measured() {
         ..Pr::default()
     });
     assert_merged(&repo, &repo.land());
+}
+
+/// How many times a merge built an xtask.
+fn builds(repo: &Repo) -> usize {
+    repo.calls()
+        .matches("cargo build --quiet --package xtask")
+        .count()
+}
+
+impl Repo {
+    /// Runs another xtask from this checkout, as a checkout whose xtask isn't
+    /// `main`'s would.
+    fn run_as(&self, binary: &Path, args: &[&str]) -> Output {
+        self.command(binary).args(args).output().unwrap()
+    }
+
+    /// The record at the head of the PR's branch.
+    fn record_at_head(&self) -> String {
+        self.origin(&["show", &format!("{}:harness/ledger/7.toml", self.head())])
+    }
+}
+
+const ONE_PASSING: &str = "journey = { passing = 1, steps = 1 }";
+
+/// The checkout's xtask runs a journey runner that fails every step, which
+/// `main`'s doesn't. Each command proves the PR with `main`'s.
+#[track_caller]
+fn assert_proven_by_mains_xtask(name: &str, checkout: impl Fn(&Repo)) {
+    let failing = failing();
+    for command in ["merge", "prepare", "land"] {
+        let repo = Repo::new(&format!("{name}-{command}"));
+        checkout(&repo);
+        repo.forget_calls();
+        let output = repo.run_as(failing, &[command, "9"]);
+        if command == "prepare" {
+            assert_prepared(&repo, &output);
+        } else {
+            assert_merged(&repo, &output);
+        }
+        let record = repo.record_at_head();
+        assert!(record.contains(ONE_PASSING), "{command}: {record}");
+        assert_eq!(repo.pr_comments(), "", "{command}");
+        assert_eq!(builds(&repo), 1, "{command}: {}", repo.calls());
+    }
+}
+
+#[test]
+fn a_checkout_behind_main_proves_a_pr_with_the_xtask_of_main() {
+    assert_proven_by_mains_xtask("checks-behind", |repo| {
+        repo.advance_main("other.txt", "y\n");
+    });
+}
+
+#[test]
+fn a_checkout_with_changes_under_xtask_proves_a_pr_with_the_xtask_of_main() {
+    assert_proven_by_mains_xtask("checks-changed", |repo| {
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("xtask/src/journey.rs", "// variant: failing\n");
+    });
+}
+
+#[test]
+fn a_checkout_of_main_proves_a_pr_with_the_xtask_of_main() {
+    assert_proven_by_mains_xtask("checks-main", |repo| {
+        repo.git(&["checkout", "-q", "main"]);
+    });
+}
+
+/// The PR's own xtask doesn't protect `xtask/`, but `main`'s does.
+#[test]
+fn a_pr_that_unprotects_a_path_it_changes_still_needs_the_label() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "checks-unprotect",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("xtask/src/base.rs", "// variant: unprotected\n")],
+    );
+    let output = repo.run_as(unprotected(), &["merge", "9"]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("fail labels"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!repo.bin.join("merged").exists());
+    assert_eq!(last_post(&repo), "failure Failed: labels");
+}
+
+/// What `main` measures after the merge is what its own runner says.
+#[test]
+fn a_pr_that_changes_the_journey_runner_is_recorded_by_its_own() {
+    failing();
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "checks-own-runner",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("xtask/src/journey.rs", "// variant: failing\n")],
+    );
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    let output = repo.prepare();
+    assert_prepared(&repo, &output);
+    let record = repo.record_at_head();
+    assert!(
+        record.contains("journey = { passing = 0, steps = 1 }"),
+        "{record}"
+    );
+    let comments = repo.pr_comments();
+    assert!(comments.contains("journey fell from 1 to 0"), "{comments}");
+    assert_eq!(last_post(&repo), "success spec 0 of 2, journey 0 of 1");
+    assert_eq!(builds(&repo), 2, "{}", repo.calls());
+}
+
+#[test]
+fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
+    failing();
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "refresh-own-runner",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("xtask/src/journey.rs", "// variant: failing\n")],
+    );
+    repo.set_pr(&Pr {
+        labels: &["spec-change"],
+        ..Pr::default()
+    });
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), "success spec 0 of 2, journey 0 of 1");
+    let comments = repo.pr_comments();
+    assert!(comments.contains("journey fell from 1 to 0"), "{comments}");
+}
+
+/// A merge that lands while this one builds the checks changes them.
+#[test]
+fn a_merge_builds_the_xtask_of_main_again_if_main_moves() {
+    let repo = Repo::new("checks-moved");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("later.txt", "x\n");
+    repo.commit();
+    let later = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+    repo.git(&["push", "-q", "origin", "HEAD:refs/heads/spare"]);
+    repo.git(&["checkout", "-q", BRANCH]);
+    repo.forget_calls();
+    let moved = repo.update_ref("refs/heads/main", &later);
+    let output = repo.merge_running("cargo build --quiet --package xtask", &moved);
+
+    assert_merged(&repo, &output);
+    assert_eq!(builds(&repo), 2, "{}", repo.calls());
+    repo.origin(&["merge-base", "--is-ancestor", &later, &repo.head()]);
 }

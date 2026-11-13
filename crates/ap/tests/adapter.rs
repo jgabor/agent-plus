@@ -46,7 +46,10 @@ fn golden(name: &str, actual: &[u8]) {
 
 /// The file the adapter renders at `path`, for these values and mode.
 fn file(system: &[&str], mode: Mode, path: &str) -> Option<Vec<u8>> {
-    let system: Vec<Vec<u8>> = system.iter().map(|value| value.as_bytes().to_vec()).collect();
+    let system: Vec<Vec<u8>> = system
+        .iter()
+        .map(|value| value.as_bytes().to_vec())
+        .collect();
     claude::files(&system, mode)
         .into_iter()
         .find(|(at, _)| *at == path)
@@ -112,7 +115,9 @@ fn full_mode_skips_its_first_run_warning() {
     for mode in MODES.into_iter().filter(|mode| *mode != Mode::Full) {
         let settings = file(&[], mode, claude::SETTINGS).unwrap();
         assert!(
-            !String::from_utf8(settings).unwrap().contains("skipDangerous"),
+            !String::from_utf8(settings)
+                .unwrap()
+                .contains("skipDangerous"),
             "{}",
             mode_name(mode)
         );

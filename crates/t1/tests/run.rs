@@ -74,14 +74,19 @@ impl Scratch {
     }
 
     /// Builds the agent `name`, whose harness is the fake one, approving
-    /// what this Agentfile asks.
+    /// what this Agentfile asks. The lock gives the fake harness the version
+    /// that `AGENT claude:<version>` names.
     fn build(&self, name: &str, agentfile: &str) {
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        let version = agentfile
+            .lines()
+            .find_map(|line| line.strip_prefix("AGENT claude:"))
+            .expect("no `AGENT claude:<version>`");
         fs::write(
             dir.join("Agentfile.lock"),
-            format!("HARNESS claude 0.0.0 {}\n", self.harness),
+            format!("HARNESS claude {version} {}\n", self.harness),
         )
         .unwrap();
         let instructions = agentfile::parse(agentfile).unwrap();
@@ -232,10 +237,18 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
         )),
     );
 
+    // The fake harness is Claude Code 0.0.0, older than `auto`, so the
+    // default mode starts it in Claude Code's manual mode.
     let first = scratch.run(&["fake", "-p", PROMPT]);
     assert_eq!(
         array(&first, "arguments"),
-        ["\"-p\"", "\"--\"", &format!("\"{PROMPT}\"")],
+        [
+            "\"-p\"",
+            "\"--permission-mode\"",
+            "\"default\"",
+            "\"--\"",
+            &format!("\"{PROMPT}\"")
+        ],
         "{first}"
     );
     for seen in [
@@ -258,13 +271,56 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
     let second = scratch.run(&["fake"]);
     assert_eq!(
         array(&second, "arguments"),
-        ["\"-p\"", "\"--\"", &format!("\"{BUILT_PROMPT}\"")],
+        [
+            "\"-p\"",
+            "\"--permission-mode\"",
+            "\"default\"",
+            "\"--\"",
+            &format!("\"{BUILT_PROMPT}\"")
+        ],
         "{second}"
     );
     assert!(
         !array(&second, "files").contains(&"\"ran\""),
         "a file the first run wrote outlasted it: {second}"
     );
+}
+
+// spec(MODE): The adapter sets the mode on the harness's command line, with flags or Codex's `-c` overrides, every time it starts the harness, including on `--resume`, so a project's settings or an earlier session can't pick a different one.
+// spec(MODEL): `<model>` is passed to the harness unchanged, so it accepts whatever names or aliases the harness accepts.
+// spec(AGENT): which first-run state it prepares, so a new VM doesn't repeat the harness's setup
+#[test]
+fn claude_code_starts_with_its_adapters_configuration() {
+    let scratch = Scratch::new("adapter");
+    scratch.build(
+        "configured",
+        &format!(
+            "AGENT claude:2.1.323\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_STATUS {STATUS}\nSYSTEM Be careful.\nMODEL claude-opus-5-5\nEFFORT xhigh\nMODE full\n"
+        ),
+    );
+    let report = scratch.run(&["configured", "-p", PROMPT]);
+    assert_eq!(
+        array(&report, "arguments"),
+        [
+            "\"-p\"",
+            "\"--model\"",
+            "\"claude-opus-5-5\"",
+            "\"--effort\"",
+            "\"xhigh\"",
+            "\"--permission-mode\"",
+            "\"bypassPermissions\"",
+            "\"--\"",
+            &format!("\"{PROMPT}\""),
+        ],
+        "{report}"
+    );
+    let files = array(&report, "files");
+    for file in [".claude.json", ".claude/CLAUDE.md", ".claude/settings.json"] {
+        assert!(
+            files.contains(&format!("\"{file}\"").as_str()),
+            "the harness can't see {file}: {report}"
+        );
+    }
 }
 
 #[test]
@@ -276,7 +332,13 @@ fn the_harness_starts_in_the_workdir_which_must_be_a_directory() {
     assert!(report.contains("\"directory\":\"/tmp\""), "{report}");
     assert_eq!(
         array(&report, "arguments"),
-        ["\"-p\"", "\"--\"", "\"--help\""],
+        [
+            "\"-p\"",
+            "\"--permission-mode\"",
+            "\"default\"",
+            "\"--\"",
+            "\"--help\""
+        ],
         "{report}"
     );
 

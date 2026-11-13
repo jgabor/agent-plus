@@ -48,7 +48,10 @@ pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     }
     settings.push_str("\n}\n");
     files.push((SETTINGS, settings.into_bytes()));
-    files.push((STATE, b"{\n  \"hasCompletedOnboarding\": true\n}\n".to_vec()));
+    files.push((
+        STATE,
+        b"{\n  \"hasCompletedOnboarding\": true\n}\n".to_vec(),
+    ));
     files
 }
 
@@ -71,9 +74,7 @@ pub fn effort(version_text: &str, effort: Effort) -> (Option<&'static str>, Opti
     };
     let given = name(level);
     let warning = (level != effort).then(|| {
-        format!(
-            "Claude Code {version_text} doesn't accept `EFFORT {asked}`, so it uses `{given}`"
-        )
+        format!("Claude Code {version_text} doesn't accept `EFFORT {asked}`, so it uses `{given}`")
     });
     (Some(given), warning)
 }

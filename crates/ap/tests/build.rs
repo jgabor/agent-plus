@@ -523,10 +523,7 @@ fn the_adapter_layer_is_the_same_for_two_builds() {
 #[test]
 fn an_effort_the_locked_version_doesnt_take_is_a_warning() {
     let scratch = Scratch::new("effort-warning");
-    let dir = scratch.project(
-        "notes",
-        "AGENT claude:2.1.110\nOS minimal\nEFFORT xhigh\n",
-    );
+    let dir = scratch.project("notes", "AGENT claude:2.1.110\nOS minimal\nEFFORT xhigh\n");
     let output = scratch.ap(&dir, &["build", "--strict"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let message = stderr(&output);

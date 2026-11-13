@@ -2,9 +2,12 @@
 //! one, then boots it headless and reads what the harness saw.
 
 use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Output, Stdio};
+use std::process::{self, Child, Command, Output, Stdio};
 use std::sync::OnceLock;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ap::fetch;
 use ap::store::Store;
@@ -39,6 +42,8 @@ fn shared() -> &'static (PathBuf, PathBuf, PathBuf) {
 struct Scratch {
     root: PathBuf,
     home: PathBuf,
+    /// `XDG_RUNTIME_DIR`, where `ap` keeps the sockets of active runs.
+    runtime: PathBuf,
     /// The fake harness's SHA-256 digest.
     harness: String,
 }
@@ -58,9 +63,12 @@ impl Scratch {
         let cache = home.join(".cache/ap");
         fs::create_dir_all(&cache).unwrap();
         fs::copy(fake, cache.join(&harness)).unwrap();
+        let runtime = root.join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
         Scratch {
             root,
             home,
+            runtime,
             harness,
         }
     }
@@ -91,8 +99,8 @@ impl Scratch {
         assert_eq!(built.status.code(), Some(0), "{built:?}");
     }
 
-    /// Runs the static `ap` with these arguments and only `HOME` and
-    /// `GREETED` in its environment, under a timeout.
+    /// Runs the static `ap` with these arguments and only `HOME`,
+    /// `XDG_RUNTIME_DIR`, and `GREETED` in its environment, under a timeout.
     fn ap(&self, args: &[&str]) -> Output {
         Command::new("timeout")
             .args(["-k", "10", TIMEOUT])
@@ -100,10 +108,22 @@ impl Scratch {
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
+            .env("XDG_RUNTIME_DIR", &self.runtime)
             .env("GREETED", "the host")
             .stdin(Stdio::null())
             .output()
             .unwrap()
+    }
+
+    /// The rows `ap ps` prints after its header.
+    fn ps(&self) -> Vec<String> {
+        let output = self.ap(&["ps"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines().map(str::to_owned);
+        let header = lines.next().unwrap_or_default();
+        assert!(header.starts_with("NAME "), "{stdout}");
+        lines.collect()
     }
 
     /// Runs the agent headless, and returns the fake harness's one line of
@@ -118,6 +138,49 @@ impl Scratch {
         assert!(stdout.starts_with("{\"arguments\":"), "{output:?}");
         stdout
     }
+}
+
+/// A process this test started, killed and reaped when it's dropped, so a
+/// failed test leaves no VM behind.
+struct Started(Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The processes `pid` started, and theirs, as `/proc` lists them.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut next = vec![pid];
+    while let Some(pid) = next.pop() {
+        for task in fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+        {
+            let children = fs::read_to_string(task.unwrap().path().join("children"));
+            for child in children.unwrap_or_default().split_whitespace() {
+                let child = child.parse().unwrap();
+                found.push(child);
+                next.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// Whether the process `pid` is running: whether it exists and isn't a
+/// zombie that is waiting to be reaped.
+fn running(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let state = stat.rsplit_once(") ")?.1.chars().next()?;
+            Some(state != 'Z')
+        })
+        .unwrap_or(false)
 }
 
 impl Drop for Scratch {
@@ -239,4 +302,111 @@ fn an_agent_without_a_prompt_fails_because_interactive_runs_are_not_built() {
         stderr.contains("interactive runs are not built yet"),
         "{stderr}"
     );
+}
+
+// spec(Run): **End.** A run that `ap run` started ends when that `ap run` exits, for any reason, including a closed terminal or a killed `ap run` process, and its VM stops with it.
+// spec(ap ps): `ap ps` lists the active runs.
+#[test]
+fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
+    let scratch = Scratch::new("killed");
+    scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 60\n"));
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+
+    let mut run = Started(
+        Command::new(&shared().0)
+            .args(["run", "sleepy", "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    // The harness reports before it sleeps, so the run is active from here
+    // until the kill.
+    let mut report = String::new();
+    BufReader::new(run.0.stdout.take().unwrap())
+        .read_line(&mut report)
+        .unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let columns: Vec<&str> = rows[0].split_whitespace().collect();
+    let name = columns[0];
+    assert_eq!(name.len(), 8, "{rows:?}");
+    assert!(
+        name.bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()),
+        "{rows:?}"
+    );
+    assert_eq!(columns[1], "sleepy", "{rows:?}");
+    let socket = scratch.runtime.join("ap").join(format!("{name}.sock"));
+    assert!(socket.exists(), "{socket:?}");
+    // The run process, which holds the VM, and the cleanup process.
+    let processes = descendants(run.0.id());
+    assert_eq!(processes.len(), 2, "{processes:?}");
+
+    run.0.kill().unwrap();
+    run.0.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
+    assert_eq!(
+        left,
+        Vec::<u32>::new(),
+        "processes outlived the killed ap run"
+    );
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+    assert!(!socket.exists(), "{socket:?} outlived the run");
+}
+
+/// Sends `signal` to the process `pid`, which this test started.
+fn signal(signal: &str, pid: u32) {
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill {signal} {pid}");
+}
+
+#[test]
+fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
+    let scratch = Scratch::new("stopped");
+    scratch.build("brief", &fake("ENV FAKE_HARNESS_SLEEP 1\n"));
+    let mut run = Started(
+        Command::new(&shared().0)
+            .args(["run", "brief", "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(run.0.stdout.take().unwrap());
+    let mut report = String::new();
+    stdout.read_line(&mut report).unwrap();
+    assert_eq!(scratch.ps().len(), 1);
+
+    // As Ctrl-Z would, while the harness finishes.
+    signal("-STOP", run.0.id());
+    let processes = descendants(run.0.id());
+    assert_eq!(processes.len(), 2, "{processes:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while processes.iter().all(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        processes.iter().any(|pid| !running(*pid)),
+        "the run process didn't end"
+    );
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+
+    signal("-CONT", run.0.id());
+    assert_eq!(run.0.wait().unwrap().code(), Some(STATUS));
 }

@@ -13,6 +13,7 @@ mod commands {
     pub mod init;
     pub mod inspect;
     pub mod ls;
+    pub mod ps;
     pub mod rm;
     pub mod run;
 }
@@ -25,6 +26,7 @@ const USAGE: &str = "usage: ap --version
        ap inspect [--grants] agent
        ap rm agent
        ap run [-p prompt] agent
+       ap ps
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -44,6 +46,12 @@ fn main() -> ExitCode {
         eprintln!("ap: can't start the harness: {error}");
         // The harness never started, so this is `ap`'s failure, not its.
         return ExitCode::from(125);
+    }
+    if program.as_deref() == Some(OsStr::new(ap::runs::RUN_PROCESS)) {
+        return ExitCode::from(ap::runs::run_process(&args));
+    }
+    if program.as_deref() == Some(OsStr::new(ap::runs::CLEANUP)) {
+        return ExitCode::from(ap::runs::cleanup(&args));
     }
     if args.len() == 1 && args[0] == "--version" {
         println!("ap {}", env!("CARGO_PKG_VERSION"));
@@ -83,6 +91,11 @@ fn main() -> ExitCode {
         && let Some(run) = commands::run::parse(&args[1..])
     {
         return ExitCode::from(commands::run::run(&run));
+    }
+    if args.first().is_some_and(|command| command == "ps")
+        && let Some(all) = commands::ps::parse(&args[1..])
+    {
+        return ExitCode::from(commands::ps::run(all));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

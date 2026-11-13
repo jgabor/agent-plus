@@ -1,15 +1,18 @@
 //! A stand-in for a coding agent, which T1 checks and the journey run in the
 //! guest. It prints what it can see as one line of JSON, and exits.
 //!
-//! Two variables steer it, so an Agentfile's `ENV` lines can. After it
-//! reports, it creates the file that `FAKE_HARNESS_WRITE` names, and it exits
-//! with the status in `FAKE_HARNESS_STATUS`, or 0.
+//! Three variables steer it, so an Agentfile's `ENV` lines can. After it
+//! reports, it creates the file that `FAKE_HARNESS_WRITE` names, waits as
+//! many seconds as `FAKE_HARNESS_SLEEP` says, and exits with the status in
+//! `FAKE_HARNESS_STATUS`, or 0.
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
+use std::thread;
+use std::time::Duration;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args_os()
@@ -52,6 +55,13 @@ fn main() -> ExitCode {
             path.to_string_lossy()
         );
         return ExitCode::FAILURE;
+    }
+    if let Ok(seconds) = env::var("FAKE_HARNESS_SLEEP") {
+        let Ok(seconds) = seconds.parse() else {
+            eprintln!("fake-harness: FAKE_HARNESS_SLEEP isn't a number of seconds: {seconds}");
+            return ExitCode::FAILURE;
+        };
+        thread::sleep(Duration::from_secs(seconds));
     }
     match env::var("FAKE_HARNESS_STATUS") {
         Err(_) => ExitCode::SUCCESS,

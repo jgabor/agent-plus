@@ -13,10 +13,12 @@ use structured_zstd::encoding::{CompressionLevel, FrameCompressor};
 mod agents;
 mod approvals;
 mod layers;
+mod runs;
 
 pub use agents::{Agent, Agents, Declared, Layer, valid_name};
 pub use approvals::Approvals;
 pub use layers::Layers;
+pub use runs::{NAME_ALPHABET, NAME_LEN, Run, Runs, random_name, valid_run_name};
 
 /// Compresses `data` into one zstd frame at a zstd level: `1` to `22`, or a
 /// fast mode from `-1` to `-7`. The frame carries a content checksum.

@@ -239,6 +239,28 @@ fn each_run_starts_clean() {
 }
 
 #[test]
+fn steps_share_a_download_cache_and_each_starts_with_an_empty_store() {
+    // The first step downloads into the cache and fills its store. The second
+    // finds the download, and no store, wherever `ap` would look for one.
+    let first = "#!/bin/sh\nset -eu\nmkdir -p \"$XDG_CACHE_HOME/ap\" \"$HOME/.local/share/ap\"\ntouch \"$XDG_CACHE_HOME/ap/harness\" \"$HOME/.local/share/ap/layer\"\n";
+    let second = "#!/bin/sh\nset -eu\n[ -e \"$XDG_CACHE_HOME/ap/harness\" ]\n[ -z \"${XDG_DATA_HOME:-}\" ]\n[ ! -e \"$HOME/.local/share/ap\" ]\ncase \"$XDG_CACHE_HOME\" in \"$HOME\"/*) exit 1 ;; esac\n";
+    let toml = format!(
+        "{}{}",
+        step(1, "", "harness/journey/first.sh"),
+        step(2, "1", "harness/journey/second.sh"),
+    );
+    let root = workspace(
+        "cache",
+        &toml,
+        &[
+            ("harness/journey/first.sh", first),
+            ("harness/journey/second.sh", second),
+        ],
+    );
+    assert_journey(&root, "pass step 1\npass step 2\njourney 2 of 2\n");
+}
+
+#[test]
 fn steps_run_in_id_order() {
     let toml = format!(
         "{}{}",

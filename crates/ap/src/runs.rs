@@ -33,8 +33,9 @@
 //!
 //! `ap stop` connects to the run's socket too, and sends a stop. `ap run`
 //! passes it on to the run process, which asks the guest to send the harness
-//! `SIGTERM`. If the run hasn't ended [`GRACE`] later, the run process
-//! reports that the harness was killed, and exits, which powers the VM off.
+//! `SIGTERM`. If the run hasn't ended [`GRACE`] later, the run process exits
+//! at once with [`KILLED`], which powers the VM off, and reports nothing,
+//! so that no write can hold it back.
 //! `ap run` holds the connection until it exits itself, after the run
 //! process, so `ap stop` reads its end once the VM has stopped.
 
@@ -93,9 +94,10 @@ const STOP: u8 = 15;
 /// How long a harness has to exit after `SIGTERM`, before `ap stop` powers
 /// the VM off.
 const GRACE: Duration = Duration::from_secs(10);
-/// The status `ap run` exits with when `ap stop` powers the VM off, as if
-/// the harness had been sent `SIGKILL`.
-const KILLED: u8 = 128 + 9;
+/// The status the run process exits with when `ap stop` powers the VM off,
+/// and `ap run` too, as if the harness had been sent `SIGKILL`. No other
+/// way out of the run process exits with it without reporting the end.
+pub const KILLED: u8 = 128 + 9;
 
 /// The status `ap exec` exits with when `ap` fails.
 const FAILED_STATUS: u8 = 125;
@@ -536,7 +538,10 @@ pub fn run_process(args: &[OsString]) -> u8 {
             push_frame(&mut message, FAILED, &body);
         }
     }
-    output.end(&message);
+    if !output.end(&message) {
+        // `ap stop` is powering the VM off, and this process exits as it does.
+        return KILLED;
+    }
     drop(record);
     match end {
         End::Exited(status) => status,
@@ -688,14 +693,17 @@ impl ToRun {
         true
     }
 
-    /// Writes how the run ended, unless an end was claimed already.
-    fn end(&self, message: &[u8]) {
-        if self.claim_end() {
-            let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-            // A write fails only if `ap run` is gone, and then nobody is left
-            // to tell.
-            let _ = file.write_all(message);
+    /// Writes how the run ended, unless an end was claimed already. Returns
+    /// whether this call did.
+    fn end(&self, message: &[u8]) -> bool {
+        if !self.claim_end() {
+            return false;
         }
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        // A write fails only if `ap run` is gone, and then nobody is left to
+        // tell.
+        let _ = file.write_all(message);
+        true
     }
 
     /// Waits up to `limit` for the run to end. Returns whether it did.
@@ -718,19 +726,13 @@ impl ToRun {
 }
 
 /// Stops the run, as `ap stop` asked: the harness gets `SIGTERM`, and if the
-/// run hasn't ended [`GRACE`] later, this process reports [`KILLED`] and
-/// exits, and the VM goes with it. A write that waits for `ap run` can't
-/// hold back the exit, so then `ap run` may not learn the status.
+/// run hasn't ended [`GRACE`] later, this process exits with [`KILLED`], and
+/// the VM goes with it.
 fn stop(input: &Input, output: &ToRun) {
     // Without the guest, nothing reaches the harness, and the grace runs out.
     let _ = input.send(&ToGuest::Terminate);
     if output.wait_for_end(GRACE) || !output.claim_end() {
         return;
-    }
-    if let Ok(mut file) = output.file.try_lock() {
-        let mut message = Vec::new();
-        push_frame(&mut message, EXITED, &[KILLED]);
-        let _ = file.write_all(&message);
     }
     // SAFETY: `_exit` ends the process at once, which is what's wanted.
     unsafe { libc::_exit(KILLED.into()) };

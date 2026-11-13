@@ -462,7 +462,11 @@ fn a_text_path_is_read_at_build_time() {
         fs::write(dir.join(file), "Something else.\n").unwrap();
         let lines = layer_lines(&scratch.build(&dir, &[]));
         let statuses: Vec<&str> = lines.iter().map(|(status, _)| status.as_str()).collect();
-        assert_eq!(statuses, ["hit", "hit", "hit", "built"], "{file}: {lines:?}");
+        assert_eq!(
+            statuses,
+            ["hit", "hit", "hit", "built"],
+            "{file}: {lines:?}"
+        );
     }
     let after = scratch.agent("notes").layers;
     assert_eq!(after[..3], before[..3]);

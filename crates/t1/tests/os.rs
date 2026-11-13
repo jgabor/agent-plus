@@ -14,6 +14,9 @@ use t1::{guest_binary, kernel};
 const TIMEOUT: Duration = Duration::from_secs(60);
 const AGENTFILE: &str = "AGENT claude\nOS minimal\nNETWORK -\nPOLICY -\n";
 const GRANTS: &str = "NETWORK -\nPOLICY -\n";
+/// The SHA-256 digest of the empty file, which stands in for the harness that
+/// each agent locks. The guest command doesn't start it.
+const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /// A shell runs git and a coreutils program.
 const COMMAND: &[&str] = &[
     "/bin/sh",
@@ -44,10 +47,20 @@ fn build(home: &Path, dir: &Path, grants: &Path) -> String {
     stdout
 }
 
-fn project(root: &Path, name: &str) -> PathBuf {
+/// An agent's directory, with a lockfile that pins the harness that the
+/// download cache under `home` holds.
+fn project(root: &Path, home: &Path, name: &str) -> PathBuf {
     let dir = root.join(name);
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("Agentfile"), AGENTFILE).unwrap();
+    fs::write(
+        dir.join("Agentfile.lock"),
+        format!("HARNESS claude 0.0.0 {EMPTY}\n"),
+    )
+    .unwrap();
+    let cache = home.join(".cache/ap");
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cache.join(EMPTY), "").unwrap();
     dir
 }
 
@@ -61,7 +74,7 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
     fs::create_dir_all(&home).unwrap();
     let grants = root.join("grants");
     fs::write(&grants, GRANTS).unwrap();
-    let (one, two) = (project(&root, "one"), project(&root, "two"));
+    let (one, two) = (project(&root, &home, "one"), project(&root, &home, "two"));
 
     let first = build(&home, &one, &grants);
     assert!(first.starts_with("fetched OS minimal\n"), "{first}");

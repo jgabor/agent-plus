@@ -273,9 +273,14 @@ fn check_name(name: &str) -> io::Result<()> {
     ))
 }
 
-/// Whether a record can hold this instruction: one that takes arguments.
-fn declarable(name: &str) -> bool {
-    name != "SYSTEM" && name != "PROMPT" && INSTRUCTIONS.iter().any(|d| d.name == name)
+/// Whether a record can hold this instruction: one that takes arguments, or
+/// `PROMPT` without its text, which says only that the agent has one.
+fn declarable(name: &str, arguments: &[String]) -> bool {
+    match name {
+        "SYSTEM" => false,
+        "PROMPT" => arguments.is_empty(),
+        _ => INSTRUCTIONS.iter().any(|d| d.name == name),
+    }
 }
 
 /// The text of `agent`'s record, after checking each part of it.
@@ -315,7 +320,7 @@ fn record_text(agent: &Agent) -> io::Result<String> {
         line("LAYER", &[&layer.key, &layer.digest, &layer.instruction]);
     }
     for declared in &agent.declared {
-        if !declarable(&declared.name) {
+        if !declarable(&declared.name, &declared.arguments) {
             return invalid(format!("a record can't declare `{}`", declared.name));
         }
         let arguments: Vec<&str> = declared.arguments.iter().map(String::as_str).collect();
@@ -371,7 +376,7 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
                     ));
                 }
             },
-            _ if declarable(&word) => declared.push(Declared {
+            _ if declarable(&word, &arguments) => declared.push(Declared {
                 name: word,
                 arguments,
             }),

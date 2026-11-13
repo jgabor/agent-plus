@@ -18,10 +18,11 @@
 //! runtime directory, and connects to it, so the first connection the run
 //! process accepts is always its own.
 //!
-//! `ap run` sends the layers and how to start the harness. The run process
-//! sends the harness's output, unfiltered, then how the run ended. Each
-//! message is a tag byte, a body length as a little-endian `u32`, and the
-//! body.
+//! `ap run` sends the layers and how to start the harness. For a harness in
+//! a terminal, it then sends what you type and the terminal's new sizes. The
+//! run process sends the harness's output, unfiltered, then how the run
+//! ended. Each message is a tag byte, a body length as a little-endian
+//! `u32`, and the body.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -29,11 +30,13 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
-use guest::protocol::{Start, ToGuest};
+use guest::protocol::{Size, Start, ToGuest};
 
-use crate::boot::{self, Error, Layer, Report};
+use crate::boot::{self, Error, Input, Layer, Report};
 
 /// The `argv[0]` that starts `ap` as a run process.
 pub const RUN_PROCESS: &str = "ap-run-process";
@@ -53,6 +56,8 @@ const STDOUT: u8 = 3;
 const STDERR: u8 = 4;
 const EXITED: u8 = 5;
 const FAILED: u8 = 6;
+const INPUT: u8 = 7;
+const RESIZE: u8 = 8;
 
 /// The directory that holds the sockets of active runs: `ap` in
 /// `XDG_RUNTIME_DIR`, or, if that isn't an absolute path, `runtime` in the
@@ -111,6 +116,22 @@ pub fn send_request(stream: &mut impl Write, layers: &[LayerName], start: Start)
         .write(&mut start_frame)
         .map_err(|error| io::Error::other(format!("can't send the run: {error:?}")))?;
     push_frame(&mut message, START, &start_frame);
+    stream.write_all(&message)
+}
+
+/// Sends the run process what you typed, for the harness's terminal.
+pub fn send_input(stream: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    let mut message = Vec::new();
+    push_frame(&mut message, INPUT, bytes);
+    stream.write_all(&message)
+}
+
+/// Sends the run process the new size of your terminal.
+pub fn send_resize(stream: &mut impl Write, size: Size) -> io::Result<()> {
+    let mut body = size.rows.to_le_bytes().to_vec();
+    body.extend_from_slice(&size.columns.to_le_bytes());
+    let mut message = Vec::new();
+    push_frame(&mut message, RESIZE, &body);
     stream.write_all(&message)
 }
 
@@ -251,10 +272,24 @@ fn serve(
         })
         .collect::<Result<_, Error>>()?;
 
+    let input = match start.terminal {
+        // Confined, this process can `read` but not `recv`, so it reads
+        // `ap run` as a file too.
+        Some(_) => {
+            let source = stream
+                .try_clone()
+                .map(|clone| File::from(OwnedFd::from(clone)))
+                .map_err(lost)?;
+            let input = Arc::new(Input::new(source.as_raw_fd()));
+            pass_input(source, Arc::clone(&input));
+            Some(input)
+        }
+        None => None,
+    };
     let mut output = output
         .try_clone()
         .map_err(|error| Error::Failed(format!("can't send the run's output: {error}")))?;
-    boot::boot_agent(TIMEOUT, layers, start, move |report| {
+    boot::boot_agent(TIMEOUT, layers, start, input.as_deref(), move |report| {
         let mut message = Vec::new();
         match report {
             Report::Ready(_) => return,
@@ -264,6 +299,27 @@ fn serve(
         // If `ap run` is gone, so is this process, any moment now.
         let _ = output.write_all(&message);
     })
+}
+
+/// Passes what `ap run` sends from `source` on to the guest, until it sends
+/// something else or is gone. `ap run` exits when the run ends, so this
+/// thread ends with this process.
+fn pass_input(mut source: File, input: Arc<Input>) {
+    thread::spawn(move || {
+        while let Ok(Some((tag, body))) = read_frame(&mut source) {
+            let message = match (tag, body.as_slice()) {
+                (INPUT, _) => ToGuest::Input(body),
+                (RESIZE, [a, b, c, d]) => ToGuest::Resize(Size {
+                    rows: u16::from_le_bytes([*a, *b]),
+                    columns: u16::from_le_bytes([*c, *d]),
+                }),
+                _ => return,
+            };
+            if input.send(&message).is_err() {
+                return;
+            }
+        }
+    });
 }
 
 /// The cleanup process: `ap` started as [`CLEANUP`] with the run's socket as

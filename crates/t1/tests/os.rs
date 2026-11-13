@@ -112,6 +112,7 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
         }),
         timeout: TIMEOUT,
         confine: false,
+        input: None,
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = boot::boot(guest, |report| match report {

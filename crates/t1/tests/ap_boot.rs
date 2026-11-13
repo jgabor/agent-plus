@@ -26,6 +26,7 @@ fn boot_silent_init(timeout: Duration) -> (Result<Option<u8>, Error>, u32) {
         request: None,
         timeout,
         confine: false,
+        input: None,
     };
     let mut ready_calls = 0;
     let result = boot::boot(guest, |report| {
@@ -65,6 +66,7 @@ fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
         }),
         timeout: Duration::from_secs(30),
         confine: false,
+        input: None,
     };
     let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
     let status = boot::boot(guest, |report| match report {

@@ -10,19 +10,25 @@
 //! host gives it. Its prompt is its last argument: the host's, or else the
 //! one the agent was built with.
 //!
+//! A start with a terminal runs the harness in a new one, which it gets as
+//! its controlling terminal, and owns. What the terminal shows goes to the
+//! host as standard output. What the host types, and the terminal's new
+//! sizes, come in on another thread, which is then the channel's only
+//! reader. Once the harness ends, nothing more is served.
+//!
 //! The init doesn't change user itself. std spawns a program that changes
 //! user through a Unix socket, and the guest kernel has none. So the init
 //! starts its own program as [`AS_AGENT`], which becomes `agent` in
 //! [`exec_as_agent`] and then execs the harness.
 
-use crate::linux::{bytes_waiting, program_has_ended, reap_until};
-use crate::protocol::{MAX_OUTPUT, ProtocolError, Start, ToGuest, ToHost};
+use crate::linux::{self, bytes_waiting, program_has_ended, readable_within, reap_until};
+use crate::protocol::{MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io::{self, PipeReader, PipeWriter, Read, Write};
+use std::fs::{self, File};
+use std::io::{self, IsTerminal, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, chown};
+use std::os::unix::fs::{MetadataExt, chown, fchown};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
@@ -49,12 +55,46 @@ const SELF: &str = "/proc/self/exe";
 /// Output waiting to be sent. The bound stops a program from filling the
 /// guest's memory faster than the host reads.
 const QUEUE: usize = 4;
+/// How long a terminal must stay quiet, once its program has ended, before
+/// what it shows is taken as complete, in milliseconds.
+const QUIET: i32 = 50;
+/// The most a terminal is read once its program has ended, so a background
+/// job that keeps writing can't hold back the status. It counts bytes, not
+/// time, so a host that reads slowly loses nothing.
+const LAST_OUTPUT: usize = 1 << 20;
 
-/// Serves requests until the host hangs up.
+/// What is left to read once a program has ended.
+#[derive(Clone, Copy)]
+enum Left {
+    /// A pipe counts what it holds.
+    Counted,
+    /// A terminal holds more than it counts, so it is read until it goes
+    /// quiet.
+    UntilQuiet,
+}
+
+/// A channel whose reading can move to another thread, which a harness in a
+/// terminal needs.
+pub trait Split: Read + Write {
+    /// A reader of everything the host sends from now on. Nothing else
+    /// reads the channel afterwards.
+    fn split_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+impl Split for File {
+    fn split_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+        Ok(Box::new(self.try_clone()?))
+    }
+}
+
+/// Serves requests until the host hangs up, or until a harness that ran in a
+/// terminal has ended.
 ///
 /// A refused frame ends the service. The caller powers off, and a program
 /// still running goes with the machine.
-pub fn serve(channel: &mut (impl Read + Write)) -> Result<(), ProtocolError> {
+pub fn serve(channel: &mut impl Split) -> Result<(), ProtocolError> {
     while let Some(request) = ToGuest::read(channel)? {
         match request {
             ToGuest::Run { argv } => {
@@ -65,15 +105,21 @@ pub fn serve(channel: &mut (impl Read + Write)) -> Result<(), ProtocolError> {
                     ToHost::Exited(status_of_failure(error))
                 })?;
             }
-            ToGuest::Start(start) => match harness(&start) {
-                Ok(command) => run(command, channel, |error| {
-                    ToHost::Failed(format!("can't start the harness: {error}").into_bytes())
-                })?,
-                Err(reason) => ToHost::Failed(reason.into_bytes()).write(channel)?,
+            ToGuest::Start(start) => match (harness(&start), start.terminal) {
+                (Ok(command), None) => run(command, channel, harness_refused)?,
+                (Ok(command), Some(size)) => return run_in_terminal(command, size, channel),
+                (Err(reason), _) => ToHost::Failed(reason.into_bytes()).write(channel)?,
             },
+            // Only a harness in a terminal takes these, and it reads them
+            // itself.
+            ToGuest::Input(_) | ToGuest::Resize(_) => return Err(ProtocolError::Malformed),
         }
     }
     Ok(())
+}
+
+fn harness_refused(error: &io::Error) -> ToHost {
+    ToHost::Failed(format!("can't start the harness: {error}").into_bytes())
 }
 
 /// The harness's command, as `agent`, or why it can't start.
@@ -94,8 +140,8 @@ fn harness(start: &Start) -> Result<Command, String> {
             Err(error) => return Err(format!("can't read the prompt: {error}")),
         },
     };
-    if prompt.is_empty() {
-        return Err("the agent has no prompt, and interactive runs are not built yet".to_owned());
+    if prompt.is_empty() && start.terminal.is_none() {
+        return Err("a run without a terminal needs a prompt".to_owned());
     }
     let program = OsStr::from_bytes(start.argv.first().ok_or("the harness has no program")?);
     match fs::metadata(program) {
@@ -111,7 +157,7 @@ fn harness(start: &Start) -> Result<Command, String> {
     command
         .arg0(AS_AGENT)
         .args(start.argv.iter().map(|arg| OsStr::from_bytes(arg)))
-        .arg(OsStr::from_bytes(&prompt))
+        .args((!prompt.is_empty()).then(|| OsStr::from_bytes(&prompt)))
         .env_clear()
         .envs(
             (start.env.iter())
@@ -121,12 +167,20 @@ fn harness(start: &Start) -> Result<Command, String> {
     Ok(command)
 }
 
-/// Becomes `agent`, with no other groups, and execs `argv`. Returns only if
-/// that fails.
+/// Becomes `agent`, with no other groups, and execs `argv`. A terminal on
+/// standard input becomes the controlling terminal of a new session, and the
+/// agent's, as a login's does. Returns only if that fails.
 pub fn exec_as_agent(argv: &[OsString]) -> io::Error {
     let Some((program, args)) = argv.split_first() else {
         return io::Error::new(io::ErrorKind::InvalidInput, "no program to run");
     };
+    let stdin = io::stdin();
+    if stdin.is_terminal()
+        && let Err(error) =
+            linux::take_terminal().and_then(|()| fchown(stdin.as_fd(), Some(ID), Some(ID)))
+    {
+        return error;
+    }
     // As root, std drops every supplementary group before it changes user.
     Command::new(program).args(args).uid(ID).gid(ID).exec()
 }
@@ -201,14 +255,95 @@ fn run(
 
     let (updates, received) = sync_channel(QUEUE);
     if let Some(stdout) = child.stdout.take() {
-        forward(stdout, ToHost::Stdout, updates.clone(), ended.try_clone()?);
+        let ended = ended.try_clone()?;
+        forward(
+            stdout,
+            ToHost::Stdout,
+            Left::Counted,
+            updates.clone(),
+            ended,
+        );
     }
     if let Some(stderr) = child.stderr.take() {
-        forward(stderr, ToHost::Stderr, updates.clone(), ended.try_clone()?);
+        let ended = ended.try_clone()?;
+        forward(
+            stderr,
+            ToHost::Stderr,
+            Left::Counted,
+            updates.clone(),
+            ended,
+        );
     }
     drop(ended);
     wait(child.id(), updates, ended_writer);
+    report(&received, channel)
+}
 
+/// Runs `command` in a new terminal of this size, and streams back what the
+/// terminal shows and the status. What the host sends meanwhile reaches the
+/// terminal.
+fn run_in_terminal(
+    mut command: Command,
+    size: Size,
+    channel: &mut impl Split,
+) -> Result<(), ProtocolError> {
+    let (controller, terminal) = match linux::open_terminal(size) {
+        Ok(pair) => pair,
+        Err(error) => {
+            let reason = format!("can't open a terminal for the harness: {error}");
+            return ToHost::Failed(reason.into_bytes()).write(channel);
+        }
+    };
+    let (ended, ended_writer) = io::pipe()?;
+    // The harness takes the terminal as its controlling one itself, in
+    // `exec_as_agent`. Doing it here, between fork and exec, would make std
+    // fork through a Unix socket, which the guest kernel doesn't have.
+    command
+        .stdin(terminal.try_clone()?)
+        .stdout(terminal.try_clone()?)
+        .stderr(terminal);
+    let spawned = command.spawn();
+    // The terminal must close here, so that it ends with the program's last
+    // use of it.
+    drop(command);
+    let child = match spawned {
+        Ok(child) => child,
+        Err(error) => return harness_refused(&error).write(channel),
+    };
+
+    let (updates, received) = sync_channel(QUEUE);
+    forward(
+        controller.try_clone()?,
+        ToHost::Stdout,
+        Left::UntilQuiet,
+        updates.clone(),
+        ended,
+    );
+    type_into(channel.split_reader()?, controller);
+    wait(child.id(), updates, ended_writer);
+    report(&received, channel)
+}
+
+/// Passes what the host types to the terminal, and resizes it, until the
+/// host sends something else or hangs up. A write blocks while the program
+/// doesn't read, which holds back the host in turn.
+fn type_into(mut from_host: impl Read + Send + 'static, mut terminal: File) {
+    thread::spawn(move || {
+        while let Ok(Some(message)) = ToGuest::read(&mut from_host) {
+            let typed = match message {
+                ToGuest::Input(bytes) => terminal.write_all(&bytes),
+                ToGuest::Resize(size) => linux::resize(terminal.as_fd(), size),
+                _ => return,
+            };
+            if typed.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Sends the program's output as it arrives, then its status.
+fn report(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), ProtocolError> {
     let status = loop {
         match received.recv() {
             Ok(Update::Output(output)) => output.write(channel)?,
@@ -216,7 +351,7 @@ fn run(
             Err(_) => return Err(io::Error::other("the program's waiter stopped").into()),
         }
     };
-    drain(&received, channel)?;
+    drain(received, channel)?;
     ToHost::Exited(status_of_exit(status)).write(channel)
 }
 
@@ -237,6 +372,7 @@ fn drain(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), Pr
 fn forward(
     mut pipe: impl Read + AsFd + Send + 'static,
     wrap: fn(Vec<u8>) -> ToHost,
+    left: Left,
     updates: SyncSender<Update>,
     ended: PipeReader,
 ) {
@@ -248,6 +384,16 @@ fn forward(
                 Ok(true) => break,
                 _ => return,
             }
+        }
+        if let Left::UntilQuiet = left {
+            let mut allowed = LAST_OUTPUT;
+            while allowed > 0 && readable_within(pipe.as_fd(), QUIET).unwrap_or(false) {
+                match send_some(&mut pipe, &mut buffer, wrap, &updates) {
+                    Some(count) => allowed = allowed.saturating_sub(count),
+                    None => return,
+                }
+            }
+            return;
         }
         let Ok(mut left) = bytes_waiting(pipe.as_fd()) else {
             return;
@@ -340,6 +486,104 @@ mod tests {
         }
     }
 
+    /// A host that has sent these messages, and records the guest's.
+    struct Host {
+        sent: io::Cursor<Vec<u8>>,
+        received: Vec<u8>,
+    }
+
+    impl Read for Host {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.sent.read(buffer)
+        }
+    }
+
+    impl Write for Host {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.received.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Split for Host {
+        fn split_reader(&mut self) -> io::Result<Box<dyn Read + Send>> {
+            let mut rest = Vec::new();
+            self.sent.read_to_end(&mut rest)?;
+            Ok(Box::new(io::Cursor::new(rest)))
+        }
+    }
+
+    #[test]
+    fn a_program_in_a_terminal_sees_its_size_and_what_the_host_types() {
+        let mut sent = Vec::new();
+        for message in [
+            ToGuest::Resize(Size {
+                rows: 31,
+                columns: 101,
+            }),
+            ToGuest::Input(b"hello\n".to_vec()),
+        ] {
+            message.write(&mut sent).unwrap();
+        }
+        let mut host = Host {
+            sent: io::Cursor::new(sent),
+            received: Vec::new(),
+        };
+        let mut command = Command::new("sh");
+        // The resize may land before or after `stty` runs, so `read` waits
+        // for the typing, which comes after it.
+        command.args([
+            "-c",
+            "test -t 0 && read line && echo \"got $line\" && stty size",
+        ]);
+        let size = Size {
+            rows: 30,
+            columns: 100,
+        };
+        run_in_terminal(command, size, &mut host).unwrap();
+
+        let mut wire = host.received.as_slice();
+        let mut shown = Vec::new();
+        let mut status = None;
+        while let Some(report) = ToHost::read(&mut wire).unwrap() {
+            match report {
+                ToHost::Stdout(bytes) => shown.extend(bytes),
+                ToHost::Exited(code) => status = Some(code),
+                other => panic!("{other:?}"),
+            }
+        }
+        let shown = String::from_utf8_lossy(&shown);
+        assert_eq!(status, Some(0), "{shown}");
+        assert!(shown.contains("got hello"), "{shown}");
+        assert!(shown.contains("31 101"), "{shown}");
+    }
+
+    /// A terminal holds what was written in more than one buffer, and
+    /// its byte count sees only the first.
+    #[test]
+    fn everything_a_finished_program_left_in_a_terminal_is_delivered() {
+        const WRITTEN: usize = 40_000;
+        let size = Size {
+            rows: 24,
+            columns: 80,
+        };
+        let (controller, mut terminal) = linux::open_terminal(size).unwrap();
+        let writer = thread::spawn(move || terminal.write_all(&[b'x'; WRITTEN]).unwrap());
+        thread::sleep(Duration::from_millis(100));
+
+        let (updates, received) = sync_channel(QUEUE);
+        let (ended, program_ended) = pipe().unwrap();
+        drop(program_ended);
+        forward(controller, ToHost::Stdout, Left::UntilQuiet, updates, ended);
+        // A host that reads slowly still gets it all.
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(delivered(&received), WRITTEN);
+        writer.join().unwrap();
+    }
+
     #[test]
     fn the_agent_is_added_once_after_every_other_entry() {
         let line = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
@@ -371,7 +615,13 @@ mod tests {
         let (updates, received) = sync_channel(QUEUE);
         let (ended, program_ended) = pipe().unwrap();
         drop(program_ended);
-        forward(Starved(reader), ToHost::Stdout, updates, ended);
+        forward(
+            Starved(reader),
+            ToHost::Stdout,
+            Left::Counted,
+            updates,
+            ended,
+        );
 
         assert_eq!(delivered(&received), written.len());
     }
@@ -391,7 +641,7 @@ mod tests {
         let (updates, received) = sync_channel(QUEUE);
         let (ended, program_ended) = pipe().unwrap();
         drop(program_ended);
-        forward(reader, ToHost::Stdout, updates, ended);
+        forward(reader, ToHost::Stdout, Left::Counted, updates, ended);
 
         assert_eq!(delivered(&received), QUEUED);
         drop(writer);

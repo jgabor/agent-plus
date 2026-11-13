@@ -21,6 +21,9 @@ const EXITED: u8 = 4;
 const READY: u8 = 5;
 const START: u8 = 6;
 const FAILED: u8 = 7;
+const START_IN_TERMINAL: u8 = 8;
+const INPUT: u8 = 9;
+const RESIZE: u8 = 10;
 
 /// Why a frame was refused. The stream can't be trusted after any of these.
 #[derive(Debug)]
@@ -45,6 +48,32 @@ pub enum ToGuest {
     Run { argv: Vec<Vec<u8>> },
     /// Starts the harness as the user `agent`, as [`crate::agent`] says.
     Start(Start),
+    /// Bytes for the terminal of a harness that started in one, as if typed.
+    Input(Vec<u8>),
+    /// The new size of the terminal of a harness that started in one.
+    Resize(Size),
+}
+
+/// A terminal's size, in characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Size {
+    pub rows: u16,
+    pub columns: u16,
+}
+
+impl Size {
+    fn to_bytes(self) -> [u8; 4] {
+        let [a, b] = self.rows.to_le_bytes();
+        let [c, d] = self.columns.to_le_bytes();
+        [a, b, c, d]
+    }
+
+    fn from_bytes(bytes: &[u8; 4]) -> Size {
+        Size {
+            rows: u16::from_le_bytes([bytes[0], bytes[1]]),
+            columns: u16::from_le_bytes([bytes[2], bytes[3]]),
+        }
+    }
 }
 
 /// How to start the harness. No value holds a NUL, because each one reaches
@@ -60,6 +89,9 @@ pub struct Start {
     /// The prompt, which follows the last argument. `None` takes the one the
     /// agent was built with.
     pub prompt: Option<Vec<u8>>,
+    /// The size of the terminal the harness starts in. Without one, it
+    /// starts with pipes.
+    pub terminal: Option<Size>,
 }
 
 /// What the guest tells the host.
@@ -89,7 +121,19 @@ impl ToGuest {
                 let argv = args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
                 Ok(Some(ToGuest::Run { argv }))
             }
-            START => Ok(Some(ToGuest::Start(read_start(payload)?))),
+            START => Ok(Some(ToGuest::Start(read_start(payload, None)?))),
+            START_IN_TERMINAL => {
+                let (size, rest) = payload
+                    .split_first_chunk::<4>()
+                    .ok_or(ProtocolError::Malformed)?;
+                let start = read_start(rest, Some(Size::from_bytes(size)))?;
+                Ok(Some(ToGuest::Start(start)))
+            }
+            INPUT => Ok(Some(ToGuest::Input(payload.to_vec()))),
+            RESIZE => match payload.try_into() {
+                Ok(size) => Ok(Some(ToGuest::Resize(Size::from_bytes(size)))),
+                Err(_) => Err(ProtocolError::Malformed),
+            },
             tag => Err(ProtocolError::UnknownTag(tag)),
         }
     }
@@ -107,7 +151,15 @@ impl ToGuest {
                 }
                 write_frame(writer, RUN, &payload)
             }
-            ToGuest::Start(start) => write_frame(writer, START, &start_payload(start)?),
+            ToGuest::Start(start) => match start.terminal {
+                None => write_frame(writer, START, &start_payload(start)?),
+                Some(size) => {
+                    let payload = [&size.to_bytes()[..], &start_payload(start)?].concat();
+                    write_frame(writer, START_IN_TERMINAL, &payload)
+                }
+            },
+            ToGuest::Input(bytes) => write_frame(writer, INPUT, bytes),
+            ToGuest::Resize(size) => write_frame(writer, RESIZE, &size.to_bytes()),
         }
     }
 }
@@ -115,7 +167,8 @@ impl ToGuest {
 /// A start's payload: the number of arguments and the number of variables,
 /// each a little-endian `u32`, then the arguments, the variables as
 /// `key=value`, the directory, and the prompt if there is one. Every string
-/// ends with a NUL.
+/// ends with a NUL. A start in a terminal has its own tag, and the terminal's
+/// rows and columns, each a little-endian `u16`, before the payload.
 fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
     if start.argv.is_empty() || start.env.iter().any(|(key, _)| !is_key(key)) {
         return Err(ProtocolError::Malformed);
@@ -142,7 +195,7 @@ fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
     Ok(payload)
 }
 
-fn read_start(payload: &[u8]) -> Result<Start, ProtocolError> {
+fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolError> {
     let (argc, rest) = payload
         .split_first_chunk::<4>()
         .ok_or(ProtocolError::Malformed)?;
@@ -174,6 +227,7 @@ fn read_start(payload: &[u8]) -> Result<Start, ProtocolError> {
         env,
         directory,
         prompt,
+        terminal,
     })
 }
 

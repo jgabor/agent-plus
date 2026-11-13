@@ -198,6 +198,7 @@ fn confined_owner_process() {
         request: None,
         timeout: TIMEOUT,
         confine: env::var(CONFINE_VARIABLE).unwrap() == "on",
+        input: None,
     };
     let mut attempted = false;
     let result = boot::boot(guest, |report| {

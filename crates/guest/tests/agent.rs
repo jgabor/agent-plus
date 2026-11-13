@@ -1,6 +1,6 @@
 //! The guest agent against a fake channel, running real programs.
 
-use guest::agent;
+use guest::agent::{self, Split};
 use guest::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 /// Tests run on threads of one process, and a running `serve` reaps any child
 /// of it, so they take turns.
-fn serve(channel: &mut (impl Read + Write)) -> Result<(), ProtocolError> {
+fn serve(channel: &mut impl Split) -> Result<(), ProtocolError> {
     static TURN: Mutex<()> = Mutex::new(());
     let _turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     agent::serve(channel)
@@ -57,6 +57,8 @@ impl Read for FakeChannel {
         self.from_host.read(buffer)
     }
 }
+
+impl Split for FakeChannel {}
 
 impl Write for FakeChannel {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -245,6 +247,8 @@ fn a_slow_host_still_gets_all_of_a_finished_programs_output() {
         }
     }
 
+    impl Split for SlowHost {}
+
     impl Write for SlowHost {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             std::thread::sleep(Duration::from_millis(30));
@@ -314,6 +318,8 @@ impl Read for DeadHost {
         self.0.read(buffer)
     }
 }
+
+impl Split for DeadHost {}
 
 impl Write for DeadHost {
     fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {

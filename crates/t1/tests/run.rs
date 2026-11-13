@@ -1,16 +1,21 @@
 //! `ap run` itself: a static `ap` builds an agent whose harness is the fake
-//! one, then boots it headless and reads what the harness saw.
+//! one, then boots it, headless or in a terminal, and reads what the harness
+//! saw.
 
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
+use std::os::fd::AsFd;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use ap::fetch;
 use ap::store::Store;
+use guest::linux::{open_terminal, program_has_ended, resize, take_terminal};
+use guest::protocol::Size;
 use t1::{guest_binary, kernel};
 
 /// The status `ap run` exits with when it fails before the harness starts.
@@ -378,17 +383,228 @@ fn the_harness_starts_in_the_workdir_which_must_be_a_directory() {
     );
 }
 
+/// How long an interactive run may take to show what a check waits for.
+const SHOWN_WITHIN: Duration = Duration::from_secs(60);
+
+/// `ap run` in a terminal of its own, which this test uses as you would.
+struct Interactive {
+    run: Started,
+    controller: File,
+    /// Everything the terminal has shown.
+    shown: Arc<Mutex<Vec<u8>>>,
+    /// Closing this stops the reader, which lets go of its side of the
+    /// terminal.
+    stop_reading: PipeWriter,
+    reader: thread::JoinHandle<()>,
+    /// The other side, kept open so the terminal outlasts `ap run`.
+    _terminal: File,
+}
+
+impl Interactive {
+    fn start(scratch: &Scratch, args: &[&str], size: Size) -> Interactive {
+        let (controller, terminal) = open_terminal(size).unwrap();
+        let mut command = Command::new(&shared().0);
+        command
+            .arg("run")
+            .args(args)
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(terminal.try_clone().unwrap())
+            .stdout(terminal.try_clone().unwrap())
+            .stderr(terminal.try_clone().unwrap());
+        // SAFETY: `take_terminal` only makes system calls.
+        unsafe { command.pre_exec(take_terminal) };
+        let run = Started(command.spawn().unwrap());
+        // The terminal must end with `ap run`'s last use of it.
+        drop(command);
+        let shown = Arc::new(Mutex::new(Vec::new()));
+        let mut side = controller.try_clone().unwrap();
+        let screen = Arc::clone(&shown);
+        let (stopped, stop_reading) = io::pipe().unwrap();
+        let reader = thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(false) = program_has_ended(side.as_fd(), stopped.as_fd()) {
+                match side.read(&mut buffer) {
+                    Ok(count @ 1..) => screen.lock().unwrap().extend_from_slice(&buffer[..count]),
+                    _ => return,
+                }
+            }
+        });
+        Interactive {
+            run,
+            controller,
+            shown,
+            stop_reading,
+            reader,
+            _terminal: terminal,
+        }
+    }
+
+    /// Closes the terminal, as closing its window would.
+    fn close(self) -> Started {
+        drop(self.stop_reading);
+        self.reader.join().unwrap();
+        drop(self.controller);
+        self.run
+    }
+
+    /// Waits for `ap run` to exit, for as long as it may take to show
+    /// something.
+    fn exit_status(&mut self) -> ExitStatus {
+        wait_within(&mut self.run, SHOWN_WITHIN)
+    }
+
+    fn screen(&self) -> String {
+        String::from_utf8_lossy(&self.shown.lock().unwrap()).into_owned()
+    }
+
+    /// Waits until the terminal has shown `text`, and returns all it showed.
+    fn wait_for(&self, text: &str) -> String {
+        let deadline = Instant::now() + SHOWN_WITHIN;
+        loop {
+            let screen = self.screen();
+            if screen.contains(text) {
+                return screen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the terminal never showed {text:?}: {screen:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn type_line(&mut self, line: &str) {
+        self.controller
+            .write_all(format!("{line}\r").as_bytes())
+            .unwrap();
+    }
+}
+
+/// The status of `run`, once it exits within `limit`.
+fn wait_within(run: &mut Started, limit: Duration) -> ExitStatus {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(status) = run.0.try_wait().unwrap() {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "ap run didn't exit");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn size(rows: u16, columns: u16) -> Size {
+    Size { rows, columns }
+}
+
+// spec(Run): A run without a prompt opens the harness's interactive interface in your terminal.
+// spec(Run): **Terminal output.** Bytes from the guest are filtered before they reach your terminal.
+// spec(Run): Escape sequences that write or read your clipboard (OSC 52), or that make your terminal reply with text the guest chose, such as a window title report, are removed.
 #[test]
-fn an_agent_without_a_prompt_fails_because_interactive_runs_are_not_built() {
+fn a_run_without_a_prompt_opens_the_harness_in_a_terminal_that_follows_yours() {
     let scratch = Scratch::new("interactive");
-    scratch.build("fake", &fake(""));
-    let output = scratch.ap(&["run", "fake"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(FAILED), "{output:?}");
-    assert!(
-        stderr.contains("interactive runs are not built yet"),
-        "{stderr}"
+    scratch.build("open", &fake(""));
+    let mut run = Interactive::start(&scratch, &["open"], size(30, 100));
+
+    let screen = run.wait_for("\"user\":");
+    assert!(screen.contains("\"terminal\":\"30x100\""), "{screen:?}");
+    assert!(screen.contains("\"user\":\"agent\""), "{screen:?}");
+    // Interactive, with nothing to submit.
+    assert_eq!(
+        array(&screen, "arguments"),
+        ["\"--permission-mode\"", "\"default\"", "\"--\""],
+        "{screen:?}"
     );
+
+    // A resize of your terminal reaches the harness's. It travels apart
+    // from the keys, so the question is asked until the answer changes.
+    resize(run.controller.as_fd(), size(40, 120)).unwrap();
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    while !run.screen().contains("size 40x120") {
+        assert!(Instant::now() < deadline, "{:?}", run.screen());
+        run.type_line("size");
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // The harness repeats this line unescaped, and the clipboard write in
+    // it never reaches the terminal.
+    run.type_line("\x1b]52;c;aGk=\x07clipped");
+    let screen = run.wait_for("typed clipped");
+    assert!(!screen.contains("\x1b]52"), "{screen:?}");
+
+    run.type_line("exit");
+    assert_eq!(run.exit_status().code(), Some(STATUS));
+}
+
+#[test]
+fn a_signal_that_ends_an_interactive_run_puts_the_terminal_back() {
+    let scratch = Scratch::new("terminated");
+    scratch.build("open", &fake(""));
+    let mut run = Interactive::start(&scratch, &["open"], size(24, 80));
+    run.wait_for("\"user\":");
+    signal("-TERM", run.run.0.id());
+    let status = run.exit_status();
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    // Raw mode echoes nothing. Put back, the terminal echoes what is typed.
+    run.type_line("echoed");
+    run.wait_for("echoed");
+}
+
+// spec(Run): `ap run -i` forces interactive and submits the prompt as the first message.
+#[test]
+fn ap_run_i_submits_the_prompt_as_the_first_message() {
+    let scratch = Scratch::new("forced");
+    scratch.build("prompted", &fake(&format!("PROMPT {BUILT_PROMPT}\n")));
+    for (args, prompt) in [
+        (&["prompted", "-i"][..], BUILT_PROMPT),
+        (&["-i", "prompted", "-p", PROMPT], PROMPT),
+    ] {
+        let mut run = Interactive::start(&scratch, args, size(24, 80));
+        let screen = run.wait_for("\"user\":");
+        assert!(screen.contains("\"terminal\":\"24x80\""), "{screen:?}");
+        assert_eq!(
+            array(&screen, "arguments"),
+            [
+                "\"--permission-mode\"",
+                "\"default\"",
+                "\"--\"",
+                &format!("\"{prompt}\"")
+            ],
+            "{args:?}: {screen:?}"
+        );
+        run.type_line("exit");
+        assert_eq!(run.exit_status().code(), Some(STATUS));
+    }
+}
+
+// spec(Run): **End.** A run that `ap run` started ends when that `ap run` exits, for any reason, including a closed terminal or a killed `ap run` process, and its VM stops with it.
+#[test]
+fn closing_the_terminal_of_an_interactive_run_ends_it_and_leaves_nothing() {
+    let scratch = Scratch::new("closed");
+    scratch.build("open", &fake(""));
+    let run = Interactive::start(&scratch, &["open"], size(24, 80));
+    run.wait_for("\"user\":");
+    assert_eq!(scratch.ps().len(), 1);
+    let processes = descendants(run.run.0.id());
+    assert_eq!(processes.len(), 2, "{processes:?}");
+
+    let mut run = run.close();
+    let status = wait_within(&mut run, Duration::from_secs(10));
+    assert!(!status.success(), "{status:?}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
+    assert_eq!(
+        left,
+        Vec::<u32>::new(),
+        "processes outlived the closed terminal"
+    );
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+    let sockets = fs::read_dir(scratch.runtime.join("ap")).unwrap().count();
+    assert_eq!(sockets, 0, "a socket outlived the run");
 }
 
 // spec(Run): **End.** A run that `ap run` started ends when that `ap run` exits, for any reason, including a closed terminal or a killed `ap run` process, and its VM stops with it.

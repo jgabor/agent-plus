@@ -1,6 +1,6 @@
 //! The frames, and what the guest and the host refuse to read.
 
-use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, Start, ToGuest, ToHost};
+use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
 use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
@@ -9,6 +9,9 @@ const EXITED: u8 = 4;
 const READY: u8 = 5;
 const START: u8 = 6;
 const FAILED: u8 = 7;
+const START_IN_TERMINAL: u8 = 8;
+const INPUT: u8 = 9;
+const RESIZE: u8 = 10;
 
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
@@ -40,6 +43,17 @@ fn start(prompt: Option<&[u8]>) -> ToGuest {
         ],
         directory: b"/home/agent".to_vec(),
         prompt: prompt.map(<[u8]>::to_vec),
+        terminal: None,
+    })
+}
+
+fn in_terminal(message: ToGuest, rows: u16, columns: u16) -> ToGuest {
+    let ToGuest::Start(start) = message else {
+        panic!("not a start");
+    };
+    ToGuest::Start(Start {
+        terminal: Some(Size { rows, columns }),
+        ..start
     })
 }
 
@@ -52,6 +66,14 @@ fn every_message_survives_the_wire() {
         start(None),
         start(Some(b"Say what you can see.")),
         start(Some(b"")),
+        in_terminal(start(None), 24, 80),
+        in_terminal(start(Some(b"Hi")), u16::MAX, 0),
+        ToGuest::Input(b"\x03q\r".to_vec()),
+        ToGuest::Input(Vec::new()),
+        ToGuest::Resize(Size {
+            rows: 50,
+            columns: 200,
+        }),
     ] {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
@@ -90,17 +112,46 @@ fn a_start_counts_its_arguments_and_variables_and_ends_each_string_with_a_nul() 
         env: vec![(b"K".to_vec(), b"v".to_vec())],
         directory: b"/d".to_vec(),
         prompt: Some(b"p".to_vec()),
+        terminal: None,
     })
     .write(&mut wire)
     .unwrap();
-    let body = [
-        &[START][..],
-        &1u32.to_le_bytes(),
+    let payload = [
+        &1u32.to_le_bytes()[..],
         &1u32.to_le_bytes(),
         b"h\0K=v\0/d\0p\0",
     ]
     .concat();
-    assert_eq!(wire, frame(&body));
+    assert_eq!(wire, frame(&[&[START][..], &payload].concat()));
+
+    // In a terminal, its rows and columns come first.
+    let mut wire = Vec::new();
+    in_terminal(
+        ToGuest::Start(Start {
+            argv: vec![b"h".to_vec()],
+            env: vec![(b"K".to_vec(), b"v".to_vec())],
+            directory: b"/d".to_vec(),
+            prompt: Some(b"p".to_vec()),
+            terminal: None,
+        }),
+        0x0102,
+        0x0304,
+    )
+    .write(&mut wire)
+    .unwrap();
+    assert_eq!(
+        wire,
+        frame(&[&[START_IN_TERMINAL, 2, 1, 4, 3][..], &payload].concat())
+    );
+
+    let mut wire = Vec::new();
+    ToGuest::Resize(Size {
+        rows: 1,
+        columns: 2,
+    })
+    .write(&mut wire)
+    .unwrap();
+    assert_eq!(wire, frame(&[RESIZE, 1, 0, 2, 0]));
 }
 
 #[test]
@@ -110,6 +161,7 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         env: Vec::new(),
         directory: b"/".to_vec(),
         prompt: None,
+        terminal: None,
     };
     let refused = [
         Start {
@@ -182,6 +234,17 @@ fn a_start_whose_counts_dont_match_its_strings_is_refused() {
         );
     }
     assert!(to_guest(frame(&body(1, 0, b"h\0/d"))).is_err());
+    // A size that is cut short.
+    for body in [
+        &[START_IN_TERMINAL, 1, 0, 0][..],
+        &[RESIZE, 1, 0, 2],
+        &[RESIZE, 1, 0, 2, 0, 0],
+    ] {
+        assert!(
+            matches!(to_guest(frame(body)), Err(ProtocolError::Malformed)),
+            "{body:?}"
+        );
+    }
 }
 
 #[test]
@@ -224,7 +287,7 @@ fn the_guest_refuses_what_only_the_host_reads() {
 #[test]
 fn every_unknown_tag_is_refused() {
     for tag in 0..=u8::MAX {
-        if tag != RUN && tag != START {
+        if ![RUN, START, START_IN_TERMINAL, INPUT, RESIZE].contains(&tag) {
             assert!(matches!(
                 to_guest(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag

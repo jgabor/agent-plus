@@ -3,7 +3,7 @@
 //! This file holds one test, because it counts the threads and descriptors of
 //! the whole process, and another test would change both.
 
-use guest::agent::serve;
+use guest::agent::{Split, serve};
 use guest::protocol::{ToGuest, ToHost};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
@@ -26,6 +26,8 @@ impl Read for FakeChannel {
         self.from_host.read(buffer)
     }
 }
+
+impl Split for FakeChannel {}
 
 impl Write for FakeChannel {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

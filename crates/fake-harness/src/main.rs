@@ -5,14 +5,27 @@
 //! reports, it creates the file that `FAKE_HARNESS_WRITE` names, waits as
 //! many seconds as `FAKE_HARNESS_SLEEP` says, and exits with the status in
 //! `FAKE_HARNESS_STATUS`, or 0.
+//!
+//! In a terminal, as an interactive harness is, its report has the
+//! terminal's size, and before it exits it answers each line typed: `size`
+//! with the size again, and anything else with the line itself, unescaped.
+//! The end of input, or `exit`, stops it.
 
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::{c_int, c_ulong};
 use std::fs;
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
+
+const TIOCGWINSZ: c_ulong = 0x5413;
+
+unsafe extern "C" {
+    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+}
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = env::args_os()
@@ -37,8 +50,14 @@ fn main() -> ExitCode {
     let directory = env::current_dir()
         .map(|d| d.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let terminal = io::stdin().is_terminal();
+    let size = if terminal {
+        quote(&size())
+    } else {
+        "null".to_string()
+    };
     println!(
-        "{{\"arguments\":{},\"directory\":{},\"environment\":{{{}}},\"files\":{},\"network\":{{\"interfaces\":{},\"resolvers\":{}}},\"user\":{}}}",
+        "{{\"arguments\":{},\"directory\":{},\"environment\":{{{}}},\"files\":{},\"network\":{{\"interfaces\":{},\"resolvers\":{}}},\"terminal\":{size},\"user\":{}}}",
         array(&arguments),
         quote(&directory),
         environment.join(","),
@@ -47,6 +66,9 @@ fn main() -> ExitCode {
         array(&resolvers()),
         quote(&user()),
     );
+    if terminal {
+        answer();
+    }
     if let Some(path) = env::var_os("FAKE_HARNESS_WRITE")
         && let Err(e) = fs::write(&path, "")
     {
@@ -73,6 +95,35 @@ fn main() -> ExitCode {
             }
         },
     }
+}
+
+/// Answers each line typed, until `exit` or the end of input.
+fn answer() {
+    let mut stdout = io::stdout();
+    for line in io::stdin().lock().lines() {
+        let Ok(line) = line else {
+            return;
+        };
+        let line = line.trim_end_matches('\r');
+        let answer = match line {
+            "exit" => return,
+            "size" => format!("size {}", size()),
+            line => format!("typed {line}"),
+        };
+        let _ = writeln!(stdout, "{answer}");
+        let _ = stdout.flush();
+    }
+}
+
+/// The size of the terminal on standard input, as `<rows>x<columns>`.
+fn size() -> String {
+    let mut window = [0u16; 4];
+    // SAFETY: `TIOCGWINSZ` writes one `struct winsize`, four `u16`s, through
+    // this pointer, which is valid for the whole call.
+    if unsafe { ioctl(0, TIOCGWINSZ, window.as_mut_ptr()) } != 0 {
+        return "unknown".to_string();
+    }
+    format!("{}x{}", window[0], window[1])
 }
 
 /// The name `/etc/passwd` gives this process's effective user, or its uid if

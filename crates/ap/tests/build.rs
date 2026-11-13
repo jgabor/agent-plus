@@ -757,6 +757,21 @@ fn strict_turns_a_warning_into_an_error() {
     scratch.agent("notes");
 }
 
+// spec(Run): **Headless or interactive.** A run is headless when it has a non-empty prompt, either `PROMPT` or `-p`/`--prompt` on the command line.
+#[test]
+fn an_empty_prompt_is_not_recorded_so_its_runs_are_interactive() {
+    let scratch = Scratch::new("empty-prompt");
+    let dir = scratch.project("quiet", "AGENT claude:2.1.319\nOS minimal\nPROMPT \"\"\n");
+    scratch.build(&dir, &[]);
+    assert_eq!(
+        scratch.agent("quiet").declared,
+        [
+            declared("AGENT", &["claude:2.1.319"]),
+            declared("OS", &["minimal"]),
+        ]
+    );
+}
+
 #[test]
 fn settings_and_run_instructions_are_recorded() {
     let scratch = Scratch::new("recorded");
@@ -765,6 +780,7 @@ fn settings_and_run_instructions_are_recorded() {
         "AGENT claude:2.1.319\n\
          OS minimal\n\
          SYSTEM Be careful.\n\
+         PROMPT Take notes.\n\
          MODEL opus\n\
          EFFORT high\n\
          MODE auto\n\
@@ -784,6 +800,7 @@ fn settings_and_run_instructions_are_recorded() {
         [
             declared("AGENT", &["claude:2.1.319"]),
             declared("OS", &["minimal"]),
+            declared("PROMPT", &[]),
             declared("MODEL", &["opus"]),
             declared("EFFORT", &["high"]),
             declared("MODE", &["auto"]),

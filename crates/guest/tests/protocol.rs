@@ -10,6 +10,7 @@ const READY: u8 = 5;
 const START: u8 = 6;
 const FAILED: u8 = 7;
 const START_IN_TERMINAL: u8 = 8;
+const INPUT: u8 = 9;
 const RESIZE: u8 = 10;
 
 fn frame(body: &[u8]) -> Vec<u8> {
@@ -234,7 +235,11 @@ fn a_start_whose_counts_dont_match_its_strings_is_refused() {
     }
     assert!(to_guest(frame(&body(1, 0, b"h\0/d"))).is_err());
     // A size that is cut short.
-    for body in [&[START_IN_TERMINAL, 1, 0, 0][..], &[RESIZE, 1, 0, 2], &[RESIZE, 1, 0, 2, 0, 0]] {
+    for body in [
+        &[START_IN_TERMINAL, 1, 0, 0][..],
+        &[RESIZE, 1, 0, 2],
+        &[RESIZE, 1, 0, 2, 0, 0],
+    ] {
         assert!(
             matches!(to_guest(frame(body)), Err(ProtocolError::Malformed)),
             "{body:?}"
@@ -282,7 +287,7 @@ fn the_guest_refuses_what_only_the_host_reads() {
 #[test]
 fn every_unknown_tag_is_refused() {
     for tag in 0..=u8::MAX {
-        if tag != RUN && tag != START {
+        if ![RUN, START, START_IN_TERMINAL, INPUT, RESIZE].contains(&tag) {
             assert!(matches!(
                 to_guest(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag

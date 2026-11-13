@@ -119,7 +119,10 @@ impl Input {
             .map_err(|error| Error::Failed(format!("can't send input: {error:?}")))?;
         let mut queued = self.queued();
         while queued.len() >= INPUT_WINDOW {
-            queued = self.room.wait(queued).unwrap_or_else(PoisonError::into_inner);
+            queued = self
+                .room
+                .wait(queued)
+                .unwrap_or_else(PoisonError::into_inner);
         }
         queued.extend_from_slice(&frame);
         drop(queued);

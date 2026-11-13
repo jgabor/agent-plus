@@ -348,7 +348,11 @@ impl<'a> Running<'a> {
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        *self.0.running.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .0
+            .running
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
 }
 
@@ -719,9 +723,7 @@ fn interrupted(
         return Err(error);
     }
     kick.store(0, Ordering::SeqCst);
-    Ok(timed_out
-        .load(Ordering::SeqCst)
-        .then_some(Stop::TimedOut))
+    Ok(timed_out.load(Ordering::SeqCst).then_some(Stop::TimedOut))
 }
 
 /// Ends the watchdog on drop, so that a panic in the port callback doesn't
@@ -1106,7 +1108,11 @@ mod tests {
         drop(running);
         kick.store(0, Ordering::SeqCst);
         waker.wake();
-        assert_eq!(kick.load(Ordering::SeqCst), 0, "a run that ended was kicked");
+        assert_eq!(
+            kick.load(Ordering::SeqCst),
+            0,
+            "a run that ended was kicked"
+        );
     }
 
     /// This thread's signal mask.

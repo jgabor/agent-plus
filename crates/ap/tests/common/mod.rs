@@ -4,9 +4,18 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io::{self, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
+use ap::fetch::Client;
 use graviola::hashing::sha2::Sha256Context;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 /// Puts a stand-in for the pinned `OS minimal` layer in the store at `root`,
 /// so that a build finds it and downloads nothing. It holds only the frame
@@ -60,4 +69,117 @@ pub fn pin_harness(home: &Path, dir: &Path) {
         format!("HARNESS {harness} {version} {sha256}\n"),
     )
     .unwrap();
+}
+
+// A self-signed certificate for `localhost`, valid until 2126. It's trusted
+// only by the clients these tests build, so its key protects nothing.
+const CERT: &str = "-----BEGIN CERTIFICATE-----
+MIIBkjCCATigAwIBAgIUKo7VEB3v57sU3eXd/W6G4jkwzgcwCgYIKoZIzj0EAwIw
+FDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTEwOTE0NDYwNloYDzIxMjYxMDE2
+MTQ0NjA2WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAATLNXdJ+wCT3FFz+TbeyJz0PfkxNEKCiqGEuHaCoco3ZuRptVGExCa4
+JrgarkFAnFDBVnliryVLZIZmJyvgP+kKo2YwZDAdBgNVHQ4EFgQUJGEA0tybv+W0
++Ax4bN+yZx27vs4wHwYDVR0jBBgwFoAUJGEA0tybv+W0+Ax4bN+yZx27vs4wFAYD
+VR0RBA0wC4IJbG9jYWxob3N0MAwGA1UdEwEB/wQCMAAwCgYIKoZIzj0EAwIDSAAw
+RQIgChZzpHJEJfBlwLJjLMDLVaM6+T5/tyvUKuTEchZ8veICIQCpQZUh7CGuu45X
+UUYQOfUpWKiQ8qAUv2Yto+dEVabYcA==
+-----END CERTIFICATE-----
+";
+const KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgB9RUgEImB2I1Guvk
+eXVzHPDywIrYfllulLAfhVrw5tmhRANCAATLNXdJ+wCT3FFz+TbeyJz0PfkxNEKC
+iqGEuHaCoco3ZuRptVGExCa4JrgarkFAnFDBVnliryVLZIZmJyvgP+kK
+-----END PRIVATE KEY-----
+";
+
+pub fn ok(body: &[u8]) -> Vec<u8> {
+    let mut reply =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    reply.extend_from_slice(body);
+    reply
+}
+
+pub fn redirect(location: &str) -> Vec<u8> {
+    format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").into_bytes()
+}
+
+/// An HTTPS server that answers each path with fixed bytes, and counts
+/// requests. Its thread ends with the test process.
+pub struct Server {
+    pub port: u16,
+    pub requests: Arc<AtomicUsize>,
+    pub paths: Arc<Mutex<Vec<String>>>,
+}
+
+impl Server {
+    /// `routes` receives the server's own origin, for writing redirects.
+    pub fn start(routes: impl FnOnce(&str) -> Vec<(&'static str, Vec<u8>)>) -> Self {
+        let certs = vec![CertificateDer::from_pem_slice(CERT.as_bytes()).unwrap()];
+        let key = PrivateKeyDer::from_pem_slice(KEY.as_bytes()).unwrap();
+        let config = Arc::new(
+            ServerConfig::builder_with_provider(Arc::new(rustls_graviola::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let routes = routes(&format!("https://localhost:{port}"));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let server = Server {
+            port,
+            requests: requests.clone(),
+            paths: paths.clone(),
+        };
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let connection = ServerConnection::new(config.clone()).unwrap();
+                let mut tls = StreamOwned::new(connection, stream.unwrap());
+                let Ok(head) = read_head(&mut tls) else {
+                    continue;
+                };
+                let path = head.split(' ').nth(1).unwrap().to_owned();
+                requests.fetch_add(1, Ordering::SeqCst);
+                paths.lock().unwrap().push(path.clone());
+                let reply = routes.iter().find(|(route, _)| *route == path);
+                let reply = reply.map_or(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                    |(_, r)| r,
+                );
+                let _ = tls.write_all(reply);
+                tls.conn.send_close_notify();
+                let _ = tls.flush();
+            }
+        });
+        server
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("https://localhost:{}{path}", self.port)
+    }
+
+    pub fn requests(&self) -> usize {
+        self.requests.load(Ordering::SeqCst)
+    }
+}
+
+fn read_head(stream: &mut impl Read) -> io::Result<String> {
+    let mut head = Vec::new();
+    let mut byte = [0];
+    while !head.ends_with(b"\r\n\r\n") {
+        stream.read_exact(&mut byte)?;
+        head.push(byte[0]);
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+pub fn trusting_client() -> Client {
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(CERT.as_bytes()).unwrap())
+        .unwrap();
+    Client::with_roots(roots)
 }

@@ -110,6 +110,17 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
     store.put(pin.sha256, download(client, pin.url)?)
 }
 
+/// The text at `url`, which may hold at most `max` bytes.
+pub fn text(client: &Client, url: &str, max: u64) -> io::Result<String> {
+    let body = download(client, url)?;
+    if body.remaining > max {
+        return Err(bad_response("a body that is too large"));
+    }
+    let mut text = String::new();
+    { body }.read_to_string(&mut text)?;
+    Ok(text)
+}
+
 /// Puts the layer `pin` names in `layers` at a zstd level, downloading it
 /// only if no layer has its digest yet, and returns whether it downloaded.
 /// A download whose digest isn't the pin's is an error, and isn't stored.

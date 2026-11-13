@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -42,6 +42,14 @@ const NOOP_FILES: &[(&str, &str)] = &[
     ("agent/out/.keep", ""),
     ("grants", "NETWORK +\nPOLICY +\n"),
 ];
+/// The agent that `run_ms` runs: the fake harness, as journey step 7 builds
+/// it, with no network, so nothing outside the machine is timed.
+const RUN_AGENTFILE: &str = "AGENT claude:0.0.0\nOS minimal\nNETWORK -\n";
+const RUN_GRANTS: &str = "NETWORK -\nPOLICY +\n";
+const RUN_PROMPT: &str = "Say what you can see.";
+/// `timeout`'s arguments for every `ap run`. It stops a run that hangs, and
+/// with it the VM that its `ap run` holds.
+const RUN_TIMEOUT: [&str; 3] = ["-k", "10", "120"];
 
 pub struct Budget {
     key: String,
@@ -62,6 +70,7 @@ enum Measure {
     Size,
     Boot,
     Build,
+    Run,
     NotYet,
 }
 
@@ -73,7 +82,8 @@ fn measure_of(key: &str) -> Option<Measure> {
         "binary_bytes" => Some(Measure::Size),
         "boot_ms" => Some(Measure::Boot),
         "noop_build_ms" => Some(Measure::Build),
-        "run_ms" | "idle_mib" => Some(Measure::NotYet),
+        "run_ms" => Some(Measure::Run),
+        "idle_mib" => Some(Measure::NotYet),
         _ => None,
     }
 }
@@ -210,10 +220,24 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     let hold = lock::shared(root)?;
     let candidate = build_candidate(root, &directory)?;
     let baseline = build_base(root, &directory, &commit)?;
+    let harness = if budgets
+        .iter()
+        .any(|budget| matches!(measure_of(&budget.key), Some(Measure::Run)))
+    {
+        Some(build_harness(root)?)
+    } else {
+        None
+    };
     drop(hold);
 
     let measuring = lock::exclusive(root)?;
-    let rows = measure(&budgets, &baseline, &candidate, &directory)?;
+    let rows = measure(
+        &budgets,
+        &baseline,
+        &candidate,
+        harness.as_deref(),
+        &directory,
+    )?;
     drop(measuring);
 
     let any_over = rows.iter().any(|row| row.over);
@@ -279,6 +303,18 @@ fn clean_head(root: &Path) -> Result<Option<String>, Problem> {
     }
     let head = base::git_text(root, &["rev-parse", "HEAD"])?;
     Ok(Some(head.trim().to_string()))
+}
+
+/// The candidate's fake harness, which both builds of `ap` run for `run_ms`.
+fn build_harness(root: &Path) -> Result<PathBuf, Problem> {
+    journey::build_fake_harness(root, &root.join("target"))
+        .map_err(|Problem(e)| Problem(format!("the fake harness build: {e}")))?
+        .ok_or_else(|| {
+            Problem(
+                "`run_ms` runs the fake harness, and the workspace has no `fake-harness` package"
+                    .to_string(),
+            )
+        })
 }
 
 fn build_candidate(root: &Path, directory: &Path) -> Result<PathBuf, Problem> {
@@ -372,6 +408,7 @@ fn measure(
     budgets: &[Budget],
     base: &Path,
     candidate: &Path,
+    harness: Option<&Path>,
     directory: &Path,
 ) -> Result<Vec<Row>, Problem> {
     let mut rows = Vec::new();
@@ -384,6 +421,10 @@ fn measure(
             Some(Measure::Size) => (Some(size(base)?), size(candidate)?),
             Some(Measure::Boot) => boots(base, candidate, &directory.join("home"))?,
             Some(Measure::Build) => noop_builds(base, candidate, &directory.join("noop"))?,
+            Some(Measure::Run) => {
+                let harness = harness.expect("the fake harness is built for `run_ms`");
+                runs(base, candidate, harness, &directory.join("run"))?
+            }
             Some(Measure::NotYet) | None => continue,
         };
         rows.push(Row {
@@ -518,10 +559,12 @@ fn noop_builds(
         fs::write(cache.join(NOOP_HARNESS_SHA256), NOOP_HARNESS).map_err(problem)?;
     }
     let home_of = |binary: &Path| if binary == base { &homes[0] } else { &homes[1] };
+    let grants = directory.join("grants");
+    let agent = directory.join("agent");
     let timed = |binary: &Path| {
-        build_once(binary, directory, home_of(binary))?.ok_or_else(|| no_build(binary))
+        build_once(binary, &grants, &agent, home_of(binary))?.ok_or_else(|| no_build(binary))
     };
-    let base_builds = build_once(base, directory, home_of(base))?.is_some();
+    let base_builds = build_once(base, &grants, &agent, home_of(base))?.is_some();
     timed(candidate)?;
     if base_builds {
         let (before, after) = interleaved(base, candidate, timed)?;
@@ -540,20 +583,25 @@ fn no_build(binary: &Path) -> Problem {
     ))
 }
 
-/// Milliseconds that `ap build` takes on the fixed directory, with its grants
-/// approved, or `None` if this build exits with its usage status, because it
+/// Milliseconds that `ap build` takes on the directory `agent`, with the
+/// grants in `grants` approved, or `None` if this build exits with its usage status, because it
 /// has no such command, or has no `--approve`. `--approve` came after `ap
 /// build`, so a base without it is an old build, as one without `ap build` is,
 /// and it can't do the work the candidate is timed on.
-fn build_once(binary: &Path, directory: &Path, home: &Path) -> Result<Option<f64>, Problem> {
+fn build_once(
+    binary: &Path,
+    grants: &Path,
+    agent: &Path,
+    home: &Path,
+) -> Result<Option<f64>, Problem> {
     let shown = binary.display();
     let mut approve = std::ffi::OsString::from("--approve=");
-    approve.push(directory.join("grants"));
+    approve.push(grants);
     let start = Instant::now();
     let output = Command::new(binary)
         .arg("build")
         .arg(approve)
-        .arg(directory.join("agent"))
+        .arg(agent)
         .env_clear()
         .env("HOME", home)
         .stdin(Stdio::null())
@@ -573,6 +621,154 @@ fn build_once(binary: &Path, directory: &Path, home: &Path) -> Result<Option<f64
         )));
     }
     Ok(Some(elapsed))
+}
+
+/// The medians of running a fixed agent headless, for both builds, or for
+/// the candidate alone when the base has no `ap run`. Each build of `ap`
+/// builds an agent of its own, named for it, so each runs what it built. All
+/// of them share one `HOME`, so they share one store, and the download cache
+/// holds the fake harness that the lockfiles pin. Each builds its agent and
+/// runs it once first, so no build or download is timed.
+fn runs(
+    base: &Path,
+    candidate: &Path,
+    harness: &Path,
+    directory: &Path,
+) -> Result<(Option<f64>, f64), Problem> {
+    let problem =
+        |e: std::io::Error| Problem(format!("couldn't write {}: {e}", directory.display()));
+    if directory.exists() {
+        fs::remove_dir_all(directory).map_err(problem)?;
+    }
+    let digest = sha256(harness)?;
+    let home = directory.join("home");
+    let cache = home.join(".cache/ap");
+    fs::create_dir_all(&cache).map_err(problem)?;
+    fs::copy(harness, cache.join(&digest)).map_err(problem)?;
+    let grants = directory.join("grants");
+    fs::write(&grants, RUN_GRANTS).map_err(problem)?;
+    let agents = [directory.join("base"), directory.join("candidate")];
+    for agent in &agents {
+        fs::create_dir_all(agent).map_err(problem)?;
+        fs::write(agent.join("Agentfile"), RUN_AGENTFILE).map_err(problem)?;
+        let lock = format!("HARNESS claude 0.0.0 {digest}\n");
+        fs::write(agent.join("Agentfile.lock"), lock).map_err(problem)?;
+    }
+    let agent_of = |binary: &Path| if binary == base { &agents[0] } else { &agents[1] };
+    let name_of = |binary: &Path| if binary == base { "base" } else { "candidate" };
+    let timed = |binary: &Path| {
+        run_once_headless(binary, name_of(binary), &home)?.ok_or_else(|| no_run(binary))
+    };
+    let warm = |binary: &Path| {
+        build_once(binary, &grants, agent_of(binary), &home)?.ok_or_else(|| no_build(binary))?;
+        timed(binary)
+    };
+    let base_runs = has_run(base, name_of(base), &home)?;
+    if base_runs {
+        warm(base)?;
+    }
+    warm(candidate)?;
+    if base_runs {
+        let (before, after) = interleaved(base, candidate, timed)?;
+        return Ok((Some(before), after));
+    }
+    let after = (0..PAIRS)
+        .map(|_| timed(candidate))
+        .collect::<Result<_, _>>()?;
+    Ok((None, median(after)))
+}
+
+/// `ap run <name> -p <prompt>`, under `timeout`.
+fn run_command(binary: &Path, name: &str, home: &Path) -> Command {
+    let mut command = Command::new("timeout");
+    command
+        .args(RUN_TIMEOUT)
+        .arg(binary)
+        .args(["run", name, "-p", RUN_PROMPT])
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null());
+    command
+}
+
+/// Whether `ap run` is a command, asked before the agent `name` is built. A
+/// build that has it fails that run, but not with its usage status, and a
+/// build from before `ap run` isn't asked to build an Agentfile it may not
+/// read.
+fn has_run(binary: &Path, name: &str, home: &Path) -> Result<bool, Problem> {
+    let status = run_command(binary, name, home)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| Problem(format!("couldn't run `{} run`: {e}", binary.display())))?;
+    Ok(status.code() != Some(USAGE_STATUS))
+}
+
+fn no_run(binary: &Path) -> Problem {
+    Problem(format!(
+        "`{} run <agent> -p <prompt>` isn't a command",
+        binary.display()
+    ))
+}
+
+/// Milliseconds from spawning `ap run` until the first byte of its output,
+/// or `None` if this build exits with its usage status. The rest of the
+/// output is read to its end, and the run waited for, so the VM has stopped
+/// before the next run starts.
+fn run_once_headless(binary: &Path, name: &str, home: &Path) -> Result<Option<f64>, Problem> {
+    let shown = binary.display();
+    let problem = |e: std::io::Error| Problem(format!("couldn't run `{shown} run`: {e}"));
+    let start = Instant::now();
+    let mut child = run_command(binary, name, home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(problem)?;
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let draining = thread::spawn(move || {
+        let mut errors = Vec::new();
+        stderr.read_to_end(&mut errors).map(|_| errors)
+    });
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut first = [0; 1];
+    let read = stdout.read(&mut first);
+    let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+    let rest = io::copy(&mut stdout, &mut io::sink());
+    let status = child.wait().map_err(problem)?;
+    let printed = read.map_err(problem)?;
+    rest.map_err(problem)?;
+    let errors = draining.join().expect("draining stderr can't panic");
+    let errors = errors.map_err(problem)?;
+    if status.code() == Some(USAGE_STATUS) {
+        return Ok(None);
+    }
+    if !status.success() {
+        return Err(Problem(format!(
+            "`{shown} run` failed: {status}: {}",
+            String::from_utf8_lossy(&errors).trim()
+        )));
+    }
+    if printed == 0 {
+        return Err(Problem(format!("`{shown} run` printed nothing")));
+    }
+    Ok(Some(elapsed))
+}
+
+/// The SHA-256 digest of the file at `path`, in hex. macOS has `shasum`, and
+/// may lack `sha256sum`.
+fn sha256(path: &Path) -> Result<String, Problem> {
+    let shown = path.display();
+    let output = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .or_else(|_| Command::new("shasum").args(["-a", "256"]).arg(path).output())
+        .map_err(|e| Problem(format!("couldn't hash {shown}: {e}")))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let digest = text.split(' ').next().unwrap_or_default();
+    if !output.status.success() || digest.len() != 64 {
+        return Err(Problem(format!("couldn't hash {shown}: {}", output.status)));
+    }
+    Ok(digest.to_string())
 }
 
 /// Milliseconds from spawning `ap boot` until its ready line appears, or

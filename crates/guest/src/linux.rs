@@ -89,6 +89,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn setsid() -> c_int;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
     fn sync();
     fn reboot(command: c_int) -> c_int;
     fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
@@ -395,6 +396,15 @@ pub fn resize(terminal: BorrowedFd, size: Size) -> io::Result<()> {
             &window as *const WindowSize,
         )
     })?;
+    Ok(())
+}
+
+/// Sends the process `pid` `SIGTERM`.
+pub fn terminate(pid: u32) -> io::Result<()> {
+    const SIGTERM: c_int = 15;
+    let pid = c_int::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: `kill` takes no pointer.
+    checked(unsafe { kill(pid, SIGTERM) })?;
     Ok(())
 }
 

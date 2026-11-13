@@ -30,6 +30,7 @@ const RESIZE: u8 = 10;
 const EXEC: u8 = 11;
 const EXEC_IN_TERMINAL: u8 = 12;
 const END_OF_INPUT: u8 = 13;
+const TERMINATE: u8 = 14;
 
 /// Why a frame was refused. The stream can't be trusted after any of these.
 #[derive(Debug)]
@@ -64,6 +65,8 @@ pub enum ToGuest {
     EndOfInput,
     /// The new size of the program's terminal.
     Resize(Size),
+    /// Sends the harness `SIGTERM`.
+    Terminate,
 }
 
 /// A command to run beside the harness. Arguments can't contain a NUL.
@@ -156,6 +159,8 @@ impl ToGuest {
             }
             END_OF_INPUT if payload.is_empty() => Ok(Some(ToGuest::EndOfInput)),
             END_OF_INPUT => Err(ProtocolError::Malformed),
+            TERMINATE if payload.is_empty() => Ok(Some(ToGuest::Terminate)),
+            TERMINATE => Err(ProtocolError::Malformed),
             START => Ok(Some(ToGuest::Start(read_start(payload, None)?))),
             START_IN_TERMINAL => {
                 let (size, rest) = payload
@@ -193,6 +198,7 @@ impl ToGuest {
             },
             ToGuest::Input(bytes) => write_frame(writer, INPUT, bytes),
             ToGuest::Resize(size) => write_frame(writer, RESIZE, &size.to_bytes()),
+            ToGuest::Terminate => write_frame(writer, TERMINATE, &[]),
         }
     }
 }

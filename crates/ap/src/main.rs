@@ -17,6 +17,7 @@ mod commands {
     pub mod ps;
     pub mod rm;
     pub mod run;
+    pub mod stop;
 }
 
 const USAGE: &str = "usage: ap --version
@@ -29,6 +30,7 @@ const USAGE: &str = "usage: ap --version
        ap run [-i] [-p prompt] agent
        ap ps
        ap exec run command [arg...]
+       ap stop run
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -111,6 +113,11 @@ fn main() -> ExitCode {
         && let Some(exec) = commands::exec::parse(&args[1..])
     {
         return ExitCode::from(commands::exec::run(&exec));
+    }
+    if args.first().is_some_and(|command| command == "stop")
+        && let Some(name) = commands::stop::parse(&args[1..])
+    {
+        return ExitCode::from(commands::stop::run(&name));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

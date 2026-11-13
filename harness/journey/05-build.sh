@@ -42,9 +42,9 @@ if [ ! -f "$store/agents/notes" ]; then
   echo "the store has no agent named notes" >&2
   exit 1
 fi
-if [ "$(grep -c '^LAYER ' "$store/agents/notes")" -ne 4 ] ||
-  [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 4 ]; then
-  echo "the store doesn't hold the agent's four layers" >&2
+if [ "$(grep -c '^LAYER ' "$store/agents/notes")" -ne 5 ] ||
+  [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 5 ]; then
+  echo "the store doesn't hold the agent's five layers" >&2
   exit 1
 fi
 
@@ -75,7 +75,7 @@ if [ "$(grep -c '^built \|^fetched ' third)" -ne 1 ] ||
   cat third >&2
   exit 1
 fi
-if [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 4 ]; then
+if [ "$(find "$store/zstd-layers" -type f | wc -l)" -ne 5 ]; then
   echo "the rebuild left a layer that nothing uses" >&2
   exit 1
 fi

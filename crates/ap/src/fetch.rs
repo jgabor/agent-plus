@@ -113,11 +113,14 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
 /// The text at `url`, which may hold at most `max` bytes.
 pub fn text(client: &Client, url: &str, max: u64) -> io::Result<String> {
     let body = download(client, url)?;
-    if body.remaining > max {
+    if !body.chunked && body.remaining > max {
         return Err(bad_response("a body that is too large"));
     }
     let mut text = String::new();
-    { body }.read_to_string(&mut text)?;
+    body.take(max + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > max {
+        return Err(bad_response("a body that is too large"));
+    }
     Ok(text)
 }
 
@@ -208,13 +211,23 @@ impl Response {
         })
     }
 
-    /// The body, which errors if the connection ends before its full length.
+    /// The body, which errors if the connection ends before its full length
+    /// or, when it is chunked, before its last chunk.
     fn body(self) -> io::Result<Body> {
         if self.status != 200 {
             return Err(bad_response(&format!("status {}", self.status)));
         }
-        if self.header("transfer-encoding").is_some() {
-            return Err(bad_response("a Transfer-Encoding, which ap doesn't read"));
+        if let Some(encoding) = self.header("transfer-encoding") {
+            if !encoding.eq_ignore_ascii_case("chunked") {
+                return Err(bad_response("a Transfer-Encoding, which ap doesn't read"));
+            }
+            return Ok(Body {
+                stream: self.stream,
+                remaining: 0,
+                chunked: true,
+                total: 0,
+                done: false,
+            });
         }
         let remaining: u64 = self
             .header("content-length")
@@ -226,17 +239,57 @@ impl Response {
         Ok(Body {
             stream: self.stream,
             remaining,
+            chunked: false,
+            total: remaining,
+            done: true,
         })
     }
 }
 
+/// A response's body: `remaining` bytes, or chunks of them.
 struct Body {
     stream: Tls,
+    /// What is left of the body, or of the chunk being read.
     remaining: u64,
+    chunked: bool,
+    /// How many bytes the chunks have held so far.
+    total: u64,
+    /// Whether the last chunk has been read.
+    done: bool,
+}
+
+impl Body {
+    /// Starts the next chunk, after the end of the one before it, if there
+    /// was one. The last chunk is empty, and its trailers are skipped.
+    fn next_chunk(&mut self) -> io::Result<()> {
+        let mut line = || read_line(&mut (&mut self.stream).take(MAX_HEAD_BYTES));
+        if self.total > 0 && !line()?.is_empty() {
+            return Err(bad_response("a chunk longer than its size"));
+        }
+        let size = line()?;
+        let size = size.split(';').next().unwrap_or_default().trim();
+        let size = u64::from_str_radix(size, 16)
+            .ok()
+            .filter(|_| !size.starts_with('+'))
+            .ok_or_else(|| bad_response("a malformed chunk size"))?;
+        if size == 0 {
+            while !line()?.is_empty() {}
+            self.done = true;
+            return Ok(());
+        }
+        self.total = (self.total.checked_add(size))
+            .filter(|total| *total <= MAX_BODY_BYTES)
+            .ok_or_else(|| bad_response("a body that is too large"))?;
+        self.remaining = size;
+        Ok(())
+    }
 }
 
 impl Read for Body {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.remaining == 0 && !self.done {
+            self.next_chunk()?;
+        }
         if self.remaining == 0 || buffer.is_empty() {
             return Ok(0);
         }

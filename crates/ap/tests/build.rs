@@ -1470,6 +1470,64 @@ fn an_exact_codex_version_resolves_its_own_release() {
     );
 }
 
+/// `body` as a chunked response, in chunks of up to `size` bytes, with a
+/// chunk extension and a trailer, as HTTP/1.1 allows.
+fn chunked(body: &[u8], size: usize) -> Vec<u8> {
+    let mut reply = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    for chunk in body.chunks(size) {
+        reply.extend_from_slice(format!("{:X};name=value\r\n", chunk.len()).as_bytes());
+        reply.extend_from_slice(chunk);
+        reply.extend_from_slice(b"\r\n");
+    }
+    reply.extend_from_slice(b"0\r\nTrailer: value\r\n\r\n");
+    reply
+}
+
+// GitHub's API sends some releases chunked.
+#[test]
+fn a_chunked_codex_release_resolves() {
+    let digest = common::digest(&common::codex_file());
+    let release = chunked(&release("rust-v0.169.0", &digest), 100);
+    let file = common::codex_file();
+    let server = common::Server::start(move |_| {
+        vec![
+            ("/repos/openai/codex/releases/tags/rust-v0.169.0", release),
+            (CODEX_FILE, common::ok(&file)),
+        ]
+    });
+    let settling = Settling::new("settle-codex-chunked", "AGENT codex:0.169.0\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS codex 0.169.0 {digest}\n")
+    );
+}
+
+#[test]
+fn a_chunked_release_that_ends_early_or_is_too_large_fails() {
+    let digest = common::digest(&common::codex_file());
+    let whole = chunked(&release("rust-v0.169.0", &digest), 100);
+    let mut large = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    large.extend_from_slice(b"400001\r\n");
+    large.extend(std::iter::repeat_n(b' ', 0x400001));
+    large.extend_from_slice(b"\r\n0\r\n\r\n");
+    for (name, reply) in [
+        ("settle-codex-cut", whole[..whole.len() - 7].to_vec()),
+        ("settle-codex-large", large),
+        (
+            "settle-codex-gzip",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n".to_vec(),
+        ),
+    ] {
+        let server =
+            common::Server::start(move |_| vec![("/repos/openai/codex/releases/latest", reply)]);
+        let settling = Settling::new(name, "AGENT codex\nOS minimal\n");
+        let error = settling.settle(&server).unwrap_err().to_string();
+        assert!(error.contains("codex:latest"), "{name}: {error}");
+        assert_eq!(settling.lockfile(), None, "{name}");
+    }
+}
+
 #[test]
 fn a_codex_channel_other_than_latest_fails_without_a_request() {
     let server = openai(&common::digest(&common::codex_file()));

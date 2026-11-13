@@ -1,7 +1,7 @@
 //! Boots a machine: the host's side in [`boot`], and the guest's in [`init`].
 
-use std::ffi::OsStr;
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};

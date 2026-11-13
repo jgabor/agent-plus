@@ -30,9 +30,7 @@
 //! for a command beside it.
 
 use crate::linux::{self, bytes_waiting, program_has_ended, readable_within};
-use crate::protocol::{
-    Exec, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
-};
+use crate::protocol::{Exec, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, PipeReader, PipeWriter, Read, Write};

@@ -98,7 +98,8 @@ fn exec(args: &Args) -> Result<u8, String> {
         true => {
             // Raw mode comes first, so a signal taken from here on finds the
             // modes to put back.
-            let raw = RawMode::start().map_err(|error| format!("can't set up your terminal: {error}"))?;
+            let raw =
+                RawMode::start().map_err(|error| format!("can't set up your terminal: {error}"))?;
             pass_keys(Arc::clone(&writer), false);
             take_signals(writer);
             Some(raw)

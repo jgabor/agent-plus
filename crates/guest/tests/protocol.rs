@@ -1,8 +1,6 @@
 //! The frames, and what the guest and the host refuse to read.
 
-use guest::protocol::{
-    Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
-};
+use guest::protocol::{Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
 use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
@@ -124,7 +122,22 @@ fn an_exec_is_its_arguments_after_its_terminal_s_size() {
     .unwrap();
     assert_eq!(
         wire,
-        [10, 0, 0, 0, EXEC_IN_TERMINAL, 2, 1, 3, 0, b'a', 0, b'b', b'c', 0]
+        [
+            10,
+            0,
+            0,
+            0,
+            EXEC_IN_TERMINAL,
+            2,
+            1,
+            3,
+            0,
+            b'a',
+            0,
+            b'b',
+            b'c',
+            0
+        ]
     );
     for bad in [
         frame(&[EXEC]),

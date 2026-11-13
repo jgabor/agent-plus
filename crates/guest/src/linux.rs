@@ -2,6 +2,7 @@
 
 use crate::protocol::Size;
 use crate::{MOUNTS, Mount, System, root};
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_short, c_ulong, c_void};
 use std::fs::{File, OpenOptions};
 use std::mem::size_of;
@@ -10,7 +11,6 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{self as unix_fs, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::collections::BTreeMap;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Mutex, MutexGuard, PoisonError};

@@ -181,7 +181,10 @@ fn the_command_gets_a_terminal_of_your_terminal_s_size_only_when_both_ends_are_t
         exec_in_terminal("terminal", size, true).terminal,
         Some(size)
     );
-    assert_eq!(exec_in_terminal("half-terminal", size, false).terminal, None);
+    assert_eq!(
+        exec_in_terminal("half-terminal", size, false).terminal,
+        None
+    );
 }
 
 // spec(ap exec): If the run has finished or doesn't exist, `ap exec` says so on standard error and exits with status 125.

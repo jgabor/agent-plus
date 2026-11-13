@@ -31,8 +31,8 @@
 //! to the run process with the id it gave it. Each command has a window
 //! both ways, so one whose `ap exec` doesn't keep up holds back only itself.
 
-use std::ffi::{OsStr, OsString};
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
@@ -220,7 +220,11 @@ pub fn send_to_exec(stream: &mut impl Write, message: &FromRun) -> io::Result<()
         FromRun::Stderr(bytes) => push_frame(&mut frame, STDERR, bytes),
         FromRun::End(End::Exited(status)) => push_frame(&mut frame, EXITED, &[*status]),
         FromRun::End(End::Failed(status, reason)) => {
-            push_frame(&mut frame, FAILED, &[&[*status], reason.as_bytes()].concat());
+            push_frame(
+                &mut frame,
+                FAILED,
+                &[&[*status], reason.as_bytes()].concat(),
+            );
         }
         FromRun::ForExec(..) => return Err(bad_message()),
     }
@@ -250,7 +254,11 @@ pub fn read_from_run(stream: &mut impl Read) -> io::Result<Option<FromRun>> {
 
 /// A frame for or from the `ap exec` with this id.
 fn push_exec_frame(message: &mut Vec<u8>, id: u32, tag: u8, body: &[u8]) {
-    push_frame(message, FOR_EXEC, &[&id.to_le_bytes()[..], &[tag], body].concat());
+    push_frame(
+        message,
+        FOR_EXEC,
+        &[&id.to_le_bytes()[..], &[tag], body].concat(),
+    );
 }
 
 /// The `ap exec`s of a run, which `ap run` takes from the run's socket and
@@ -285,7 +293,10 @@ impl Window {
     fn take(&self) -> bool {
         let mut unsent = self.lock();
         while unsent.0 >= EXEC_WINDOW && !unsent.1 {
-            unsent = self.room.wait(unsent).unwrap_or_else(PoisonError::into_inner);
+            unsent = self
+                .room
+                .wait(unsent)
+                .unwrap_or_else(PoisonError::into_inner);
         }
         unsent.0 += 1;
         !unsent.1
@@ -341,10 +352,7 @@ impl Execs {
                 *status,
                 String::from_utf8_lossy(reason).into_owned(),
             )),
-            _ => FromRun::End(End::Failed(
-                FAILED_STATUS,
-                bad_message().to_string(),
-            )),
+            _ => FromRun::End(End::Failed(FAILED_STATUS, bad_message().to_string())),
         };
         let ended = matches!(message, FromRun::End(_));
         let _ = client.output.send(message);
@@ -415,6 +423,9 @@ impl Execs {
                 return;
             }
         }
+        // Dropping the client ends its writer, and the command's connection
+        // closes in the run process.
+        self.clients().remove(&id);
         let _ = self.send(id, HUNG_UP, &[]);
     }
 

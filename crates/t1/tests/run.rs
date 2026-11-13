@@ -747,7 +747,11 @@ fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
 /// standard error.
 fn printed(output: &Output, stdout: &str) {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stdout, "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        stdout,
+        "{output:?}"
+    );
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 
@@ -848,6 +852,25 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
     let unrunnable = scratch.exec(&name, &["/etc/passwd"], b"");
     assert_eq!(unrunnable.status.code(), Some(126), "{unrunnable:?}");
 
+    // An `ap exec` that goes away mid-command leaves the run as it was.
+    let mut abandoned = Started(
+        scratch
+            .exec_command(&name, &["sh", "-c", "echo reading; cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut reading = String::new();
+    BufReader::new(abandoned.0.stdout.take().unwrap())
+        .read_line(&mut reading)
+        .unwrap();
+    assert_eq!(reading, "reading\n");
+    // `timeout` passes the signal on to `ap exec`.
+    signal("-TERM", abandoned.0.id());
+    wait_within(&mut abandoned, Duration::from_secs(10));
+    printed(&scratch.exec(&name, &["id", "-un"], b""), "agent\n");
+
     // The run ends while a command runs.
     let mut sleeper = Started(
         scratch
@@ -876,5 +899,8 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
     let finished = scratch.exec(&name, &["true"], b"");
     assert_eq!(finished.status.code(), Some(FAILED), "{finished:?}");
     let stderr = String::from_utf8_lossy(&finished.stderr);
-    assert!(stderr.contains(&format!("run {name} has finished")), "{stderr}");
+    assert!(
+        stderr.contains(&format!("run {name} has finished")),
+        "{stderr}"
+    );
 }

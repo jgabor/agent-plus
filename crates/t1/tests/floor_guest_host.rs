@@ -940,6 +940,7 @@ fn check_allowed_controls(case: &Case, seen: &Observation) -> Result<(), String>
 }
 
 // seccomp and BPF, from <linux/seccomp.h> and <linux/filter.h>.
+const PR_SET_DUMPABLE: c_int = 4;
 const PR_SET_SECCOMP: c_int = 22;
 const PR_SET_NO_NEW_PRIVS: c_int = 38;
 const SECCOMP_MODE_FILTER: c_ulong = 2;
@@ -1014,15 +1015,18 @@ const FILTER: [Instruction; 15] = [
     op(RETURN, 0, 0, RET_ERRNO_ENOSYS),
 ];
 
+/// Puts the filter on this process, and stops it from dumping core, because a
+/// planted device gets it killed on purpose.
 fn forbid_new_processes() {
     let program = Program {
         len: FILTER.len() as u16,
         instructions: FILTER.as_ptr(),
     };
-    // SAFETY: both calls match the prctl signatures for these options, and
-    // `program` and the filter it points to outlive the second call, which
+    // SAFETY: the calls match the prctl signatures for these options, and
+    // `program` and the filter it points to outlive the last call, which
     // copies them.
     unsafe {
+        assert_eq!(prctl(PR_SET_DUMPABLE, 0 as c_ulong), 0);
         assert_eq!(
             prctl(
                 PR_SET_NO_NEW_PRIVS,

@@ -952,7 +952,7 @@ fn the_os_layer_is_the_bottom_layer() {
 #[test]
 fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
     let scratch = Scratch::new("harness-fifo");
-    let dir = scratch.project("notes", "AGENT claude\n");
+    let dir = scratch.project("notes", "AGENT claude\nOS minimal\n");
     let path = common::cached(&scratch.home, &common::digest(common::HARNESS));
     fs::remove_file(&path).unwrap();
     let made = Command::new("mkfifo").arg(&path).status().unwrap();
@@ -986,5 +986,5 @@ fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
     let mut message = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut message).unwrap();
     assert!(message.contains("isn't a file"), "{message}");
-    assert!(scratch.layer_files().is_empty());
+    assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
 }

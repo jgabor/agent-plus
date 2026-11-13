@@ -7,6 +7,7 @@ use crate::workspace::{self, Package};
 use crate::{Problem, Verdict, base, limit, report};
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const SECONDS: u64 = 3600;
@@ -36,12 +37,16 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
     // A killed run can't clean up its copies of the tree. Here, the next run does.
     let temp = output.join("tmp");
     fs::create_dir_all(&temp).map_err(|e| Problem(format!("couldn't create {OUTPUT}: {e}")))?;
+    // Each test binary runs as a job of its own, so a mutant that runs away
+    // takes only its own processes with it, and `cargo test` sees it fail.
+    let runner = output.join("runner");
+    write_script(&runner, &limit::job_script()?)?;
     let limit = limit::seconds(SECONDS_OVERRIDE, SECONDS)?;
     let finished = limit::run(
         hold,
         root,
         Path::new("cargo"),
-        &arguments(&changed),
+        &arguments(&changed, &runner),
         &[("TMPDIR", temp.as_os_str())],
         limit,
     )?;
@@ -95,10 +100,23 @@ fn changed_packages(
     Ok(changed)
 }
 
-fn arguments(changed: &[(Package, String)]) -> Vec<String> {
-    let mut arguments: Vec<String> = ["mutants", "--colors", "never", "--no-shuffle", "-o", OUTPUT]
+fn write_script(path: &Path, script: &str) -> Result<(), Problem> {
+    fs::write(path, script)
+        .and_then(|()| fs::set_permissions(path, fs::Permissions::from_mode(0o755)))
+        .map_err(|error| Problem(format!("couldn't write {}: {error}", path.display())))
+}
+
+/// `runner` is given to `cargo` as a TOML string, which is quoted the way Rust
+/// quotes one for debugging, as long as it holds no control characters.
+fn arguments(changed: &[(Package, String)], runner: &Path) -> Vec<String> {
+    let mut arguments: Vec<String> = ["mutants", "--colors", "never", "--no-shuffle"]
         .map(String::from)
         .to_vec();
+    arguments.push(format!(
+        "--cargo-arg=--config=target.'cfg(all())'.runner=[{:?}]",
+        runner.to_string_lossy()
+    ));
+    arguments.extend(["-o", OUTPUT].map(String::from));
     for (package, _) in changed {
         arguments.push("-p".to_string());
         arguments.push(package.name.clone());

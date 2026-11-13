@@ -1351,9 +1351,14 @@ fn a_surviving_mutant_opens_an_issue() {
     repo.touch(&["ap"]);
     let output = repo.xtask(&["nightly"]);
     assert_mutation_ran(&repo, &output, 0, "pass");
+    let mutants = repo.read_bin("mutants-calls");
+    let runner = repo.root.join("target/mutants/runner");
     assert_eq!(
-        repo.read_bin("mutants-calls"),
-        "mutants --colors never --no-shuffle -o target/mutants -p ap"
+        mutants,
+        format!(
+            "mutants --colors never --no-shuffle --cargo-arg=--config=target.'cfg(all())'.runner=[{:?}] -o target/mutants -p ap",
+            runner.display().to_string()
+        )
     );
     let calls = repo.calls().join("\n");
     assert!(
@@ -1418,6 +1423,112 @@ fn mutants_run_as_one_contained_job() {
     ] {
         assert!(calls.contains(part), "{part} in {calls}");
     }
+}
+
+/// Finds the runner in the fake's arguments, and runs `cargo test` with it. The
+/// test runs away only if `RUNAWAY_HERE` is set.
+const TEST_WITH_RUNNER: &str = r#"for a in "$@"; do case "$a" in --cargo-arg=*) arg="${a#--cargo-arg=}";; esac; done
+if [ -n "$RUNAWAY_HERE" ]; then export RUNAWAY="$d"; fi
+cargo test --quiet --package ap --test runaway ${arg:+"$arg"} >/dev/null 2>&1
+echo $? > "$d/tested"
+"#;
+
+/// Starts a process that only sleeps, and then allocates 2 GiB, but only when
+/// `RUNAWAY` names a directory to say so in.
+const RUNAWAY_TEST: &str = r#"use std::path::Path;
+use std::process::Command;
+
+// The child is meant to outlive this test, unless the job takes it too.
+#[allow(clippy::zombie_processes)]
+#[test]
+fn runaway() {
+    let Some(d) = std::env::var_os("RUNAWAY") else {
+        return;
+    };
+    Command::new("sh")
+        .arg("-c")
+        .arg(CHILD)
+        .arg("sh")
+        .arg(&d)
+        .spawn()
+        .unwrap();
+    while !Path::new(&d).join("child").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let mut blocks = Vec::new();
+    for _ in 0..2048 {
+        blocks.push(vec![1u8; 1 << 20]);
+    }
+    assert_eq!(blocks.len(), 2048);
+}
+
+const CHILD: &str = r"echo $$ $(cut -d')' -f2 /proc/$$/stat | cut -d' ' -f21) > $1/child.new
+mv $1/child.new $1/child
+exec sleep 3608";
+"#;
+
+/// `cargo mutants` gives `cargo` the runner for each test binary.
+#[test]
+fn each_test_of_mutants_is_a_job_of_its_own() {
+    let repo = Repo::with(
+        "test-job",
+        "fn main() {}\n",
+        &[("crates/ap/tests/runaway.rs", RUNAWAY_TEST)],
+    );
+    repo.set_mutants(TEST_WITH_RUNNER);
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert_eq!(repo.read_bin("tested"), "0");
+    let calls = repo.read_bin("systemd-calls");
+    let job = calls
+        .lines()
+        .find(|line| line.contains("/runaway-"))
+        .unwrap_or_else(|| panic!("no job ran the test in {calls}"));
+    for part in [
+        "--user --scope --quiet --collect --expand-environment=no",
+        "MemoryMax=8G",
+        "MemorySwapMax=0",
+        "OOMPolicy=kill",
+        "BindsTo=",
+    ] {
+        assert!(job.contains(part), "{part} in {job}");
+    }
+}
+
+/// When the kernel kills a test over the memory limit, a process it started
+/// mustn't live on into the next mutant, and `cargo mutants` must go on. One
+/// that did took the rest of a nightly run with it.
+#[test]
+fn a_mutant_over_the_memory_limit_takes_only_its_own_processes() {
+    let repo = Repo::with(
+        "test-oom",
+        "fn main() {}\n",
+        &[("crates/ap/tests/runaway.rs", RUNAWAY_TEST)],
+    );
+    fs::remove_file(repo.bin.join("systemd-run")).unwrap();
+    repo.set_mutants(TEST_WITH_RUNNER);
+    repo.touch(&["ap"]);
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .env("XTASK_MEMORY_MAX", "512M")
+        .env("RUNAWAY_HERE", "1")
+        .output()
+        .unwrap();
+    let child = ids(&repo, "child");
+    let _reap = Reap(child[0], child[1]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while is_alive(child[0], child[1]) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !is_alive(child[0], child[1]),
+        "process {} outlived the test that started it",
+        child[0]
+    );
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert_eq!(repo.read_bin("tested"), "101", "the test failed");
 }
 
 #[test]

@@ -264,7 +264,7 @@ fn build(args: &Args) -> Result<(), String> {
         &mut lock,
         &agent,
         &Client::new(),
-        lock::base(agent.harness),
+        &lock::ORIGINS,
         &cache,
         |locked| {
             stored(&agents, &layers, &harness_key(locked), BASE_LEVEL)

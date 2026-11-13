@@ -1012,17 +1012,6 @@ impl Settling {
     /// Settles as [`Settling::settle`] does, when the store has the harness
     /// layer if `stored`.
     fn settle_with(&self, server: &common::Server, stored: bool) -> std::io::Result<bool> {
-        self.settle_from(server, RELEASES, stored)
-    }
-
-    /// Settles as [`Settling::settle_with`] does, with the harness's
-    /// releases under `base` on `server`.
-    fn settle_from(
-        &self,
-        server: &common::Server,
-        base: &str,
-        stored: bool,
-    ) -> std::io::Result<bool> {
         let source = fs::read_to_string(self.dir.join("Agentfile")).unwrap();
         let instructions = agentfile::parse(&source).unwrap();
         let agent = agentfile::Settings::read(&instructions).unwrap().agent;
@@ -1036,7 +1025,11 @@ impl Settling {
             &mut lock,
             &agent,
             &common::trusting_client(),
-            &server.url(base),
+            &ap::lock::Origins {
+                claude: &server.url(RELEASES),
+                codex_api: &server.url(CODEX_API),
+                codex: &server.url(CODEX),
+            },
             &self.cache,
             |_| stored,
         )
@@ -1254,32 +1247,49 @@ fn a_version_that_is_not_one_path_segment_is_refused() {
     assert_eq!(settling.lockfile(), None);
 }
 
-/// The path under which [`openai`] serves Codex's GitHub releases.
+/// The path under which [`openai`] serves Codex's releases in GitHub's API.
+const CODEX_API: &str = "/repos/openai/codex";
+
+/// The path under which [`openai`] serves Codex's files.
 const CODEX: &str = "/openai/codex";
 
 /// The path of Codex 0.169.0's file, under [`CODEX`].
 const CODEX_FILE: &str =
     "/openai/codex/releases/download/rust-v0.169.0/codex-x86_64-unknown-linux-musl.zst";
 
+/// A GitHub release of Codex, as its API sends one, whose Linux x86_64
+/// asset has the digest `sha256`, with other assets around it.
+fn release(tag: &str, sha256: &str) -> Vec<u8> {
+    let other = "1".repeat(64);
+    format!(
+        r#"{{"tag_name":"{tag}","name":"0.169.0","body":"Fixes \"codex-x86_64-unknown-linux-musl.zst\"","assets":[
+{{"name":"codex-x86_64-unknown-linux-musl.tar.gz","uploader":{{"login":"x"}},"size":1,"digest":"sha256:{other}"}},
+{{"name":"codex-x86_64-unknown-linux-musl.zst","uploader":{{"login":"x"}},"size":1,"digest":"sha256:{sha256}"}},
+{{"name":"codex-aarch64-unknown-linux-musl.zst","uploader":{{"login":"x"}},"size":1,"digest":"sha256:{other}"}}
+]}}"#
+    )
+    .into_bytes()
+}
+
 /// Serves Codex 0.169.0 as GitHub does, as its latest release, with `file`
-/// as its Linux x86_64 asset.
-fn openai(file: Vec<u8>) -> common::Server {
-    common::Server::start(move |origin| {
+/// as its Linux x86_64 asset and `release` as what the API says of it.
+fn openai_with(file: Vec<u8>, release: Vec<u8>) -> common::Server {
+    common::Server::start(move |_| {
         vec![
+            ("/repos/openai/codex/releases/latest", common::ok(&release)),
             (
-                "/openai/codex/releases/latest",
-                common::redirect(&format!("{origin}/openai/codex/releases/tag/rust-v0.169.0")),
+                "/repos/openai/codex/releases/tags/rust-v0.169.0",
+                common::ok(&release),
             ),
             (CODEX_FILE, common::ok(&file)),
         ]
     })
 }
 
-impl Settling {
-    /// Settles Codex against `server`, as [`Settling::settle`] does.
-    fn settle_codex(&self, server: &common::Server) -> std::io::Result<bool> {
-        self.settle_from(server, CODEX, false)
-    }
+/// Serves Codex 0.169.0 as GitHub does, with [`common::codex_file`] as its
+/// Linux x86_64 asset, which the API gives the digest `sha256`.
+fn openai(sha256: &str) -> common::Server {
+    openai_with(common::codex_file(), release("rust-v0.169.0", sha256))
 }
 
 // spec(Build): **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile.
@@ -1288,16 +1298,16 @@ impl Settling {
 fn codex_latest_resolves_downloads_and_writes_the_lock() {
     let file = common::codex_file();
     let digest = common::digest(&file);
-    let server = openai(file.clone());
+    let server = openai(&digest);
     let settling = Settling::new("settle-codex", "AGENT codex:latest\nOS minimal\n");
-    assert!(settling.settle_codex(&server).unwrap());
+    assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
         format!("HARNESS codex 0.169.0 {digest}\n")
     );
     assert_eq!(
         Settling::paths(&server),
-        ["/openai/codex/releases/latest", CODEX_FILE]
+        ["/repos/openai/codex/releases/latest", CODEX_FILE]
     );
     assert_eq!(settling.cached(), [digest.as_str()]);
     assert_eq!(fs::read(settling.cache.join(&digest)).unwrap(), file);
@@ -1317,12 +1327,14 @@ fn codex_latest_resolves_downloads_and_writes_the_lock() {
 // spec(AGENT): Without a version, `ap` uses `latest`.
 #[test]
 fn codex_without_a_version_resolves_latest() {
-    let file = common::codex_file();
-    let digest = common::digest(&file);
-    let server = openai(file);
+    let digest = common::digest(&common::codex_file());
+    let server = openai(&digest);
     let settling = Settling::new("settle-codex-bare", "AGENT codex\nOS minimal\n");
-    assert!(settling.settle_codex(&server).unwrap());
-    assert_eq!(Settling::paths(&server)[0], "/openai/codex/releases/latest");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        Settling::paths(&server)[0],
+        "/repos/openai/codex/releases/latest"
+    );
     assert_eq!(
         settling.lockfile().unwrap(),
         format!("HARNESS codex 0.169.0 {digest}\n")
@@ -1331,24 +1343,92 @@ fn codex_without_a_version_resolves_latest() {
 
 #[test]
 fn a_codex_rebuild_reuses_the_lock_and_downloads_nothing() {
-    let server = openai(common::codex_file());
+    let server = openai(&common::digest(&common::codex_file()));
     let settling = Settling::new("settle-codex-reuse", "AGENT codex:latest\nOS minimal\n");
-    assert!(settling.settle_codex(&server).unwrap());
+    assert!(settling.settle(&server).unwrap());
     let lock = settling.lockfile().unwrap();
     let requests = server.requests();
-    assert!(!settling.settle_codex(&server).unwrap());
+    assert!(!settling.settle(&server).unwrap());
     assert_eq!(server.requests(), requests);
     assert_eq!(settling.lockfile().unwrap(), lock);
 }
 
+// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
+#[test]
+fn a_codex_file_in_the_cache_or_store_is_not_downloaded_again() {
+    let digest = common::digest(&common::codex_file());
+    let server = openai(&digest);
+    let first = Settling::new("settle-codex-once", "AGENT codex:latest\nOS minimal\n");
+    assert!(first.settle(&server).unwrap());
+    // A second project resolves the same release, and the cache has its file.
+    let second = first
+        .scratch
+        .project("two", "AGENT codex:latest\nOS minimal\n");
+    fs::remove_file(second.join("Agentfile.lock")).unwrap();
+    let path = second.join("Agentfile.lock");
+    let source = fs::read_to_string(second.join("Agentfile")).unwrap();
+    let instructions = agentfile::parse(&source).unwrap();
+    let agent = agentfile::Settings::read(&instructions).unwrap().agent;
+    let origins = ap::lock::Origins {
+        claude: &server.url(RELEASES),
+        codex_api: &server.url(CODEX_API),
+        codex: &server.url(CODEX),
+    };
+    let mut lock = ap::lock::Lock::default();
+    let client = common::trusting_client();
+    assert!(
+        ap::lock::settle(
+            &path,
+            &mut lock,
+            &agent,
+            &client,
+            &origins,
+            &first.cache,
+            |_| false
+        )
+        .unwrap()
+    );
+    // And one whose store has the harness layer needs no cached file.
+    let third = Settling::new("settle-codex-stored", "AGENT codex:latest\nOS minimal\n");
+    assert!(third.settle_with(&server, true).unwrap());
+    assert!(third.cached().is_empty());
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/repos/openai/codex/releases/latest",
+            CODEX_FILE,
+            "/repos/openai/codex/releases/latest",
+            "/repos/openai/codex/releases/latest",
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        format!("HARNESS codex 0.169.0 {digest}\n")
+    );
+}
+
+#[test]
+fn a_codex_download_with_the_wrong_digest_stores_nothing_and_writes_no_lock() {
+    let server = openai(&common::digest(b"another file"));
+    let settling = Settling::new("settle-codex-digest", "AGENT codex:latest\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(
+        error.contains(&common::digest(&common::codex_file())),
+        "{error}"
+    );
+    assert!(error.contains("codex:0.169.0"), "{error}");
+    assert_eq!(settling.lockfile(), None);
+    assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+}
+
 #[test]
 fn a_codex_download_that_does_not_match_the_lock_stores_nothing() {
-    let server = openai(b"another file".to_vec());
-    let settling = Settling::new("settle-codex-digest", "AGENT codex:latest\nOS minimal\n");
+    let server = openai_with(b"another file".to_vec(), Vec::new());
+    let settling = Settling::new("settle-codex-locked", "AGENT codex:latest\nOS minimal\n");
     let digest = common::digest(&common::codex_file());
     let lock = format!("HARNESS codex 0.169.0 {digest}\n");
     fs::write(settling.dir.join("Agentfile.lock"), &lock).unwrap();
-    let error = settling.settle_codex(&server).unwrap_err().to_string();
+    let error = settling.settle(&server).unwrap_err().to_string();
     assert!(error.contains(&common::digest(b"another file")), "{error}");
     assert!(error.contains("codex:0.169.0"), "{error}");
     assert_eq!(Settling::paths(&server), [CODEX_FILE]);
@@ -1358,14 +1438,13 @@ fn a_codex_download_that_does_not_match_the_lock_stores_nothing() {
 
 #[test]
 fn a_codex_download_that_fails_stores_nothing_and_writes_no_lock() {
-    let server = common::Server::start(|origin| {
-        vec![(
-            "/openai/codex/releases/latest",
-            common::redirect(&format!("{origin}/openai/codex/releases/tag/rust-v0.169.0")),
-        )]
+    let digest = common::digest(&common::codex_file());
+    let release = release("rust-v0.169.0", &digest);
+    let server = common::Server::start(move |_| {
+        vec![("/repos/openai/codex/releases/latest", common::ok(&release))]
     });
     let settling = Settling::new("settle-codex-404", "AGENT codex:latest\nOS minimal\n");
-    let error = settling.settle_codex(&server).unwrap_err().to_string();
+    let error = settling.settle(&server).unwrap_err().to_string();
     assert!(error.contains("codex:0.169.0"), "{error}");
     assert!(error.contains("404"), "{error}");
     assert_eq!(settling.lockfile(), None);
@@ -1373,13 +1452,18 @@ fn a_codex_download_that_fails_stores_nothing_and_writes_no_lock() {
 }
 
 #[test]
-fn an_exact_codex_version_resolves_without_latest() {
-    let file = common::codex_file();
-    let digest = common::digest(&file);
-    let server = openai(file);
+fn an_exact_codex_version_resolves_its_own_release() {
+    let digest = common::digest(&common::codex_file());
+    let server = openai(&digest);
     let settling = Settling::new("settle-codex-exact", "AGENT codex:0.169.0\nOS minimal\n");
-    assert!(settling.settle_codex(&server).unwrap());
-    assert_eq!(Settling::paths(&server), [CODEX_FILE]);
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/repos/openai/codex/releases/tags/rust-v0.169.0",
+            CODEX_FILE
+        ]
+    );
     assert_eq!(
         settling.lockfile().unwrap(),
         format!("HARNESS codex 0.169.0 {digest}\n")
@@ -1388,27 +1472,39 @@ fn an_exact_codex_version_resolves_without_latest() {
 
 #[test]
 fn a_codex_channel_other_than_latest_fails_without_a_request() {
-    let server = openai(common::codex_file());
+    let server = openai(&common::digest(&common::codex_file()));
     let settling = Settling::new("settle-codex-stable", "AGENT codex:stable\nOS minimal\n");
-    let error = settling.settle_codex(&server).unwrap_err().to_string();
+    let error = settling.settle(&server).unwrap_err().to_string();
     assert!(error.contains("codex:stable"), "{error}");
     assert_eq!(server.requests(), 0);
     assert_eq!(settling.lockfile(), None);
 }
 
 #[test]
-fn a_latest_release_that_is_not_a_version_writes_no_lock() {
-    let server = common::Server::start(|origin| {
-        vec![(
-            "/openai/codex/releases/latest",
-            common::redirect(&format!("{origin}/openai/codex/releases/tag/rust-v..%2f")),
-        )]
-    });
-    let settling = Settling::new("settle-codex-tag", "AGENT codex:latest\nOS minimal\n");
-    let error = settling.settle_codex(&server).unwrap_err().to_string();
-    assert!(error.contains("codex:latest"), "{error}");
-    assert_eq!(server.requests(), 1);
-    assert_eq!(settling.lockfile(), None);
+fn a_codex_release_that_does_not_say_what_to_lock_writes_no_lock() {
+    let digest = common::digest(&common::codex_file());
+    for (name, agent, release) in [
+        ("settle-codex-tag", "latest", release("rust-v../x", &digest)),
+        (
+            "settle-codex-other",
+            "0.169.0",
+            release("rust-v0.168.0", &digest),
+        ),
+        (
+            "settle-codex-nodigest",
+            "latest",
+            release("rust-v0.169.0", "00ff"),
+        ),
+        ("settle-codex-json", "latest", b"{\"tag_name\":".to_vec()),
+    ] {
+        let server = openai_with(common::codex_file(), release);
+        let settling = Settling::new(name, &format!("AGENT codex:{agent}\nOS minimal\n"));
+        let error = settling.settle(&server).unwrap_err().to_string();
+        assert!(error.contains(&format!("codex:{agent}")), "{name}: {error}");
+        assert_eq!(server.requests(), 1, "{name}");
+        assert_eq!(settling.lockfile(), None, "{name}");
+        assert!(settling.cached().is_empty(), "{name}");
+    }
 }
 
 #[test]

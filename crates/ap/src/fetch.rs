@@ -110,24 +110,6 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
     store.put(pin.sha256, download(client, pin.url)?)
 }
 
-/// Downloads `url` into `store`, and returns the digest it is stored under
-/// and its path. A download that fails stores nothing.
-pub fn add(store: &Store, client: &Client, url: &str) -> io::Result<(String, PathBuf)> {
-    store.add(download(client, url)?)
-}
-
-/// Where `url` redirects to. Any other response is an error.
-pub fn location(client: &Client, url: &str) -> io::Result<String> {
-    let response = client.get(url)?;
-    match response.redirect() {
-        Some(location) => location,
-        None => Err(bad_response(&format!(
-            "status {}, not a redirect",
-            response.status
-        ))),
-    }
-}
-
 /// The text at `url`, which may hold at most `max` bytes.
 pub fn text(client: &Client, url: &str, max: u64) -> io::Result<String> {
     let body = download(client, url)?;

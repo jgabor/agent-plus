@@ -8,6 +8,7 @@ pub mod boot;
 pub mod fetch;
 pub mod filter;
 pub mod gitignore;
+pub mod json;
 pub mod lock;
 pub mod paths;
 pub mod runs;

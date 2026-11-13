@@ -70,21 +70,11 @@ impl Store {
 
     /// Stores `content` if it hashes to `sha256`. The file appears under its
     /// final name complete and synced, or not at all.
-    pub fn put(&self, sha256: &str, content: impl Read) -> io::Result<PathBuf> {
-        self.path(sha256)?;
-        Ok(self.write(content, Some(sha256))?.1)
-    }
-
-    /// Stores `content` under its digest, and returns the digest and the
-    /// path, as [`Store::put`] does when the digest isn't known first.
-    pub fn add(&self, content: impl Read) -> io::Result<(String, PathBuf)> {
-        self.write(content, None)
-    }
-
-    fn write(&self, mut content: impl Read, sha256: Option<&str>) -> io::Result<(String, PathBuf)> {
+    pub fn put(&self, sha256: &str, mut content: impl Read) -> io::Result<PathBuf> {
+        let path = self.path(sha256)?;
         fs::create_dir_all(&self.layers)?;
 
-        let (partial, mut file) = self.create_partial(sha256.unwrap_or("download"))?;
+        let (partial, mut file) = self.create_partial(sha256)?;
 
         let mut hash = Sha256Context::new();
         let mut buffer = vec![0; 64 * 1024];
@@ -98,16 +88,13 @@ impl Store {
         }
 
         let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
-        if let Some(sha256) = sha256
-            && actual != sha256
-        {
+        if actual != sha256 {
             return Err(crate::fetch::wrong_digest(&actual, sha256));
         }
-        let path = self.path(&actual)?;
         file.sync_all()?;
         fs::rename(&partial.0, &path)?;
         File::open(&self.layers)?.sync_all()?;
-        Ok((actual, path))
+        Ok(path)
     }
 
     /// Creates a file with a name no other writer holds. A crashed process

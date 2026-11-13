@@ -337,21 +337,39 @@ Files outside any single lane follow these rules:
 
 | File | Rule |
 |---|---|
-| `SPEC.md` | Changed only by `spec-change` PRs |
-| `AGENTS.md` and `HARNESS.md` | Changed only by `spec-change` PRs, so an agent can't change its own rules |
+| `SPEC.md` | A new sentence merges with its check. A rewrite waits for the owner |
 | `harness/ledger/` | One new file per merge |
-| `harness/waived.txt` | Changed only by `spec-change` PRs, with union merge through `.gitattributes` |
+| `harness/waived.txt` | A new waiver waits for the owner. Union merge through `.gitattributes` |
 | `harness/journey/` | Step scripts, which any PR may change |
-| `xtask/`, `.github/`, and the rest of `harness/` | Changed only by `spec-change` PRs, so a PR can't weaken its own gate |
 | `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
 
-The gate fails when a diff touches one of these `spec-change` paths and its PR
-doesn't have the label. That includes a typo, because a program can't tell a
-typo from a change of meaning. A `spec-change` PR may also edit the `// spec(`
-lines and waivers that quote the changed text. A branch with no open PR yet
-prints `skip labels`, because `cargo xtask merge` gates it again with the PR
-open. `cargo xtask merge` refuses a `spec-change` PR, and `cargo xtask prepare`
-readies it for the owner.
+### What waits for the owner
+
+`cargo xtask merge` reads a PR's diff with `main` to decide whether the PR
+waits for the owner. The owner's merge is for awareness, not a security
+boundary. A PR waits when it:
+
+- changes or removes a SPEC.md unit that `main` has. A unit ignores
+  whitespace, so a reflowed paragraph doesn't wait.
+- adds a waiver to `harness/waived.txt`.
+- raises a target or a band in `harness/budgets.toml`, or removes a budget.
+- adds a line to `harness/build-scripts.txt`.
+- lowers the number of `#[test]` functions under `xtask/`. They are counted,
+  not named, so a test can be renamed or moved.
+- lowers a count.
+- changes a path under `.github/`, because a workflow there runs with a token
+  that can write, and a leaked token can't be taken back.
+- changes `xtask/src/waits.rs`, `merge.rs`, `gate.rs`, or `spec.rs`, which
+  decide this.
+
+Each of these lowers the bar for later PRs, or can't be undone by a revert.
+Everything else merges under `auto:merge`: a new SPEC.md sentence with its
+check, AGENTS.md, HARNESS.md, the task briefs, and the rest of `xtask/` and
+`harness/`. Nightly mutation testing is what notices a weakened test that kept
+its count. The xtask built from `main` decides, so a PR can't let itself
+through. `merge` fails a PR that waits with `fail owner`, and names each
+reason. `prepare` passes it, and its comment lists each reason under
+"Merging this PR at `<head>` accepts:".
 
 ## Data formats
 
@@ -623,10 +641,9 @@ accepts. A PR that changes a file xtask reads together with the code that
 reads it, or how `prove` is called, still has to be staged: teach the reader
 first, and change the file in a later PR.
 
-1. `merge` refuses a PR unless its issue has `auto:merge`, and refuses a
-   `spec-change` PR. All three commands refuse a PR that comes from a fork,
-   doesn't close exactly one issue, doesn't target `main`, or has changes
-   requested. `merge` and `prepare` refuse a thread that doesn't hold the
+1. `merge` refuses a PR unless its issue has `auto:merge`. All three commands
+   refuse a PR that comes from a fork, doesn't close exactly one issue, doesn't
+   target `main`, or has changes requested. `merge` and `prepare` refuse a thread that doesn't hold the
    issue's live claim.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
@@ -634,7 +651,9 @@ first, and change the file in a later PR.
 4. Post `pending` on the branch's current head. Run the gate on the rebased
    head, the journey without `spend` steps, and the bench if a budget can be
    affected. If the PR changes `xtask/`, its own xtask then runs them too. A
-   lowered count fails `merge`, and passes `prepare`. An exact revert under
+   lowered count fails `merge`, and passes `prepare`. So does a PR that
+   [waits for the owner](#what-waits-for-the-owner), and `merge` fails it
+   before the gate runs. An exact revert under
    `prepare` skips the bench, because its base may be what doesn't build. If
    the rebase or this proof fails, the command posts `failure` on the branch's
    current head and pushes nothing.
@@ -642,9 +661,10 @@ first, and change the file in a later PR.
    Commit the ledger record, whose `commit` is the gated head and whose `base`
    is the `main` it was tested on, and push with `--force-with-lease`.
 6. Verify that the new head differs from the gated head only by that record.
-   If a count fell or the PR is an exact revert, comment on the PR naming what
-   merging accepts. Post `xtask/gate` on the new head. `prepare` stops here,
-   and so does `land` if merging would accept something, so the owner reads it.
+   If the PR waits for the owner, a count fell, or the PR is an exact revert,
+   comment on the PR naming what merging accepts. Post `xtask/gate` on the new
+   head. `prepare` stops here, and so does `land` if merging would accept
+   something, so the owner reads it.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
@@ -854,9 +874,8 @@ passes. No scheduled work runs on GitHub.
 ## Owner actions
 
 - Add `auto:*` labels to top-level issues.
-- Merge `spec-change` PRs, which cover SPEC.md, AGENTS.md, HARNESS.md,
-  `xtask/`, `.github/`, and `harness/`, with any merge button once
-  `xtask/gate` is green.
+- Merge each PR that [waits for the owner](#what-waits-for-the-owner) with any
+  merge button once `xtask/gate` is green. A PR comment says why it waits.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
 - If the PR is behind `main`, wait for the [refresh](#refresh) to prove it

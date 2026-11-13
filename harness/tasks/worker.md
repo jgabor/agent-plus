@@ -43,13 +43,13 @@ can't continue alone, park the issue as AGENTS.md says.
 6. Open the PR and link it with `mcp__t3-code__link_pull_request`. `xtask/gate`
    is the only check, and no bot reviews this repository, so don't wait for
    either.
-7. If the issue has `auto:merge` and the PR doesn't have `spec-change`, run
-   `cargo xtask merge <pr> --thread <id>`. If it prints `fail hills`, `fail
-   journey`, or `fail budgets` because a count fell, run `cargo xtask prepare
-   <pr> --thread <id>` and go on as below. On any other PR, run `cargo xtask
-   prepare <pr> --thread <id>`. If either says the issue is held by another
-   thread, stop and change nothing more. If `prepare` exits 0, park the issue
-   and say that the PR is ready to merge. Never squash it yourself.
+7. If the issue has `auto:merge`, run `cargo xtask merge <pr> --thread <id>`.
+   If it prints `fail owner`, because the PR waits for the owner, or `fail
+   hills`, `fail journey`, or `fail budgets` because a count fell, run `cargo
+   xtask prepare <pr> --thread <id>` and go on as below. On any other PR, run
+   `cargo xtask prepare <pr> --thread <id>`. If either says the issue is held
+   by another thread, stop and change nothing more. If `prepare` exits 0, park
+   the issue and say that the PR is ready to merge. Never squash it yourself.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
 9. Remove your worktree and its local branch after a merge, and also after

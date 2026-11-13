@@ -6,9 +6,11 @@
 //! permission mode every time it starts the harness, so neither a project's
 //! settings nor an earlier session can pick others.
 //!
-//! What each version accepts was read from the published releases: `--effort`
-//! takes `low`, `medium`, `high`, and `max` from 2.1.38, and `xhigh` too from
-//! 2.1.111, and `--permission-mode` takes `auto` from 2.1.91.
+//! What each version accepts was read from the published releases, by giving
+//! each an option it refuses: `--effort` takes `low`, `medium`, `high`, and
+//! `max` from 2.1.38, and `xhigh` too from 2.1.111, and `--permission-mode`
+//! takes `auto` from 2.1.71. The adapter doesn't set the effort of an older
+//! version, which reads it only from its environment.
 
 use agentfile::{Effort, Mode};
 
@@ -27,7 +29,7 @@ const EFFORT_FROM: [u64; 3] = [2, 1, 38];
 /// The first version whose `--effort` takes `xhigh`.
 const XHIGH_FROM: [u64; 3] = [2, 1, 111];
 /// The first version whose `--permission-mode` takes `auto`.
-const AUTO_FROM: [u64; 3] = [2, 1, 91];
+const AUTO_FROM: [u64; 3] = [2, 1, 71];
 
 /// The files the adapter puts in the configuration layer, by guest path, in
 /// path order: `SYSTEM`'s values in [`INSTRUCTIONS`], if there are any, then
@@ -64,7 +66,7 @@ pub fn effort(version_text: &str, effort: Effort) -> (Option<&'static str>, Opti
     let version = version(version_text);
     if version.as_slice() < EFFORT_FROM.as_slice() {
         let warning = format!(
-            "Claude Code {version_text} has no effort setting, so `EFFORT {asked}` does nothing"
+            "Claude Code {version_text} has no `--effort`, so `EFFORT {asked}` does nothing"
         );
         return (None, Some(warning));
     }

@@ -24,7 +24,7 @@ const MODES: [Mode; 5] = [Mode::Read, Mode::Ask, Mode::Edit, Mode::Auto, Mode::F
 /// The current version, and the versions on either side of each change in
 /// what Claude Code accepts.
 const VERSIONS: [&str; 7] = [
-    "2.1.37", "2.1.38", "2.1.90", "2.1.91", "2.1.110", "2.1.111", "2.1.323",
+    "2.1.37", "2.1.38", "2.1.70", "2.1.71", "2.1.110", "2.1.111", "2.1.323",
 ];
 
 /// Fails unless `actual` is what the golden file `name` holds.

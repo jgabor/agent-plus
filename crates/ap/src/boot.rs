@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
-use guest::protocol::{MAX_BODY, PORT, Start, ToGuest, ToHost};
+use guest::protocol::{EXEC_PORT, MAX_BODY, PORT, Start, ToGuest, ToHost};
 use guest::{Channel, Event, agent, root};
 use vmm::block::Block;
 use vmm::initramfs::{self, Entry};
@@ -723,7 +723,8 @@ impl Channel for Host {
         ToHost::Ready(release.trim_ascii().to_vec())
             .write(&mut channel)
             .map_err(protocol_failed)?;
-        agent::serve(&mut channel).map_err(protocol_failed)?;
+        let connect = || linux::connect_to_host(EXEC_PORT);
+        agent::serve(&mut channel, Some(connect)).map_err(protocol_failed)?;
         Ok(Event::PowerOff)
     }
 }

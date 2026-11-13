@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 fn serve(channel: &mut impl Split) -> Result<(), ProtocolError> {
     static TURN: Mutex<()> = Mutex::new(());
     let _turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    agent::serve(channel)
+    agent::serve(channel, None)
 }
 
 /// Fails the test instead of the machine when a program floods the channel.

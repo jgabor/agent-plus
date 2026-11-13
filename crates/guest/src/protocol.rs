@@ -13,6 +13,9 @@ pub const MAX_BODY: usize = 64 * 1024;
 pub const MAX_OUTPUT: usize = MAX_BODY / 2;
 /// The vsock port the init connects to on the host.
 pub const PORT: u32 = 1024;
+/// The vsock port the agent connects to on the host, once for each command
+/// it may be asked to run beside the harness.
+pub const EXEC_PORT: u32 = 1025;
 
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;
@@ -24,6 +27,9 @@ const FAILED: u8 = 7;
 const START_IN_TERMINAL: u8 = 8;
 const INPUT: u8 = 9;
 const RESIZE: u8 = 10;
+const EXEC: u8 = 11;
+const EXEC_IN_TERMINAL: u8 = 12;
+const END_OF_INPUT: u8 = 13;
 
 /// Why a frame was refused. The stream can't be trusted after any of these.
 #[derive(Debug)]
@@ -48,10 +54,26 @@ pub enum ToGuest {
     Run { argv: Vec<Vec<u8>> },
     /// Starts the harness as the user `agent`, as [`crate::agent`] says.
     Start(Start),
-    /// Bytes for the terminal of a harness that started in one, as if typed.
+    /// Runs a command beside the harness, as `agent`, with the harness's
+    /// environment and directory.
+    Exec(Exec),
+    /// Bytes for the program's input: typed into its terminal, if it has
+    /// one.
     Input(Vec<u8>),
-    /// The new size of the terminal of a harness that started in one.
+    /// The end of a command's input. A program in a terminal ignores it.
+    EndOfInput,
+    /// The new size of the program's terminal.
     Resize(Size),
+}
+
+/// A command to run beside the harness. Arguments can't contain a NUL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Exec {
+    /// The command, and its arguments.
+    pub argv: Vec<Vec<u8>>,
+    /// The size of the terminal the command runs in. Without one, it runs
+    /// with pipes.
+    pub terminal: Option<Size>,
 }
 
 /// A terminal's size, in characters.
@@ -116,11 +138,24 @@ impl ToGuest {
         };
         let (tag, payload) = body.split_first().ok_or(ProtocolError::Malformed)?;
         match *tag {
-            RUN => {
-                let args = payload.strip_suffix(&[0]).ok_or(ProtocolError::Malformed)?;
-                let argv = args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect();
-                Ok(Some(ToGuest::Run { argv }))
+            RUN => Ok(Some(ToGuest::Run {
+                argv: read_argv(payload)?,
+            })),
+            EXEC => Ok(Some(ToGuest::Exec(Exec {
+                argv: read_argv(payload)?,
+                terminal: None,
+            }))),
+            EXEC_IN_TERMINAL => {
+                let (size, rest) = payload
+                    .split_first_chunk::<4>()
+                    .ok_or(ProtocolError::Malformed)?;
+                Ok(Some(ToGuest::Exec(Exec {
+                    argv: read_argv(rest)?,
+                    terminal: Some(Size::from_bytes(size)),
+                })))
             }
+            END_OF_INPUT if payload.is_empty() => Ok(Some(ToGuest::EndOfInput)),
+            END_OF_INPUT => Err(ProtocolError::Malformed),
             START => Ok(Some(ToGuest::Start(read_start(payload, None)?))),
             START_IN_TERMINAL => {
                 let (size, rest) = payload
@@ -140,17 +175,15 @@ impl ToGuest {
 
     pub fn write(&self, writer: &mut impl Write) -> Result<(), ProtocolError> {
         match self {
-            ToGuest::Run { argv } => {
-                if argv.is_empty() || argv.iter().any(|arg| arg.contains(&0)) {
-                    return Err(ProtocolError::Malformed);
+            ToGuest::Run { argv } => write_frame(writer, RUN, &argv_payload(argv)?),
+            ToGuest::Exec(exec) => match exec.terminal {
+                None => write_frame(writer, EXEC, &argv_payload(&exec.argv)?),
+                Some(size) => {
+                    let payload = [&size.to_bytes()[..], &argv_payload(&exec.argv)?].concat();
+                    write_frame(writer, EXEC_IN_TERMINAL, &payload)
                 }
-                let mut payload = Vec::new();
-                for arg in argv {
-                    payload.extend_from_slice(arg);
-                    payload.push(0);
-                }
-                write_frame(writer, RUN, &payload)
-            }
+            },
+            ToGuest::EndOfInput => write_frame(writer, END_OF_INPUT, &[]),
             ToGuest::Start(start) => match start.terminal {
                 None => write_frame(writer, START, &start_payload(start)?),
                 Some(size) => {
@@ -162,6 +195,24 @@ impl ToGuest {
             ToGuest::Resize(size) => write_frame(writer, RESIZE, &size.to_bytes()),
         }
     }
+}
+
+/// Arguments, each ending with a NUL. There is at least one.
+fn argv_payload(argv: &[Vec<u8>]) -> Result<Vec<u8>, ProtocolError> {
+    if argv.is_empty() || argv.iter().any(|arg| arg.contains(&0)) {
+        return Err(ProtocolError::Malformed);
+    }
+    let mut payload = Vec::new();
+    for arg in argv {
+        payload.extend_from_slice(arg);
+        payload.push(0);
+    }
+    Ok(payload)
+}
+
+fn read_argv(payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    let args = payload.strip_suffix(&[0]).ok_or(ProtocolError::Malformed)?;
+    Ok(args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect())
 }
 
 /// A start's payload: the number of arguments and the number of variables,

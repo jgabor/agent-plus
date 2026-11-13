@@ -47,6 +47,14 @@ fn main() -> ExitCode {
         // The harness never started, so this is `ap`'s failure, not its.
         return ExitCode::from(125);
     }
+    if program.as_deref() == Some(OsStr::new(guest::agent::EXEC_AS_AGENT)) {
+        // The guest's init started this to become `agent` and exec a command
+        // beside the harness, which fails as a shell's would.
+        let error = guest::agent::exec_as_agent(&args);
+        let name = args.first().map(|name| name.to_string_lossy());
+        eprintln!("ap exec: {}: {error}", name.unwrap_or_default());
+        return ExitCode::from(guest::agent::status_of_failure(&error));
+    }
     if program.as_deref() == Some(OsStr::new(ap::runs::RUN_PROCESS)) {
         return ExitCode::from(ap::runs::run_process(&args));
     }

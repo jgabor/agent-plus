@@ -66,7 +66,7 @@ fn run_once(stop: &Path) {
         from_host: Cursor::new(wire),
         to_host: Vec::new(),
     };
-    serve(&mut channel).unwrap();
+    serve(&mut channel, None).unwrap();
 
     let mut stdout = Vec::new();
     let mut frames = channel.to_host.as_slice();

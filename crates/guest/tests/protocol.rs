@@ -1,6 +1,8 @@
 //! The frames, and what the guest and the host refuse to read.
 
-use guest::protocol::{MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
+use guest::protocol::{
+    Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
+};
 use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
@@ -12,6 +14,9 @@ const FAILED: u8 = 7;
 const START_IN_TERMINAL: u8 = 8;
 const INPUT: u8 = 9;
 const RESIZE: u8 = 10;
+const EXEC: u8 = 11;
+const EXEC_IN_TERMINAL: u8 = 12;
+const END_OF_INPUT: u8 = 13;
 
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
@@ -74,6 +79,18 @@ fn every_message_survives_the_wire() {
             rows: 50,
             columns: 200,
         }),
+        ToGuest::Exec(Exec {
+            argv: vec![b"id".to_vec(), b"".to_vec(), b"-un".to_vec()],
+            terminal: None,
+        }),
+        ToGuest::Exec(Exec {
+            argv: vec![b"sh".to_vec()],
+            terminal: Some(Size {
+                rows: 24,
+                columns: 80,
+            }),
+        }),
+        ToGuest::EndOfInput,
     ] {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
@@ -90,6 +107,42 @@ fn every_message_survives_the_wire() {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
         assert_eq!(to_host(wire).unwrap(), Some(message));
+    }
+}
+
+#[test]
+fn an_exec_is_its_arguments_after_its_terminal_s_size() {
+    let mut wire = Vec::new();
+    ToGuest::Exec(Exec {
+        argv: vec![b"a".to_vec(), b"bc".to_vec()],
+        terminal: Some(Size {
+            rows: 0x0102,
+            columns: 3,
+        }),
+    })
+    .write(&mut wire)
+    .unwrap();
+    assert_eq!(
+        wire,
+        [10, 0, 0, 0, EXEC_IN_TERMINAL, 2, 1, 3, 0, b'a', 0, b'b', b'c', 0]
+    );
+    for bad in [
+        frame(&[EXEC]),
+        frame(&[EXEC, b'a']),
+        frame(&[EXEC_IN_TERMINAL, 24, 0, 80]),
+        frame(&[END_OF_INPUT, 0]),
+    ] {
+        assert!(
+            matches!(to_guest(bad.clone()), Err(ProtocolError::Malformed)),
+            "{bad:?}"
+        );
+    }
+    for argv in [vec![], vec![b"a\0b".to_vec()]] {
+        let exec = ToGuest::Exec(Exec {
+            argv,
+            terminal: None,
+        });
+        assert!(exec.write(&mut Vec::new()).is_err(), "{exec:?}");
     }
 }
 
@@ -287,7 +340,18 @@ fn the_guest_refuses_what_only_the_host_reads() {
 #[test]
 fn every_unknown_tag_is_refused() {
     for tag in 0..=u8::MAX {
-        if ![RUN, START, START_IN_TERMINAL, INPUT, RESIZE].contains(&tag) {
+        if ![
+            RUN,
+            START,
+            START_IN_TERMINAL,
+            INPUT,
+            RESIZE,
+            EXEC,
+            EXEC_IN_TERMINAL,
+            END_OF_INPUT,
+        ]
+        .contains(&tag)
+        {
             assert!(matches!(
                 to_guest(frame(&[tag, 0])),
                 Err(ProtocolError::UnknownTag(found)) if found == tag

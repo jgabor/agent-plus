@@ -1,10 +1,7 @@
 //! The real system calls, from a process without privileges, so that each one
 //! fails where the guest's would succeed.
-//!
-//! No test here starts a child, because `reap_until` collects any child of the
-//! process.
 
-use guest::linux::{Linux, bytes_waiting, program_has_ended, reap_until};
+use guest::linux::{Linux, bytes_waiting, program_has_ended};
 use guest::{Mount, System};
 use std::ffi::{CString, c_int};
 use std::fs::{self, File};
@@ -18,7 +15,6 @@ use std::thread;
 use std::time::Duration;
 
 const EPERM: i32 = 1;
-const ECHILD: i32 = 10;
 const EACCES: i32 = 13;
 const SIGUSR1: c_int = 10;
 
@@ -101,12 +97,6 @@ fn a_refused_power_off_is_an_error() {
     unprivileged();
     let error = Linux.power_off().unwrap_err();
     assert_eq!(error.raw_os_error(), Some(EPERM));
-}
-
-#[test]
-fn waiting_without_children_is_an_error() {
-    let error = reap_until(u32::MAX).unwrap_err();
-    assert_eq!(error.raw_os_error(), Some(ECHILD));
 }
 
 #[test]

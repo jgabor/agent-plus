@@ -224,14 +224,54 @@ fn regressions(root: &Path, commit: &str, record: &Record) -> Result<Vec<String>
     Ok(found)
 }
 
+/// An open section, left out when it has nothing in it.
 fn section(text: &mut String, heading: &str, lines: Vec<String>) {
-    text.push_str(&format!("\n## {heading}\n\n"));
     if lines.is_empty() {
-        text.push_str("Nothing.\n");
+        return;
     }
+    text.push_str(&format!("\n## {heading}\n\n"));
     for line in lines {
         text.push_str(&format!("- {line}\n"));
     }
+}
+
+/// A folded section, left out when it has nothing in it. GitHub renders the
+/// list inside only with a blank line on each side of it.
+fn fold(text: &mut String, summary: &str, lines: Vec<String>) {
+    if lines.is_empty() {
+        return;
+    }
+    text.push_str(&format!("\n<details>\n<summary>{summary}</summary>\n\n"));
+    for line in lines {
+        text.push_str(&format!("- {line}\n"));
+    }
+    text.push_str("\n</details>\n");
+}
+
+/// What the night's checks came to, or nothing when there were none.
+fn verdict(checks: &[(&str, &str)]) -> String {
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|(_, state)| *state == "fail")
+        .map(|(name, _)| *name)
+        .collect();
+    match (checks.is_empty(), failed.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => "**All checks passed.** ".to_string(),
+        (false, false) => format!("**Failed: {}.** ", failed.join(", ")),
+    }
+}
+
+/// The checks fold's summary, such as `Checks: 4 passed, 1 failed`.
+fn tally(checks: &[(&str, &str)]) -> String {
+    let counts: Vec<String> = [("pass", "passed"), ("fail", "failed"), ("skip", "skipped")]
+        .iter()
+        .filter_map(|(state, word)| {
+            let n = checks.iter().filter(|(_, s)| s == state).count();
+            (n > 0).then(|| format!("{n} {word}"))
+        })
+        .collect();
+    format!("Checks: {}", counts.join(", "))
 }
 
 impl Report {
@@ -241,9 +281,11 @@ impl Report {
         Report { left_out, ..self }
     }
 
-    /// The nightly job passes its checks. A report on its own has none.
+    /// The nightly job passes its checks. A report on its own has none. What
+    /// needs the owner stays open, and the rest folds.
     pub fn markdown(&self, checks: &[(&str, &str)]) -> String {
         let mut text = format!("# Nightly report for `{}`\n\n", self.commit);
+        text.push_str(&verdict(checks));
         match &self.scores {
             Some(s) => text.push_str(&format!(
                 "spec {} of {}, journey {} of {}, budgets {} of {}\n",
@@ -255,19 +297,6 @@ impl Report {
             "\nJourney steps that spend money, and weren't run: {}\n",
             self.left_out
         ));
-        if !checks.is_empty() {
-            let lines = checks
-                .iter()
-                .map(|(name, state)| format!("{state} {name}"))
-                .collect();
-            section(&mut text, "Checks", lines);
-        }
-        let merged = self
-            .merged
-            .iter()
-            .map(|m| format!("`{}` {}, issue #{}", m.commit, m.subject, m.issue))
-            .collect();
-        section(&mut text, "Merged", merged);
         let regressed = self
             .regressed
             .iter()
@@ -286,6 +315,17 @@ impl Report {
             .map(|w| format!("#{} {}", w.issue, w.title))
             .collect();
         section(&mut text, "Waiting on the owner", waiting);
+        let merged = self
+            .merged
+            .iter()
+            .map(|m| format!("`{}` {}, issue #{}", m.commit, m.subject, m.issue))
+            .collect();
+        fold(&mut text, &format!("Merged: {}", self.merged.len()), merged);
+        let lines = checks
+            .iter()
+            .map(|(name, state)| format!("{state} {name}"))
+            .collect();
+        fold(&mut text, &tally(checks), lines);
         text
     }
 

@@ -363,3 +363,50 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert!(!socket.exists(), "{socket:?} outlived the run");
 }
+
+/// Sends `signal` to the process `pid`, which this test started.
+fn signal(signal: &str, pid: u32) {
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill {signal} {pid}");
+}
+
+#[test]
+fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
+    let scratch = Scratch::new("stopped");
+    scratch.build("brief", &fake("ENV FAKE_HARNESS_SLEEP 1\n"));
+    let mut run = Started(
+        Command::new(&shared().0)
+            .args(["run", "brief", "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(run.0.stdout.take().unwrap());
+    let mut report = String::new();
+    stdout.read_line(&mut report).unwrap();
+    assert_eq!(scratch.ps().len(), 1);
+
+    // As Ctrl-Z would, while the harness finishes.
+    signal("-STOP", run.0.id());
+    let processes = descendants(run.0.id());
+    assert_eq!(processes.len(), 2, "{processes:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while processes.iter().all(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        processes.iter().any(|pid| !running(*pid)),
+        "the run process didn't end"
+    );
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+
+    signal("-CONT", run.0.id());
+    assert_eq!(run.0.wait().unwrap().code(), Some(STATUS));
+}

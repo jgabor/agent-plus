@@ -9,8 +9,8 @@
 //! nanoseconds since the Unix epoch. A record appears under its name complete
 //! and synced, or not at all, and never replaces another run's.
 //!
-//! While a run is active, the `ap run` that started it holds an exclusive
-//! lock on its record. The kernel drops the lock when that process exits, for
+//! While a run is active, its run process holds an exclusive lock on its
+//! record. The kernel drops the lock when that process exits, for
 //! any reason, so a run whose process is gone never reads as active.
 
 use std::fs::{self, File, TryLockError};
@@ -81,9 +81,8 @@ impl Runs {
 
     /// Records a new run of `agent`, which started at `started`, under a name
     /// picked at random. It picks again if the store already has a run with
-    /// that name. It returns the run, and its record, open, so that the
-    /// caller can lock it.
-    pub fn create(&self, agent: &str, started: u128) -> io::Result<(Run, File)> {
+    /// that name.
+    pub fn create(&self, agent: &str, started: u128) -> io::Result<Run> {
         self.create_with(agent, started, random_name)
     }
 
@@ -93,7 +92,7 @@ impl Runs {
         agent: &str,
         started: u128,
         mut pick: impl FnMut() -> io::Result<String>,
-    ) -> io::Result<(Run, File)> {
+    ) -> io::Result<Run> {
         if !valid_name(agent) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -116,12 +115,13 @@ impl Runs {
         };
         drop(partial);
         sync_up_from(&self.dir)?;
+        drop(file);
         let run = Run {
             name,
             agent: agent.to_owned(),
             started,
         };
-        Ok((run, file))
+        Ok(run)
     }
 
     /// The run with this name, if the store has one.
@@ -134,6 +134,17 @@ impl Runs {
         read_record(name, &text).map(Some).map_err(|message| {
             io::Error::new(io::ErrorKind::InvalidData, format!("run {name}: {message}"))
         })
+    }
+
+    /// Takes the exclusive lock on the record of the run with this name,
+    /// which marks the run active until the returned file closes.
+    pub fn hold(&self, name: &str) -> io::Result<File> {
+        let file = self.open(name)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("no run is named {name}"))
+        })?;
+        file.lock()
+            .map_err(|error| io::Error::new(error.kind(), format!("run {name}: {error}")))?;
+        Ok(file)
     }
 
     /// Whether the run with this name is active: whether a process holds the

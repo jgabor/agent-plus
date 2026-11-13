@@ -20,9 +20,9 @@ fn store_root(test: &str) -> PathBuf {
 fn a_name_the_store_has_is_picked_again() {
     let root = store_root("again");
     let runs = Runs::new(&root);
-    let (first, _) = runs.create("notes", 7).unwrap();
+    let first = runs.create("notes", 7).unwrap();
     let mut picks = vec![Ok("k3x9q2mf".to_owned()), Ok(first.name.clone())];
-    let (second, _) = runs
+    let second = runs
         .create_with("notes", 9, || picks.pop().unwrap())
         .unwrap();
     assert!(picks.is_empty());
@@ -36,15 +36,16 @@ fn a_name_the_store_has_is_picked_again() {
 #[test]
 fn a_run_is_active_while_its_record_is_locked() {
     let runs = Runs::new(store_root("active"));
-    let (run, file) = runs.create("notes", 1).unwrap();
+    let run = runs.create("notes", 1).unwrap();
     assert!(!runs.active(&run.name).unwrap());
-    file.lock().unwrap();
+    let file = runs.hold(&run.name).unwrap();
     assert!(runs.active(&run.name).unwrap());
     drop(file);
     assert!(!runs.active(&run.name).unwrap());
     assert!(!runs.active("k3x9q2mf").unwrap());
     assert_eq!(runs.get("k3x9q2mf").unwrap(), None);
     assert!(runs.get("../agents").is_err());
+    assert!(runs.hold("k3x9q2mf").is_err());
     assert!(runs.create("Notes", 1).is_err());
     assert!(random_name().is_ok());
 }

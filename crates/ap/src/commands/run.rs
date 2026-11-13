@@ -120,11 +120,9 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    let (run, record) = ::store::Runs::new(root)
+    let run = ::store::Runs::new(root)
         .create(&args.agent.to_string_lossy(), started)
         .map_err(fail("can't record the run"))?;
-    // The lock lasts as long as this process, and marks the run active.
-    record.lock().map_err(fail("can't lock the run's record"))?;
 
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), root);
     DirBuilder::new()
@@ -135,10 +133,10 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let opened = File::open(&dir).map_err(fail(&format!("can't open {}", dir.display())))?;
     let socket_name = runs::socket_name(&run.name);
     let socket = runs::short_path(&opened, &socket_name);
+    // The cleanup process starts before the socket exists, so that it
+    // removes the socket however this process ends. The name is the run's
+    // alone, so there's no other socket it could remove.
     let (lifeline, held) = io::pipe().map_err(fail("can't start the run"))?;
-    let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
-    // From here, the cleanup process removes the socket, however this
-    // process ends.
     let exe = Path::new("/proc/self/exe");
     Command::new(exe)
         .arg0(runs::CLEANUP)
@@ -149,12 +147,14 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run's cleanup"))?;
+    let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
     // Connecting before the run process starts makes this connection the
     // first it accepts.
     let mut stream = UnixStream::connect(&socket).map_err(fail("can't connect to the run"))?;
     let mut process = Command::new(exe)
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
+        .arg(&run.name)
         .stdin(OwnedFd::from(listener))
         .stdout(held.try_clone().map_err(fail("can't start the run"))?)
         .process_group(0)

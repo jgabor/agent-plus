@@ -1,6 +1,7 @@
 //! `ap ps`, from SPEC.md's `ap ps` section. Nothing here boots: a test makes
-//! a run active the way `ap run` does, by holding the lock on its record, and
-//! gives it a socket in the runtime directory. The boots are in `t1`.
+//! a run active the way a run process does, by holding the lock on its
+//! record, and gives it a socket in the runtime directory. The boots are in
+//! `t1`.
 
 use std::fs::{self, File};
 use std::os::unix::net::UnixListener;
@@ -48,8 +49,9 @@ impl Scratch {
     /// Records a run of `agent`, and gives it a socket. The run is active
     /// for as long as the returned file is open.
     fn run(&self, agent: &str, started: u128) -> (String, File, UnixListener) {
-        let (run, record) = Runs::new(&self.store).create(agent, started).unwrap();
-        record.lock().unwrap();
+        let runs = Runs::new(&self.store);
+        let run = runs.create(agent, started).unwrap();
+        let record = runs.hold(&run.name).unwrap();
         let dir = File::open(&self.runtime).unwrap();
         let socket = ap::runs::short_path(&dir, &ap::runs::socket_name(&run.name));
         (run.name, record, UnixListener::bind(socket).unwrap())
@@ -83,9 +85,9 @@ fn ap_ps_lists_the_active_runs_newest_first() {
     let (ended, ended_record, _ended_socket) = scratch.run("notes", 1_794_567_800 * SECOND);
     drop(ended_record);
     // An active run with no socket, and a file that isn't a run's.
-    let (_, _hidden_record) = Runs::new(&scratch.store)
-        .create("notes", 1_794_567_810 * SECOND)
-        .unwrap();
+    let runs = Runs::new(&scratch.store);
+    let hidden = runs.create("notes", 1_794_567_810 * SECOND).unwrap();
+    let _hidden_record = runs.hold(&hidden.name).unwrap();
     fs::write(scratch.runtime.join("notes.txt"), "").unwrap();
 
     let output = scratch.ap(&["ps"]);

@@ -1,19 +1,22 @@
 //! A run's processes, and the socket `ap run` talks to them over.
 //!
-//! `ap run` records the run in the store, and locks its record for as long as
-//! it lives. It binds the run's socket, `<name>.sock`, in the runtime
-//! directory, and connects to it before it starts anything, so the first
-//! connection the run process accepts is always its own. Then it starts two
-//! processes, each in a process group of its own, so that a key the terminal
-//! turns into a signal reaches only `ap run`:
+//! `ap run` records the run in the store, and starts two processes, each in a
+//! process group of its own, so that a key the terminal turns into a signal
+//! reaches only `ap run`:
 //!
-//! - The cleanup process removes the socket once `ap run` and the run process
-//!   have both exited. Each holds the write end of the pipe it reads, so it
-//!   reads the end of the pipe only then.
+//! - The cleanup process removes the run's socket once `ap run` and the run
+//!   process have both exited. Each holds the write end of the pipe it reads,
+//!   so it reads the end of the pipe only then. It starts before the socket
+//!   exists, so no way out of `ap run` leaves the socket behind.
 //! - The run process holds the VM, and is confined as `ap boot` is. Its
 //!   parent's death kills it, so the VM stops when `ap run` exits, for any
-//!   reason. Once confined it can only write, so it can't remove its socket
-//!   itself.
+//!   reason. It locks the run's record for as long as it lives, which makes
+//!   the run active. Once confined it can only write, so it can't remove its
+//!   socket itself.
+//!
+//! Between the two, `ap run` binds the run's socket, `<name>.sock`, in the
+//! runtime directory, and connects to it, so the first connection the run
+//! process accepts is always its own.
 //!
 //! `ap run` sends the layers and how to start the harness. The run process
 //! sends the harness's output, unfiltered, then how the run ended. Each
@@ -130,9 +133,10 @@ pub fn read_from_run(stream: &mut impl Read) -> io::Result<Option<FromRun>> {
 }
 
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
-/// process id is the one argument, with the run's listening socket as its
-/// standard input. It returns the status to exit with, which nobody reads,
-/// because it reports how the run ended over the socket.
+/// process id is the first argument, for the run named by the second, with
+/// the run's listening socket as its standard input. It returns the status
+/// to exit with, which nobody reads, because it reports how the run ended
+/// over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
     let parent = args
         .first()
@@ -142,7 +146,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if args.len() != 1 || orphaned {
+    if args.len() != 2 || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
@@ -160,7 +164,9 @@ pub fn run_process(args: &[OsString]) -> u8 {
     else {
         return 125;
     };
-    let end = match serve(&stream, &output) {
+    // The lock on the run's record lasts until this process exits.
+    let mut record = None;
+    let end = match serve(&args[1].to_string_lossy(), &stream, &output, &mut record) {
         Ok(status) => End::Exited(status),
         Err(error) => End::Failed(error.exit_code(), error.to_string()),
     };
@@ -175,18 +181,37 @@ pub fn run_process(args: &[OsString]) -> u8 {
     }
     // A write fails only if `ap run` is gone, and then nobody is left to tell.
     let _ = output.write_all(&message);
-    // The listener stays open until here, so the socket accepts connections
-    // for as long as the run is active.
+    // The listener and the lock last until here, so the socket accepts
+    // connections for as long as the run is active.
     drop(listener);
+    drop(record);
     match end {
         End::Exited(status) => status,
         End::Failed(status, _) => status,
     }
 }
 
-/// Reads the request from `stream`, and boots the agent with its output sent
-/// to `output`.
-fn serve(stream: &UnixStream, output: &File) -> Result<u8, Error> {
+/// Locks the record of the run named `name` into `record`, reads the
+/// request from `stream`, and boots the agent with its output sent to
+/// `output`.
+fn serve(
+    name: &str,
+    stream: &UnixStream,
+    output: &File,
+    record: &mut Option<File>,
+) -> Result<u8, Error> {
+    let root = crate::store::default_root(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+    .ok_or_else(|| {
+        Error::Failed("HOME isn't an absolute path, so there's no place for the store".to_owned())
+    })?;
+    *record = Some(
+        ::store::Runs::new(&root)
+            .hold(name)
+            .map_err(|error| Error::Failed(format!("can't lock the run's record: {error}")))?,
+    );
     let lost = |error: io::Error| Error::Failed(format!("can't read the run from ap run: {error}"));
     let mut reader = stream;
     let mut names = Vec::new();
@@ -209,13 +234,6 @@ fn serve(stream: &UnixStream, output: &File) -> Result<u8, Error> {
         }
     };
 
-    let root = crate::store::default_root(
-        std::env::var_os("XDG_DATA_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
-    .ok_or_else(|| {
-        Error::Failed("HOME isn't an absolute path, so there's no place for the store".to_owned())
-    })?;
     let store = ::store::Layers::new(&root);
     let layers = names
         .into_iter()

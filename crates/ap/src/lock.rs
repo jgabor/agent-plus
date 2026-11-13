@@ -10,7 +10,8 @@
 //! line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
-//! download cache, and writes the lockfile.
+//! download cache, and writes the lockfile. Claude Code comes from
+//! [`ANTHROPIC`], and Codex from its GitHub releases at [`OPENAI`].
 
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
@@ -34,6 +35,26 @@ pub const ANTHROPIC: &str = "https://downloads.claude.ai/claude-code-releases";
 
 /// The platform the guest runs Claude Code on.
 const PLATFORM: &str = "linux-x64";
+
+/// Where OpenAI publishes Codex. `<base>/releases/latest` redirects to the
+/// newest release's tag, `<base>/releases/tag/rust-v<version>`, and
+/// `<base>/releases/download/rust-v<version>/<asset>` is a release's asset.
+pub const OPENAI: &str = "https://github.com/openai/codex";
+
+/// The asset the guest runs Codex from: the static Linux x86_64 binary, in
+/// one zstd frame.
+pub const CODEX_ASSET: &str = "codex-x86_64-unknown-linux-musl.zst";
+
+/// The prefix of a Codex release's tag, before its version.
+const CODEX_TAG: &str = "rust-v";
+
+/// Where `harness` is published, for [`settle`].
+pub fn base(harness: Harness) -> &'static str {
+    match harness {
+        Harness::Claude => ANTHROPIC,
+        Harness::Codex => OPENAI,
+    }
+}
 
 /// The most a version or a manifest may hold. Both are far smaller.
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
@@ -123,10 +144,12 @@ impl Lock {
 }
 
 /// Settles the harness that `agent` names, and returns whether `lock`
-/// changed. A lock that resolves `agent` is kept. Any other resolves again:
-/// a channel resolves to the exact version Anthropic publishes for it, and
-/// the lock gets that version and the digest Anthropic publishes for its
-/// file. The file is downloaded from `base` into `cache`, unless `cache`
+/// changed. A lock that resolves `agent` is kept. Any other resolves again
+/// from `base`. For Claude Code, a channel resolves to the exact version
+/// Anthropic publishes for it, and the lock gets that version and the
+/// digest Anthropic publishes for its file. For Codex, `latest` resolves to
+/// the newest release, and the lock gets the digest of the file downloaded
+/// from it. The file is downloaded from `base` into `cache`, unless `cache`
 /// holds it or `stored` says the store has its layer. A file whose digest
 /// isn't the lock's is an error, and isn't stored. A changed lock checks a
 /// file the cache already holds, and only then replaces the lockfile `path`.
@@ -139,11 +162,12 @@ pub fn settle(
     cache: &Path,
     stored: impl Fn(&Locked) -> bool,
 ) -> io::Result<bool> {
+    let store = Store::flat(cache);
     let locked = match &lock.harness {
         Some(locked) if locked.resolves(agent) => locked.clone(),
+        _ if agent.harness == Harness::Codex => resolve_codex(agent, client, base, &store)?,
         _ => resolve(agent, client, base)?,
     };
-    let store = Store::flat(cache);
     let file = store.path(&locked.sha256)?;
     let changed = lock.harness.as_ref() != Some(&locked);
     // The build checks that whatever is at the path is the locked file, but
@@ -153,14 +177,11 @@ pub fn settle(
         check_file(&file, &locked)?;
     }
     if !cached && !stored(&locked) {
-        if locked.harness != Harness::Claude {
-            return Err(io::Error::other(format!(
-                "`{}` isn't in the download cache, and downloading Codex is not built yet",
-                locked.label()
-            )));
-        }
         check_version(&locked.version)?;
-        let url = format!("{base}/{}/{PLATFORM}/claude", locked.version);
+        let url = match locked.harness {
+            Harness::Claude => format!("{base}/{}/{PLATFORM}/claude", locked.version),
+            Harness::Codex => codex_url(base, &locked.version),
+        };
         fetch::fetch(
             &store,
             client,
@@ -226,13 +247,6 @@ fn check_file(path: &Path, locked: &Locked) -> io::Result<()> {
 /// The exact version and digest that Anthropic publishes for what `agent`
 /// names.
 fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
-    if agent.harness != Harness::Claude {
-        return Err(io::Error::other(format!(
-            "resolving `AGENT {}:{}` is not built yet",
-            name(agent.harness),
-            agent.version
-        )));
-    }
     let failed = |error: io::Error| {
         io::Error::new(
             error.kind(),
@@ -268,6 +282,60 @@ fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
         version,
         sha256,
     })
+}
+
+/// The exact version of Codex that `agent` names, and the digest of its
+/// file, which is downloaded from `base` into `store`. Codex publishes one
+/// channel, `latest`, which resolves to the release `<base>/releases/latest`
+/// redirects to.
+fn resolve_codex(agent: &Agent, client: &Client, base: &str, store: &Store) -> io::Result<Locked> {
+    let failed = |error: io::Error| {
+        io::Error::new(
+            error.kind(),
+            format!("resolving `AGENT codex:{}`: {error}", agent.version),
+        )
+    };
+    check_version(&agent.version)?;
+    let version = match agent.version.as_str() {
+        version if is_exact(version) => version.to_string(),
+        "latest" => {
+            let url = format!("{base}/releases/latest");
+            let location = fetch::location(client, &url).map_err(failed)?;
+            let version = location
+                .rsplit_once(&format!("/releases/tag/{CODEX_TAG}"))
+                .map(|(_, version)| version)
+                .filter(|version| is_exact(version) && check_version(version).is_ok())
+                .ok_or_else(|| {
+                    failed(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("the latest release is at {location}, which names no version"),
+                    ))
+                })?;
+            version.to_string()
+        }
+        _ => {
+            return Err(failed(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Codex publishes no channel but `latest`".to_string(),
+            )));
+        }
+    };
+    let (sha256, _) = fetch::add(store, client, &codex_url(base, &version)).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("downloading `AGENT codex:{version}`: {error}"),
+        )
+    })?;
+    Ok(Locked {
+        harness: Harness::Codex,
+        version,
+        sha256,
+    })
+}
+
+/// Where Codex `version`'s file is under `base`.
+fn codex_url(base: &str, version: &str) -> String {
+    format!("{base}/releases/download/{CODEX_TAG}{version}/{CODEX_ASSET}")
 }
 
 /// Whether a version is exact. One that starts with a digit is, and any

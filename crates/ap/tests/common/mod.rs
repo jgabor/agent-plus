@@ -45,14 +45,17 @@ pub fn cached(home: &Path, sha256: &str) -> PathBuf {
     home.join(".cache/ap").join(sha256)
 }
 
-/// Puts [`HARNESS`] in the download cache under `home`, and writes the
-/// lockfile next to the Agentfile in `dir` that pins it, for the harness the
-/// Agentfile names and the version it names, or `0.0.0` for a channel.
+/// The file Codex's release ships [`HARNESS`] in: one zstd frame.
+pub fn codex_file() -> Vec<u8> {
+    store::compress(HARNESS, 3)
+}
+
+/// Puts the file for [`HARNESS`] in the download cache under `home`, and
+/// writes the lockfile next to the Agentfile in `dir` that pins it, for the
+/// harness the Agentfile names and the version it names, or `0.0.0` for a
+/// channel. Claude Code's file is [`HARNESS`], and Codex's is
+/// [`codex_file`].
 pub fn pin_harness(home: &Path, dir: &Path) {
-    let sha256 = digest(HARNESS);
-    let path = cached(home, &sha256);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(&path, HARNESS).unwrap();
     let source = fs::read_to_string(dir.join("Agentfile")).unwrap_or_default();
     let agent = source
         .lines()
@@ -60,6 +63,14 @@ pub fn pin_harness(home: &Path, dir: &Path) {
         .unwrap_or("claude")
         .trim();
     let (harness, version) = agent.split_once(':').unwrap_or((agent, "latest"));
+    let file = match harness {
+        "codex" => codex_file(),
+        _ => HARNESS.to_vec(),
+    };
+    let sha256 = digest(&file);
+    let path = cached(home, &sha256);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, file).unwrap();
     let version = match version.starts_with(|c: char| c.is_ascii_digit()) {
         true => version,
         false => "0.0.0",

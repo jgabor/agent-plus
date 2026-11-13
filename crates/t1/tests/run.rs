@@ -5,7 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -396,6 +396,8 @@ struct Interactive {
     /// terminal.
     stop_reading: PipeWriter,
     reader: thread::JoinHandle<()>,
+    /// The other side, kept open so the terminal outlasts `ap run`.
+    _terminal: File,
 }
 
 impl Interactive {
@@ -410,7 +412,7 @@ impl Interactive {
             .env("XDG_RUNTIME_DIR", &scratch.runtime)
             .stdin(terminal.try_clone().unwrap())
             .stdout(terminal.try_clone().unwrap())
-            .stderr(terminal);
+            .stderr(terminal.try_clone().unwrap());
         // SAFETY: `take_terminal` only makes system calls.
         unsafe { command.pre_exec(take_terminal) };
         let run = Started(command.spawn().unwrap());
@@ -435,6 +437,7 @@ impl Interactive {
             shown,
             stop_reading,
             reader,
+            _terminal: terminal,
         }
     }
 
@@ -532,6 +535,20 @@ fn a_run_without_a_prompt_opens_the_harness_in_a_terminal_that_follows_yours() {
 
     run.type_line("exit");
     assert_eq!(run.exit_status().code(), Some(STATUS));
+}
+
+#[test]
+fn a_signal_that_ends_an_interactive_run_puts_the_terminal_back() {
+    let scratch = Scratch::new("terminated");
+    scratch.build("open", &fake(""));
+    let mut run = Interactive::start(&scratch, &["open"], size(24, 80));
+    run.wait_for("\"user\":");
+    signal("-TERM", run.run.0.id());
+    let status = run.exit_status();
+    assert_eq!(status.signal(), Some(15), "{status:?}");
+    // Raw mode echoes nothing. Put back, the terminal echoes what is typed.
+    run.type_line("echoed");
+    run.wait_for("echoed");
 }
 
 // spec(Run): `ap run -i` forces interactive and submits the prompt as the first message.

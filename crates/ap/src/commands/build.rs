@@ -207,7 +207,7 @@ fn build(args: &Args) -> Result<(), String> {
         lock: &lock,
         cache: cache.as_deref(),
     };
-    let (planned, warnings) =
+    let (planned, warnings, prompted) =
         plan(&instructions, &mut resolved, &cached, dir_name).map_err(report)?;
     if args.strict && !warnings.is_empty() {
         return Err(report(warnings));
@@ -247,11 +247,13 @@ fn build(args: &Args) -> Result<(), String> {
     let Some(agentfile_path) = agentfile.path().to_str().map(str::to_string) else {
         return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
     };
-    // Text stays in the layers. Only that there is a `PROMPT` is kept, which
+    // Text stays in the layers. Only that there is a prompt is kept, which
     // makes a run headless.
     let declared: Vec<::store::Declared> = instructions
         .iter()
-        .filter(|instruction| instruction.text.is_none() || instruction.name == "PROMPT")
+        .filter(|instruction| {
+            instruction.text.is_none() || (instruction.name == "PROMPT" && prompted)
+        })
         .map(|instruction| ::store::Declared {
             name: instruction.name.clone(),
             arguments: match instruction.text {
@@ -489,12 +491,13 @@ fn read_lock(path: &Path, context: &Path) -> Result<Lock, String> {
 /// then the locked harness, one for each `ADD`, in line order, and the harness
 /// configuration last. It returns every error it finds, or the layers and the
 /// warnings.
+/// The agent's layers, any warnings, and whether it has a non-empty prompt.
 fn plan(
     instructions: &[Instruction],
     resolved: &mut Resolved,
     cached: &Cached,
     dir_name: &str,
-) -> Result<(Vec<Planned>, Vec<Error>), Vec<Error>> {
+) -> Result<(Vec<Planned>, Vec<Error>, bool), Vec<Error>> {
     let mut errors = Vec::new();
     let settings = take(&mut errors, Settings::read(instructions));
     // The line of the `OS` instruction, if there is one.
@@ -558,7 +561,8 @@ fn plan(
         if instruction.name == "SYSTEM" {
             system.push(value);
         } else {
-            prompt = Some(value);
+            // An empty prompt is no prompt, which leaves runs interactive.
+            prompt = (!value.is_empty()).then_some(value);
         }
     }
     // Checking `ADD` and `SHARE` on the host needs their typed values.
@@ -645,7 +649,7 @@ fn plan(
         content: Content::Image(image),
     });
     warnings.sort_by_key(|warning| warning.line);
-    Ok((planned, warnings))
+    Ok((planned, warnings, prompt.is_some()))
 }
 
 /// The warning for an `EFFORT` that the locked Claude Code doesn't take, on

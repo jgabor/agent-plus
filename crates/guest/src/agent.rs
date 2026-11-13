@@ -21,7 +21,7 @@
 //! starts its own program as [`AS_AGENT`], which becomes `agent` in
 //! [`exec_as_agent`] and then execs the harness.
 
-use crate::linux::{self, bytes_waiting, program_has_ended, reap_until};
+use crate::linux::{self, bytes_waiting, program_has_ended, readable_within, reap_until};
 use crate::protocol::{MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -34,6 +34,7 @@ use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
+use std::time::{Duration, Instant};
 
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
@@ -55,6 +56,22 @@ const SELF: &str = "/proc/self/exe";
 /// Output waiting to be sent. The bound stops a program from filling the
 /// guest's memory faster than the host reads.
 const QUEUE: usize = 4;
+/// How long a terminal must stay quiet, once its program has ended, before
+/// what it shows is taken as complete, in milliseconds.
+const QUIET: i32 = 50;
+/// The longest a terminal is read once its program has ended, so a
+/// background job that keeps writing can't hold back the status.
+const LAST_OUTPUT: Duration = Duration::from_secs(1);
+
+/// What is left to read once a program has ended.
+#[derive(Clone, Copy)]
+enum Left {
+    /// A pipe counts what it holds.
+    Counted,
+    /// A terminal holds more than it counts, so it is read until it goes
+    /// quiet.
+    UntilQuiet,
+}
 
 /// A channel whose reading can move to another thread, which a harness in a
 /// terminal needs.
@@ -238,10 +255,24 @@ fn run(
 
     let (updates, received) = sync_channel(QUEUE);
     if let Some(stdout) = child.stdout.take() {
-        forward(stdout, ToHost::Stdout, updates.clone(), ended.try_clone()?);
+        let ended = ended.try_clone()?;
+        forward(
+            stdout,
+            ToHost::Stdout,
+            Left::Counted,
+            updates.clone(),
+            ended,
+        );
     }
     if let Some(stderr) = child.stderr.take() {
-        forward(stderr, ToHost::Stderr, updates.clone(), ended.try_clone()?);
+        let ended = ended.try_clone()?;
+        forward(
+            stderr,
+            ToHost::Stderr,
+            Left::Counted,
+            updates.clone(),
+            ended,
+        );
     }
     drop(ended);
     wait(child.id(), updates, ended_writer);
@@ -284,6 +315,7 @@ fn run_in_terminal(
     forward(
         controller.try_clone()?,
         ToHost::Stdout,
+        Left::UntilQuiet,
         updates.clone(),
         ended,
     );
@@ -340,6 +372,7 @@ fn drain(received: &Receiver<Update>, channel: &mut impl Write) -> Result<(), Pr
 fn forward(
     mut pipe: impl Read + AsFd + Send + 'static,
     wrap: fn(Vec<u8>) -> ToHost,
+    left: Left,
     updates: SyncSender<Update>,
     ended: PipeReader,
 ) {
@@ -351,6 +384,14 @@ fn forward(
                 Ok(true) => break,
                 _ => return,
             }
+        }
+        if let Left::UntilQuiet = left {
+            let deadline = Instant::now() + LAST_OUTPUT;
+            while Instant::now() < deadline
+                && readable_within(pipe.as_fd(), QUIET).unwrap_or(false)
+                && send_some(&mut pipe, &mut buffer, wrap, &updates).is_some()
+            {}
+            return;
         }
         let Ok(mut left) = bytes_waiting(pipe.as_fd()) else {
             return;
@@ -518,6 +559,27 @@ mod tests {
         assert!(shown.contains("31 101"), "{shown}");
     }
 
+    /// A terminal holds what was written in more than one buffer, and
+    /// its byte count sees only the first.
+    #[test]
+    fn everything_a_finished_program_left_in_a_terminal_is_delivered() {
+        const WRITTEN: usize = 10_000;
+        let size = Size {
+            rows: 24,
+            columns: 80,
+        };
+        let (controller, mut terminal) = linux::open_terminal(size).unwrap();
+        let writer = thread::spawn(move || terminal.write_all(&[b'x'; WRITTEN]).unwrap());
+        thread::sleep(Duration::from_millis(100));
+
+        let (updates, received) = sync_channel(QUEUE);
+        let (ended, program_ended) = pipe().unwrap();
+        drop(program_ended);
+        forward(controller, ToHost::Stdout, Left::UntilQuiet, updates, ended);
+        assert_eq!(delivered(&received), WRITTEN);
+        writer.join().unwrap();
+    }
+
     #[test]
     fn the_agent_is_added_once_after_every_other_entry() {
         let line = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
@@ -549,7 +611,13 @@ mod tests {
         let (updates, received) = sync_channel(QUEUE);
         let (ended, program_ended) = pipe().unwrap();
         drop(program_ended);
-        forward(Starved(reader), ToHost::Stdout, updates, ended);
+        forward(
+            Starved(reader),
+            ToHost::Stdout,
+            Left::Counted,
+            updates,
+            ended,
+        );
 
         assert_eq!(delivered(&received), written.len());
     }
@@ -569,7 +637,7 @@ mod tests {
         let (updates, received) = sync_channel(QUEUE);
         let (ended, program_ended) = pipe().unwrap();
         drop(program_ended);
-        forward(reader, ToHost::Stdout, updates, ended);
+        forward(reader, ToHost::Stdout, Left::Counted, updates, ended);
 
         assert_eq!(delivered(&received), QUEUED);
         drop(writer);

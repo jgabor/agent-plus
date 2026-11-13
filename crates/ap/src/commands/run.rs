@@ -24,7 +24,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -191,7 +191,7 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
             let writer = stream.try_clone().map_err(fail("can't start the run"))?;
             let writer = Arc::new(Mutex::new(writer));
             pass_keys(Arc::clone(&writer));
-            pass_resizes(writer);
+            take_signals(writer);
             Some(RawMode::start().map_err(fail("can't set up your terminal"))?)
         }
         false => None,
@@ -213,6 +213,14 @@ fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
     move |error| Error::Failed(format!("{context}: {error}"))
 }
 
+/// Your terminal's modes before `ap run` changed them, for the thread that
+/// puts them back if a signal ends `ap run`.
+static SAVED_MODES: OnceLock<libc::termios> = OnceLock::new();
+
+/// The signals that end `ap run`, which an interactive run takes itself so
+/// that it can put your terminal back first. `SIGKILL` can't be taken.
+const ENDING: [libc::c_int; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
+
 /// Your terminal in raw mode, until this drops: every key goes to the run as
 /// it is typed, and nothing turns a key into a signal.
 struct RawMode(libc::termios);
@@ -227,6 +235,7 @@ impl RawMode {
             }
             saved.assume_init()
         };
+        let _ = SAVED_MODES.set(saved);
         let mut raw = saved;
         // SAFETY: both calls take a valid struct, which outlives them.
         unsafe {
@@ -241,10 +250,15 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        // SAFETY: the struct is the one `tcgetattr` filled. A terminal that
-        // went away has nothing to restore.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, &self.0) };
+        restore(&self.0);
     }
+}
+
+/// Puts your terminal's modes back. A terminal that went away has nothing to
+/// restore.
+fn restore(modes: &libc::termios) {
+    // SAFETY: the struct is one that `tcgetattr` filled.
+    unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, modes) };
 }
 
 /// Passes what you type to the run, until your input ends. The run goes on,
@@ -268,16 +282,21 @@ fn pass_keys(writer: Arc<Mutex<UnixStream>>) {
     });
 }
 
-/// Passes each new size of your terminal to the run. `SIGWINCH` is blocked
-/// already, so this thread is the one that takes it.
-fn pass_resizes(writer: Arc<Mutex<UnixStream>>) {
+/// Takes the signals of [`taken_signals`], which are blocked already, so
+/// this thread is the one that gets them. It passes each new size of your
+/// terminal to the run. A signal that ends `ap run` puts your terminal back
+/// first, then ends it as it would have.
+fn take_signals(writer: Arc<Mutex<UnixStream>>) {
     thread::spawn(move || {
-        let set = resize_signal();
+        let set = taken_signals();
         loop {
             let mut signal = 0;
             // SAFETY: both pointers are valid for the whole call.
             if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
                 return;
+            }
+            if signal != libc::SIGWINCH {
+                end_by(signal);
             }
             let mut writer = writer.lock().unwrap_or_else(PoisonError::into_inner);
             if runs::send_resize(&mut *writer, terminal_size()).is_err() {
@@ -287,14 +306,34 @@ fn pass_resizes(writer: Arc<Mutex<UnixStream>>) {
     });
 }
 
-/// The set that holds only `SIGWINCH`.
-fn resize_signal() -> libc::sigset_t {
+/// Puts your terminal back, and ends `ap run` with `signal`'s own action.
+fn end_by(signal: libc::c_int) {
+    if let Some(modes) = SAVED_MODES.get() {
+        restore(modes);
+    }
+    let mut only = MaybeUninit::uninit();
+    // SAFETY: the set is initialized before it is used, and each call takes
+    // only valid pointers. With its default action and unblocked on this
+    // thread, the signal ends the process.
+    unsafe {
+        libc::sigemptyset(only.as_mut_ptr());
+        libc::sigaddset(only.as_mut_ptr(), signal);
+        libc::signal(signal, libc::SIG_DFL);
+        libc::pthread_sigmask(libc::SIG_UNBLOCK, only.as_ptr(), std::ptr::null_mut());
+        libc::raise(signal);
+    }
+}
+
+/// `SIGWINCH`, and the signals that end `ap run`.
+fn taken_signals() -> libc::sigset_t {
     let mut set = MaybeUninit::uninit();
     // SAFETY: `sigemptyset` initializes the set, and `sigaddset` takes it
     // initialized.
     unsafe {
         libc::sigemptyset(set.as_mut_ptr());
-        libc::sigaddset(set.as_mut_ptr(), libc::SIGWINCH);
+        for signal in ENDING.into_iter().chain([libc::SIGWINCH]) {
+            libc::sigaddset(set.as_mut_ptr(), signal);
+        }
         set.assume_init()
     }
 }
@@ -436,10 +475,11 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         }
         true => {
             // Blocked before the size is read, a resize from here on waits
-            // for the thread that passes it on.
+            // for the thread that takes it, as does a signal that ends
+            // `ap run`.
             // SAFETY: the set is valid, and a null old set is allowed.
             unsafe {
-                libc::pthread_sigmask(libc::SIG_BLOCK, &resize_signal(), std::ptr::null_mut())
+                libc::pthread_sigmask(libc::SIG_BLOCK, &taken_signals(), std::ptr::null_mut())
             };
             Some(terminal_size())
         }

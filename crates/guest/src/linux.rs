@@ -220,6 +220,21 @@ pub fn program_has_ended(pipe: BorrowedFd, ended: BorrowedFd) -> io::Result<bool
     Ok(fds[1].revents != 0)
 }
 
+/// Whether `fd` can be read without blocking, which includes having closed,
+/// within `milliseconds`.
+pub fn readable_within(fd: BorrowedFd, milliseconds: c_int) -> io::Result<bool> {
+    let mut fds = [waiting_on(fd)];
+    loop {
+        // SAFETY: the pointer and count describe `fds`, which outlives the call.
+        let polled = unsafe { poll(fds.as_mut_ptr(), 1, milliseconds) };
+        match checked(polled) {
+            Ok(ready) => return Ok(ready != 0),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// How many bytes `pipe` holds, which can be more than its nominal size.
 pub fn bytes_waiting(pipe: BorrowedFd) -> io::Result<usize> {
     let mut count: c_int = 0;

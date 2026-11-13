@@ -434,6 +434,12 @@ impl Locked {
     }
 }
 
+/// The version in a [`Locked::label`] for `harness`, or `None` if `label`
+/// isn't one.
+pub fn labeled_version(label: &str, harness: Harness) -> Option<&str> {
+    label.strip_prefix("AGENT ")?.strip_prefix(name(harness))?.strip_prefix(':')
+}
+
 /// The harness's name, as `AGENT` writes it.
 pub fn name(harness: Harness) -> &'static str {
     match harness {

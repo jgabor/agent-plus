@@ -2,6 +2,7 @@
 
 use std::io;
 
+pub mod adapter;
 pub mod add;
 pub mod approval;
 pub mod boot;

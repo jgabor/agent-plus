@@ -272,6 +272,12 @@ fn build(args: &Args) -> Result<(), String> {
         },
     )
     .map_err(|error| format!("{shown}:{agent_line}: {error}"))?;
+    if let Some(warning) = effort_warning(&instructions, &lock) {
+        if args.strict {
+            return Err(report(vec![warning]));
+        }
+        eprintln!("{shown}:{}: warning: {}", warning.line, warning.message);
+    }
     let cached = Cached {
         lock: &lock,
         cache: Some(&cache),
@@ -624,7 +630,7 @@ fn plan(
         return Err(errors);
     }
     let line = text_line.unwrap_or(1);
-    let image = configuration(settings.agent.harness, &system, prompt.as_deref())
+    let image = configuration(&settings, &system, prompt.as_deref())
         .map_err(|error| vec![fail(line, error.to_string())])?;
     planned.push(Planned {
         line,
@@ -635,6 +641,26 @@ fn plan(
     });
     warnings.sort_by_key(|warning| warning.line);
     Ok((planned, warnings))
+}
+
+/// The warning for an `EFFORT` that the locked Claude Code doesn't take, on
+/// the line of the `EFFORT`. The lock is settled, so it locks the harness
+/// that `AGENT` names.
+fn effort_warning(instructions: &[Instruction], lock: &Lock) -> Option<Error> {
+    let settings = Settings::read(instructions).ok()?;
+    let locked = lock.harness.as_ref()?;
+    if settings.agent.harness != Harness::Claude {
+        return None;
+    }
+    let (_, warning) = ap::adapter::claude::effort(&locked.version, settings.effort?);
+    let line = instructions
+        .iter()
+        .find(|instruction| instruction.name == "EFFORT")?
+        .line;
+    Some(Error {
+        line,
+        message: warning?,
+    })
 }
 
 /// The line of the `AGENT` instruction, or 1 if there is none.
@@ -660,11 +686,10 @@ fn read_text(host: &HostPath) -> io::Result<Vec<u8>> {
     Ok(value)
 }
 
-/// The harness configuration layer, as an uncompressed EROFS image. `SYSTEM`
-/// goes to the harness's own file, its values separated by a blank line, and
-/// the prompt to [`PROMPT`].
+/// The harness configuration layer, as an uncompressed EROFS image: the
+/// files the harness's adapter renders, and the prompt at [`PROMPT`].
 fn configuration(
-    harness: Harness,
+    settings: &Settings,
     system: &[Vec<u8>],
     prompt: Option<&[u8]>,
 ) -> io::Result<Vec<u8>> {
@@ -672,25 +697,13 @@ fn configuration(
         mode: 0o755,
         entries: BTreeMap::new(),
     };
-    if !system.is_empty() {
-        let file = match harness {
-            Harness::Claude => "/home/agent/.claude/CLAUDE.md",
-            Harness::Codex => "/home/agent/.codex/AGENTS.md",
-        };
-        let mut text: Vec<u8> = Vec::new();
-        for value in system {
-            if !text.is_empty() {
-                if !text.ends_with(b"\n") {
-                    text.push(b'\n');
-                }
-                text.push(b'\n');
-            }
-            text.extend_from_slice(value);
-        }
-        if !text.ends_with(b"\n") {
-            text.push(b'\n');
-        }
-        insert(&mut root, file, text_file(text));
+    let files = match settings.agent.harness {
+        Harness::Claude => ap::adapter::claude::files(system, settings.mode),
+        Harness::Codex if system.is_empty() => Vec::new(),
+        Harness::Codex => vec![("/home/agent/.codex/AGENTS.md", ap::adapter::system(system))],
+    };
+    for (path, content) in files {
+        insert(&mut root, path, text_file(content));
     }
     if let Some(prompt) = prompt {
         insert(&mut root, PROMPT, text_file(prompt.to_vec()));

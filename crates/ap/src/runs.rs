@@ -97,11 +97,7 @@ pub enum FromRun {
 }
 
 /// Sends the run process what to run.
-pub fn send_request(
-    stream: &mut impl Write,
-    layers: &[LayerName],
-    start: Start,
-) -> io::Result<()> {
+pub fn send_request(stream: &mut impl Write, layers: &[LayerName], start: Start) -> io::Result<()> {
     let mut message = Vec::new();
     for layer in layers {
         let body = format!("{} {}", layer.digest, layer.instruction);
@@ -158,7 +154,10 @@ pub fn run_process(args: &[OsString]) -> u8 {
     };
     // Confined, this process can `write` but not `send`, which a socket's
     // own writes use, so it writes to `ap run` as to a file.
-    let Ok(mut output) = stream.try_clone().map(|clone| File::from(OwnedFd::from(clone))) else {
+    let Ok(mut output) = stream
+        .try_clone()
+        .map(|clone| File::from(OwnedFd::from(clone)))
+    else {
         return 125;
     };
     let end = match serve(&stream, &output) {
@@ -195,7 +194,8 @@ fn serve(stream: &UnixStream, output: &File) -> Result<u8, Error> {
         match read_frame(&mut reader).map_err(lost)? {
             Some((LAYER, body)) => {
                 let body = String::from_utf8(body).map_err(|_| lost(bad_message()))?;
-                let (digest, instruction) = body.split_once(' ').ok_or_else(|| lost(bad_message()))?;
+                let (digest, instruction) =
+                    body.split_once(' ').ok_or_else(|| lost(bad_message()))?;
                 names.push(LayerName {
                     digest: digest.to_owned(),
                     instruction: instruction.to_owned(),
@@ -289,7 +289,10 @@ fn read_frame(stream: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
 }
 
 fn bad_message() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "a message from the run is malformed")
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "a message from the run is malformed",
+    )
 }
 
 #[cfg(test)]
@@ -324,7 +327,10 @@ mod tests {
         assert_eq!(read(), Some(FromRun::Stderr(Vec::new())));
         assert_eq!(
             read(),
-            Some(FromRun::End(End::Failed(124, "the guest didn't finish".to_owned())))
+            Some(FromRun::End(End::Failed(
+                124,
+                "the guest didn't finish".to_owned()
+            )))
         );
         assert_eq!(read(), Some(FromRun::End(End::Exited(3))));
         assert_eq!(read(), None);

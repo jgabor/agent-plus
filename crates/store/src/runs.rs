@@ -159,10 +159,7 @@ impl Runs {
         match File::open(self.dir.join(name)) {
             Ok(file) => Ok(Some(file)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(io::Error::new(
-                error.kind(),
-                format!("run {name}: {error}"),
-            )),
+            Err(error) => Err(io::Error::new(error.kind(), format!("run {name}: {error}"))),
         }
     }
 }

@@ -10,10 +10,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::fs::{DirBuilder, File};
 use std::io::{self, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
@@ -135,12 +135,10 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let opened = File::open(&dir).map_err(fail(&format!("can't open {}", dir.display())))?;
     let socket_name = runs::socket_name(&run.name);
     let socket = runs::short_path(&opened, &socket_name);
-    let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
-    // Connecting before the run process starts makes this connection the
-    // first it accepts.
-    let mut stream = UnixStream::connect(&socket).map_err(fail("can't connect to the run"))?;
-
     let (lifeline, held) = io::pipe().map_err(fail("can't start the run"))?;
+    let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
+    // From here, the cleanup process removes the socket, however this
+    // process ends.
     let exe = Path::new("/proc/self/exe");
     Command::new(exe)
         .arg0(runs::CLEANUP)
@@ -151,6 +149,9 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run's cleanup"))?;
+    // Connecting before the run process starts makes this connection the
+    // first it accepts.
+    let mut stream = UnixStream::connect(&socket).map_err(fail("can't connect to the run"))?;
     let mut process = Command::new(exe)
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
@@ -160,8 +161,7 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .spawn()
         .map_err(fail("can't start the run process"))?;
 
-    let lost = fail("lost the run");
-    runs::send_request(&mut stream, layers, start).map_err(lost)?;
+    runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;
     let end = relay(&mut stream).map_err(fail("lost the run"));
     // The run process exits once it has reported, so this doesn't wait long.
     let _ = process.wait();

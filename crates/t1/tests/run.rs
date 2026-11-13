@@ -156,7 +156,10 @@ fn descendants(pid: u32) -> Vec<u32> {
     let mut found = Vec::new();
     let mut next = vec![pid];
     while let Some(pid) = next.pop() {
-        for task in fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten() {
+        for task in fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+        {
             let children = fs::read_to_string(task.unwrap().path().join("children"));
             for child in children.unwrap_or_default().split_whitespace() {
                 let child = child.parse().unwrap();
@@ -352,7 +355,11 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
         thread::sleep(Duration::from_millis(10));
     }
     let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
-    assert_eq!(left, Vec::<u32>::new(), "processes outlived the killed ap run");
+    assert_eq!(
+        left,
+        Vec::<u32>::new(),
+        "processes outlived the killed ap run"
+    );
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert!(!socket.exists(), "{socket:?} outlived the run");
 }

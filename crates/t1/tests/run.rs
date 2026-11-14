@@ -817,7 +817,14 @@ fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
     let (mut run, name) = start_headless(&scratch, "stubborn");
     let vm = run_process(run.0.id());
     let started = Instant::now();
-    printed(&scratch.ap(&["stop", &name]), "");
+    let stop = thread::scope(|scope| {
+        let stop = scope.spawn(|| scratch.ap(&["stop", &name]));
+        // The run takes commands until the VM is off.
+        thread::sleep(Duration::from_secs(2));
+        printed(&scratch.exec(&name, &["echo", "still"], b""), "still\n");
+        stop.join().unwrap()
+    });
+    printed(&stop, "");
     let took = started.elapsed();
     assert!(took >= Duration::from_secs(10), "{took:?}");
     assert!(took < Duration::from_secs(20), "{took:?}");

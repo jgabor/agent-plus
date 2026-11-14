@@ -740,14 +740,26 @@ fn stop(input: &Input, output: &ToRun) {
 
 /// Passes what `ap run` sends from `source` on to the guest, until it sends
 /// something else or is gone: keys and resizes for a harness in a
-/// `terminal`, and what each `ap exec` sends. A stop is the last thing it
-/// passes. `ap run` exits when the run ends, so this thread ends with this
-/// process.
+/// `terminal`, and what each `ap exec` sends. A stop goes to a thread of its
+/// own, started now, while this process may still start one, so the rest
+/// goes on passing while the harness ends. `ap run` exits when the run ends,
+/// so these threads end with this process.
 fn pass_input(mut source: File, input: Arc<Input>, output: Arc<ToRun>, terminal: bool) {
+    let (stops, stopped) = mpsc::channel();
+    let stopping = Arc::clone(&input);
+    thread::spawn(move || {
+        if stopped.recv().is_ok() {
+            stop(&stopping, &output);
+        }
+    });
     thread::spawn(move || {
         while let Ok(Some((tag, body))) = read_frame(&mut source) {
             let passed = match (tag, body.as_slice()) {
-                (STOP, []) => return stop(&input, &output),
+                // A second stop finds the first under way.
+                (STOP, []) => {
+                    let _ = stops.send(());
+                    Ok(())
+                }
                 (INPUT, _) if terminal => input.send(&ToGuest::Input(body)),
                 (RESIZE, [a, b, c, d]) if terminal => input.send(&ToGuest::Resize(Size {
                     rows: u16::from_le_bytes([*a, *b]),

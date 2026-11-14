@@ -30,6 +30,14 @@
 //! its own: [`Execs`] in `ap run` takes each one, and passes its messages on
 //! to the run process with the id it gave it. Each command has a window
 //! both ways, so one whose `ap exec` doesn't keep up holds back only itself.
+//!
+//! `ap stop` connects to the run's socket too, and sends a stop. `ap run`
+//! passes it on to the run process, which asks the guest to send the harness
+//! `SIGTERM`. If the run hasn't ended [`GRACE`] later, the run process exits
+//! at once with [`KILLED`], which powers the VM off, and reports nothing,
+//! so that no write can hold it back.
+//! `ap run` holds the connection until it exits itself, after the run
+//! process, so `ap stop` reads its end once the VM has stopped.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -43,7 +51,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use guest::protocol::{Exec, MAX_OUTPUT, Size, Start, ToGuest, ToHost};
 
@@ -80,6 +88,16 @@ const TAKEN: u8 = 12;
 const HUNG_UP: u8 = 13;
 /// The guest has taken one more message for the command.
 const TOOK: u8 = 14;
+/// `ap stop` asks for the run to stop.
+const STOP: u8 = 15;
+
+/// How long a harness has to exit after `SIGTERM`, before `ap stop` powers
+/// the VM off.
+const GRACE: Duration = Duration::from_secs(10);
+/// The status the run process exits with when `ap stop` powers the VM off,
+/// and `ap run` too, as if the harness had been sent `SIGKILL`. No other
+/// way out of the run process exits with it without reporting the end.
+pub const KILLED: u8 = 128 + 9;
 
 /// The status `ap exec` exits with when `ap` fails.
 const FAILED_STATUS: u8 = 125;
@@ -175,6 +193,13 @@ pub fn send_exec(stream: &mut impl Write, exec: Exec) -> io::Result<()> {
     stream.write_all(&message)
 }
 
+/// Sends `ap run` a request to stop the run.
+pub fn send_stop(stream: &mut impl Write) -> io::Result<()> {
+    let mut message = Vec::new();
+    push_frame(&mut message, STOP, &[]);
+    stream.write_all(&message)
+}
+
 /// Sends `ap run` the end of the command's input.
 pub fn send_end_of_input(stream: &mut impl Write) -> io::Result<()> {
     let mut message = Vec::new();
@@ -189,6 +214,8 @@ pub enum FromExec {
     Input(Vec<u8>),
     EndOfInput,
     Resize(Size),
+    /// From `ap stop`, not `ap exec`.
+    Stop,
 }
 
 /// Reads what `ap exec` sends next. The end of the stream is `None`.
@@ -208,6 +235,7 @@ pub fn read_from_exec(stream: &mut impl Read) -> io::Result<Option<FromExec>> {
             rows: u16::from_le_bytes([*a, *b]),
             columns: u16::from_le_bytes([*c, *d]),
         }),
+        (STOP, []) => FromExec::Stop,
         _ => return Err(bad_message()),
     }))
 }
@@ -262,7 +290,7 @@ fn push_exec_frame(message: &mut Vec<u8>, id: u32, tag: u8, body: &[u8]) {
 }
 
 /// The `ap exec`s of a run, which `ap run` takes from the run's socket and
-/// relays to the run process.
+/// relays to the run process, and the `ap stop`s.
 pub struct Execs {
     /// The stream to the run process, which `ap run` writes to as well.
     to_run: Arc<Mutex<UnixStream>>,
@@ -373,13 +401,29 @@ impl Execs {
         to_run.write_all(&message)
     }
 
+    /// Sends the run process a message for the whole run.
+    fn send_whole(&self, tag: u8, body: &[u8]) -> io::Result<()> {
+        let mut message = Vec::new();
+        push_frame(&mut message, tag, body);
+        let mut to_run = self.to_run.lock().unwrap_or_else(PoisonError::into_inner);
+        to_run.write_all(&message)
+    }
+
     /// Relays one `ap exec`: its command and input to the run process, and
     /// what the command does back. If the run is gone, `ap exec` reads the
     /// end of the stream.
     fn take(self: Arc<Execs>, stream: UnixStream) {
         let mut reader = &stream;
-        let Ok(Some(FromExec::Exec(exec))) = read_from_exec(&mut reader) else {
-            return;
+        let exec = match read_from_exec(&mut reader) {
+            Ok(Some(FromExec::Exec(exec))) => exec,
+            Ok(Some(FromExec::Stop)) => {
+                if self.send_whole(STOP, &[]).is_ok() {
+                    // Held until `ap stop` hangs up, or this process exits.
+                    let _ = io::copy(&mut reader, &mut io::sink());
+                }
+                return;
+            }
+            _ => return,
         };
         let Ok(writer) = stream.try_clone() else {
             return;
@@ -472,12 +516,13 @@ pub fn run_process(args: &[OsString]) -> u8 {
     let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
     // Confined, this process can `write` but not `send`, which a socket's
     // own writes use, so it writes to `ap run` as to a file.
-    let Ok(mut output) = stream
+    let Ok(output) = stream
         .try_clone()
         .map(|clone| File::from(OwnedFd::from(clone)))
     else {
         return 125;
     };
+    let output = Arc::new(ToRun::new(output));
     // The lock on the run's record lasts until this process exits.
     let mut record = None;
     let end = match serve(&args[1].to_string_lossy(), &stream, &output, &mut record) {
@@ -493,8 +538,10 @@ pub fn run_process(args: &[OsString]) -> u8 {
             push_frame(&mut message, FAILED, &body);
         }
     }
-    // A write fails only if `ap run` is gone, and then nobody is left to tell.
-    let _ = output.write_all(&message);
+    if !output.end(&message) {
+        // `ap stop` is powering the VM off, and this process exits as it does.
+        return KILLED;
+    }
     drop(record);
     match end {
         End::Exited(status) => status,
@@ -508,7 +555,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
 fn serve(
     name: &str,
     stream: &UnixStream,
-    output: &File,
+    output: &Arc<ToRun>,
     record: &mut Option<File>,
 ) -> Result<u8, Error> {
     let root = crate::store::default_root(
@@ -569,10 +616,13 @@ fn serve(
         .map(|clone| File::from(OwnedFd::from(clone)))
         .map_err(lost)?;
     let input = Arc::new(Input::new(source.as_raw_fd()));
-    pass_input(source, Arc::clone(&input), start.terminal.is_some());
-    let mut output = output
-        .try_clone()
-        .map_err(|error| Error::Failed(format!("can't send the run's output: {error}")))?;
+    pass_input(
+        source,
+        Arc::clone(&input),
+        Arc::clone(output),
+        start.terminal.is_some(),
+    );
+    let output = Arc::clone(output);
     boot::boot_agent(TIMEOUT, layers, start, Some(&input), move |report| {
         let mut message = Vec::new();
         match report {
@@ -595,19 +645,121 @@ fn serve(
             Report::Exec(_, ToHost::Ready(_)) => return,
             Report::ExecTook(id) => push_exec_frame(&mut message, id, TOOK, &[]),
         }
-        // If `ap run` is gone, so is this process, any moment now.
-        let _ = output.write_all(&message);
+        output.send(&message);
     })
+}
+
+/// What the run process writes to `ap run`: what the run does, then how it
+/// ended. Only the first end is written, and nothing after it. Whether the
+/// run has ended has a lock of its own, so a write that waits for `ap run`
+/// holds back no stop.
+struct ToRun {
+    file: Mutex<File>,
+    ended: Mutex<bool>,
+    changed: Condvar,
+}
+
+impl ToRun {
+    fn new(file: File) -> ToRun {
+        ToRun {
+            file: Mutex::new(file),
+            ended: Mutex::new(false),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn ended(&self) -> MutexGuard<'_, bool> {
+        self.ended.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Writes a message about the run, unless it has ended.
+    fn send(&self, message: &[u8]) {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*self.ended() {
+            // If `ap run` is gone, so is this process, any moment now.
+            let _ = file.write_all(message);
+        }
+    }
+
+    /// Marks the run ended, unless it was already. Returns whether this call
+    /// did.
+    fn claim_end(&self) -> bool {
+        let mut ended = self.ended();
+        if *ended {
+            return false;
+        }
+        *ended = true;
+        self.changed.notify_all();
+        true
+    }
+
+    /// Writes how the run ended, unless an end was claimed already. Returns
+    /// whether this call did.
+    fn end(&self, message: &[u8]) -> bool {
+        if !self.claim_end() {
+            return false;
+        }
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        // A write fails only if `ap run` is gone, and then nobody is left to
+        // tell.
+        let _ = file.write_all(message);
+        true
+    }
+
+    /// Waits up to `limit` for the run to end. Returns whether it did.
+    fn wait_for_end(&self, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        let mut ended = self.ended();
+        while !*ended {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            ended = self
+                .changed
+                .wait_timeout(ended, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        true
+    }
+}
+
+/// Stops the run, as `ap stop` asked: the harness gets `SIGTERM`, and if the
+/// run hasn't ended [`GRACE`] later, this process exits with [`KILLED`], and
+/// the VM goes with it.
+fn stop(input: &Input, output: &ToRun) {
+    // Without the guest, nothing reaches the harness, and the grace runs out.
+    let _ = input.send(&ToGuest::Terminate);
+    if output.wait_for_end(GRACE) || !output.claim_end() {
+        return;
+    }
+    // SAFETY: `_exit` ends the process at once, which is what's wanted.
+    unsafe { libc::_exit(KILLED.into()) };
 }
 
 /// Passes what `ap run` sends from `source` on to the guest, until it sends
 /// something else or is gone: keys and resizes for a harness in a
-/// `terminal`, and what each `ap exec` sends. `ap run` exits when the run
-/// ends, so this thread ends with this process.
-fn pass_input(mut source: File, input: Arc<Input>, terminal: bool) {
+/// `terminal`, and what each `ap exec` sends. A stop goes to a thread of its
+/// own, started now, while this process may still start one, so the rest
+/// goes on passing while the harness ends. `ap run` exits when the run ends,
+/// so these threads end with this process.
+fn pass_input(mut source: File, input: Arc<Input>, output: Arc<ToRun>, terminal: bool) {
+    let (stops, stopped) = mpsc::channel();
+    let stopping = Arc::clone(&input);
+    thread::spawn(move || {
+        if stopped.recv().is_ok() {
+            stop(&stopping, &output);
+        }
+    });
     thread::spawn(move || {
         while let Ok(Some((tag, body))) = read_frame(&mut source) {
             let passed = match (tag, body.as_slice()) {
+                // A second stop finds the first under way.
+                (STOP, []) => {
+                    let _ = stops.send(());
+                    Ok(())
+                }
                 (INPUT, _) if terminal => input.send(&ToGuest::Input(body)),
                 (RESIZE, [a, b, c, d]) if terminal => input.send(&ToGuest::Resize(Size {
                     rows: u16::from_le_bytes([*a, *b]),

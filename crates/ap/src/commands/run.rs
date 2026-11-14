@@ -201,8 +201,13 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let end = relay(&mut stream, &execs).map_err(fail("lost the run"));
     drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
-    let _ = process.wait();
+    let exited = process.wait();
     drop(held);
+    // A VM that `ap stop` powered off ends the run with no report.
+    let killed = exited.is_ok_and(|status| status.code() == Some(runs::KILLED.into()));
+    if end.is_err() && killed {
+        return Ok(runs::KILLED);
+    }
     match end? {
         End::Exited(status) => Ok(status),
         End::Failed(status, _) if status == Error::TimedOut.exit_code() => Err(Error::TimedOut),

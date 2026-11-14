@@ -15,6 +15,7 @@ const RESIZE: u8 = 10;
 const EXEC: u8 = 11;
 const EXEC_IN_TERMINAL: u8 = 12;
 const END_OF_INPUT: u8 = 13;
+const TERMINATE: u8 = 14;
 
 fn frame(body: &[u8]) -> Vec<u8> {
     let mut bytes = (body.len() as u32).to_le_bytes().to_vec();
@@ -89,6 +90,7 @@ fn every_message_survives_the_wire() {
             }),
         }),
         ToGuest::EndOfInput,
+        ToGuest::Terminate,
     ] {
         let mut wire = Vec::new();
         message.write(&mut wire).unwrap();
@@ -144,6 +146,7 @@ fn an_exec_is_its_arguments_after_its_terminal_s_size() {
         frame(&[EXEC, b'a']),
         frame(&[EXEC_IN_TERMINAL, 24, 0, 80]),
         frame(&[END_OF_INPUT, 0]),
+        frame(&[TERMINATE, 0]),
     ] {
         assert!(
             matches!(to_guest(bad.clone()), Err(ProtocolError::Malformed)),
@@ -362,6 +365,7 @@ fn every_unknown_tag_is_refused() {
             EXEC,
             EXEC_IN_TERMINAL,
             END_OF_INPUT,
+            TERMINATE,
         ]
         .contains(&tag)
         {

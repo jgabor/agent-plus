@@ -715,6 +715,125 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
     assert!(!socket.exists(), "{socket:?} outlived the run");
 }
 
+/// Starts a headless run of `agent`, and returns it and its name, once the
+/// harness has reported, which the fake one does before it sleeps.
+fn start_headless(scratch: &Scratch, agent: &str) -> (Started, String) {
+    let mut run = Started(
+        Command::new(&shared().0)
+            .args(["run", agent, "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut report = String::new();
+    BufReader::new(run.0.stdout.take().unwrap())
+        .read_line(&mut report)
+        .unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+    (run, name)
+}
+
+/// The run process that `ap run` started, which holds the VM.
+fn run_process(ap_run: u32) -> u32 {
+    let found: Vec<u32> = descendants(ap_run)
+        .into_iter()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline.starts_with(b"ap-run-process\0"))
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    found[0]
+}
+
+// spec(ap stop): `ap stop <run>` stops an active run.
+// spec(ap stop): `ap stop` returns once the VM has stopped.
+// spec(ap stop): On success, it prints nothing and exits 0.
+// spec(ap stop): If the harness exits after `SIGTERM`, the run's `ap run` exits with the harness's status.
+// spec(ap stop): On a finished run, `ap stop` does nothing and exits 0.
+// spec(ap stop): If the run doesn't exist, `ap stop` says so on standard error and exits 1.
+#[test]
+fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
+    let scratch = Scratch::new("stop");
+    scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+
+    // A headless harness. The fake one ends by `SIGTERM`, so its status is
+    // 128 + 15.
+    let (mut run, name) = start_headless(&scratch, "sleepy");
+    let vm = run_process(run.0.id());
+    // An `ap stop` that can't reach the run doesn't say it stopped.
+    let elsewhere = scratch.root.join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    let unreached = Command::new(&shared().0)
+        .args(["stop", &name])
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .env("XDG_RUNTIME_DIR", &elsewhere)
+        .output()
+        .unwrap();
+    assert_eq!(unreached.status.code(), Some(1), "{unreached:?}");
+    assert!(running(vm), "{unreached:?}");
+    printed(&scratch.ap(&["stop", &name]), "");
+    // The VM lives in the run process, which has ended by now.
+    assert!(!running(vm), "the VM outlived ap stop");
+    let status = wait_within(&mut run, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(128 + 15), "{status:?}");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+
+    printed(&scratch.ap(&["stop", &name]), "");
+    let missing = scratch.ap(&["stop", "nosuchrn"]);
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    assert!(missing.stdout.is_empty(), "{missing:?}");
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("no run is named nosuchrn"), "{stderr}");
+
+    // A harness in a terminal.
+    scratch.build("open", &fake(""));
+    let mut open = Interactive::start(&scratch, &["open"], size(24, 80));
+    open.wait_for("\"user\":");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+    printed(&scratch.ap(&["stop", &name]), "");
+    assert_eq!(open.exit_status().code(), Some(128 + 15));
+}
+
+// spec(ap stop): It sends the harness `SIGTERM`, and powers the VM off if the harness hasn't exited 10 seconds later.
+// spec(ap stop): If `ap stop` powers the VM off, `ap run` exits with status 137.
+#[test]
+fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
+    let scratch = Scratch::new("stubborn");
+    scratch.build(
+        "stubborn",
+        &fake("ENV FAKE_HARNESS_SLEEP 300\nENV FAKE_HARNESS_IGNORE_TERM 1\n"),
+    );
+    let (mut run, name) = start_headless(&scratch, "stubborn");
+    let vm = run_process(run.0.id());
+    let started = Instant::now();
+    let stop = thread::scope(|scope| {
+        let stop = scope.spawn(|| scratch.ap(&["stop", &name]));
+        // The run takes commands until the VM is off.
+        thread::sleep(Duration::from_secs(2));
+        printed(&scratch.exec(&name, &["echo", "still"], b""), "still\n");
+        stop.join().unwrap()
+    });
+    printed(&stop, "");
+    let took = started.elapsed();
+    assert!(took >= Duration::from_secs(10), "{took:?}");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+    assert!(!running(vm), "the VM outlived ap stop");
+    let status = wait_within(&mut run, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(137), "{status:?}");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+}
+
 /// Sends `signal` to the process `pid`, which this test started.
 fn signal(signal: &str, pid: u32) {
     let status = Command::new("kill")

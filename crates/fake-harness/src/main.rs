@@ -1,10 +1,11 @@
 //! A stand-in for a coding agent, which T1 checks and the journey run in the
 //! guest. It prints what it can see as one line of JSON, and exits.
 //!
-//! Three variables steer it, so an Agentfile's `ENV` lines can. After it
+//! Four variables steer it, so an Agentfile's `ENV` lines can. After it
 //! reports, it creates the file that `FAKE_HARNESS_WRITE` names, waits as
 //! many seconds as `FAKE_HARNESS_SLEEP` says, and exits with the status in
-//! `FAKE_HARNESS_STATUS`, or 0.
+//! `FAKE_HARNESS_STATUS`, or 0. With `FAKE_HARNESS_IGNORE_TERM` set, it
+//! ignores `SIGTERM`.
 //!
 //! In a terminal, as an interactive harness is, its report has the
 //! terminal's size, and before it exits it answers each line typed: `size`
@@ -22,12 +23,19 @@ use std::thread;
 use std::time::Duration;
 
 const TIOCGWINSZ: c_ulong = 0x5413;
+const SIGTERM: c_int = 15;
+const SIG_IGN: usize = 1;
 
 unsafe extern "C" {
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    fn signal(signal: c_int, handler: usize) -> usize;
 }
 
 fn main() -> ExitCode {
+    if env::var_os("FAKE_HARNESS_IGNORE_TERM").is_some() {
+        // SAFETY: ignoring a signal runs no code in this process.
+        unsafe { signal(SIGTERM, SIG_IGN) };
+    }
     let arguments: Vec<String> = env::args_os()
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())

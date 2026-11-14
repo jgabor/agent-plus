@@ -19,6 +19,8 @@ band_abs = 5.0
 key = "idle_mib"
 name = "Idle overhead of `ap`, the VMM, and the guest kernel"
 target = 64.0
+band_pct = 5.0
+band_abs = 2.0
 
 [[budget]]
 key = "noop_build_ms"

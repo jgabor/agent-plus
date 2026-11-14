@@ -832,6 +832,7 @@ fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(137), "{status:?}");
     assert_eq!(scratch.ps(), Vec::<String>::new());
+    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
 }
 
 /// Sends `signal` to the process `pid`, which this test started.

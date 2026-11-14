@@ -1508,6 +1508,28 @@ fn each_test_of_mutants_is_a_job_of_its_own() {
     }
 }
 
+/// Mutants crash on purpose, so a test binary's job may write a core of at
+/// most 1 byte. When `core_pattern` is a pipe, the kernel skips the dump at
+/// that limit, where at 0 it still records the crash.
+#[test]
+fn a_test_job_dumps_no_core() {
+    let repo = Repo::new("test-core");
+    repo.set_mutants(
+        r#"for a in "$@"; do case "$a" in --cargo-arg=*) runner="${a#*runner=[\"}"; runner="${runner%\"]}";; esac; done
+"$runner" sh -c 'grep "^Max core file size" /proc/self/limits > "$1/core"' sh "$d"
+"#,
+    );
+    repo.touch(&["ap"]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    let core: Vec<String> = repo
+        .read_bin("core")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(core[4..], ["1", "1", "bytes"], "{core:?}");
+}
+
 /// When the kernel kills a test over the memory limit, a process it started
 /// mustn't live on into the next mutant, and `cargo mutants` must go on. One
 /// that did took the rest of a nightly run with it.

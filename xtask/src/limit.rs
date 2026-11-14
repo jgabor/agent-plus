@@ -81,11 +81,14 @@ pub fn scope(
 /// job's memory limit kills the whole job at once. Otherwise the kernel can
 /// kill a process and leave its children running, or pick the script's caller.
 /// The job is stopped with the job that ran the script, which keeps its time
-/// limit.
+/// limit. Its core limit is 1 byte, because mutants crash on purpose: when
+/// `core_pattern` is a pipe, the kernel skips the dump at that limit, where at
+/// 0 it still records the crash. `prlimit` counts in bytes, and a scope keeps
+/// the limit of the process that starts it.
 pub fn job_script() -> Result<String, Problem> {
     let options: Vec<String> = options(None, "kill")?.iter().map(|o| quote(o)).collect();
     Ok(format!(
-        "#!/bin/sh\nouter=\"$(basename \"$(cut -d: -f3 /proc/self/cgroup)\")\"\nexec systemd-run {} -p \"BindsTo=$outer\" -p \"After=$outer\" -- \"$@\"\n",
+        "#!/bin/sh\nouter=\"$(basename \"$(cut -d: -f3 /proc/self/cgroup)\")\"\nexec prlimit --core=1 systemd-run {} -p \"BindsTo=$outer\" -p \"After=$outer\" -- \"$@\"\n",
         options.join(" ")
     ))
 }

@@ -10,7 +10,9 @@ use std::process::{Command, Output};
 
 mod common;
 
-const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n\n[[budget]]\nkey = \"idle_mib\"\nname = \"idle\"\ntarget = 150.0\n";
+const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"b\"\n";
+/// A budget with a target, for the scores, which read only the ledger.
+const SCORED: &str = "[[budget]]\nkey = \"idle_mib\"\nname = \"idle\"\ntarget = 150.0\n";
 const BOOT_BUDGETS: &str = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\nband_pct = 10.0\nband_abs = 25.0\n";
 const BOOTS: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
 const SLOW_BOOT: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        std::thread::sleep(std::time::Duration::from_millis(150));\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
@@ -210,7 +212,6 @@ fn level_builds_pass() {
     let out = stdout(&output);
     assert!(out.contains("pass version_ms "), "{out}");
     assert!(out.contains("recorded binary_bytes "), "{out}");
-    assert!(out.contains("skip idle_mib\n"), "{out}");
 }
 
 #[test]
@@ -624,6 +625,208 @@ fn run_needs_the_fake_harness_package() {
     assert_problem(&repo.bench(), "fake-harness");
 }
 
+const IDLE_BUDGETS: &str = "[[budget]]\nkey = \"idle_mib\"\nname = \"idle\"\ntarget = 64.0\nband_pct = 10.0\nband_abs = 16.0\n";
+/// An `ap` whose `build` is `RUNS`'s, and keeps the agent's Agentfile in
+/// `HOME`. Its `run <agent> -p <prompt>` fails unless that agent is built,
+/// starts a process that holds the run, as a run process holds a VM, prints
+/// a line, and counts the run in `HOME`, with both processes and the name of
+/// the process that started it. If the agent's harness waits, both then
+/// wait until the run is ended, and otherwise the run ends.
+const IDLES: &str = r#"use std::io::Write;
+use std::path::Path;
+use std::process::ExitCode;
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let home = std::env::var("HOME").unwrap();
+    let home = Path::new(&home);
+    match args.first().map(String::as_str) {
+        Some("build") => {
+            let approved = args.iter().find_map(|a| a.strip_prefix("--approve=")).and_then(|f| std::fs::read_to_string(f).ok());
+            let dir = Path::new(args.last().unwrap());
+            if !approved.is_some_and(|a| a.contains("NETWORK -") && a.contains("POLICY +")) || !dir.join("Agentfile").is_file() {
+                eprintln!("ap: needs approval {args:?}");
+                return ExitCode::from(1);
+            }
+            let lock = std::fs::read_to_string(dir.join("Agentfile.lock")).unwrap_or_default();
+            let digest = lock.strip_prefix("HARNESS claude 0.0.0 ").map(str::trim_end).unwrap_or_default();
+            if digest.len() != 64 || !home.join(".cache/ap").join(digest).is_file() {
+                eprintln!("ap: Agentfile.lock locks no harness the cache holds");
+                return ExitCode::from(1);
+            }
+            let name = dir.file_name().unwrap().to_str().unwrap();
+            std::fs::copy(dir.join("Agentfile"), home.join(format!("built-{name}"))).unwrap();
+            ExitCode::SUCCESS
+        }
+        Some("hold") => {
+            // held
+            println!("ready");
+            let parent = std::os::unix::process::parent_id();
+            while std::os::unix::process::parent_id() == parent {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            ExitCode::SUCCESS
+        }
+        Some("run") => {
+            if args.len() != 4 || args[2] != "-p" {
+                eprintln!("usage: ap run agent -p prompt");
+                return ExitCode::from(2);
+            }
+            let Ok(agentfile) = std::fs::read_to_string(home.join(format!("built-{}", args[1]))) else {
+                eprintln!("ap: no agent {}", args[1]);
+                return ExitCode::from(125);
+            };
+            let mut held = std::process::Command::new(std::env::current_exe().unwrap()).arg("hold").stdout(std::process::Stdio::piped()).spawn().unwrap();
+            std::io::Read::read_exact(&mut held.stdout.take().unwrap(), &mut [0; 1]).unwrap();
+            let parent = std::os::unix::process::parent_id();
+            let parent = std::fs::read_to_string(format!("/proc/{parent}/comm")).unwrap();
+            let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(home.join("runs")).unwrap();
+            writeln!(runs, "{} {} {} {}", args[1], std::process::id(), held.id(), parent.trim()).unwrap();
+            println!("{{\"arguments\":[]}}");
+            if agentfile.lines().any(|line| line.starts_with("ENV FAKE_HARNESS_SLEEP ")) {
+                std::thread::sleep(std::time::Duration::from_secs(300));
+            }
+            held.kill().unwrap();
+            held.wait().unwrap();
+            ExitCode::SUCCESS
+        }
+        Some("--version") => ExitCode::SUCCESS,
+        _ => {
+            eprintln!("usage: ap");
+            ExitCode::from(2)
+        }
+    }
+}
+"#;
+
+fn idle_repo(name: &str, ap: &str) -> Repo {
+    Repo::with(name, IDLE_BUDGETS, ap, FAKE_HARNESS)
+}
+
+/// `IDLES`, with the process that holds the run holding `mib` more.
+fn larger_hold(mib: usize) -> String {
+    IDLES.replace(
+        "// held",
+        &format!(
+            "let held = std::hint::black_box(vec![1u8; {mib} << 20]);\n            std::hint::black_box(&held);"
+        ),
+    )
+}
+
+/// Whether the process `pid` exists and isn't a zombie waiting to be reaped.
+fn running(pid: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+/// The pids of every process each idle run started, read from `HOME`.
+fn idle_runs(repo: &Repo) -> Vec<String> {
+    let runs = fs::read_to_string(repo.root.join("target/bench/idle/home/runs")).unwrap();
+    runs.lines().map(str::to_string).collect()
+}
+
+#[test]
+fn idle_is_measured_for_the_base_and_the_candidate() {
+    let repo = idle_repo("idle", IDLES);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass idle_mib base "), "{out}");
+    assert!(repo.record().contains("idle_mib = "));
+}
+
+#[test]
+fn a_planted_idle_regression_fails() {
+    let repo = idle_repo("idle-larger", IDLES);
+    repo.set_gh("echo '[]'\n");
+    repo.plant(&larger_hold(64));
+    let output = repo.bench();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("fail idle_mib "),
+        "{}",
+        stdout(&output)
+    );
+}
+
+/// The memory is counted where it is held, and only while it is: a block the
+/// process under `ap run` holds counts, at its size.
+#[test]
+fn idle_counts_every_process_under_ap_run() {
+    let repo = idle_repo("idle-held", &larger_hold(64));
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    let value = out
+        .lines()
+        .find_map(|line| line.strip_prefix("pass idle_mib base "))
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or_else(|| panic!("{out}"));
+    let value: f64 = value.parse().unwrap();
+    assert!((64.0..96.0).contains(&value), "{out}");
+}
+
+/// Each binary builds an agent of its own, whose harness waits, and runs it
+/// once to warm up. Every run is under `timeout`, and has stopped, with every
+/// process it started, by the time the bench ends.
+#[test]
+fn every_idle_run_waits_has_a_timeout_and_stops() {
+    let repo = idle_repo("idle-stops", IDLES);
+    assert_passes(&repo.bench());
+    let home = repo.root.join("target/bench/idle/home");
+    let runs = idle_runs(&repo);
+    for agent in ["base", "candidate"] {
+        let built = fs::read_to_string(home.join(format!("built-{agent}"))).unwrap();
+        assert!(built.contains("\nENV FAKE_HARNESS_SLEEP "), "{built}");
+        let count = runs
+            .iter()
+            .filter(|line| line.starts_with(&format!("{agent} ")))
+            .count();
+        assert_eq!(count, 1 + 15, "{runs:?}");
+    }
+    for line in &runs {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields[3], "timeout", "{line}");
+        for pid in &fields[1..3] {
+            assert!(!running(pid), "{pid} outlived the bench: {line}");
+        }
+    }
+}
+
+#[test]
+fn a_base_with_no_run_command_has_no_idle_comparison() {
+    let repo = idle_repo("idle-none", NO_BOOT);
+    repo.plant(IDLES);
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("no-comparison idle_mib candidate "), "{out}");
+    assert!(repo.record().contains("idle_mib = "));
+}
+
+#[test]
+fn an_idle_run_that_fails_before_it_reports_is_a_problem() {
+    let broken = IDLES.replace(
+        "let mut held =",
+        "eprintln!(\"ap: no kvm\");\n            return ExitCode::from(125);\n            #[allow(unreachable_code)]\n            let mut held =",
+    );
+    let repo = idle_repo("idle-broken", &broken);
+    repo.plant(IDLES);
+    assert_problem(&repo.bench(), "no kvm");
+}
+
+#[test]
+fn an_idle_run_that_prints_nothing_is_a_problem() {
+    let silent = IDLES
+        .replace("println!(\"{{\\\"arguments\\\":[]}}\");", "")
+        .replace("from_secs(300)", "from_secs(0)");
+    assert_ne!(silent, IDLES);
+    let repo = idle_repo("idle-silent", IDLES);
+    repo.plant(&silent);
+    assert_problem(&repo.bench(), "printed nothing");
+}
+
 #[test]
 fn a_planted_sleep_fails() {
     let repo = Repo::new("sleep", BUDGETS);
@@ -912,7 +1115,7 @@ fn score_counts_the_budgets_met() {
         let previous = record_text(&format!("idle_mib = {value}\n"));
         let repo = Repo::with(
             &format!("score-{name}"),
-            BUDGETS,
+            SCORED,
             FAST,
             &[("harness/ledger/5.toml", previous.as_str())],
         );
@@ -936,7 +1139,7 @@ fn score_counts_a_budget_with_no_value_as_missed() {
     let previous = record_text("");
     let repo = Repo::with(
         "score-unmeasured",
-        BUDGETS,
+        SCORED,
         FAST,
         &[("harness/ledger/5.toml", previous.as_str())],
     );

@@ -186,7 +186,7 @@ each step as the last journey ran it.
 |---|---|---|
 | Boot to guest init | under 150 ms | 10% or 5 ms, whichever is larger |
 | `ap run` to a ready harness, with layers cached | under 1 s | 10% or 5 ms, whichever is larger |
-| Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
+| Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | 5% or 2 MiB, whichever is larger |
 | `ap build` with nothing changed | under 100 ms | 10% or 5 ms, whichever is larger |
 | Desktop cost until first use | disk only | none |
 | Stripped release binary | to be set | to be set |
@@ -219,6 +219,12 @@ of its output, on a fixed agent whose harness is the fake one. Each build of
 and runs it once first. All runs share one `HOME`, so no build or download is
 timed. Every run has a timeout, and ends before the next starts. A base with no
 `ap run` is reported as no comparison.
+
+Idle overhead is measured the same way, on an agent whose harness waits after
+it reports. Once the run has reported, the bench sums the proportional set
+size, from `/proc/<pid>/smaps_rollup`, of `ap run` and every process under it,
+which includes the run process that holds the VM. It then ends the run, and
+waits until those processes have stopped.
 
 ## Floors
 
@@ -927,6 +933,6 @@ The harness is built before product features.
 | Limit on model spend for workers | Workers run no step marked `spend` |
 | Credential and spend limit for Codex in journey step 13 | Step 13 gets no Codex credential |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
-| Bands for every budget except boot, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
+| Bands for every budget except boot, idle overhead, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

@@ -2827,10 +2827,11 @@ fn a_refresh_built_from_an_older_main_proves_with_the_newest() {
     assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
 }
 
-const BUDGETS_NOT_YET: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n\n[[budget]]\nkey = \"idle_mib\"\nname = \"i\"\nband_pct = 20.0\nband_abs = 25.0\n";
+const BUDGETS_NOT_YET: &str =
+    "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
 
-/// The PR's own xtask measures what `main`'s can't yet, so `land` takes it
-/// from any checkout.
+/// The PR's own xtask measures what `main`'s may not, so `land` proves the
+/// PR with both, from any checkout.
 #[test]
 fn land_proves_a_pr_that_may_add_a_measurer_with_its_own_xtask() {
     let base = record(0, 1, "");

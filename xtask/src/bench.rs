@@ -47,6 +47,10 @@ const NOOP_FILES: &[(&str, &str)] = &[
 const RUN_AGENTFILE: &str = "AGENT claude:0.0.0\nOS minimal\nNETWORK -\n";
 const RUN_GRANTS: &str = "NETWORK -\nPOLICY +\n";
 const RUN_PROMPT: &str = "Say what you can see.";
+/// The agent that `idle_mib` runs: `run_ms`'s, with a harness that waits
+/// after it reports, longer than `RUN_TIMEOUT` lets a run last.
+const IDLE_AGENTFILE: &str =
+    "AGENT claude:0.0.0\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_SLEEP 300\n";
 /// `timeout`'s arguments for every `ap run`. It stops a run that hangs, and
 /// with it the VM that its `ap run` holds.
 const RUN_TIMEOUT: [&str; 3] = ["-k", "10", "120"];
@@ -71,7 +75,7 @@ enum Measure {
     Boot,
     Build,
     Run,
-    NotYet,
+    Idle,
 }
 
 /// How a budget is measured. A key that isn't listed is a mistake in the
@@ -83,7 +87,7 @@ fn measure_of(key: &str) -> Option<Measure> {
         "boot_ms" => Some(Measure::Boot),
         "noop_build_ms" => Some(Measure::Build),
         "run_ms" => Some(Measure::Run),
-        "idle_mib" => Some(Measure::NotYet),
+        "idle_mib" => Some(Measure::Idle),
         _ => None,
     }
 }
@@ -213,7 +217,7 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     let baseline = build_base(root, &directory, &commit)?;
     let harness = if budgets
         .iter()
-        .any(|budget| matches!(measure_of(&budget.key), Some(Measure::Run)))
+        .any(|budget| matches!(measure_of(&budget.key), Some(Measure::Run | Measure::Idle)))
     {
         Some(build_harness(root)?)
     } else {
@@ -259,11 +263,6 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
         }
         values.insert(row.key.clone(), row.candidate);
     }
-    for budget in &budgets {
-        if matches!(measure_of(&budget.key), Some(Measure::NotYet)) {
-            println!("skip {}", budget.key);
-        }
-    }
     if verdict == Verdict::Pass {
         if let Some(commit) = head
             && clean_head(root)?.as_ref() == Some(&commit)
@@ -296,13 +295,14 @@ fn clean_head(root: &Path) -> Result<Option<String>, Problem> {
     Ok(Some(head.trim().to_string()))
 }
 
-/// The candidate's fake harness, which both builds of `ap` run for `run_ms`.
+/// The candidate's fake harness, which both builds of `ap` run for `run_ms`
+/// and `idle_mib`.
 fn build_harness(root: &Path) -> Result<PathBuf, Problem> {
     journey::build_fake_harness(root, &root.join("target"))
         .map_err(|Problem(e)| Problem(format!("the fake harness build: {e}")))?
         .ok_or_else(|| {
             Problem(
-                "`run_ms` runs the fake harness, and the workspace has no `fake-harness` package"
+                "`run_ms` and `idle_mib` run the fake harness, and the workspace has no `fake-harness` package"
                     .to_string(),
             )
         })
@@ -414,9 +414,29 @@ fn measure(
             Some(Measure::Build) => noop_builds(base, candidate, &directory.join("noop"))?,
             Some(Measure::Run) => {
                 let harness = harness.expect("the fake harness is built for `run_ms`");
-                runs(base, candidate, harness, &directory.join("run"))?
+                let directory = directory.join("run");
+                runs(
+                    base,
+                    candidate,
+                    harness,
+                    &directory,
+                    RUN_AGENTFILE,
+                    run_once_headless,
+                )?
             }
-            Some(Measure::NotYet) | None => continue,
+            Some(Measure::Idle) => {
+                let harness = harness.expect("the fake harness is built for `idle_mib`");
+                let directory = directory.join("idle");
+                runs(
+                    base,
+                    candidate,
+                    harness,
+                    &directory,
+                    IDLE_AGENTFILE,
+                    idle_once,
+                )?
+            }
+            None => continue,
         };
         rows.push(Row {
             key: budget.key.clone(),
@@ -614,17 +634,19 @@ fn build_once(
     Ok(Some(elapsed))
 }
 
-/// The medians of running a fixed agent headless, for both builds, or for
-/// the candidate alone when the base has no `ap run`. Each build of `ap`
-/// builds an agent of its own, named for it, so each runs what it built. All
-/// of them share one `HOME`, so they share one store, and the download cache
-/// holds the fake harness that the lockfiles pin. Each builds its agent and
-/// runs it once first, so no build or download is timed.
+/// The medians of `once` running the agent `agentfile` headless, for both
+/// builds, or for the candidate alone when the base has no `ap run`. Each
+/// build of `ap` builds an agent of its own, named for it, so each runs what
+/// it built. All of them share one `HOME`, so they share one store, and the
+/// download cache holds the fake harness that the lockfiles pin. Each builds
+/// its agent and runs it once first, so no build or download is measured.
 fn runs(
     base: &Path,
     candidate: &Path,
     harness: &Path,
     directory: &Path,
+    agentfile: &str,
+    once: fn(&Path, &str, &Path) -> Result<Option<f64>, Problem>,
 ) -> Result<(Option<f64>, f64), Problem> {
     let problem =
         |e: std::io::Error| Problem(format!("couldn't write {}: {e}", directory.display()));
@@ -641,7 +663,7 @@ fn runs(
     let agents = [directory.join("base"), directory.join("candidate")];
     for agent in &agents {
         fs::create_dir_all(agent).map_err(problem)?;
-        fs::write(agent.join("Agentfile"), RUN_AGENTFILE).map_err(problem)?;
+        fs::write(agent.join("Agentfile"), agentfile).map_err(problem)?;
         let lock = format!("HARNESS claude 0.0.0 {digest}\n");
         fs::write(agent.join("Agentfile.lock"), lock).map_err(problem)?;
     }
@@ -653,9 +675,7 @@ fn runs(
         }
     };
     let name_of = |binary: &Path| if binary == base { "base" } else { "candidate" };
-    let timed = |binary: &Path| {
-        run_once_headless(binary, name_of(binary), &home)?.ok_or_else(|| no_run(binary))
-    };
+    let timed = |binary: &Path| once(binary, name_of(binary), &home)?.ok_or_else(|| no_run(binary));
     let warm = |binary: &Path| {
         build_once(binary, &grants, agent_of(binary), &home)?.ok_or_else(|| no_build(binary))?;
         timed(binary)
@@ -749,6 +769,129 @@ fn run_once_headless(binary: &Path, name: &str, home: &Path) -> Result<Option<f6
         return Err(Problem(format!("`{shown} run` printed nothing")));
     }
     Ok(Some(elapsed))
+}
+
+/// MiB of host memory that a run holds once its harness has reported and
+/// waits: the proportional set size of `ap run` and of every process under
+/// it, the run process that holds the VM among them. `None` if this build
+/// exits with its usage status. The run is then ended, and this waits until
+/// every process it measured has stopped.
+fn idle_once(binary: &Path, name: &str, home: &Path) -> Result<Option<f64>, Problem> {
+    let shown = binary.display();
+    let problem = |e: std::io::Error| Problem(format!("couldn't run `{shown} run`: {e}"));
+    let mut child = run_command(binary, name, home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(problem)?;
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let draining = thread::spawn(move || {
+        let mut errors = Vec::new();
+        stderr.read_to_end(&mut errors).map(|_| errors)
+    });
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+    let mut report = String::new();
+    let read = stdout.read_line(&mut report);
+    let reported = matches!(read, Ok(count) if count > 0);
+    let measured = if reported {
+        let processes = descendants(child.id());
+        let held = held_mib(&processes);
+        // `timeout` passes the signal on to `ap run`, and the run's other
+        // processes end with it.
+        let _ = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+        Some((processes, held))
+    } else {
+        None
+    };
+    let rest = io::copy(&mut stdout, &mut io::sink());
+    let status = child.wait().map_err(problem)?;
+    let errors = draining.join().expect("draining stderr can't panic");
+    if let Some((processes, held)) = measured {
+        stopped(&processes, binary)?;
+        return held.map(Some);
+    }
+    read.map_err(problem)?;
+    rest.map_err(problem)?;
+    let errors = errors.map_err(problem)?;
+    if status.code() == Some(USAGE_STATUS) {
+        return Ok(None);
+    }
+    if !status.success() {
+        return Err(Problem(format!(
+            "`{shown} run` failed: {status}: {}",
+            String::from_utf8_lossy(&errors).trim()
+        )));
+    }
+    Err(Problem(format!("`{shown} run` printed nothing")))
+}
+
+/// Every process under the process `pid`.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut next = vec![pid];
+    while let Some(pid) = next.pop() {
+        let tasks = fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten();
+        for task in tasks.flatten() {
+            let children = fs::read_to_string(task.path().join("children")).unwrap_or_default();
+            for child in children.split_whitespace().filter_map(|c| c.parse().ok()) {
+                found.push(child);
+                next.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// The sum of the proportional set sizes of `processes`, in MiB.
+fn held_mib(processes: &[u32]) -> Result<f64, Problem> {
+    if processes.is_empty() {
+        return Err(Problem(
+            "the idle run had ended before it was measured".to_string(),
+        ));
+    }
+    let mut kib = 0;
+    for pid in processes {
+        let path = format!("/proc/{pid}/smaps_rollup");
+        let ended = |_| Problem(format!("the idle run had ended before {path} was read"));
+        let rollup = fs::read_to_string(&path).map_err(ended)?;
+        let pss = rollup
+            .lines()
+            .find_map(|line| line.strip_prefix("Pss:"))
+            .and_then(|rest| rest.trim().strip_suffix(" kB"))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or_else(|| Problem(format!("{path} has no `Pss:` line")))?;
+        kib += pss;
+    }
+    Ok(kib as f64 / 1024.0)
+}
+
+/// Waits until none of `processes` runs, so that no VM outlives its
+/// measurement. `timeout` kills a run that doesn't end within its own grace,
+/// so this waits a little longer than that.
+fn stopped(processes: &[u32], binary: &Path) -> Result<(), Problem> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(15);
+    while processes.iter().any(|pid| running(*pid)) {
+        if Instant::now() > deadline {
+            return Err(Problem(format!(
+                "a run of `{}` outlived its measurement",
+                binary.display()
+            )));
+        }
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+/// Whether the process `pid` exists and isn't a zombie waiting to be reaped.
+fn running(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
 }
 
 /// The SHA-256 digest of the file at `path`, in hex. macOS has `shasum`, and

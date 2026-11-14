@@ -208,8 +208,9 @@ Under `auto:pr`, park the same way when the merge gate passes, but add
 
 Park only when you can't continue alone: you can't prove the change, the merge
 gate can't pass, the goal is ambiguous in a way that changes the result, or
-the next step is outside your label. Decide everything else yourself, and list
-those decisions in the PR.
+the next step is outside your label. Decide everything else yourself. A
+decision a user could observe goes into SPEC.md, as [the spec](#the-spec)
+says. List the rest in the PR.
 
 ### Proof
 
@@ -239,7 +240,7 @@ How this solves it.
 spec 412 -> 417 of 812, journey 7 of 19, budgets level
 
 ## Decisions
-Anything the owner may want to overrule.
+Choices the owner may want to overrule that no user can observe.
 
 <details>
 <summary>Proof and review</summary>
@@ -274,6 +275,8 @@ read-only. In T3 Code, use `delegate_task` with a review role.
 
 - Give the reviewer the intent, the base, the diff, and the check results. Give
   it your conclusions only after it has formed its own.
+- Have the reviewer confirm that no decision a user could observe is left
+  only in the PR body.
 - Rank findings: blocker (the intended case is wrong), should (a real bug
   callers will hit), and nit (everything else).
 - Verify each finding against the source. Fix real ones with the smallest
@@ -321,7 +324,10 @@ current behavior. A mismatch is a bug in the contract. Resolve it or report
 it, and never silently pick one.
 
 - If the code disagrees with the spec, fix the code.
-- If the spec is wrong, ambiguous, or impossible, open a separate PR that
+- Where SPEC.md is silent and you decide something a user could observe, add
+  the sentence and the check that proves it in the same PR. A sentence that
+  needs a waiver waits for the owner, so prefer one that a check can prove.
+- If a sentence is wrong, ambiguous, or impossible, open a separate PR that
   changes only the spec and the quotes and waivers that follow from it, and
   park the issue that depends on it. A PR that rewrites a sentence waits for
   the owner, even for a typo, because a program can't tell the difference.

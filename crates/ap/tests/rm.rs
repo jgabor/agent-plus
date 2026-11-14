@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use store::{Agents, Approvals};
+use store::{Agents, Approvals, Runs};
 
 /// A test's own directory, with a home directory in it.
 struct Scratch {
@@ -185,6 +185,36 @@ fn rm_of_an_unknown_agent_fails_and_names_it() {
         scratch.ok_in(&scratch.root, &["ls"]),
         format!("notes {}\n", dir.display())
     );
+}
+
+// spec(ap logs): A finished run's log is kept until `ap rm <agent>` or `ap reset <agent>` deletes it.
+#[test]
+fn rm_deletes_the_logs_of_finished_runs_and_keeps_an_active_run_s() {
+    let scratch = Scratch::new("logs");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let runs = Runs::new(scratch.store());
+    let finished = runs.create("notes", 1).unwrap();
+    runs.create_log(&finished.name).unwrap();
+    let active = runs.create("notes", 2).unwrap();
+    runs.create_log(&active.name).unwrap();
+    let held = runs.hold(&active.name).unwrap();
+    let other = runs.create("other", 3).unwrap();
+    runs.create_log(&other.name).unwrap();
+
+    scratch.ok_in(&scratch.root, &["rm", "notes"]);
+    assert!(runs.log(&finished.name).unwrap().is_none());
+    assert_eq!(runs.get(&finished.name).unwrap(), None);
+    assert!(runs.log(&active.name).unwrap().is_some());
+    assert!(runs.log(&other.name).unwrap().is_some());
+
+    // Once the run ends, `ap rm` deletes its log, though the agent is gone.
+    drop(held);
+    scratch.ok_in(&scratch.root, &["rm", "notes"]);
+    assert!(runs.log(&active.name).unwrap().is_none());
+    let output = scratch.ap(&["rm", "notes"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(runs.log(&other.name).unwrap().is_some());
 }
 
 #[test]

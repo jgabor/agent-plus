@@ -832,6 +832,7 @@ fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(137), "{status:?}");
     assert_eq!(scratch.ps(), Vec::<String>::new());
+    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
 }
 
 /// Sends `signal` to the process `pid`, which this test started.
@@ -1040,5 +1041,120 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
     assert!(
         stderr.contains(&format!("run {name} has finished")),
         "{stderr}"
+    );
+}
+
+impl Scratch {
+    /// The rows `ap ps -a` prints after its header, split into columns.
+    fn ps_all(&self) -> Vec<Vec<String>> {
+        let output = self.ap(&["ps", "-a"]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let mut lines = stdout.lines();
+        let header: Vec<&str> = lines
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
+        assert_eq!(header, ["NAME", "AGENT", "STARTED", "STATUS"], "{stdout}");
+        lines
+            .map(|line| line.split_whitespace().map(str::to_owned).collect())
+            .collect()
+    }
+
+    /// The status `ap ps -a` shows for the run `name`, if it lists it.
+    fn status_of(&self, name: &str) -> Option<String> {
+        self.ps_all()
+            .into_iter()
+            .find(|row| row[0] == name)
+            .map(|row| row[3..].join(" "))
+    }
+}
+
+/// Fails unless `ap logs` failed as SPEC.md says for a run it has no log of.
+fn no_log(output: &Output, name: &str) {
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(name), "{stderr}");
+}
+
+// spec(ap logs): It prints the run's output from its start, for an active run up to that moment, and exits 0.
+// spec(ap logs): A headless run's log keeps standard output and standard error apart, and `ap logs` writes each to the same stream.
+// spec(ap logs): A finished run's log is kept until `ap rm <agent>` or `ap reset <agent>` deletes it.
+// spec(ap logs): If the run doesn't exist, or its log was deleted, `ap logs` says so on standard error and exits 1.
+// spec(ap ps): `ap ps -a` also lists the finished runs whose logs are kept.
+// spec(ap ps): It adds each run's status: `running`, or `exited` and the run's exit status.
+// spec(ap stop): The stopped run's log is kept.
+#[test]
+fn a_run_keeps_its_log_until_its_agent_is_removed() {
+    let scratch = Scratch::new("logs");
+    // The fake harness reports on standard output, then fails on standard
+    // error.
+    scratch.build("noisy", &fake("ENV FAKE_HARNESS_SLEEP oops\n"));
+    let run = scratch.ap(&["run", "noisy", "-p", PROMPT]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert!(!run.stdout.is_empty() && !run.stderr.is_empty(), "{run:?}");
+    let rows = scratch.ps_all();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0][1], "noisy", "{rows:?}");
+    assert_eq!(rows[0][3..], ["exited", "1"], "{rows:?}");
+    let noisy = rows[0][0].clone();
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+    let logs = scratch.ap(&["logs", &noisy]);
+    assert_eq!(logs.status.code(), Some(0), "{logs:?}");
+    assert_eq!(logs.stdout, run.stdout, "{logs:?}");
+    assert_eq!(logs.stderr, run.stderr, "{logs:?}");
+
+    // An active run's log, up to now.
+    scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let (mut sleeping, sleepy) = start_headless(&scratch, "sleepy");
+    assert_eq!(scratch.status_of(&sleepy).as_deref(), Some("running"));
+    let logs = scratch.ap(&["logs", &sleepy]);
+    assert_eq!(logs.status.code(), Some(0), "{logs:?}");
+    let shown = String::from_utf8(logs.stdout.clone()).unwrap();
+    assert!(shown.starts_with("{\"arguments\":"), "{logs:?}");
+    assert_eq!(shown.lines().count(), 1, "{logs:?}");
+    assert!(logs.stderr.is_empty(), "{logs:?}");
+
+    // A stopped run's log is kept, with its status.
+    printed(&scratch.ap(&["stop", &sleepy]), "");
+    wait_within(&mut sleeping, Duration::from_secs(10));
+    assert_eq!(scratch.status_of(&sleepy).as_deref(), Some("exited 143"));
+    assert_eq!(scratch.ap(&["logs", &sleepy]).stdout, logs.stdout);
+
+    // Removing an agent deletes its runs' logs, and only its own.
+    printed(&scratch.ap(&["rm", "noisy"]), "");
+    no_log(&scratch.ap(&["logs", &noisy]), &noisy);
+    assert_eq!(scratch.status_of(&noisy), None);
+    assert_eq!(scratch.status_of(&sleepy).as_deref(), Some("exited 143"));
+    no_log(&scratch.ap(&["logs", "nosuchrn"]), "nosuchrn");
+}
+
+// spec(ap logs): An interactive run's log holds what the run showed in your terminal, filtered as [Run](#run) says.
+#[test]
+fn an_interactive_run_s_log_holds_what_your_terminal_showed() {
+    let scratch = Scratch::new("shown");
+    scratch.build("open", &fake(""));
+    let mut run = Interactive::start(&scratch, &["open"], size(24, 80));
+    run.wait_for("\"user\":");
+    let rows = scratch.ps_all();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0][0].clone();
+    run.type_line("\x1b]52;c;aGk=\x07clipped");
+    run.wait_for("typed clipped");
+    run.type_line("exit");
+    assert_eq!(run.exit_status().code(), Some(STATUS));
+
+    let logs = scratch.ap(&["logs", &name]);
+    assert_eq!(logs.status.code(), Some(0), "{logs:?}");
+    assert!(logs.stderr.is_empty(), "{logs:?}");
+    let shown = String::from_utf8_lossy(&logs.stdout);
+    assert!(shown.contains("\"terminal\":\"24x80\""), "{shown:?}");
+    assert!(shown.contains("typed clipped"), "{shown:?}");
+    assert!(!shown.contains("\x1b]52"), "{shown:?}");
+    assert_eq!(
+        scratch.status_of(&name).as_deref(),
+        Some(&*format!("exited {STATUS}"))
     );
 }

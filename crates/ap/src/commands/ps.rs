@@ -2,6 +2,9 @@
 //! and lists each run there whose `ap run` still holds the lock on its
 //! record: a header row, then a row per run, newest first, with its name, its
 //! agent, and when it started, in UTC.
+//!
+//! `ap ps -a` reads the store's runs instead, and lists each one that is
+//! active or has a log, with its status.
 
 use std::ffi::OsString;
 use std::io;
@@ -9,7 +12,7 @@ use std::path::Path;
 
 use store::{Run, Runs};
 
-/// Reads `ap ps`'s arguments: none, or `-a`, which isn't built yet.
+/// Reads `ap ps`'s arguments: none, or `-a`.
 pub fn parse(args: &[OsString]) -> Option<bool> {
     match args {
         [] => Some(false),
@@ -20,10 +23,6 @@ pub fn parse(args: &[OsString]) -> Option<bool> {
 
 /// Lists the active runs, and returns the exit status.
 pub fn run(all: bool) -> u8 {
-    if all {
-        eprintln!("ap: `ap ps -a` is not built yet");
-        return 1;
-    }
     let home = std::env::var_os("HOME");
     let Some(root) = ap::store::default_root(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
@@ -33,9 +32,18 @@ pub fn run(all: bool) -> u8 {
         return 1;
     };
     let dir = ap::runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), &root);
-    match active(&dir, &Runs::new(&root)) {
-        Ok(runs) => {
-            print!("{}", table(runs));
+    let runs = Runs::new(&root);
+    let listed = match all {
+        true => kept(&runs),
+        false => active(&dir, &runs).map(|runs| {
+            runs.into_iter()
+                .map(|run| Row { run, status: None })
+                .collect()
+        }),
+    };
+    match listed {
+        Ok(rows) => {
+            print!("{}", table(rows, all));
             0
         }
         Err(error) => {
@@ -77,19 +85,60 @@ fn active(dir: &Path, runs: &Runs) -> io::Result<Vec<Run>> {
     Ok(active)
 }
 
-/// The header and a row per run, newest first, in aligned columns.
-fn table(mut runs: Vec<Run>) -> String {
-    runs.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| a.name.cmp(&b.name)));
-    let mut rows = vec![["NAME".to_owned(), "AGENT".to_owned(), "STARTED".to_owned()]];
-    rows.extend(
-        runs.into_iter()
-            .map(|run| [run.name, run.agent, utc(run.started)]),
-    );
+/// A run to list, and its status if `ap ps -a` lists it.
+struct Row {
+    run: Run,
+    status: Option<String>,
+}
+
+/// The runs that are active or have a log, with their status: `running`, or
+/// `exited` and the status it recorded, or `?` if it recorded none, because
+/// its `ap run` was killed.
+fn kept(runs: &Runs) -> io::Result<Vec<Row>> {
+    let mut kept = Vec::new();
+    for run in runs.list()? {
+        let status = if runs.active(&run.name)? {
+            "running".to_owned()
+        } else if runs.log(&run.name)?.is_some() {
+            // The run may have ended since it was read, and it records its
+            // status before it lets go of the lock.
+            let exited = runs.get(&run.name)?.and_then(|run| run.exited);
+            let exited = exited.map_or("?".to_owned(), |status| status.to_string());
+            format!("exited {exited}")
+        } else {
+            continue;
+        };
+        kept.push(Row {
+            run,
+            status: Some(status),
+        });
+    }
+    Ok(kept)
+}
+
+/// The header and a row per run, newest first, in aligned columns, with a
+/// column for the status with `all`.
+fn table(mut runs: Vec<Row>, all: bool) -> String {
+    runs.sort_by(|a, b| {
+        (b.run.started.cmp(&a.run.started)).then_with(|| a.run.name.cmp(&b.run.name))
+    });
+    let header = ["NAME", "AGENT", "STARTED", "STATUS"].map(str::to_owned);
+    let mut rows = vec![header];
+    rows.extend(runs.into_iter().map(|row| {
+        let run = row.run;
+        [
+            run.name,
+            run.agent,
+            utc(run.started),
+            row.status.unwrap_or_default(),
+        ]
+    }));
     let name_width = rows.iter().map(|row| row[0].len()).max().unwrap_or(0);
     let agent_width = rows.iter().map(|row| row[1].len()).max().unwrap_or(0);
     rows.iter()
-        .map(|[name, agent, started]| {
-            format!("{name:name_width$}  {agent:agent_width$}  {started}\n")
+        .map(|[name, agent, started, status]| match all {
+            true => format!("{name:name_width$}  {agent:agent_width$}  {started:20}  {status}\n"),
+            false => format!("{name:name_width$}  {agent:agent_width$}  {started}\n"),
         })
         .collect()
 }
@@ -125,11 +174,15 @@ fn utc(nanoseconds: u128) -> String {
 mod tests {
     use super::*;
 
-    fn run(name: &str, agent: &str, started: u128) -> Run {
-        Run {
-            name: name.to_owned(),
-            agent: agent.to_owned(),
-            started,
+    fn run(name: &str, agent: &str, started: u128) -> Row {
+        Row {
+            run: Run {
+                name: name.to_owned(),
+                agent: agent.to_owned(),
+                started,
+                exited: None,
+            },
+            status: None,
         }
     }
 
@@ -144,11 +197,14 @@ mod tests {
     #[test]
     fn rows_are_newest_first_under_aligned_headers() {
         let second = 1_000_000_000;
-        let table = table(vec![
-            run("k3x9q2mf", "notes", 10 * second),
-            run("a0b1c2d3", "my-long-agent", 30 * second),
-            run("zz9", "x", 20 * second),
-        ]);
+        let table = table(
+            vec![
+                run("k3x9q2mf", "notes", 10 * second),
+                run("a0b1c2d3", "my-long-agent", 30 * second),
+                run("zz9", "x", 20 * second),
+            ],
+            false,
+        );
         assert_eq!(
             table,
             "NAME      AGENT          STARTED\n\
@@ -160,6 +216,25 @@ mod tests {
     }
 
     fn table_header() -> String {
-        table(Vec::new())
+        table(Vec::new(), false)
+    }
+
+    #[test]
+    fn with_all_a_column_shows_each_status() {
+        let second = 1_000_000_000;
+        let mut running = run("k3x9q2mf", "notes", 10 * second);
+        running.status = Some("running".to_owned());
+        let mut exited = run("a0b1c2d3", "x", 30 * second);
+        exited.status = Some("exited 137".to_owned());
+        assert_eq!(
+            table(vec![running, exited], true),
+            "NAME      AGENT  STARTED               STATUS\n\
+             a0b1c2d3  x      1970-01-01T00:00:30Z  exited 137\n\
+             k3x9q2mf  notes  1970-01-01T00:00:10Z  running\n"
+        );
+        assert_eq!(
+            table(Vec::new(), true),
+            "NAME  AGENT  STARTED               STATUS\n"
+        );
     }
 }

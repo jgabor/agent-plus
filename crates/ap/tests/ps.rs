@@ -104,15 +104,44 @@ fn ap_ps_lists_the_active_runs_newest_first() {
     );
 }
 
+// spec(ap ps): `ap ps -a` also lists the finished runs whose logs are kept.
+// spec(ap ps): It adds each run's status: `running`, or `exited` and the run's exit status.
 #[test]
-fn ap_ps_a_is_named_as_not_built_and_other_arguments_print_usage() {
-    let scratch = Scratch::new("arguments");
+fn ap_ps_a_lists_the_finished_runs_with_logs_and_each_status() {
+    let scratch = Scratch::new("all");
+    let runs = Runs::new(&scratch.store);
+    let (active, _active_record, _active_socket) = scratch.run("notes", 1_794_567_729 * SECOND);
+    let exited = runs.create("review-bot", 1_794_567_790 * SECOND).unwrap();
+    runs.create_log(&exited.name).unwrap();
+    store::record_exit(&runs.hold(&exited.name).unwrap(), 3).unwrap();
+    // A run whose `ap run` was killed records no status.
+    let killed = runs.create("notes", 1_794_567_800 * SECOND).unwrap();
+    runs.create_log(&killed.name).unwrap();
+    // A finished run whose log is gone isn't listed.
+    let deleted = runs.create("notes", 1_794_567_810 * SECOND).unwrap();
+
     let output = scratch.ap(&["ps", "-a"]);
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("`ap ps -a` is not built yet"),
-        "{output:?}"
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        format!(
+            "NAME      AGENT       STARTED               STATUS\n\
+             {killed}  notes       2026-11-13T11:03:20Z  exited ?\n\
+             {exited}  review-bot  2026-11-13T11:03:10Z  exited 3\n\
+             {active}  notes       2026-11-13T11:02:09Z  running\n",
+            killed = killed.name,
+            exited = exited.name,
+        ),
+        "{} is listed",
+        deleted.name
     );
+}
+
+#[test]
+fn other_arguments_print_usage() {
+    let scratch = Scratch::new("arguments");
     for args in [&["ps", "-x"][..], &["ps", "notes"], &["ps", "-a", "-a"]] {
         let output = scratch.ap(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");

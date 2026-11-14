@@ -2,7 +2,8 @@
 //! the run, and starts a run process that boots the agent's layers in a new
 //! microVM and starts the harness there as the user `agent`, as
 //! [`ap::runs`] says. It streams the harness's output and exits with its
-//! status, or with 125 if the harness never started.
+//! status, or with 125 if the harness never started. What it shows of the
+//! output, it also writes to the run's log.
 //!
 //! A run with a prompt is headless, and the harness gets pipes. Any other
 //! run, or one with `-i`, is interactive: the harness gets a terminal in the
@@ -143,7 +144,8 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    let run = ::store::Runs::new(root)
+    let runs = ::store::Runs::new(root);
+    let run = runs
         .create(&args.agent.to_string_lossy(), started)
         .map_err(fail("can't record the run"))?;
 
@@ -181,6 +183,11 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run process"))?;
+    // The log is made only once the run process runs, which records how
+    // the run ends, so `ap ps -a` never lists a run that couldn't start.
+    let mut log = runs
+        .create_log(&run.name)
+        .map_err(fail("can't create the run's log"))?;
 
     let interactive = start.terminal.is_some();
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;
@@ -198,7 +205,7 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         }
         false => None,
     };
-    let end = relay(&mut stream, &execs).map_err(fail("lost the run"));
+    let end = relay(&mut stream, &execs, &mut log).map_err(fail("lost the run"));
     drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
     let exited = process.wait();
@@ -378,22 +385,26 @@ pub(super) fn terminal_size() -> Size {
     }
 }
 
-/// Writes the run's output to this process's, filtered, and hands each
-/// `ap exec` what is for it, until the run ends. Write errors are ignored: a
-/// reader that went away shouldn't change what the harness does or how it
-/// ends.
-fn relay(stream: &mut UnixStream, execs: &runs::Execs) -> io::Result<End> {
+/// Writes the run's output to this process's and to the run's log,
+/// filtered, and hands each `ap exec` what is for it, until the run ends.
+/// Write errors are ignored: a reader that went away, or a full disk,
+/// shouldn't change what the harness does or how it ends.
+fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Result<End> {
     let mut stdout_filter = Filter::default();
     let mut stderr_filter = Filter::default();
     loop {
         match runs::read_from_run(stream)? {
             Some(FromRun::Stdout(bytes)) => {
+                let shown = stdout_filter.push(&bytes);
                 let mut stdout = io::stdout();
-                let _ = stdout.write_all(&stdout_filter.push(&bytes));
+                let _ = stdout.write_all(&shown);
                 let _ = stdout.flush();
+                let _ = runs::write_log(log, false, &shown);
             }
             Some(FromRun::Stderr(bytes)) => {
-                let _ = io::stderr().write_all(&stderr_filter.push(&bytes));
+                let shown = stderr_filter.push(&bytes);
+                let _ = io::stderr().write_all(&shown);
+                let _ = runs::write_log(log, true, &shown);
             }
             Some(FromRun::ForExec(id, tag, body)) => execs.deliver(id, tag, body),
             Some(FromRun::End(end)) => return Ok(end),

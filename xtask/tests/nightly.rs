@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod common;
 
-const BUDGETS: &str = "[[budget]]\nkey = \"idle_mib\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
+const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
 const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
 const NO_ISSUES: &str = "[]";
 const REPORT_ISSUE: &str =
@@ -58,7 +58,7 @@ struct Recorded<'a> {
     pr: usize,
     proven: usize,
     passing: usize,
-    idle_mib: f64,
+    version_ms: f64,
     reason: &'a str,
 }
 
@@ -73,7 +73,7 @@ const CLEAN: Recorded = Recorded {
     pr: 9,
     proven: 1,
     passing: 1,
-    idle_mib: 100.0,
+    version_ms: 100.0,
     reason: "",
 };
 
@@ -263,13 +263,13 @@ impl Repo {
         self.write(
             &format!("harness/ledger/{}.toml", record.issue),
             &format!(
-                "issue = {}\npr = {}\ncommit = \"gated\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = {{ proven = {}, promises = 7 }}\njourney = {{ passing = {}, steps = 4 }}\nreason = \"{}\"\n\n[budgets]\nidle_mib = {}\n",
+                "issue = {}\npr = {}\ncommit = \"gated\"\ndate = \"2026-01-01\"\nhost = \"h\"\nspec = {{ proven = {}, promises = 7 }}\njourney = {{ passing = {}, steps = 4 }}\nreason = \"{}\"\n\n[budgets]\nversion_ms = {}\n",
                 record.issue,
                 record.pr,
                 record.proven,
                 record.passing,
                 record.reason,
-                record.idle_mib,
+                record.version_ms,
             ),
         );
         self.commit(subject, age_hours);
@@ -503,7 +503,7 @@ fn a_lower_score_than_the_record_before_is_a_regression() {
         "Worse (#9)",
         2,
         &Recorded {
-            idle_mib: 200.0,
+            version_ms: 200.0,
             ..CLEAN
         },
     );
@@ -1264,7 +1264,7 @@ fn a_tighter_target_later_doesnt_blame_an_earlier_commit() {
         "Slower, inside the target (#9)",
         3,
         &Recorded {
-            idle_mib: 140.0,
+            version_ms: 140.0,
             ..CLEAN
         },
     );
@@ -1291,7 +1291,7 @@ fn a_commit_with_no_budget_file_compares_no_budgets() {
         "Without the file (#9)",
         3,
         &Recorded {
-            idle_mib: 200.0,
+            version_ms: 200.0,
             ..CLEAN
         },
     );

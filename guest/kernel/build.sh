@@ -5,7 +5,7 @@
 set -eu
 
 version=7.3.3
-release=$version-ap.2
+release=$version-ap.3
 archive=linux-$version.tar.xz
 url=https://cdn.kernel.org/pub/linux/kernel/v7.x/$archive
 archive_sha256=79c66dde66cd96877fcde8f7d36aec946b1f423d2b97b5a7b1751b75c764f3d1

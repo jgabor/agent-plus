@@ -1050,7 +1050,11 @@ impl Scratch {
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         let mut lines = stdout.lines();
-        let header: Vec<&str> = lines.next().unwrap_or_default().split_whitespace().collect();
+        let header: Vec<&str> = lines
+            .next()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
         assert_eq!(header, ["NAME", "AGENT", "STARTED", "STATUS"], "{stdout}");
         lines
             .map(|line| line.split_whitespace().map(str::to_owned).collect())

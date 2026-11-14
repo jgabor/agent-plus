@@ -38,6 +38,11 @@
 //! so that no write can hold it back.
 //! `ap run` holds the connection until it exits itself, after the run
 //! process, so `ap stop` reads its end once the VM has stopped.
+//!
+//! `ap run` writes what it shows of the run's output to the run's log, in the
+//! same messages the run process sends it, and `ap logs` reads them back.
+//! Before the run process lets go of the run's record, it adds the status
+//! `ap run` exits with, which `ap ps -a` shows.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -49,7 +54,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -147,6 +152,30 @@ pub enum FromRun {
     End(End),
     /// A message for the `ap exec` with this id: its tag and its body.
     ForExec(u32, u8, Vec<u8>),
+}
+
+/// Adds output that `ap run` showed, on standard error if `stderr`, to the
+/// run's log. It is one write, so a reader sees all of it or none.
+pub fn write_log(log: &mut impl Write, stderr: bool, bytes: &[u8]) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut message = Vec::new();
+    push_frame(&mut message, if stderr { STDERR } else { STDOUT }, bytes);
+    log.write_all(&message)
+}
+
+/// Reads the next output from a run's log. The end of the log is `None`, and
+/// so is a message cut short, which a run still writing may have left.
+pub fn read_log(log: &mut impl Read) -> io::Result<Option<FromRun>> {
+    match read_frame(log) {
+        Ok(Some((STDOUT, body))) => Ok(Some(FromRun::Stdout(body))),
+        Ok(Some((STDERR, body))) => Ok(Some(FromRun::Stderr(body))),
+        Ok(None) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Ok(Some(_)) => Err(bad_message()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Sends the run process what to run.
@@ -523,9 +552,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         return 125;
     };
     let output = Arc::new(ToRun::new(output));
-    // The lock on the run's record lasts until this process exits.
-    let mut record = None;
-    let end = match serve(&args[1].to_string_lossy(), &stream, &output, &mut record) {
+    let end = match serve(&args[1].to_string_lossy(), &stream, &output) {
         Ok(status) => End::Exited(status),
         Err(error) => End::Failed(error.exit_code(), error.to_string()),
     };
@@ -538,26 +565,37 @@ pub fn run_process(args: &[OsString]) -> u8 {
             push_frame(&mut message, FAILED, &body);
         }
     }
-    if !output.end(&message) {
-        // `ap stop` is powering the VM off, and this process exits as it does.
-        return KILLED;
-    }
-    drop(record);
-    match end {
+    let status = match end {
         End::Exited(status) => status,
         End::Failed(status, _) => status,
+    };
+    if !output.end(&message) {
+        // `ap stop` is powering the VM off, and records its status first.
+        // This process exits as it does.
+        loop {
+            thread::park();
+        }
+    }
+    record_exit(status);
+    status
+}
+
+/// The run's record, which this process holds the lock on until it exits.
+static RECORD: OnceLock<File> = OnceLock::new();
+
+/// Adds the status `ap run` exits with to the run's record. Only the one
+/// that claimed the run's end calls this, so it is written at most once.
+fn record_exit(status: u8) {
+    if let Some(record) = RECORD.get() {
+        // Without it, `ap ps -a` shows the run ended, with no status.
+        let _ = ::store::record_exit(record, status);
     }
 }
 
-/// Locks the record of the run named `name` into `record`, reads the
+/// Locks the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, and boots the agent with its output sent to
 /// `output`.
-fn serve(
-    name: &str,
-    stream: &UnixStream,
-    output: &Arc<ToRun>,
-    record: &mut Option<File>,
-) -> Result<u8, Error> {
+fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Error> {
     let root = crate::store::default_root(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
@@ -565,11 +603,10 @@ fn serve(
     .ok_or_else(|| {
         Error::Failed("HOME isn't an absolute path, so there's no place for the store".to_owned())
     })?;
-    *record = Some(
-        ::store::Runs::new(&root)
-            .hold(name)
-            .map_err(|error| Error::Failed(format!("can't lock the run's record: {error}")))?,
-    );
+    let record = ::store::Runs::new(&root)
+        .hold(name)
+        .map_err(|error| Error::Failed(format!("can't lock the run's record: {error}")))?;
+    let _ = RECORD.set(record);
     let lost = |error: io::Error| Error::Failed(format!("can't read the run from ap run: {error}"));
     let mut reader = stream;
     let mut names = Vec::new();
@@ -734,6 +771,7 @@ fn stop(input: &Input, output: &ToRun) {
     if output.wait_for_end(GRACE) || !output.claim_end() {
         return;
     }
+    record_exit(KILLED);
     // SAFETY: `_exit` ends the process at once, which is what's wanted.
     unsafe { libc::_exit(KILLED.into()) };
 }

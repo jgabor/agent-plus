@@ -7,14 +7,20 @@
 //!
 //! `AGENT` is the agent the run started, and `STARTED` is when, in
 //! nanoseconds since the Unix epoch. A record appears under its name complete
-//! and synced, or not at all, and never replaces another run's.
+//! and synced, or not at all, and never replaces another run's. When the run
+//! ends, its run process adds `EXITED <status>`, the status `ap run` exits
+//! with, before it lets go of the lock.
 //!
 //! While a run is active, its run process holds an exclusive lock on its
 //! record. The kernel drops the lock when that process exits, for
 //! any reason, so a run whose process is gone never reads as active.
+//!
+//! A run's log is kept apart from its record, under `logs` with the run's
+//! name, and only `ap run` writes it.
 
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::agents::valid_name;
@@ -39,6 +45,9 @@ pub struct Run {
     pub agent: String,
     /// When the run started, in nanoseconds since the Unix epoch.
     pub started: u128,
+    /// The status the run ended with, once it has, if its run process could
+    /// record it.
+    pub exited: Option<u8>,
 }
 
 /// Whether `name` can name a run: one or more characters of the alphabet.
@@ -66,9 +75,16 @@ pub fn random_name() -> io::Result<String> {
     }
 }
 
+/// Adds the status the run ended with to its record, which [`Runs::hold`]
+/// opened. It is one write, so a reader sees the whole line or none of it.
+pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
+    held.write_all(format!("EXITED {status}\n").as_bytes())
+}
+
 /// The runs in a store. Creating one touches nothing.
 pub struct Runs {
     dir: PathBuf,
+    logs: PathBuf,
 }
 
 impl Runs {
@@ -76,6 +92,7 @@ impl Runs {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Runs {
             dir: root.as_ref().join("runs"),
+            logs: root.as_ref().join("logs"),
         }
     }
 
@@ -120,6 +137,7 @@ impl Runs {
             name,
             agent: agent.to_owned(),
             started,
+            exited: None,
         };
         Ok(run)
     }
@@ -136,12 +154,82 @@ impl Runs {
         })
     }
 
+    /// Every run the store has, in no order.
+    pub fn list(&self) -> io::Result<Vec<Run>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut runs = Vec::new();
+        for entry in entries {
+            let file = entry?.file_name();
+            // A partial record starts with a dot, which no name has.
+            let Some(name) = file.to_str().filter(|name| valid_run_name(name)) else {
+                continue;
+            };
+            // `ap rm` may have removed it since.
+            if let Some(run) = self.get(name)? {
+                runs.push(run);
+            }
+        }
+        Ok(runs)
+    }
+
+    /// Creates the log of the run with this name, which must have none.
+    pub fn create_log(&self, name: &str) -> io::Result<File> {
+        check_run_name(name)?;
+        fs::create_dir_all(&self.logs)?;
+        // A log can hold whatever the agent printed, so it is yours alone.
+        OpenOptions::new()
+            .append(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(self.logs.join(name))
+    }
+
+    /// The log of the run with this name, if the store has it.
+    pub fn log(&self, name: &str) -> io::Result<Option<File>> {
+        check_run_name(name)?;
+        match File::open(self.logs.join(name)) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("the log of run {name}: {error}"),
+            )),
+        }
+    }
+
+    /// Removes the run with this name and its log. The log goes first, so a
+    /// run is never left with a log and no record.
+    pub fn remove(&self, name: &str) -> io::Result<()> {
+        check_run_name(name)?;
+        for path in [self.logs.join(name), self.dir.join(name)] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     /// Takes the exclusive lock on the record of the run with this name,
-    /// which marks the run active until the returned file closes.
+    /// which marks the run active until the returned file closes. The file
+    /// can add to the record, as [`record_exit`] does.
     pub fn hold(&self, name: &str) -> io::Result<File> {
-        let file = self.open(name)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("no run is named {name}"))
-        })?;
+        check_run_name(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(self.dir.join(name))
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::NotFound => {
+                    io::Error::new(error.kind(), format!("no run is named {name}"))
+                }
+                _ => io::Error::new(error.kind(), format!("run {name}: {error}")),
+            })?;
         file.lock()
             .map_err(|error| io::Error::new(error.kind(), format!("run {name}: {error}")))?;
         Ok(file)
@@ -161,12 +249,7 @@ impl Runs {
     }
 
     fn open(&self, name: &str) -> io::Result<Option<File>> {
-        if !valid_run_name(name) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("{name:?} isn't a run's name"),
-            ));
-        }
+        check_run_name(name)?;
         match File::open(self.dir.join(name)) {
             Ok(file) => Ok(Some(file)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -175,9 +258,20 @@ impl Runs {
     }
 }
 
+fn check_run_name(name: &str) -> io::Result<()> {
+    if valid_run_name(name) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{name:?} isn't a run's name"),
+    ))
+}
+
 fn read_record(name: &str, text: &str) -> Result<Run, String> {
     let mut agent = None;
     let mut started = None;
+    let mut exited = None;
     for line in text.lines() {
         match line.split_once(' ') {
             Some(("AGENT", value)) if agent.is_none() && valid_name(value) => {
@@ -186,6 +280,9 @@ fn read_record(name: &str, text: &str) -> Result<Run, String> {
             Some(("STARTED", value)) if started.is_none() => {
                 started = Some(value.parse().map_err(|_| format!("bad line {line:?}"))?);
             }
+            Some(("EXITED", value)) if exited.is_none() => {
+                exited = Some(value.parse().map_err(|_| format!("bad line {line:?}"))?);
+            }
             _ => return Err(format!("bad line {line:?}")),
         }
     }
@@ -193,6 +290,7 @@ fn read_record(name: &str, text: &str) -> Result<Run, String> {
         name: name.to_owned(),
         agent: agent.ok_or("no AGENT line")?,
         started: started.ok_or("no STARTED line")?,
+        exited,
     })
 }
 
@@ -234,6 +332,9 @@ mod tests {
         let run = read_record("k3x9q2mf", "AGENT notes\nSTARTED 12\n").unwrap();
         assert_eq!(run.agent, "notes");
         assert_eq!(run.started, 12);
+        assert_eq!(run.exited, None);
+        let run = read_record("k3x9q2mf", "AGENT notes\nSTARTED 12\nEXITED 137\n").unwrap();
+        assert_eq!(run.exited, Some(137));
         for bad in [
             "",
             "AGENT notes\n",
@@ -242,6 +343,8 @@ mod tests {
             "AGENT notes\nSTARTED soon\n",
             "AGENT notes\nAGENT notes\nSTARTED 12\n",
             "AGENT notes\nSTARTED 12\nPORT 80\n",
+            "AGENT notes\nSTARTED 12\nEXITED 256\n",
+            "AGENT notes\nSTARTED 12\nEXITED 1\nEXITED 2\n",
         ] {
             assert!(read_record("k3x9q2mf", bad).is_err(), "{bad:?}");
         }

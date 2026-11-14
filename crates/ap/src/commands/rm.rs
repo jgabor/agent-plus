@@ -3,8 +3,11 @@
 //! says. The approval stays, because it belongs to the Agentfile's path and
 //! not to the agent.
 //!
-//! An agent has no persisted state, runs, kept repositories, or pending
-//! changes yet, so there's nothing else to remove, and nothing to refuse for.
+//! It also removes the agent's finished runs and their logs. An active run
+//! keeps its log, until an agent of that name is removed again.
+//!
+//! An agent has no persisted state, kept repositories, or pending changes
+//! yet, so there's nothing else to remove, and nothing to refuse for.
 
 use std::ffi::OsString;
 
@@ -41,9 +44,20 @@ fn remove(name: &str) -> Result<(), String> {
     if !::store::valid_name(name) {
         return Err(unknown());
     }
-    match ::store::Agents::new(root).remove(name) {
-        Ok(true) => Ok(()),
+    match ::store::Agents::new(&root).remove(name) {
+        Ok(true) => remove_runs(&::store::Runs::new(&root), name)
+            .map_err(|error| format!("ap: can't remove the runs of {name}: {error}")),
         Ok(false) => Err(unknown()),
         Err(error) => Err(format!("ap: {error}")),
     }
+}
+
+/// Removes the finished runs of the agent `name`, and their logs.
+fn remove_runs(runs: &::store::Runs, name: &str) -> std::io::Result<()> {
+    for run in runs.list()? {
+        if run.agent == name && !runs.active(&run.name)? {
+            runs.remove(&run.name)?;
+        }
+    }
+    Ok(())
 }

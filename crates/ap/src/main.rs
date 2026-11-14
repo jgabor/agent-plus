@@ -13,6 +13,7 @@ mod commands {
     pub mod fmt;
     pub mod init;
     pub mod inspect;
+    pub mod logs;
     pub mod ls;
     pub mod ps;
     pub mod rm;
@@ -28,7 +29,8 @@ const USAGE: &str = "usage: ap --version
        ap inspect [--grants] agent
        ap rm agent
        ap run [-i] [-p prompt] agent
-       ap ps
+       ap ps [-a]
+       ap logs run
        ap exec run command [arg...]
        ap stop run
        ap boot [--timeout N] [-- COMMAND...]";
@@ -108,6 +110,11 @@ fn main() -> ExitCode {
         && let Some(all) = commands::ps::parse(&args[1..])
     {
         return ExitCode::from(commands::ps::run(all));
+    }
+    if args.first().is_some_and(|command| command == "logs")
+        && let Some(name) = commands::logs::parse(&args[1..])
+    {
+        return ExitCode::from(commands::logs::run(&name));
     }
     if args.first().is_some_and(|command| command == "exec")
         && let Some(exec) = commands::exec::parse(&args[1..])

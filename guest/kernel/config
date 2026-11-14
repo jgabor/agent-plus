@@ -2,7 +2,7 @@
 # over allnoconfig, then fails if Kconfig dropped any line.
 
 CONFIG_64BIT=y
-CONFIG_LOCALVERSION="-ap.2"
+CONFIG_LOCALVERSION="-ap.3"
 # CONFIG_LOCALVERSION_AUTO is not set
 # CONFIG_MODULES is not set
 # CONFIG_ACPI is not set
@@ -48,6 +48,10 @@ CONFIG_VIRTIO_BLK=y
 CONFIG_NET=y
 CONFIG_VSOCKETS=y
 CONFIG_VIRTIO_VSOCKETS=y
+
+# Unix sockets, which a harness's runtime makes at start. Tokio's signal
+# driver, under Codex, panics without them.
+CONFIG_UNIX=y
 
 # The diagnostic log.
 CONFIG_TTY=y

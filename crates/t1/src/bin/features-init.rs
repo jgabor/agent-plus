@@ -1,10 +1,11 @@
-//! A static `/init` for T1: it logs what the kernel offers the Run milestone,
+//! A static `/init` for T1: it logs what the kernel offers runs and harnesses,
 //! and powers off.
 
 use guest::linux::Linux;
 use guest::{MOUNTS, System};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -27,6 +28,10 @@ fn main() {
     }
     if Path::new("/sys/bus/virtio/drivers/virtio_blk").is_dir() {
         report.push_str(" virtio_blk");
+    }
+    // Tokio's signal driver, which Codex starts with, makes this pair.
+    if UnixStream::pair().is_ok() {
+        report.push_str(" unix");
     }
     report.push_str(" end");
     OpenOptions::new()

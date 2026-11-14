@@ -4,7 +4,8 @@
 //! not to the agent.
 //!
 //! It also removes the agent's finished runs and their logs. An active run
-//! keeps its log, until an agent of that name is removed again.
+//! keeps its log, until `ap rm` of that name runs again, which then removes
+//! the log even though the agent is gone.
 //!
 //! An agent has no persisted state, kept repositories, or pending changes
 //! yet, so there's nothing else to remove, and nothing to refuse for.
@@ -44,20 +45,27 @@ fn remove(name: &str) -> Result<(), String> {
     if !::store::valid_name(name) {
         return Err(unknown());
     }
-    match ::store::Agents::new(&root).remove(name) {
-        Ok(true) => remove_runs(&::store::Runs::new(&root), name)
-            .map_err(|error| format!("ap: can't remove the runs of {name}: {error}")),
-        Ok(false) => Err(unknown()),
-        Err(error) => Err(format!("ap: {error}")),
+    let removed = ::store::Agents::new(&root)
+        .remove(name)
+        .map_err(|error| format!("ap: {error}"))?;
+    // An agent removed while it ran leaves that run's log, which goes now.
+    let runs = remove_runs(&::store::Runs::new(&root), name)
+        .map_err(|error| format!("ap: can't remove the runs of {name}: {error}"))?;
+    match removed || runs > 0 {
+        true => Ok(()),
+        false => Err(unknown()),
     }
 }
 
-/// Removes the finished runs of the agent `name`, and their logs.
-fn remove_runs(runs: &::store::Runs, name: &str) -> std::io::Result<()> {
+/// Removes the finished runs of the agent `name`, and their logs, and
+/// returns how many it removed.
+fn remove_runs(runs: &::store::Runs, name: &str) -> std::io::Result<usize> {
+    let mut removed = 0;
     for run in runs.list()? {
         if run.agent == name && !runs.active(&run.name)? {
             runs.remove(&run.name)?;
+            removed += 1;
         }
     }
-    Ok(())
+    Ok(removed)
 }

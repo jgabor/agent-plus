@@ -148,9 +148,6 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
     let run = runs
         .create(&args.agent.to_string_lossy(), started)
         .map_err(fail("can't record the run"))?;
-    let mut log = runs
-        .create_log(&run.name)
-        .map_err(fail("can't create the run's log"))?;
 
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), root);
     DirBuilder::new()
@@ -186,6 +183,11 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run process"))?;
+    // The log is made only once the run process runs, which records how
+    // the run ends, so `ap ps -a` never lists a run that couldn't start.
+    let mut log = runs
+        .create_log(&run.name)
+        .map_err(fail("can't create the run's log"))?;
 
     let interactive = start.terminal.is_some();
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;

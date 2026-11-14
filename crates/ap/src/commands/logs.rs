@@ -4,7 +4,7 @@
 //! stops at what `ap run` has written so far.
 
 use std::ffi::OsString;
-use std::io::{self, BufReader, Write};
+use std::io::{self, BufReader, Read, Write};
 
 use ap::runs::{self, FromRun};
 use store::Runs;
@@ -44,7 +44,9 @@ fn print(name: &str) -> Result<(), String> {
         .log(name)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| format!("the log of run {name} was deleted"))?;
-    let mut log = BufReader::new(log);
+    // An active run's log ends where it was when it was opened.
+    let length = log.metadata().map_err(|error| error.to_string())?.len();
+    let mut log = BufReader::new(log).take(length);
     let (mut stdout, mut stderr) = (io::stdout().lock(), io::stderr().lock());
     let unreadable = |error: io::Error| format!("can't read the log of run {name}: {error}");
     // A reader that went away has nothing more to see.

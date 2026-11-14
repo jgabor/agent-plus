@@ -100,9 +100,10 @@ fn kept(runs: &Runs) -> io::Result<Vec<Row>> {
         let status = if runs.active(&run.name)? {
             "running".to_owned()
         } else if runs.log(&run.name)?.is_some() {
-            let exited = run
-                .exited
-                .map_or("?".to_owned(), |status| status.to_string());
+            // The run may have ended since it was read, and it records its
+            // status before it lets go of the lock.
+            let exited = runs.get(&run.name)?.and_then(|run| run.exited);
+            let exited = exited.map_or("?".to_owned(), |status| status.to_string());
             format!("exited {exited}")
         } else {
             continue;

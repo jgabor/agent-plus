@@ -930,6 +930,23 @@ mod tests {
     }
 
     #[test]
+    fn a_log_reads_back_up_to_a_message_still_being_written() {
+        let mut log = Vec::new();
+        write_log(&mut log, false, b"out").unwrap();
+        write_log(&mut log, true, b"").unwrap();
+        write_log(&mut log, true, b"err").unwrap();
+        write_log(&mut log, false, b"cut").unwrap();
+        let mut reader = &log[..log.len() - 1];
+        let mut read = || read_log(&mut reader).unwrap();
+        assert_eq!(read(), Some(FromRun::Stdout(b"out".to_vec())));
+        assert_eq!(read(), Some(FromRun::Stderr(b"err".to_vec())));
+        assert_eq!(read(), None);
+        let mut other = Vec::new();
+        push_frame(&mut other, EXITED, &[0]);
+        assert!(read_log(&mut &other[..]).is_err());
+    }
+
+    #[test]
     fn a_cut_short_or_unknown_or_oversized_message_is_an_error() {
         let mut whole = Vec::new();
         push_frame(&mut whole, STDOUT, b"out");

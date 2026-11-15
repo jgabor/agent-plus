@@ -327,7 +327,7 @@ impl Repo {
     /// Wrappers for `git` and `cargo`, and the fake `gh`. Each logs the call.
     /// `KILL_ON` kills `xtask` at the first call containing it, `KILL_WHEN`
     /// says whether before or after doing the call, `HANG_ON` makes a matching
-    /// call sleep, and `RUN_ON` runs `RUN_COMMAND` just before the first
+    /// call sleep for `HANG_FOR` seconds, or 3, and `RUN_ON` runs `RUN_COMMAND` just before the first
     /// matching call. The fake `gh` keeps the newest state posted on each
     /// commit, and gives it back when asked for that commit's status.
     fn write_tools(&self) {
@@ -342,7 +342,7 @@ maybe_kill() {{
   fi
 }}
 if [ -n "$HANG_ON" ]; then
-  case "$call" in *"$HANG_ON"*) exec sleep 3 ;; esac
+  case "$call" in *"$HANG_ON"*) exec sleep "${{HANG_FOR:-3}}" ;; esac
 fi
 if [ -n "$RUN_ON" ] && [ ! -f '{bin}/ran' ]; then
   case "$call" in *"$RUN_ON"*) : > '{bin}/ran'; eval "$RUN_COMMAND" ;; esac
@@ -1544,6 +1544,32 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert!(!repo.bin.join("merged").exists());
     assert_merged(&repo, &repo.merge());
+}
+
+/// A PR that changes xtask is proven twice, and each proof gets the whole
+/// timeout, so the two together may take longer.
+#[test]
+fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
+    let repo = changing(
+        "timeout-twice",
+        &[],
+        &[("xtask/src/bench.rs", "// a better measurer\n")],
+    );
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("HANG_ON", "cargo fmt --all")
+        .env("HANG_FOR", "20")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "32")
+        .output()
+        .unwrap();
+    assert_eq!(
+        repo.calls().matches("cargo fmt --all").count(),
+        2,
+        "{}",
+        repo.calls()
+    );
+    assert_merged(&repo, &output);
 }
 
 /// A command that a merge starts, and that outlives its parent: it ignores

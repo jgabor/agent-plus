@@ -403,15 +403,15 @@ fn a_run_with_ro_and_rw_directory_shares_gets_past_its_checks() {
 }
 
 #[test]
-fn a_copy_on_write_or_file_share_is_not_built_yet() {
+fn a_copy_on_write_share_is_not_built_yet() {
     let scratch = Scratch::new("share-not-built");
     let dir = scratch.root.join("file");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("notes.txt"), "one").unwrap();
-    scratch.build("file", &format!("{RUNNABLE}SHARE ./notes.txt ro\n"));
+    scratch.build("file", &format!("{RUNNABLE}SHARE ./notes.txt\n"));
     refused(
         &scratch.ap(&["run", "file", "-p", "hi"], &[]),
-        "`SHARE ./notes.txt`: sharing a file is not built yet",
+        "`SHARE ./notes.txt`: a copy-on-write `SHARE` is not built yet",
     );
     fs::create_dir_all(scratch.root.join("cow/app")).unwrap();
     scratch.build("cow", &format!("{RUNNABLE}SHARE ./app\n"));

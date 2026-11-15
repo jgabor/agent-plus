@@ -283,6 +283,19 @@ fn a_read_write_file_share_changes_the_file_alone() {
 }
 
 #[test]
+fn a_file_share_shows_the_file_it_started_with() {
+    let tree = Tree::new("file-replaced");
+    let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadOnly);
+    fs::write(tree.root.join("hello.txt"), b"changed").unwrap();
+    assert_eq!(guest.read_file("hello.txt").unwrap(), b"changed");
+    // Replaced on the host, it is another file, which the share never
+    // shows.
+    fs::write(tree.base.join("new"), b"replaced").unwrap();
+    fs::rename(tree.base.join("new"), tree.root.join("hello.txt")).unwrap();
+    assert_eq!(guest.read_file("hello.txt"), Err(ESTALE));
+}
+
+#[test]
 fn a_file_share_must_be_of_a_file() {
     let tree = Tree::new("file-dir");
     for name in ["dir", "link", "missing"] {

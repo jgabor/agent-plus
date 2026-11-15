@@ -280,6 +280,9 @@ fn a_run_starts_in_its_workdir_or_its_only_directory_share() {
 
 // spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.
 // spec(SHARE): Without `<dest>`, the [mirror rule](#paths) decides the guest path.
+// spec(SHARE): A shared file is the agent's view of that one file.
+// spec(SHARE): If a program on your host replaces the file instead of changing it, as some editors do when they save, the agent gets a `Stale file handle` error for it until the next run.
+// spec(SHARE): The agent can't remove or rename a shared file, which fails with a `Device or resource busy` error.
 #[test]
 fn a_run_shows_a_shared_file_and_nothing_beside_it() {
     let scratch = Scratch::new("file");
@@ -324,6 +327,14 @@ fn a_run_shows_a_shared_file_and_nothing_beside_it() {
     );
     printed(&scratch.sh(name, "echo new > ~/work.txt"), "");
     assert_eq!(fs::read_to_string(dir.join("work.txt")).unwrap(), "new\n");
+    for script in ["rm ~/work.txt", "mv ~/work.txt ~/moved.txt"] {
+        failed(&scratch.sh(name, script), "Device or resource busy");
+    }
+
+    // A file the host puts in its place is another file.
+    fs::write(dir.join("replacement"), "replaced\n").unwrap();
+    fs::rename(dir.join("replacement"), dir.join("work.txt")).unwrap();
+    failed(&scratch.sh(name, "cat ~/work.txt"), "Stale file handle");
     let stopped = scratch.ap(&["stop", name]);
     assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
 }

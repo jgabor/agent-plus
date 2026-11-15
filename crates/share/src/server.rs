@@ -277,7 +277,8 @@ struct Share {
     root: Rc<OwnedFd>,
     read_only: bool,
     /// For a file share, the file's name in the root, and the file, opened
-    /// with `O_PATH`.
+    /// with `O_PATH`. The share shows that file alone, and no other the
+    /// name comes to lead to.
     only: Option<(CString, OwnedFd)>,
     nodes: BTreeMap<u64, Node>,
     /// The node each host file has, by device and inode.
@@ -535,6 +536,10 @@ impl Share {
     /// Opens the file a node is, by the name it was last found by, and
     /// checks that the name still leads to it.
     fn reopen(&self, found: &Node, flags: i32) -> Result<OwnedFd, i32> {
+        // Landlock refuses any other file, so this one is told apart first.
+        if let Some((_, file)) = &self.only {
+            still_the_file(file, &found.parent, &found.name)?;
+        }
         let fd = sys::open_beneath(found.parent.as_fd(), &found.name, flags).map_err(errno)?;
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
         if (stat.st_dev, stat.st_ino) != (found.device, found.inode) {
@@ -592,11 +597,13 @@ impl Share {
     /// Answers with the entry for `name` in the directory `parent`.
     fn lookup(&mut self, parent: u64, body: &[u8]) -> Answer {
         let name = entry_name(body)?;
-        if let Some((only, _)) = &self.only
+        if let Some((only, file)) = &self.only
             && parent == ROOT
-            && name != *only
         {
-            return Err(libc::ENOENT);
+            if name != *only {
+                return Err(libc::ENOENT);
+            }
+            still_the_file(file, &self.root, &name)?;
         }
         let (directory, place) = {
             let found = self.node(parent)?;
@@ -1219,6 +1226,22 @@ fn parse(bytes: &[u8]) -> Option<Request<'_>> {
         node: u64_at(bytes, 16)?,
         body: &bytes[IN_HEADER..len],
     })
+}
+
+/// Fails with `ESTALE` unless `name` in `directory` is still a file share's
+/// `file`, which a file the host put in its place isn't.
+fn still_the_file(file: &OwnedFd, directory: &OwnedFd, name: &CStr) -> Result<(), i32> {
+    let flags = libc::O_PATH | libc::O_NOFOLLOW;
+    let found = sys::open_beneath(directory.as_fd(), name, flags).map_err(errno)?;
+    let identity = |fd: BorrowedFd| {
+        sys::fstat(fd)
+            .map(|stat| (stat.st_dev, stat.st_ino))
+            .map_err(errno)
+    };
+    match identity(found.as_fd())? == identity(file.as_fd())? {
+        true => Ok(()),
+        false => Err(libc::ESTALE),
+    }
 }
 
 /// Whether a file share answers `request`. Its root is the directory that

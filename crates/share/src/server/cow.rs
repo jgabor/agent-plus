@@ -138,9 +138,15 @@ struct Dirent {
 }
 
 enum Handle {
-    /// An open file: the agent's copy, or yours, which is open for reading
-    /// alone. `mode` is what the guest saw when it opened it.
-    File { fd: OwnedFd, node: u64, mode: u32 },
+    /// An open file: the agent's copy, or with `lower`, yours, which is
+    /// open for reading alone. `mode` is what the guest saw when it opened
+    /// it.
+    File {
+        fd: OwnedFd,
+        node: u64,
+        mode: u32,
+        lower: bool,
+    },
     /// An open directory, listed when it opened.
     Dir { entries: Vec<Dirent> },
 }
@@ -413,7 +419,9 @@ impl Cow {
             None => {
                 // A directory is in the tree with no entry only to hold what
                 // the agent changed beneath it.
-                let upper = self.open_upper(path, PATH_FLAGS).ok();
+                let upper = self.open_upper(path, PATH_FLAGS).ok().filter(|fd| {
+                    sys::fstat(fd.as_fd()).is_ok_and(|stat| is(stat.st_mode, libc::S_IFDIR))
+                });
                 let lower = match (hidden, &upper) {
                     (true, _) => None,
                     (false, None) => Some(self.open_lower(path, PATH_FLAGS)?),
@@ -529,6 +537,7 @@ impl Cow {
         self.make_parents(path)?;
         let Some(lower) = &view.lower else {
             // A directory in the tree that you have since removed.
+            self.base(path, None)?;
             let entry = Entry::Dir {
                 mode: 0o755,
                 opaque: false,
@@ -552,24 +561,59 @@ impl Cow {
             }
             kind => {
                 let copy = self.create_upper(path, libc::O_WRONLY)?;
-                let entry = match kind {
-                    libc::S_IFREG => {
-                        self.copy_file(path, &stat, copy.as_fd())?;
-                        Entry::File { mode }
+                let made = (|| {
+                    let entry = match kind {
+                        libc::S_IFREG => {
+                            self.copy_file(path, &stat, copy.as_fd())?;
+                            Entry::File { mode }
+                        }
+                        libc::S_IFLNK => Entry::Symlink {
+                            target: sys::readlink(lower.as_fd()).map_err(errno)?,
+                        },
+                        _ => Entry::Special {
+                            mode: stat.st_mode,
+                            rdev: encode(stat.st_rdev),
+                        },
+                    };
+                    set_times(copy.as_fd(), &stat)?;
+                    Ok(entry)
+                })();
+                match made {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        // A copy with no entry would read as a directory.
+                        let _ = self.unlink_upper(path, 0);
+                        return Err(error);
                     }
-                    libc::S_IFLNK => Entry::Symlink {
-                        target: sys::readlink(lower.as_fd()).map_err(errno)?,
-                    },
-                    _ => Entry::Special {
-                        mode: stat.st_mode,
-                        rdev: encode(stat.st_rdev),
-                    },
-                };
-                set_times(copy.as_fd(), &stat)?;
-                entry
+                }
             }
         };
-        self.set(path, entry)
+        self.set(path, entry)?;
+        // What the guest has open of your file reads the copy from now on,
+        // and its POSIX locks are taken there.
+        let node = self.paths.get(path).copied();
+        self.locks.retain(|(locked, _), _| Some(*locked) != node);
+        let readers: Vec<_> = self
+            .handles
+            .iter()
+            .filter(|(_, handle)| matches!(handle, Handle::File { node: open, lower: true, .. } if Some(*open) == node))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in readers {
+            let fd = self.open_upper(path, READ_FLAGS)?;
+            if let Some(Handle::File { fd: old, lower, .. }) = self.handles.get_mut(&id) {
+                *old = fd;
+                *lower = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes `path` from the tree.
+    fn unlink_upper(&self, path: &[u8], flags: i32) -> Result<(), i32> {
+        let (dir, name) = split(path);
+        let dir = self.open_upper(dir, libc::O_PATH | libc::O_DIRECTORY)?;
+        sys::unlinkat(dir.as_fd(), &c(name), flags).map_err(errno)
     }
 
     /// Copies your file at `path`, which `stat` describes, to `copy`.
@@ -695,6 +739,7 @@ impl Cow {
         if !is(mode, libc::S_IFREG) {
             return Err(libc::EINVAL);
         }
+        let lower = !writes(flags) && view.entry.is_none();
         let fd = if writes(flags) {
             self.copy_up(path)?;
             let fd = self.open_upper(path, open_flags(flags) & !libc::O_TRUNC)?;
@@ -702,12 +747,17 @@ impl Cow {
                 sys::ftruncate(fd.as_fd(), 0).map_err(errno)?;
             }
             fd
-        } else if view.entry.is_some() {
-            self.open_upper(path, open_flags(flags))?
-        } else {
+        } else if lower {
             self.open_lower(path, open_flags(flags))?
+        } else {
+            self.open_upper(path, open_flags(flags))?
         };
-        Ok(self.add_handle(Handle::File { fd, node, mode }))
+        Ok(self.add_handle(Handle::File {
+            fd,
+            node,
+            mode,
+            lower,
+        }))
     }
 
     fn open(&mut self, node: u64, body: &[u8]) -> Answer {
@@ -841,7 +891,13 @@ impl Cow {
             let mut out = self.remember(path)?;
             let node = u64_at(&out, 0).ok_or(libc::EIO)?;
             let mode = libc::S_IFREG | mode;
-            out.extend(open_out(self.add_handle(Handle::File { fd, node, mode })));
+            let handle = Handle::File {
+                fd,
+                node,
+                mode,
+                lower: false,
+            };
+            out.extend(open_out(self.add_handle(handle)));
             return Ok(out);
         }
         let mut out = self.remember(path.clone())?;
@@ -973,10 +1029,7 @@ impl Cow {
         }
         self.base(&path, None)?;
         if view.upper.is_some() {
-            let (parent, name) = split(&path);
-            let parent = self.open_upper(parent, libc::O_PATH | libc::O_DIRECTORY)?;
-            let flags = if dir { libc::AT_REMOVEDIR } else { 0 };
-            sys::unlinkat(parent.as_fd(), &c(name), flags).map_err(errno)?;
+            self.unlink_upper(&path, if dir { libc::AT_REMOVEDIR } else { 0 })?;
         }
         self.take_beneath(&path);
         self.set(&path, Entry::Deleted)?;
@@ -1049,7 +1102,12 @@ impl Cow {
         )
         .map_err(errno)?;
         let moved = self.take_beneath(&from);
+        let replaced = target.is_some() || self.entries.keys().any(|key| beneath(key, &into));
         self.take_beneath(&into);
+        if replaced {
+            // Read in order, the records drop what was there first.
+            self.record(line(&into, &Entry::Deleted))?;
+        }
         let mut entry = self.entries.remove(&from).ok_or(libc::EIO)?;
         if let Entry::Dir { opaque, .. } = &mut entry {
             *opaque = self.open_lower(&into, PATH_FLAGS).is_ok();
@@ -1099,7 +1157,10 @@ impl Cow {
         if valid & (FATTR_UID | FATTR_GID) != 0 {
             return Err(libc::EPERM);
         }
-        let path = self.path(node)?;
+        let path = match self.path(node) {
+            Err(libc::ENOENT) if valid & FATTR_FH != 0 => return self.setattr_open(node, body),
+            path => path?,
+        };
         self.copy_up(&path)?;
         let entry = self.view(&path)?.entry.ok_or(libc::EIO)?;
         let dir = matches!(entry, Entry::Dir { .. });
@@ -1141,6 +1202,40 @@ impl Cow {
             sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
         }
         Ok(attr_out(&self.attributes(node, &self.view(&path)?)?))
+    }
+
+    /// `SETATTR` for a node that is gone, through the agent's copy that a
+    /// handle holds open. Its mode has no record left to change.
+    fn setattr_open(&self, node: u64, body: &[u8]) -> Answer {
+        let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
+        let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
+        let valid = word(0)?;
+        let handle = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let Some(Handle::File {
+            fd,
+            node: open,
+            mode,
+            lower: false,
+        }) = self.handles.get(&handle)
+        else {
+            return Err(libc::ENOENT);
+        };
+        if *open != node {
+            return Err(libc::EBADF);
+        }
+        if valid & FATTR_SIZE != 0 {
+            sys::ftruncate(fd.as_fd(), field(16)?).map_err(errno)?;
+        }
+        let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
+        if valid & times != 0 {
+            let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
+            let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
+            sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
+        }
+        let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
+        stat.st_mode = *mode;
+        stat.st_ino = node;
+        Ok(attr_out(&stat))
     }
 
     /// `struct fuse_fallocate_in`.

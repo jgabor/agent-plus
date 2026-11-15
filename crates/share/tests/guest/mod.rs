@@ -473,6 +473,7 @@ pub fn host_locked(path: &Path, kind: i16) -> bool {
     lock.l_type != libc::F_UNLCK as i16
 }
 
+pub const EACCES: i32 = 13;
 pub const EXDEV: i32 = 18;
 pub const ENOTEMPTY: i32 = 39;
 pub const S_IFIFO: u32 = 0o010_000;

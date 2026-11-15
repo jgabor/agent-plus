@@ -129,7 +129,7 @@ fn files_the_agent_has_not_written_show_your_changes_live() {
     assert_eq!(guest.read_file("dir/nested.txt").unwrap(), b"the agent's");
 }
 
-// spec(SHARE): Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
+// spec(SHARE): **Bringing changes back.** Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
 // spec(SHARE): The next run starts from your current files, not from earlier unapplied changes.
 #[test]
 fn changes_survive_the_run_and_the_next_run_starts_from_your_files() {
@@ -361,6 +361,7 @@ fn a_lock_on_a_file_the_agent_wrote_is_taken_on_its_pending_copy() {
     assert_eq!(free, -1);
 }
 
+// spec(SHARE): In a copy-on-write share, renaming a directory that holds your files, or making a hard link, fails with an `Invalid cross-device link` error, as it does in overlayfs, so tools copy instead.
 #[test]
 fn a_rename_moves_the_agent_s_copy_and_leaves_yours() {
     let tree = Tree::new("cow-rename");
@@ -475,4 +476,114 @@ fn a_write_never_reaches_outside_a_copy_on_write_share() {
     let outside: Vec<_> = fs::read_dir(tree.base.join("outside")).unwrap().collect();
     assert_eq!(outside.len(), 1);
     assert!(!tree.base.join("planted").exists());
+}
+
+#[test]
+fn a_copy_that_fails_leaves_nothing_behind() {
+    let tree = Tree::new("cow-failed-copy");
+    let path = tree.root.join("hello.txt");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    assert_eq!(guest.open(hello, O_RDWR), Err(EACCES));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(kind(guest.mode("hello.txt").unwrap()), S_IFREG);
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    assert_eq!(guest.read_file("hello.txt").unwrap(), b"agent");
+}
+
+#[test]
+fn a_file_open_for_reading_reads_the_agent_s_copy_once_it_has_one() {
+    let tree = Tree::new("cow-reader");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    assert_eq!(guest.read(READ, reader, 0, 64), (0, b"agent".to_vec()));
+}
+
+#[test]
+fn a_file_the_agent_removed_still_changes_through_its_handle() {
+    let tree = Tree::new("cow-removed-open");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let (file, handle) = guest.create(1, b"temp", 0).unwrap();
+    guest.write(handle, 0, b"temporary").unwrap();
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    // `FATTR_SIZE | FATTR_FH`, to 4 bytes, through the handle.
+    let mut body = (FATTR_SIZE | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(handle.to_le_bytes());
+    body.extend(4u64.to_le_bytes());
+    body.resize(88, 0);
+    assert_eq!(guest.call(SETATTR, file, &body).0, 0);
+    assert_eq!(guest.read(READ, handle, 0, 64), (0, b"temp".to_vec()));
+    // Your file, open for reading, never changes through a handle.
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    let reader = guest.open(nested, 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
+    let mut body = (FATTR_SIZE | FATTR_MTIME | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(reader.to_le_bytes());
+    body.resize(88, 0);
+    assert_ne!(guest.call(SETATTR, nested, &body).0, 0);
+    assert_eq!(
+        fs::read(tree.root.join("dir/nested.txt")).unwrap(),
+        b"nested"
+    );
+}
+
+#[test]
+fn a_lock_moves_to_the_agent_s_copy_once_it_has_one() {
+    let tree = Tree::new("cow-lock-moves");
+    let pending = pending(&tree);
+    let mut guest = Guest::cow(&tree.root, &pending);
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    assert_eq!(guest.lock(GETLK, reader, 7, F_WRLCK, 0).0, 0);
+    let writer = guest.open(hello, O_RDWR).unwrap();
+    assert_eq!(guest.lock(SETLK, writer, 7, F_WRLCK, 0).0, 0);
+    assert!(host_locked(
+        &pending.join("tree/hello.txt"),
+        libc::F_RDLCK as i16
+    ));
+}
+
+#[test]
+fn a_directory_you_removed_is_recorded_before_the_agent_changes_it() {
+    let tree = Tree::new("cow-orphan");
+    let pending = pending(&tree);
+    let mut guest = Guest::cow(&tree.root, &pending);
+    guest.overwrite("dir/nested.txt", b"agent").unwrap();
+    fs::remove_dir_all(tree.root.join("dir")).unwrap();
+    let dir = guest.walk("dir").unwrap();
+    assert_eq!(guest.setattr(dir, FATTR_MODE, 0, 0o700), 0);
+    drop(guest);
+    assert_eq!(base(&pending, "dir"), "none");
+}
+
+#[test]
+fn a_rename_over_a_directory_records_what_it_replaced() {
+    let tree = Tree::new("cow-replaced");
+    let pending = pending(&tree);
+    let mut guest = Guest::cow(&tree.root, &pending);
+    let target = guest.mkdir(1, b"target").unwrap();
+    let (_, handle) = guest.create(target, b"ghost", 0).unwrap();
+    guest.release(handle);
+    assert_eq!(guest.remove(UNLINK, target, b"ghost"), 0);
+    guest.mkdir(1, b"source").unwrap();
+    assert_eq!(guest.rename(1, b"source", 1, b"target", 0), 0);
+    // An exchange isn't a rename this share makes.
+    guest.mkdir(1, b"other").unwrap();
+    assert_eq!(
+        guest.rename(1, b"other", 1, b"target", RENAME_EXCHANGE),
+        EINVAL
+    );
+    drop(guest);
+    // Read in order, the records leave nothing of the old directory.
+    let records = records(&pending);
+    let last = |line: &str| records.iter().rposition(|found| found == line).unwrap();
+    let cleared = last(r#"DELETE "target""#);
+    assert!(last(r#"DELETE "target/ghost""#) < cleared, "{records:#?}");
+    assert!(cleared < last(r#"DIR "target" 755"#), "{records:#?}");
 }

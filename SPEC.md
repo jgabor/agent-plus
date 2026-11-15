@@ -1403,6 +1403,9 @@ How it works:
 - In a linked worktree, `.git` is a file that points outside the share, so
   git doesn't work inside the guest, and `ap apply` applies files rather
   than a branch. Share the main working tree if the agent needs git.
+- In a copy-on-write share, renaming a directory that holds your files, or
+  making a hard link, fails with an `Invalid cross-device link` error, as it
+  does in overlayfs, so tools copy instead.
 - File locks pass through to the host.
 - A lock that would wait for another holder fails at once with an
   `Operation not supported` error, because the agent's machine waits for

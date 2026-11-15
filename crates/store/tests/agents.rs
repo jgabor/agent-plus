@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
-use store::{Agent, Agents, Declared, Layer, Layers, valid_name};
+use store::{Agent, Agents, Declared, Kind, Layer, Layers, valid_name};
 
 /// A fresh directory for one test, with `HOME` and the store root inside it.
 fn store_root(test: &str) -> PathBuf {
@@ -48,6 +48,7 @@ fn agent(name: &str, directory: &str, layers: Vec<Layer>) -> Agent {
         directory: directory.to_string(),
         agentfile: format!("{directory}/Agentfile"),
         layers,
+        kinds: Vec::new(),
         declared: vec![declared("AGENT", &["claude"])],
     }
 }
@@ -109,6 +110,16 @@ fn a_recorded_agent_reads_back_the_same() {
         "/home/me/my notes \"draft\"\n\\ \u{202e}",
         layers(&root, &["one", "two", "three"]),
     );
+    recorded.kinds = vec![
+        Kind {
+            source: "./a b".to_string(),
+            directory: true,
+        },
+        Kind {
+            source: "~/notes.md".to_string(),
+            directory: false,
+        },
+    ];
     recorded.declared = vec![
         declared("AGENT", &["claude"]),
         declared("ENV", &["GREETING=\"hello, $USER\""]),
@@ -134,6 +145,10 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
         digest: Layers::new(&root).put(b"src", 3).unwrap(),
         instruction: "ADD ./src /work".to_string(),
     }];
+    recorded.kinds = vec![Kind {
+        source: "./out".to_string(),
+        directory: true,
+    }];
     recorded.declared = vec![
         declared("AGENT", &["claude"]),
         declared("SHARE", &["./out", "/work/out", "rw"]),
@@ -149,6 +164,7 @@ fn a_record_is_written_in_the_agentfile_line_syntax() {
             "DIRECTORY \"/home/me/my notes\"\n\
              AGENTFILE \"/home/me/my notes/Agentfile\"\n\
              LAYER \"key src\" {digest} \"ADD ./src /work\"\n\
+             KIND ./out directory\n\
              AGENT claude\n\
              SHARE ./out /work/out rw\n\
              ENV TAB=a\\u{{9}}b\n"
@@ -176,6 +192,8 @@ fn a_record_that_is_not_in_the_syntax_is_an_error() {
         format!("{head}LAYER key {digest} \"\"\n"),
         format!("{head}LAYER key {digest} ADD x\n"),
         format!("{head}BOGUS word\n"),
+        format!("{head}KIND ./out\n"),
+        format!("{head}KIND ./out folder\n"),
         format!("{head}ENV \\x\n"),
         format!("{head}SYSTEM hello\n"),
         format!("{head}SYSTEM\n"),

@@ -248,6 +248,22 @@ fn build(args: &Args) -> Result<(), String> {
         return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
     };
 
+    // A run checks that each share source is still what it was.
+    let mut kinds: Vec<::store::Kind> = Vec::new();
+    for share in Files::read(&instructions).map_err(report)?.share {
+        if kinds.iter().any(|kind| kind.source == share.source) {
+            continue;
+        }
+        let directory = resolved
+            .get(&share.source)
+            .and_then(|host| host.is_dir())
+            .map_err(|error| format!("{shown}:{}: {error}", share.line))?;
+        kinds.push(::store::Kind {
+            source: share.source,
+            directory,
+        });
+    }
+
     let agent_line = agent_line(&instructions);
     let agent = Settings::read(&instructions).map_err(report)?.agent;
     let cache = cache.ok_or("ap: HOME isn't an absolute path, so there's no download cache")?;
@@ -314,6 +330,7 @@ fn build(args: &Args) -> Result<(), String> {
             directory: directory.to_string(),
             agentfile: agentfile_path.clone(),
             layers: built,
+            kinds: kinds.clone(),
             declared,
         };
         // A build that put no layer leaves an unchanged record as it is. The

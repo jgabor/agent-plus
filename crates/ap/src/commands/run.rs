@@ -13,7 +13,7 @@
 //! Only an agent with `NETWORK -` runs. Everything else on #297's list of
 //! what isn't built yet fails with 125 and says so, before any VM starts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::fs::{DirBuilder, File};
 use std::io::{self, IsTerminal, Read, Write};
@@ -29,9 +29,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentfile::{Files, Harness, Instruction, Network, Os, Part, Secrets, Settings, Sign};
+use agentfile::{Files, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, Sign};
 use ap::boot::Error;
 use ap::filter::Filter;
+use ap::paths::HostPath;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
 use guest::protocol::{Size, Start};
@@ -470,11 +471,17 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         let messages: Vec<String> = errors.into_iter().map(|error| error.message).collect();
         fail(format!("agent {name} can't run: {}", messages.join("; ")))
     };
-    if let Some(instruction) = instructions
-        .iter()
-        .find(|instruction| NOT_BUILT.contains(&instruction.name.as_str()))
-    {
+    // A share is checked before it is refused, so its checks are kept now.
+    if let Some(instruction) = instructions.iter().find(|instruction| {
+        instruction.name != "SHARE" && NOT_BUILT.contains(&instruction.name.as_str())
+    }) {
         return Err(fail(format!("`{}` is not built yet", instruction.name)));
+    }
+    let files = Files::read(&instructions).map_err(unreadable)?;
+    if !files.share.is_empty() {
+        let home = home.clone().unwrap_or_default();
+        check_shares(&root, &record, &instructions, &files.share, &home)?;
+        return Err(fail("`SHARE` is not built yet".to_owned()));
     }
     let settings = Settings::read(&instructions).map_err(unreadable)?;
     let tier = match settings.os {
@@ -522,7 +529,6 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         false => None,
     };
     let secrets = Secrets::read(&instructions).map_err(unreadable)?;
-    let files = Files::read(&instructions).map_err(unreadable)?;
 
     let mut env = BTreeMap::new();
     env.insert(b"PATH".to_vec(), PATH.as_bytes().to_vec());
@@ -605,6 +611,86 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         terminal,
     };
     Ok((root, layers, start))
+}
+
+/// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a
+/// run does: a relative source needs the build context to be where it was,
+/// every source must still exist and be the kind it was at build time, and
+/// what it resolves to now must be approved, or you are asked again.
+fn check_shares(
+    root: &Path,
+    record: &::store::Agent,
+    instructions: &[Instruction],
+    shares: &[Share],
+    home: &Path,
+) -> Result<(), Error> {
+    let fail = |message: String| Error::Failed(message);
+    let context = Path::new(&record.directory);
+    let relative =
+        |source: &str| !(source.starts_with('/') || source == "~" || source.starts_with("~/"));
+    if shares.iter().any(|share| relative(&share.source)) {
+        let now = context.canonicalize().map_err(|error| {
+            fail(format!(
+                "the agent was built from {}, which can't be found now: {error}",
+                context.display()
+            ))
+        })?;
+        if now != context {
+            return Err(fail(format!(
+                "the agent was built from {}, which is now {}. Build it again where it is",
+                context.display(),
+                now.display()
+            )));
+        }
+    }
+    let word = |directory: bool| match directory {
+        true => "directory",
+        false => "file",
+    };
+    let mut resolved = HashMap::new();
+    for share in shares {
+        let shown = format!("`SHARE {}`", agentfile::print_argument(&share.source));
+        let host = HostPath::resolve_pinned(&share.source, context, home)
+            .and_then(|host| Ok((host.is_dir()?, host)));
+        let (directory, host) = host.map_err(|error| fail(format!("{shown}: {error}")))?;
+        let built = (record.kinds.iter())
+            .find(|kind| kind.source == share.source)
+            .ok_or_else(|| {
+                fail(format!(
+                    "{shown}: the agent was built before `ap` recorded what its shares are. Build it again"
+                ))
+            })?;
+        if built.directory != directory {
+            return Err(fail(format!(
+                "{shown}: it was a {} when the agent was built, and is a {} now",
+                word(built.directory),
+                word(directory)
+            )));
+        }
+        resolved.insert(share.source.as_str(), host);
+    }
+    let only_shares: Vec<Instruction> = (instructions.iter())
+        .filter(|instruction| instruction.name == "SHARE")
+        .cloned()
+        .collect();
+    let grants = ap::approval::grants(&only_shares, |text| {
+        resolved
+            .get(text)
+            .cloned()
+            .ok_or_else(|| io::Error::other(format!("{text} wasn't resolved")))
+    })
+    .map_err(|errors| {
+        let messages: Vec<String> = errors.into_iter().map(|error| error.message).collect();
+        fail(messages.join("; "))
+    })?;
+    let approvals = ::store::Approvals::new(root);
+    ap::approval::approve_shares(
+        &approvals,
+        Path::new(&record.agentfile),
+        &record.agentfile,
+        grants.paths,
+    )
+    .map_err(fail)
 }
 
 /// An `ENV` value with its variables read from this process's environment,

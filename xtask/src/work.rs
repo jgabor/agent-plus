@@ -725,6 +725,7 @@ fn update_status(
     };
     if Status::parse(&Comment {
         id: 0,
+        url: String::new(),
         author: String::new(),
         body: body.to_string(),
     })
@@ -912,6 +913,7 @@ mod tests {
     fn comment(id: u64, author: &str, body: &str) -> Comment {
         Comment {
             id,
+            url: String::new(),
             author: author.to_string(),
             body: body.to_string(),
         }

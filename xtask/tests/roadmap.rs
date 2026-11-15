@@ -124,6 +124,11 @@ printf '%s\n' "$*" >> "$d/calls"
 case "$1 $2" in
   "issue list") cat "$d/issues.json" ;;
   "pr list") cat "$d/prs.json" ;;
+  "issue view") cat "$d/issue.json" 2>/dev/null || echo '{"number":2,"state":"OPEN","body":"","labels":[],"comments":[]}' ;;
+  "repo view") echo '{"owner":{"login":"o"}}' ;;
+  "api "*"/reactions?content=eyes")
+    id="${2%/reactions*}"; id="${id##*/}"
+    cat "$d/eyes-$id" 2>/dev/null || true ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 "#;
@@ -539,6 +544,10 @@ Steps:
 
 - #10 Boot the machine
 - #43 Share \\<src> with `ap run <agent>`
+
+### To read
+
+Nothing.
 ";
 
 #[test]
@@ -673,7 +682,7 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
     assert_eq!(text.matches("Parent: none.\n").count(), 3, "{text}");
     assert!(
         text.ends_with(
-            "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n"
+            "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n\n### To read\n\nNothing.\n"
         ),
         "{text}"
     );
@@ -780,4 +789,45 @@ fn a_roadmap_that_cant_reach_github_is_an_error() {
     let output = repo.xtask(&["roadmap"]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// A nightly report that asks to be read, with no :eyes: from the owner,
+/// waits on the owner. Someone else's reaction doesn't count.
+#[test]
+fn the_details_list_each_unread_report() {
+    let repo = Repo::new("unread");
+    let (issues, prs) = full();
+    repo.set(&issues, &prs);
+    let mark = "Mark this report read by reacting with :eyes:.";
+    let comment = |id: u64, author: &str, commit: &str, body: &str| {
+        format!(
+            "{{\"url\":\"https://github.com/o/r/issues/2#issuecomment-{id}\",\"author\":{{\"login\":\"{author}\"}},\"body\":{}}}",
+            quoted(&format!("# Nightly report for `{commit}`\n\n{body}\n"))
+        )
+    };
+    let comments = [
+        comment(7, "o", "1111111", "Nothing to read."),
+        comment(8, "o", "2222222", mark),
+        comment(9, "o", "3333333", mark),
+        comment(10, "someone", "4444444", mark),
+    ];
+    fs::write(
+        repo.bin.join("issue.json"),
+        format!(
+            "{{\"number\":2,\"state\":\"OPEN\",\"body\":\"\",\"labels\":[],\"comments\":[{}]}}",
+            comments.join(",")
+        ),
+    )
+    .unwrap();
+    fs::write(repo.bin.join("eyes-8"), "someone\n").unwrap();
+    fs::write(repo.bin.join("eyes-9"), "o\n").unwrap();
+    let text = repo.details();
+    assert!(
+        text.ends_with(
+            "### To read\n\n- [Nightly report for `2222222`](https://github.com/o/r/issues/2#issuecomment-8)\n"
+        ),
+        "{text}"
+    );
+    // The roadmap for anyone names nothing that waits on the owner.
+    assert!(!repo.roadmap().contains("Nightly report for"));
 }

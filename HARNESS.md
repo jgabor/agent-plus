@@ -189,7 +189,7 @@ each step as the last journey ran it.
 | Idle overhead of `ap`, the VMM, and the guest kernel | under 64 MiB | to be set |
 | `ap build` with nothing changed | under 100 ms | 10% or 5 ms, whichever is larger |
 | Desktop cost until first use | disk only | none |
-| Stripped release binary | to be set | to be set |
+| Stripped release binary | to be set | 5% |
 | `ap --version` | none | 20% or 2 ms, whichever is larger |
 
 `harness/budgets.toml` holds the targets and bands. A budget with no band is
@@ -309,7 +309,9 @@ releases a hold when its process exits. `cargo` builds `xtask` itself before
 it can take the lock, which is one reason `xtask` has no dependencies.
 
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
-matching, and device input from the guest.
+matching, and device input from the guest. A target for code with an oracle
+compares the two, and a difference fails like a crash. An oracle kept as a
+dev-dependency counts toward the C floor.
 
 **Flaky tests.** A test is never retried. It is fixed, or quarantined with a
 linked issue. Quarantine lowers the spec score, so it needs the owner.
@@ -341,7 +343,7 @@ Files outside any single lane follow these rules:
 | `harness/ledger/` | One new file per merge |
 | `harness/waived.txt` | A new waiver waits for the owner. Union merge through `.gitattributes` |
 | `harness/journey/` | Step scripts, which any PR may change |
-| `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR |
+| `Cargo.lock` | Regenerated on rebase. A new dependency gets its own PR, and that PR's ledger record is its cost |
 
 ### What waits for the owner
 
@@ -934,6 +936,6 @@ The harness is built before product features.
 | Limit on model spend for workers | Workers run no step marked `spend` |
 | Credential and spend limit for Codex in journey step 13 | Step 13 gets no Codex credential |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
-| Bands for every budget except boot, a build with nothing changed, and `ap --version`, and the binary size target | Those budgets are recorded, and don't fail |
+| The binary size target, and bands for every budget except boot, a build with nothing changed, `ap --version`, and the binary | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

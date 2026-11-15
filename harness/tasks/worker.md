@@ -41,6 +41,10 @@ can't continue alone, park the issue as AGENTS.md says.
    {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5"}
    ```
 
+   When the PR adds a crate, or writes code a crate could do, ask the
+   reviewer to confirm that the measurement was taken and that the oracle is
+   in the tests, as Crates and our own code in AGENTS.md says.
+
 6. Open the PR and link it with `mcp__t3-code__link_pull_request`. `xtask/gate`
    is the only check, and no bot reviews this repository, so don't wait for
    either.

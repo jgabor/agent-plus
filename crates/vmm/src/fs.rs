@@ -37,11 +37,12 @@ const IN_HEADER: usize = 40;
 const OUT_HEADER: usize = 16;
 const EIO: i32 = 5;
 
-/// How long one read of the socket waits before the device looks at the
-/// clock again.
+/// How long one read or write of the socket waits before the device looks
+/// at the clock again.
 const POLL: Duration = Duration::from_millis(50);
 const SOL_SOCKET: c_int = 1;
 const SO_RCVTIMEO: c_int = 20;
+const SO_SNDTIMEO: c_int = 21;
 
 unsafe extern "C" {
     fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const c_void, len: u32) -> c_int;
@@ -54,12 +55,14 @@ pub trait Server {
     fn call(&mut self, share: u32, request: &[u8]) -> io::Result<Vec<u8>>;
 }
 
-/// The VMM's end of the socket to the share server. It gives up on an
-/// answer once the guest's time is over, so a server that hangs can't hold
-/// the vCPU past its timeout.
+/// The VMM's end of the socket to the share server. It gives up on a
+/// request once the guest's time is over, so a server that hangs can't hold
+/// the vCPU past its timeout. After any failure it fails every request,
+/// because a late answer would be taken for the next one.
 pub struct Relay {
     socket: File,
     deadline: Instant,
+    broken: bool,
 }
 
 impl Relay {
@@ -67,22 +70,26 @@ impl Relay {
     /// no answer past `deadline`. Call it before the process is confined.
     pub fn new(socket: OwnedFd, deadline: Instant) -> io::Result<Self> {
         let timeout = [POLL.as_secs() as i64, i64::from(POLL.subsec_micros())];
-        // SAFETY: `timeout` is a `struct timeval`, which outlives the call.
-        let set = unsafe {
-            setsockopt(
-                socket.as_raw_fd(),
-                SOL_SOCKET,
-                SO_RCVTIMEO,
-                timeout.as_ptr().cast(),
-                size_of_val(&timeout) as u32,
-            )
-        };
-        if set != 0 {
-            return Err(io::Error::last_os_error());
+        for option in [SO_RCVTIMEO, SO_SNDTIMEO] {
+            // SAFETY: `timeout` is a `struct timeval`, which outlives the
+            // call.
+            let set = unsafe {
+                setsockopt(
+                    socket.as_raw_fd(),
+                    SOL_SOCKET,
+                    option,
+                    timeout.as_ptr().cast(),
+                    size_of_val(&timeout) as u32,
+                )
+            };
+            if set != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         Ok(Self {
             socket: File::from(socket),
             deadline,
+            broken: false,
         })
     }
 
@@ -91,35 +98,45 @@ impl Relay {
         self.socket.as_raw_fd()
     }
 
+    /// Waits again after a read or write that timed out, until the deadline.
+    fn retry(&self, error: io::Error) -> io::Result<()> {
+        match error.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                if Instant::now() < self.deadline =>
+            {
+                Ok(())
+            }
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => {
+                Err(io::ErrorKind::TimedOut.into())
+            }
+            _ => Err(error),
+        }
+    }
+
     fn read_exact(&mut self, mut buffer: &mut [u8]) -> io::Result<()> {
         while !buffer.is_empty() {
             match self.socket.read(buffer) {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(len) => buffer = &mut buffer[len..],
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    if Instant::now() >= self.deadline {
-                        return Err(io::ErrorKind::TimedOut.into());
-                    }
-                }
-                Err(error) => return Err(error),
+                Err(error) => self.retry(error)?,
             }
         }
         Ok(())
     }
-}
 
-impl Server for Relay {
-    fn call(&mut self, share: u32, request: &[u8]) -> io::Result<Vec<u8>> {
-        let mut frame = Vec::with_capacity(8 + request.len());
-        frame.extend((request.len() as u32).to_le_bytes());
-        frame.extend(share.to_le_bytes());
-        frame.extend(request);
-        self.socket.write_all(&frame)?;
+    fn write_all(&mut self, mut bytes: &[u8]) -> io::Result<()> {
+        while !bytes.is_empty() {
+            match self.socket.write(bytes) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(len) => bytes = &bytes[len..],
+                Err(error) => self.retry(error)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn exchange(&mut self, frame: &[u8]) -> io::Result<Vec<u8>> {
+        self.write_all(frame)?;
         let mut header = [0; 4];
         self.read_exact(&mut header)?;
         let len = u32::from_le_bytes(header) as usize;
@@ -129,6 +146,21 @@ impl Server for Relay {
         let mut answer = vec![0; len];
         self.read_exact(&mut answer)?;
         Ok(answer)
+    }
+}
+
+impl Server for Relay {
+    fn call(&mut self, share: u32, request: &[u8]) -> io::Result<Vec<u8>> {
+        let mut frame = Vec::with_capacity(8 + request.len());
+        frame.extend((request.len() as u32).to_le_bytes());
+        frame.extend(share.to_le_bytes());
+        frame.extend(request);
+        if self.broken {
+            return Err(io::Error::other("the share server is gone"));
+        }
+        let answer = self.exchange(&frame);
+        self.broken = answer.is_err();
+        answer
     }
 }
 
@@ -298,6 +330,7 @@ mod tests {
     const USED: u64 = 0x3000;
     const REQUEST_AT: u64 = 0x4000;
     const ANSWER_AT: u64 = 0x8000;
+    const SO_SNDBUF: c_int = 7;
 
     /// Answers each request with its own bytes reversed, and records what
     /// it was sent.
@@ -562,5 +595,42 @@ mod tests {
             .write_all(&(MAX_FRAME as u32 + 1).to_le_bytes())
             .unwrap();
         assert!(relay.call(0, b"x").is_err());
+    }
+
+    #[test]
+    fn a_server_that_stops_reading_can_t_hold_a_request_past_the_deadline() {
+        let (mine, theirs) = UnixStream::pair().unwrap();
+        // A small buffer, so the request can't fit in it, and a server that
+        // never reads leaves the write waiting.
+        let small: c_int = 4096;
+        // SAFETY: `small` is an `int`, which outlives the call.
+        let set = unsafe {
+            setsockopt(
+                mine.as_raw_fd(),
+                SOL_SOCKET,
+                SO_SNDBUF,
+                (&raw const small).cast(),
+                size_of::<c_int>() as u32,
+            )
+        };
+        assert_eq!(set, 0);
+        let deadline = Instant::now() + POLL * 2;
+        let mut relay = Relay::new(OwnedFd::from(mine), deadline).unwrap();
+        let error = relay.call(0, &vec![0; MAX_FRAME]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(Instant::now() < deadline + Duration::from_secs(5));
+        drop(theirs);
+    }
+
+    #[test]
+    fn after_a_failure_the_relay_fails_every_request() {
+        let (mine, mut theirs) = UnixStream::pair().unwrap();
+        let deadline = Instant::now() + POLL;
+        let mut relay = Relay::new(OwnedFd::from(mine), deadline).unwrap();
+        assert!(relay.call(0, b"x").is_err());
+        // An answer that comes late is never taken for a later request's.
+        theirs.write_all(&[2, 0, 0, 0, b'o', b'k']).unwrap();
+        relay.deadline = Instant::now() + Duration::from_secs(30);
+        assert!(relay.call(0, b"y").is_err());
     }
 }

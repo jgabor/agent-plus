@@ -218,6 +218,9 @@ fn run_agent(
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run process"))?;
+    // The command holds this process's copy of the run process's end of the
+    // socket, which must close so that the run's end reads as an end.
+    drop(command);
     drop(share_socket);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.

@@ -119,6 +119,51 @@ pub enum Mode<P = OwnedFd> {
     CopyOnWrite(P),
 }
 
+/// A share's root, as the server takes it: a directory, and what the share
+/// allows. A file share shows one `file` in the directory, by its name, and
+/// nothing else of it.
+#[derive(Debug)]
+pub struct Root<F = OwnedFd> {
+    pub directory: F,
+    pub file: Option<CString>,
+    pub mode: Mode<F>,
+}
+
+impl<F> Root<F> {
+    /// The share of the directory `directory`.
+    pub fn new(directory: F, mode: Mode<F>) -> Self {
+        Self {
+            directory,
+            file: None,
+            mode,
+        }
+    }
+
+    /// The share of the file `name` in `directory`.
+    pub fn file(directory: F, name: CString, mode: Mode<F>) -> Self {
+        Self {
+            directory,
+            file: Some(name),
+            mode,
+        }
+    }
+}
+
+impl<F: AsFd> Root<F> {
+    /// The same root, borrowing its descriptors.
+    pub fn as_fd(&self) -> Root<BorrowedFd<'_>> {
+        Root {
+            directory: self.directory.as_fd(),
+            file: self.file.clone(),
+            mode: match &self.mode {
+                Mode::ReadOnly => Mode::ReadOnly,
+                Mode::ReadWrite => Mode::ReadWrite,
+                Mode::CopyOnWrite(pending) => Mode::CopyOnWrite(pending.as_fd()),
+            },
+        }
+    }
+}
+
 /// Where a file sits, for what an `rw` share protects. It follows from the
 /// place of the directory above, and the file's name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +276,9 @@ struct Handle {
 struct Share {
     root: Rc<OwnedFd>,
     read_only: bool,
+    /// For a file share, the file's name in the root, and the file, opened
+    /// with `O_PATH`.
+    only: Option<(CString, OwnedFd)>,
     nodes: BTreeMap<u64, Node>,
     /// The node each host file has, by device and inode.
     known: BTreeMap<(u64, u64), u64>,
@@ -413,11 +461,28 @@ fn busy(error: io::Error, wait: bool) -> i32 {
 }
 
 impl Share {
-    fn new(root: OwnedFd, read_only: bool, place: Place) -> io::Result<Self> {
+    fn new(
+        root: OwnedFd,
+        file: Option<CString>,
+        read_only: bool,
+        place: Place,
+    ) -> io::Result<Self> {
         let stat = sys::fstat(root.as_fd())?;
         if !is(stat.st_mode, libc::S_IFDIR) {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
+        let only = match file {
+            None => None,
+            Some(name) => {
+                let flags = libc::O_PATH | libc::O_NOFOLLOW;
+                let fd = sys::open_beneath(root.as_fd(), &name, flags)?;
+                let mode = sys::fstat(fd.as_fd())?.st_mode;
+                if is(mode, libc::S_IFDIR) || is(mode, libc::S_IFLNK) {
+                    return Err(io::Error::other("a file share's file isn't a file"));
+                }
+                Some((name, fd))
+            }
+        };
         let root = Rc::new(root);
         let node = Node {
             fd: Rc::clone(&root),
@@ -432,6 +497,7 @@ impl Share {
         Ok(Self {
             root,
             read_only,
+            only,
             nodes: BTreeMap::from([(ROOT, node)]),
             known: BTreeMap::from([((stat.st_dev, stat.st_ino), ROOT)]),
             handles: BTreeMap::new(),
@@ -526,6 +592,12 @@ impl Share {
     /// Answers with the entry for `name` in the directory `parent`.
     fn lookup(&mut self, parent: u64, body: &[u8]) -> Answer {
         let name = entry_name(body)?;
+        if let Some((only, _)) = &self.only
+            && parent == ROOT
+            && name != *only
+        {
+            return Err(libc::ENOENT);
+        }
         let (directory, place) = {
             let found = self.node(parent)?;
             (Rc::clone(&found.fd), found.place)
@@ -1053,17 +1125,28 @@ impl Server {
     /// A server for these roots, each one an open directory, in share order.
     /// Call it before the process is confined, because it reads where each
     /// root is.
-    pub fn new(roots: Vec<(OwnedFd, Mode)>) -> io::Result<Self> {
+    pub fn new(roots: Vec<Root>) -> io::Result<Self> {
         let shares = roots
             .into_iter()
-            .map(|(root, mode)| match mode {
-                Mode::CopyOnWrite(pending) => cow::Cow::new(root, pending).map(Served::CopyOnWrite),
-                mode => {
-                    let place = root_place(&root);
-                    let read_only = matches!(mode, Mode::ReadOnly);
-                    Share::new(root, read_only, place).map(Served::Direct)
-                }
-            })
+            .map(
+                |Root {
+                     directory,
+                     file,
+                     mode,
+                 }| match mode {
+                    Mode::CopyOnWrite(_) if file.is_some() => Err(io::Error::other(
+                        "a copy-on-write file share is not built yet",
+                    )),
+                    Mode::CopyOnWrite(pending) => {
+                        cow::Cow::new(directory, pending).map(Served::CopyOnWrite)
+                    }
+                    mode => {
+                        let place = root_place(&directory);
+                        let read_only = matches!(mode, Mode::ReadOnly);
+                        Share::new(directory, file, read_only, place).map(Served::Direct)
+                    }
+                },
+            )
             .collect::<io::Result<_>>()?;
         Ok(Self { shares })
     }
@@ -1074,10 +1157,17 @@ impl Server {
         let mut access = Vec::new();
         for share in &self.shares {
             match share {
-                Served::Direct(share) if share.read_only => {
-                    access.push((share.root.as_fd(), Access::Read));
+                Served::Direct(share) => {
+                    // A file share reaches its file alone.
+                    let reached = match &share.only {
+                        Some((_, file)) => file.as_fd(),
+                        None => share.root.as_fd(),
+                    };
+                    match share.read_only {
+                        true => access.push((reached, Access::Read)),
+                        false => access.push((reached, Access::ReadWrite)),
+                    }
                 }
-                Served::Direct(share) => access.push((share.root.as_fd(), Access::ReadWrite)),
                 Served::CopyOnWrite(share) => {
                     let (root, pending) = share.directories();
                     access.push((root, Access::Read));
@@ -1131,11 +1221,34 @@ fn parse(bytes: &[u8]) -> Option<Request<'_>> {
     })
 }
 
+/// Whether a file share answers `request`. Its root is the directory that
+/// holds the file, so the guest may look the file up in it and nothing
+/// more, and no entry in it can be made, removed, or renamed.
+fn file_share_allows(request: &Request) -> bool {
+    let names = [
+        SYMLINK, MKNOD, MKDIR, UNLINK, RMDIR, RENAME, RENAME2, LINK, CREATE,
+    ];
+    let at_root = [
+        INIT,
+        LOOKUP,
+        GETATTR,
+        STATFS,
+        DESTROY,
+        FORGET,
+        BATCH_FORGET,
+        INTERRUPT,
+    ];
+    !names.contains(&request.opcode) && (request.node != ROOT || at_root.contains(&request.opcode))
+}
+
 /// The answer to a request, or `None` for one that gets no answer.
 fn dispatch(share: &mut Share, request: &Request) -> Option<Answer> {
     let Request { node, body, .. } = *request;
     if WRITES.contains(&request.opcode) && share.read_only {
         return Some(Err(libc::EROFS));
+    }
+    if share.only.is_some() && !file_share_allows(request) {
+        return Some(Err(libc::EPERM));
     }
     Some(match request.opcode {
         INIT => init(body),

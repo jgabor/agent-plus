@@ -32,6 +32,9 @@ const MS_MOVE: c_ulong = 8192;
 const MS_NOSUID: c_ulong = 2;
 const MS_NOEXEC: c_ulong = 8;
 const MS_NODEV: c_ulong = 4;
+const MS_REMOUNT: c_ulong = 32;
+const MS_BIND: c_ulong = 4096;
+const MNT_DETACH: c_int = 2;
 const O_RDWR: c_int = 2;
 const O_NOCTTY: c_int = 0o400;
 const O_CLOEXEC: c_int = 0o2000000;
@@ -88,6 +91,7 @@ unsafe extern "C" {
         flags: c_ulong,
         data: *const c_void,
     ) -> c_int;
+    fn umount2(target: *const c_char, flags: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn setsid() -> c_int;
     fn kill(pid: c_int, signal: c_int) -> c_int;
@@ -326,6 +330,38 @@ pub fn mount_share(tag: &str, target: &Path) -> io::Result<()> {
         .to_str()
         .ok_or_else(|| io::Error::other("a share's guest path isn't text"))?;
     mount_with(tag, target, "virtiofs", MS_NOSUID | MS_NODEV, "")
+}
+
+/// Mounts the one file `name` of the share whose device has `tag` at
+/// `target`, which it creates if it is missing, as [`mount_share`] mounts a
+/// directory. The share's root is mounted only on the way, so nothing in
+/// the guest can reach it.
+pub fn mount_file_share(tag: &str, name: &OsStr, target: &Path) -> io::Result<()> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if !target.exists() {
+        File::create(target)?;
+    }
+    let text = |path: &Path| {
+        (path.to_str().map(str::to_owned))
+            .ok_or_else(|| io::Error::other("a share's guest path isn't text"))
+    };
+    let stage = format!("/.{tag}");
+    let file = text(&Path::new(&stage).join(name))?;
+    let target = text(target)?;
+    fs::create_dir_all(&stage)?;
+    mount_with(tag, &stage, "virtiofs", MS_NOSUID | MS_NODEV, "")?;
+    let bound = mount_with(&file, &target, "", MS_BIND, "").and_then(|()| {
+        // A bind keeps none of the flags of the mount it comes from.
+        let flags = MS_REMOUNT | MS_BIND | MS_NOSUID | MS_NODEV;
+        mount_with("", &target, "", flags, "")
+    });
+    let staged = CString::new(stage.as_str()).map_err(io::Error::other)?;
+    // SAFETY: the path is a `CString` that outlives the call.
+    checked(unsafe { umount2(staged.as_ptr(), MNT_DETACH) })?;
+    fs::remove_dir(&stage)?;
+    bound
 }
 
 pub fn connect_to_host(port: u32) -> io::Result<File> {

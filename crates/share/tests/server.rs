@@ -5,7 +5,8 @@
 mod guest;
 
 use guest::*;
-use share::{Mode, Server};
+use share::{Mode, Root, Server};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
@@ -226,10 +227,85 @@ fn a_malformed_request_gets_no_answer() {
 }
 
 #[test]
+fn a_file_share_shows_its_file_and_nothing_beside_it() {
+    let tree = Tree::new("file");
+    for mode in [Mode::ReadOnly, Mode::ReadWrite] {
+        let mut guest = Guest::file(&tree.root, "hello.txt", mode);
+        assert_eq!(guest.read_file("hello.txt").unwrap(), INSIDE);
+        for name in [
+            "dir",
+            "link",
+            "escape",
+            "absolute",
+            "dirlink",
+            "dir/nested.txt",
+        ] {
+            assert_eq!(guest.read_file(name), Err(ENOENT), "{name}");
+        }
+        // The directory that holds the file can't be listed, locked, or
+        // changed, whatever the share allows.
+        assert_eq!(guest.call(OPENDIR, 1, &[0; 8]).0, EPERM);
+        let error = |code: i32| code == EPERM || code == EROFS;
+        let file = guest.walk("hello.txt").unwrap();
+        assert!(error(guest.create(1, b"new.txt", 0).unwrap_err()));
+        assert!(error(guest.mkdir(1, b"made").unwrap_err()));
+        assert!(error(guest.symlink(1, b"made", b"hello.txt").unwrap_err()));
+        assert!(error(guest.link(file, 1, b"hard").unwrap_err()));
+        assert!(error(guest.remove(UNLINK, 1, b"hello.txt")));
+        assert!(error(guest.remove(UNLINK, 1, b"dir")));
+        assert!(error(guest.rename(1, b"hello.txt", 1, b"moved", 0)));
+        assert!(error(guest.setattr(1, FATTR_MODE, 0, 0o777)));
+    }
+    let names: BTreeSet<_> = fs::read_dir(&tree.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    let before = ["absolute", "dir", "dirlink", "escape", "hello.txt", "link"];
+    assert_eq!(names, before.map(str::to_owned).into());
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
+}
+
+#[test]
+fn a_read_write_file_share_changes_the_file_alone() {
+    let tree = Tree::new("file-rw");
+    let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadWrite);
+    guest.overwrite("hello.txt", b"changed").unwrap();
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"changed");
+    let file = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(file, FATTR_SIZE, 4, 0), 0);
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"chan");
+
+    // A shared `Agentfile` stays as SPEC.md's SHARE section says.
+    fs::write(tree.root.join("Agentfile"), INSIDE).unwrap();
+    let mut guest = Guest::file(&tree.root, "Agentfile", Mode::ReadWrite);
+    assert_eq!(guest.overwrite("Agentfile", b"changed"), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join("Agentfile")).unwrap(), INSIDE);
+}
+
+#[test]
+fn a_file_share_must_be_of_a_file() {
+    let tree = Tree::new("file-dir");
+    for name in ["dir", "link", "missing"] {
+        let directory = OwnedFd::from(File::open(&tree.root).unwrap());
+        let name = std::ffi::CString::new(name).unwrap();
+        let root = Root::file(directory, name, Mode::ReadOnly);
+        assert!(Server::new(vec![root]).is_err());
+    }
+    // Copy-on-write isn't built for a file.
+    let pending = tree.base.join("pending");
+    fs::create_dir(&pending).unwrap();
+    let directory = OwnedFd::from(File::open(&tree.root).unwrap());
+    let pending = OwnedFd::from(File::open(&pending).unwrap());
+    let name = std::ffi::CString::new("hello.txt").unwrap();
+    let root = Root::file(directory, name, Mode::CopyOnWrite(pending));
+    assert!(Server::new(vec![root]).is_err());
+}
+
+#[test]
 fn a_root_must_be_a_directory() {
     let tree = Tree::new("root-file");
     let file = OwnedFd::from(File::open(tree.root.join("hello.txt")).unwrap());
-    assert!(Server::new(vec![(file, Mode::ReadOnly)]).is_err());
+    assert!(Server::new(vec![Root::new(file, Mode::ReadOnly)]).is_err());
 }
 
 #[test]

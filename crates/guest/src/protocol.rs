@@ -113,14 +113,35 @@ pub struct Start {
     pub directory: Vec<u8>,
     /// Where each share is mounted, in the order the host lists them. The
     /// share at index `i` is the device that [`crate::share::tag`] names
-    /// for `i`. Each path is absolute.
-    pub shares: Vec<Vec<u8>>,
+    /// for `i`.
+    pub shares: Vec<Share>,
     /// The prompt, which follows the last argument. `None` takes the one the
     /// agent was built with.
     pub prompt: Option<Vec<u8>>,
     /// The size of the terminal the harness starts in. Without one, it
     /// starts with pipes.
     pub terminal: Option<Size>,
+}
+
+/// A share, as the guest mounts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Share {
+    /// The guest path, which is absolute.
+    pub path: Vec<u8>,
+    /// For a file share, the file's name in the share's root. The guest
+    /// mounts that one file at `path`.
+    pub file: Option<Vec<u8>>,
+}
+
+impl Share {
+    /// Whether every value can reach `mount`: an absolute path, and a file
+    /// that is one name.
+    fn is_valid(&self) -> bool {
+        let one_name = |name: &Vec<u8>| {
+            !name.is_empty() && !name.contains(&b'/') && name != b"." && name != b".."
+        };
+        self.path.starts_with(b"/") && self.file.as_ref().is_none_or(one_name)
+    }
 }
 
 /// What the guest tells the host.
@@ -227,15 +248,15 @@ fn read_argv(payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
 
 /// A start's payload: the number of arguments, of variables, and of shares,
 /// each a little-endian `u32`, then the arguments, the variables as
-/// `key=value`, the shares' guest paths, the directory, and the prompt if
-/// there is one. Every string
+/// `key=value`, each share's guest path and its file's name, which is empty
+/// for a directory, the directory, and the prompt if there is one. Every
+/// string
 /// ends with a NUL. A start in a terminal has its own tag, and the terminal's
 /// rows and columns, each a little-endian `u16`, before the payload.
 fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
-    let relative = |path: &Vec<u8>| !path.starts_with(b"/");
     if start.argv.is_empty()
         || start.env.iter().any(|(key, _)| !is_key(key))
-        || start.shares.iter().any(relative)
+        || !start.shares.iter().all(Share::is_valid)
     {
         return Err(ProtocolError::Malformed);
     }
@@ -250,7 +271,12 @@ fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
         .map(|(key, value)| [key.as_slice(), b"=", value].concat());
     let strings = (start.argv.iter().cloned())
         .chain(variables)
-        .chain(start.shares.iter().cloned())
+        .chain(
+            start
+                .shares
+                .iter()
+                .flat_map(|share| [share.path.clone(), share.file.clone().unwrap_or_default()]),
+        )
         .chain([start.directory.clone()])
         .chain(start.prompt.clone());
     for text in strings {
@@ -285,7 +311,14 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         let at = at.ok_or(ProtocolError::Malformed)?;
         env.push((variable[..at].to_vec(), variable[at + 1..].to_vec()));
     }
-    let shares: Vec<Vec<u8>> = strings.by_ref().take(sharec as usize).collect();
+    let mut shares = Vec::new();
+    for _ in 0..sharec {
+        let (Some(path), Some(file)) = (strings.next(), strings.next()) else {
+            return Err(ProtocolError::Malformed);
+        };
+        let file = (!file.is_empty()).then_some(file);
+        shares.push(Share { path, file });
+    }
     let directory = strings.next().ok_or(ProtocolError::Malformed)?;
     let prompt = strings.next();
     let complete = argv.len() == argc as usize
@@ -294,8 +327,7 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
     if !complete || argv.is_empty() || strings.next().is_some() {
         return Err(ProtocolError::Malformed);
     }
-    if env.iter().any(|(key, _)| !is_key(key)) || shares.iter().any(|path| !path.starts_with(b"/"))
-    {
+    if env.iter().any(|(key, _)| !is_key(key)) || !shares.iter().all(Share::is_valid) {
         return Err(ProtocolError::Malformed);
     }
     Ok(Start {

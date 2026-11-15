@@ -10,8 +10,9 @@
 //! guest, and your terminal is put in raw mode for as long as the run lasts,
 //! so every key reaches the harness. Its resizes follow.
 //!
-//! An agent's `ro` and `rw` directory shares are checked again, then opened,
-//! and a share server serves those handles to the run. The guest mounts each
+//! An agent's `ro` and `rw` shares are checked again, then opened, and a
+//! share server serves those handles to the run. A file share is served
+//! from the directory that holds it, by its name. The guest mounts each
 //! at the place SPEC.md's Paths section gives it.
 //!
 //! Only an agent with `NETWORK -` runs. Everything else on #297's list of
@@ -42,6 +43,7 @@ use ap::filter::Filter;
 use ap::paths::HostPath;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
+use guest::protocol::Share as GuestShare;
 use guest::protocol::{Size, Start};
 
 /// The `PATH` the harness gets, unless `ENV` sets one.
@@ -154,7 +156,7 @@ fn run_agent(
     root: &Path,
     args: &Args,
     layers: &[LayerName],
-    shares: &[(File, share::Mode<File>)],
+    shares: &[share::Root<File>],
     start: Start,
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
@@ -195,18 +197,7 @@ fn run_agent(
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
-            let roots: Vec<_> = (shares.iter())
-                .map(|(root, mode)| {
-                    let mode = match mode {
-                        share::Mode::ReadOnly => share::Mode::ReadOnly,
-                        share::Mode::ReadWrite => share::Mode::ReadWrite,
-                        share::Mode::CopyOnWrite(pending) => {
-                            share::Mode::CopyOnWrite(pending.as_fd())
-                        }
-                    };
-                    (root.as_fd(), mode)
-                })
-                .collect();
+            let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
             let server = share::start(exe, &roots).map_err(fail("can't start the share server"))?;
             let inherited = share::inheritable(server.socket.as_fd())
                 .map_err(fail("can't start the share server"))?;
@@ -467,7 +458,7 @@ fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Re
 }
 
 /// The roots of a run's shares, opened, in share order.
-type Roots = Vec<(File, share::Mode<File>)>;
+type Roots = Vec<share::Root<File>>;
 
 /// Everything the run needs before its VM starts: the store's root, the
 /// agent's layers, its shares' roots, and how to start its harness.
@@ -541,15 +532,17 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> 
             ShareMode::ReadOnly => share::Mode::ReadOnly,
             ShareMode::ReadWrite => share::Mode::ReadWrite,
         };
-        if !directory {
-            return Err(fail(format!("{shown}: sharing a file is not built yet")));
-        }
+        let opened = |error: io::Error| fail(format!("{shown}: {error}"));
         // The share server serves this handle, so a symlink swapped in
-        // since the check fails the run instead of being followed.
-        let opened = host
-            .open()
-            .map_err(|error| fail(format!("{shown}: {error}")))?;
-        roots.push((opened, mode));
+        // since the check fails the run instead of being followed. A file
+        // is served from the directory that holds it, by its name.
+        roots.push(match directory {
+            true => share::Root::new(host.open().map_err(opened)?, mode),
+            false => {
+                let (parent, name) = host.open_parent().map_err(opened)?;
+                share::Root::file(parent, name, mode)
+            }
+        });
     }
     let context_name = Path::new(&record.directory)
         .file_name()
@@ -697,7 +690,12 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> 
         argv: argv.into_iter().map(String::into_bytes).collect(),
         env: env.into_iter().collect(),
         directory: directory.into_bytes(),
-        shares: shares.into_iter().map(String::into_bytes).collect(),
+        shares: (shares.into_iter().zip(&roots))
+            .map(|(path, root)| GuestShare {
+                path: path.into_bytes(),
+                file: root.file.as_ref().map(|name| name.as_bytes().to_vec()),
+            })
+            .collect(),
         prompt: args.prompt.clone(),
         terminal,
     };

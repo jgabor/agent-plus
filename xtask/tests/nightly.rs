@@ -32,6 +32,9 @@ case "$1 $2" in
   "issue view") cat "$(dirname "$0")/issue.json" ;;
   "repo view") echo '{"owner":{"login":"o"}}' ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
+  "api "*"/reactions?content=eyes")
+    id="${2%/reactions*}"; id="${id##*/}"
+    cat "$(dirname "$0")/eyes-$id" 2>/dev/null || true ;;
   "api repos/"*) echo '{"statuses":[]}' ;;
   "issue pin") ;;
   "issue comment")
@@ -301,6 +304,12 @@ impl Repo {
             ),
         )
         .unwrap();
+    }
+
+    /// Gives a report comment :eyes: reactions from these accounts.
+    fn set_eyes(&self, comment: usize, logins: &[&str]) {
+        let lines: String = logins.iter().map(|login| format!("{login}\n")).collect();
+        fs::write(self.bin.join(format!("eyes-{comment}")), lines).unwrap();
     }
 
     /// Makes the report issue's newest comment a report on this commit.
@@ -575,7 +584,7 @@ fn the_report_as_json() {
     assert_eq!(
         stdout(&output),
         format!(
-            "{{\"commit\":\"{head}\",\"scores\":{{\"spec\":{{\"proven\":1,\"promises\":7}},\"journey\":{{\"passing\":1,\"steps\":4}},\"budgets\":{{\"met\":1,\"targets\":1}}}},\"left_out\":2,\"merged\":[{{\"commit\":\"{merged}\",\"subject\":\"The \\\"new\\\" one (#9)\",\"issue\":5,\"pr\":9}}],\"regressed\":[{{\"commit\":\"{merged}\",\"issue\":5,\"pr\":9,\"what\":\"spec fell from 2 to 1\"}}],\"unrecorded\":[{{\"commit\":\"{head}\",\"subject\":\"By hand\"}}],\"waiting\":[{{\"issue\":30,\"title\":\"Promises that end in a colon\"}}]}}\n"
+            "{{\"commit\":\"{head}\",\"scores\":{{\"spec\":{{\"proven\":1,\"promises\":7}},\"journey\":{{\"passing\":1,\"steps\":4}},\"budgets\":{{\"met\":1,\"targets\":1}}}},\"left_out\":2,\"merged\":[{{\"commit\":\"{merged}\",\"subject\":\"The \\\"new\\\" one (#9)\",\"issue\":5,\"pr\":9}}],\"regressed\":[{{\"commit\":\"{merged}\",\"issue\":5,\"pr\":9,\"what\":\"spec fell from 2 to 1\"}}],\"unrecorded\":[{{\"commit\":\"{head}\",\"subject\":\"By hand\"}}],\"waiting\":[{{\"issue\":30,\"title\":\"Promises that end in a colon\"}}],\"spec_changes\":[],\"rule_changes\":[],\"unread\":[]}}\n"
         )
     );
 }
@@ -2208,4 +2217,143 @@ fn a_record_merged_after_main_moved_is_listed_as_not_in_the_ledger() {
         "{report}"
     );
     assert!(!report.contains("issue #5\n- `"), "{report}");
+}
+
+const MARK: &str = "Mark this report read by reacting with :eyes:.";
+
+/// SPEC.md and the rules as they were before the report's day.
+fn with_rules(name: &str) -> Repo {
+    let repo = Repo::new(name);
+    repo.write("SPEC.md", "# A\n\nOne.\n\nGone.\n");
+    repo.write(
+        "AGENTS.md",
+        "# Agent+\n\nIntro.\n\n## Ways\n\nOld.\n\n## Other\n\nSame words here.\n",
+    );
+    repo.commit("Write the rules", 30);
+    repo
+}
+
+/// Under its heading, with its PR, a sentence is added, changed, or removed.
+/// A heading of the rules whose text changed is listed once, with each PR.
+#[test]
+fn the_report_lists_spec_and_rule_changes() {
+    let repo = with_rules("spec-changes");
+    repo.write("SPEC.md", "# A\n\nUno.\n\nGone.\n\n# B\n\nNew.\n");
+    repo.write(
+        "AGENTS.md",
+        "# Agent+\n\nIntro.\n\n## Ways\n\nNewer.\n\n## Other\n\nSame words\nhere.\n",
+    );
+    repo.merge("Change things (#9)", 3, &CLEAN);
+    repo.write("SPEC.md", "# A\n\nUno.\n\n# B\n\nNew.\n");
+    repo.write(
+        "AGENTS.md",
+        "# Agent+\n\nIntro.\n\n## Ways\n\nNewest.\n\n## Other\n\nSame words\nhere.\n",
+    );
+    repo.write("HARNESS.md", "# Harness\n\nText.\n");
+    repo.merge(
+        "Change more (#10)",
+        2,
+        &Recorded {
+            issue: 6,
+            pr: 10,
+            ..CLEAN
+        },
+    );
+    let report = repo.report();
+    assert!(
+        report.contains(
+            "\n## SPEC.md\n\n### A\n\n- Changed in #9:\n  - Was: One.\n  - Now: Uno.\n- Removed in #10: Gone.\n\n### B\n\n- Added in #9: New.\n\n## Rules\n\n- `AGENTS.md`, Ways: #9, #10\n- `HARNESS.md`, Harness: #10\n\n<details>"
+        ),
+        "{report}"
+    );
+    // `report` prints no comment, so there is nothing to react to.
+    assert!(!report.contains(MARK), "{report}");
+    let output = repo.xtask(&["report", "--json"]);
+    let json = stdout(&output);
+    assert!(
+        json.contains("\"spec_changes\":[{\"heading\":\"A\",\"pr\":\"#9\",\"was\":\"One.\",\"now\":\"Uno.\"},{\"heading\":\"A\",\"pr\":\"#10\",\"was\":\"Gone.\",\"now\":null},{\"heading\":\"B\",\"pr\":\"#9\",\"was\":null,\"now\":\"New.\"}],\"rule_changes\":[{\"file\":\"AGENTS.md\",\"heading\":\"Ways\",\"prs\":[\"#9\",\"#10\"]},{\"file\":\"HARNESS.md\",\"heading\":\"Harness\",\"prs\":[\"#10\"]}],\"unread\":[]"),
+        "{json}"
+    );
+}
+
+/// A commit with no record has no PR to name, so the report names the commit.
+#[test]
+fn a_change_with_no_record_names_its_commit() {
+    let repo = with_rules("spec-unrecorded");
+    repo.write("SPEC.md", "# A\n\nOne.\n");
+    repo.commit("Push straight to main", 1);
+    let head = repo.short("HEAD");
+    let report = repo.report();
+    assert!(
+        report.contains(&format!(
+            "\n## SPEC.md\n\n### A\n\n- Removed in `{head}`: Gone.\n"
+        )),
+        "{report}"
+    );
+    assert!(!report.contains("## Rules"), "{report}");
+}
+
+/// Reflowing a paragraph changes no rule and no sentence.
+#[test]
+fn a_reflow_changes_nothing() {
+    let repo = with_rules("reflow");
+    repo.write("SPEC.md", "# A\n\nOne.\nGone.\n");
+    repo.write(
+        "AGENTS.md",
+        "# Agent+\n\nIntro.\n\n## Ways\n\nOld.\n\n## Other\n\nSame\nwords here.\n",
+    );
+    repo.merge("Reflow (#9)", 2, &CLEAN);
+    let report = repo.report();
+    assert!(!report.contains("## SPEC.md"), "{report}");
+    assert!(!report.contains("## Rules"), "{report}");
+}
+
+/// The comment for a report with a change ends with the line that asks to
+/// mark it read.
+#[test]
+fn nightly_asks_to_mark_a_report_with_changes_read() {
+    let repo = with_rules("mark-line");
+    repo.write("SPEC.md", "# A\n\nOne.\n");
+    // Nothing proves a sentence here, so the record proves none.
+    let record = Recorded { proven: 0, ..CLEAN };
+    repo.merge("Drop a sentence (#9)", 2, &record);
+    repo.sync();
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert!(comment.contains("\n## SPEC.md\n"), "{comment}");
+    assert!(
+        comment.ends_with(&format!("{CHECKS_PASSED}\n{MARK}\n")),
+        "{comment}"
+    );
+}
+
+/// A report that asks to be read, with no :eyes: from the owner, is unread.
+/// Someone else's reaction doesn't count, and a report that asked nothing
+/// needs no mark.
+#[test]
+fn the_report_links_to_each_earlier_unread_report() {
+    let repo = Repo::new("unread");
+    repo.merge("Add a thing (#9)", 2, &CLEAN);
+    repo.set_issues(REPORT_ISSUE);
+    let asks = |commit: &str| format!("# Nightly report for `{commit}`\n\nWords.\n\n{MARK}\n");
+    repo.set_report_comments(&[
+        ("o", "# Nightly report for `1111111`\n\nNothing to read.\n"),
+        ("o", &asks("2222222")),
+        ("o", &asks("3333333")),
+        ("o", &asks("4444444")),
+        ("someone", &asks("5555555")),
+    ]);
+    repo.set_eyes(2, &["someone", "o"]);
+    repo.set_eyes(3, &["someone"]);
+    let report = repo.report();
+    assert!(
+        report.contains(
+            "\n## Unread reports\n\n- [Nightly report for `2222222`](https://github.com/o/r/issues/12#issuecomment-1)\n- [Nightly report for `4444444`](https://github.com/o/r/issues/12#issuecomment-3)\n\n<details>"
+        ),
+        "{report}"
+    );
+    let calls = repo.calls();
+    let asked: Vec<&String> = calls.iter().filter(|c| c.contains("reactions")).collect();
+    assert_eq!(asked.len(), 3, "{calls:?}");
 }

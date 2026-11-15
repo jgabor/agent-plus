@@ -7,6 +7,7 @@
 use crate::forge::{Gh, OpenPr, RoadmapIssue};
 use crate::journey::{self, Milestone, Outcome};
 use crate::readme::{self, Line, README_FILE};
+use crate::report::Unread;
 use crate::score::{self, Score, Sentence};
 use crate::spec::{self, Arrives, Command};
 use crate::work::{ANSWER_NEEDED, LAND_NEEDED, PARKED};
@@ -38,7 +39,11 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
     let milestones = journey::milestones(&root)?;
     let commands = commands(&root)?;
     let text = match &score {
-        Some(score) => self::details(&milestones, &outcomes, &(&commands, score), &issues, &prs),
+        Some(score) => {
+            let unread = unread(&gh, &issues)?;
+            let proof = (commands.as_slice(), score);
+            self::details(&milestones, &outcomes, &proof, &issues, &prs, &unread)
+        }
         None => {
             let details = titled(&issues, DETAILS_TITLE).map(|issue| issue.number);
             let words = (commands.as_slice(), lines(&root));
@@ -81,7 +86,15 @@ pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Pro
     let milestones = journey::milestones(root)?;
     let commands = commands(root)?;
     let proof = (commands.as_slice(), score);
-    let text = details(&milestones, outcomes, &proof, &issues, &gh.open_prs()?);
+    let unread = unread(&gh, &issues)?;
+    let text = details(
+        &milestones,
+        outcomes,
+        &proof,
+        &issues,
+        &gh.open_prs()?,
+        &unread,
+    );
     // The roadmap links to the details, so they are written first.
     let number = match titled(&issues, DETAILS_TITLE) {
         Some(found) => {
@@ -93,6 +106,12 @@ pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Pro
     let words = (commands.as_slice(), lines(root));
     let text = roadmap(&milestones, outcomes, &words, &issues, Some(number));
     put(&gh, issue, &text)
+}
+
+/// The nightly reports that wait for the owner to read them.
+fn unread(gh: &Gh, issues: &[RoadmapIssue]) -> Result<Vec<Unread>, Problem> {
+    let number = titled(issues, report::ISSUE_TITLE).map(|issue| issue.number);
+    report::unread_on(gh, number)
 }
 
 fn put(gh: &Gh, issue: &RoadmapIssue, text: &str) -> Result<(), Problem> {
@@ -216,6 +235,7 @@ fn details(
     (commands, score): &Proof,
     all: &[RoadmapIssue],
     prs: &[OpenPr],
+    unread: &[Unread],
 ) -> String {
     let mut issues: Vec<&RoadmapIssue> = all.iter().collect();
     issues.sort_by_key(|issue| issue.number);
@@ -292,6 +312,11 @@ fn details(
         .map(|issue| line(issue.number, &issue.title))
         .collect();
     section(&mut text, "### To label or close", unlabeled);
+    let to_read = unread
+        .iter()
+        .map(|u| format!("[Nightly report for `{}`]({})", u.commit, u.url))
+        .collect();
+    section(&mut text, "### To read", to_read);
     text
 }
 

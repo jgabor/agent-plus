@@ -23,6 +23,7 @@ const DESCRIPTION_LIMIT: usize = 140;
 #[derive(Clone, Debug)]
 pub struct Comment {
     pub id: u64,
+    pub url: String,
     pub author: String,
     pub body: String,
 }
@@ -425,6 +426,15 @@ impl Gh {
         Ok(text("state").map(|state| (state, text("description").unwrap_or_default())))
     }
 
+    /// The accounts that reacted to an issue comment with this reaction, such
+    /// as `eyes`. A deleted account has no login, and is left out.
+    pub fn reacted(&self, comment: u64, content: &str) -> Result<Vec<String>, Problem> {
+        let path = format!("{ISSUES}/comments/{comment}/reactions?content={content}");
+        let filter = ".[] | .user.login // empty";
+        let text = self.text(&["api", &path, "--paginate", "--jq", filter], None)?;
+        Ok(text.lines().map(str::to_string).collect())
+    }
+
     pub fn pin_issue(&self, number: u64) -> Result<(), Problem> {
         self.text(&["issue", "pin", &number.to_string()], None)?;
         Ok(())
@@ -684,8 +694,10 @@ fn has_standing_request(reviews: &[Json]) -> Option<bool> {
 }
 
 fn read_comment(value: &Json) -> Option<Comment> {
+    let url = value.get("url")?.as_str()?;
     Some(Comment {
-        id: comment_id(value.get("url")?.as_str()?)?,
+        id: comment_id(url)?,
+        url: url.to_string(),
         // A deleted account has no author.
         author: value
             .get("author")

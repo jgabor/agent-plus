@@ -85,7 +85,7 @@ pub fn reasons(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
 }
 
 /// A file as a commit has it, or `None` if it isn't there.
-fn file_at(root: &Path, commit: &str, path: &str) -> Result<Option<String>, Problem> {
+pub fn file_at(root: &Path, commit: &str, path: &str) -> Result<Option<String>, Problem> {
     let listed = base::git_text(root, &["ls-tree", "--name-only", commit, "--", path])?;
     if listed.trim().is_empty() {
         return Ok(None);

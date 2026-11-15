@@ -192,3 +192,30 @@ fn remove_refuses_the_main_checkout() {
     assert!(repo.main.join(".git").exists());
     assert!(repo.worktree.exists());
 }
+
+#[test]
+fn remove_deletes_only_its_own_worktree_when_a_name_differs_by_a_space() {
+    let repo = Repo::new("space");
+    let spaced = repo.worktree.with_file_name(format!("{BRANCH} "));
+    repo.git(
+        &repo.main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "8-y",
+            &spaced.to_string_lossy(),
+        ],
+    );
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"), &spaced)
+        .arg("remove")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", describe(&output));
+    assert!(!spaced.exists());
+    assert!(repo.worktree.join("Cargo.toml").exists());
+    assert!(repo.is_listed());
+    assert!(repo.has_branch());
+}

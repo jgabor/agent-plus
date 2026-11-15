@@ -87,7 +87,8 @@ fn delete(path: &Path) -> Result<(), String> {
 pub fn run() -> Result<Verdict, Problem> {
     let here = std::env::current_dir()
         .map_err(|e| Problem(format!("couldn't read the current directory: {e}")))?;
-    let top = PathBuf::from(git_text(&here, &["rev-parse", "--show-toplevel"])?.trim());
+    let top = git_text(&here, &["rev-parse", "--show-toplevel"])?;
+    let top = PathBuf::from(top.strip_suffix('\n').unwrap_or(&top));
     let worktrees = list(&here)?;
     let Some(main) = worktrees.first() else {
         return Err(Problem("git lists no worktrees".to_string()));

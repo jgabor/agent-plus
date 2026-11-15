@@ -1,8 +1,14 @@
-//! The virtio-blk device: one read-only disk, held in host memory.
+//! The virtio-blk device: one read-only disk, held in host memory or read
+//! from a file as the guest asks for it.
 //!
 //! Every request comes from the guest, so nothing in it is trusted. A request
 //! the device can't serve fails with a status, and never reaches past the
 //! disk.
+
+use std::fs::File;
+use std::io;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::FileExt;
 
 use crate::memory::GuestMemory;
 use crate::virtio::{Chain, Transport};
@@ -17,6 +23,8 @@ const HEADER: usize = 16;
 const ID_LEN: usize = 20;
 /// What fills the bytes a request leaves unanswered.
 static ZEROS: [u8; 64 << 10] = [0; 64 << 10];
+/// How much of a file the device reads at a time.
+const PIECE: usize = 64 << 10;
 
 const TYPE_IN: u32 = 0;
 const TYPE_OUT: u32 = 1;
@@ -26,23 +34,82 @@ const STATUS_OK: u8 = 0;
 const STATUS_IOERR: u8 = 1;
 const STATUS_UNSUPP: u8 = 2;
 
+/// What a device serves: bytes in memory, or a file, which the host keeps in
+/// its page cache rather than in this process.
+pub trait Disk: Send {
+    /// How many bytes the disk holds, asked once, when its device is made.
+    fn size(&self) -> io::Result<u64>;
+    /// Fills `buffer` from `offset` on, where the disk has every byte.
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()>;
+    /// The descriptor a confined process must still be able to read.
+    fn descriptor(&self) -> Option<RawFd>;
+}
+
+impl Disk for Vec<u8> {
+    fn size(&self) -> io::Result<u64> {
+        Ok(self.len() as u64)
+    }
+
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        let start = offset as usize;
+        buffer.copy_from_slice(&self[start..start + buffer.len()]);
+        Ok(())
+    }
+
+    fn descriptor(&self) -> Option<RawFd> {
+        None
+    }
+}
+
+impl Disk for File {
+    fn size(&self) -> io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        self.read_exact_at(buffer, offset)
+    }
+
+    fn descriptor(&self) -> Option<RawFd> {
+        Some(self.as_raw_fd())
+    }
+}
+
+impl<D: Disk + ?Sized> Disk for Box<D> {
+    fn size(&self) -> io::Result<u64> {
+        (**self).size()
+    }
+
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        (**self).read_at(buffer, offset)
+    }
+
+    fn descriptor(&self) -> Option<RawFd> {
+        (**self).descriptor()
+    }
+}
+
 /// A virtio-blk device that serves `disk` and refuses writes.
 pub struct Block {
     transport: Transport,
-    disk: Vec<u8>,
+    disk: Box<dyn Disk>,
+    /// The disk's size. Past it, up to a whole sector, it reads as zeros.
+    size: u64,
+    sectors: u64,
+    buffer: Box<[u8]>,
     id: [u8; ID_LEN],
 }
 
 impl Block {
     /// A device that serves `disk`, which is padded with zeros to a whole
     /// sector. `id` is what the guest reads as the serial, cut to 20 bytes.
-    pub fn new(mut disk: Vec<u8>, id: &[u8]) -> Self {
-        let sectors = (disk.len() as u64).div_ceil(SECTOR);
-        disk.resize((sectors * SECTOR) as usize, 0);
+    pub fn new(disk: impl Disk + 'static, id: &[u8]) -> io::Result<Self> {
+        let size = disk.size()?;
+        let sectors = size.div_ceil(SECTOR);
         let mut padded = [0; ID_LEN];
         let len = id.len().min(ID_LEN);
         padded[..len].copy_from_slice(&id[..len]);
-        Self {
+        Ok(Self {
             transport: Transport::new(
                 DEVICE_ID,
                 READ_ONLY,
@@ -50,9 +117,17 @@ impl Block {
                 1,
                 QUEUE_SIZE,
             ),
-            disk,
+            disk: Box::new(disk),
+            size,
+            sectors,
+            buffer: vec![0; PIECE].into_boxed_slice(),
             id: padded,
-        }
+        })
+    }
+
+    /// The descriptor that the device reads its disk through, if any.
+    pub fn descriptor(&self) -> Option<RawFd> {
+        self.disk.descriptor()
     }
 
     /// Handles a guest read of the device's registers.
@@ -98,7 +173,7 @@ impl Block {
     /// is the last writable byte, and a chain with none gets no answer. The
     /// used length counts from the first writable byte, so every byte before
     /// the status is written, with zeros where the answer is shorter.
-    fn serve(&self, memory: &GuestMemory, chain: &Chain) -> u32 {
+    fn serve(&mut self, memory: &GuestMemory, chain: &Chain) -> u32 {
         let Some(room) = writable_len(chain).checked_sub(1) else {
             return 0;
         };
@@ -131,20 +206,33 @@ impl Block {
 
     /// Copies `len` bytes from `sector` on, if they all lie on the disk.
     fn read_disk(
-        &self,
+        &mut self,
         memory: &GuestMemory,
         chain: &Chain,
         sector: u64,
         len: usize,
     ) -> (u8, usize) {
-        let bytes = sector
-            .checked_mul(SECTOR)
-            .and_then(|start| usize::try_from(start).ok())
-            .and_then(|start| self.disk.get(start..start.checked_add(len)?));
-        match bytes {
-            Some(bytes) if write_at(memory, chain, 0, bytes) => (STATUS_OK, len),
-            _ => (STATUS_IOERR, 0),
+        let Some(start) = sector.checked_mul(SECTOR).filter(|start| {
+            start
+                .checked_add(len as u64)
+                .is_some_and(|end| end <= self.sectors * SECTOR)
+        }) else {
+            return (STATUS_IOERR, 0);
+        };
+        let mut done = 0;
+        while done < len {
+            let piece = (len - done).min(PIECE);
+            let at = start + done as u64;
+            let held = self.size.saturating_sub(at).min(piece as u64) as usize;
+            let buffer = &mut self.buffer[..piece];
+            let (from_disk, past_end) = buffer.split_at_mut(held);
+            past_end.fill(0);
+            if self.disk.read_at(from_disk, at).is_err() || !write_at(memory, chain, done, buffer) {
+                return (STATUS_IOERR, 0);
+            }
+            done += piece;
         }
+        (STATUS_OK, len)
     }
 }
 
@@ -202,6 +290,7 @@ fn write_at(memory: &GuestMemory, chain: &Chain, mut skip: usize, mut bytes: &[u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     const SIZE: u16 = 8;
     const QUEUE_NUM: u64 = 0x038;
@@ -222,7 +311,7 @@ mod tests {
     const USED: u64 = 0x3000;
     const HEADER_AT: u64 = 0x4000;
     const DATA: u64 = 0x5000;
-    const STATUS_AT: u64 = 0x9000;
+    const STATUS_AT: u64 = 0xf_0000;
     /// Three sectors, each byte different from its neighbours.
     const DISK: usize = 3 * SECTOR as usize;
 
@@ -242,10 +331,10 @@ mod tests {
             Self::with(disk(), b"layer-1234")
         }
 
-        fn with(disk: Vec<u8>, id: &[u8]) -> Self {
+        fn with(disk: impl Disk + 'static, id: &[u8]) -> Self {
             let mut driver = Self {
-                memory: GuestMemory::new(1 << 16).unwrap(),
-                device: Block::new(disk, id),
+                memory: GuestMemory::new(1 << 20).unwrap(),
+                device: Block::new(disk, id).unwrap(),
                 published: 0,
             };
             driver.set(QUEUE_NUM, u32::from(SIZE));
@@ -359,6 +448,52 @@ mod tests {
         );
         // The disk still serves its last sector.
         assert_eq!(driver.request(TYPE_IN, 2, &[512]), (STATUS_OK, 513));
+    }
+
+    /// `bytes` in a file that is open, and already gone from its directory.
+    fn file_of(bytes: &[u8]) -> File {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let name = format!(
+            "vmm-block-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_file_is_served_as_the_bytes_it_holds() {
+        let mut driver = Driver::with(file_of(&disk()), b"");
+        assert_eq!(driver.get(CONFIG), 3);
+        assert_eq!(
+            driver.request(TYPE_IN, 1, &[768, 256]),
+            (STATUS_OK, 1024 + 1)
+        );
+        assert_eq!(driver.data(1024), disk()[512..1536]);
+        assert_eq!(driver.request(TYPE_IN, 2, &[1024]), (STATUS_IOERR, 1025));
+    }
+
+    #[test]
+    fn a_file_s_partial_last_sector_reads_as_zeros() {
+        let mut driver = Driver::with(file_of(&[7; 513]), b"");
+        assert_eq!(driver.get(CONFIG), 2);
+        assert_eq!(driver.request(TYPE_IN, 1, &[512]), (STATUS_OK, 513));
+        let mut expected = vec![0; 512];
+        expected[0] = 7;
+        assert_eq!(driver.data(512), expected);
+    }
+
+    #[test]
+    fn a_read_larger_than_the_device_s_buffer_is_served_whole() {
+        let bytes: Vec<u8> = (0..512 << 10).map(|i: u32| (i % 251) as u8).collect();
+        let mut driver = Driver::with(file_of(&bytes), b"");
+        let (status, len) = driver.request(TYPE_IN, 1, &[300 << 10, 100 << 10]);
+        assert_eq!((status, len), (STATUS_OK, (400 << 10) + 1));
+        assert_eq!(driver.data(400 << 10), bytes[512..512 + (400 << 10)]);
     }
 
     #[test]

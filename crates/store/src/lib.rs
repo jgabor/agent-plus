@@ -31,9 +31,31 @@ pub fn compress(data: &[u8], level: i8) -> Vec<u8> {
 /// Decompresses the zstd frame at the start of `frame`, and checks its content
 /// checksum if it has one.
 pub fn decompress(frame: &[u8]) -> io::Result<Vec<u8>> {
-    let mut decoder = StreamingDecoder::new(frame).map_err(io::Error::other)?;
     let mut data = Vec::new();
-    decoder.read_to_end(&mut data)?;
+    decompress_to(frame, |bytes| {
+        data.extend_from_slice(bytes);
+        Ok(())
+    })?;
+    Ok(data)
+}
+
+/// Decompresses the zstd frame at the start of `frame` a piece at a time,
+/// passing each piece to `out`, and checks its content checksum if it has
+/// one.
+pub(crate) fn decompress_to(
+    frame: impl Read,
+    mut out: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut decoder = StreamingDecoder::new(frame).map_err(io::Error::other)?;
+    let mut piece = vec![0; 64 << 10];
+    loop {
+        match decoder.read(&mut piece) {
+            Ok(0) => break,
+            Ok(len) => out(&piece[..len])?,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
     let stored = decoder.decoder.get_checksum_from_data();
     if stored.is_some() && stored != decoder.decoder.get_calculated_checksum() {
         return Err(io::Error::new(
@@ -41,5 +63,5 @@ pub fn decompress(frame: &[u8]) -> io::Result<Vec<u8>> {
             "zstd frame fails its content checksum",
         ));
     }
-    Ok(data)
+    Ok(())
 }

@@ -197,8 +197,8 @@ fn confined_owner_process() {
     // Opened before the filter, which allows writes to what is already open.
     let mut log = File::create(log).unwrap();
     let guest = Guest {
-        kernel: &kernel,
-        init: &init,
+        kernel: (&kernel).into(),
+        init: (&init).into(),
         files: &[],
         layers: Vec::new(),
         request: None,

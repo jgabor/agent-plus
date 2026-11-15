@@ -1099,8 +1099,8 @@ fn vm_owner_process() {
     }
     let wants_command = !fs::read(directory.join("command")).unwrap().is_empty();
     let guest = Guest {
-        kernel: &kernel,
-        init: &init,
+        kernel: (&kernel).into(),
+        init: (&init).into(),
         files: &files,
         layers: Vec::new(),
         request: wants_command.then(|| ToGuest::Run {

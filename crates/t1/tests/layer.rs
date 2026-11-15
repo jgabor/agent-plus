@@ -112,7 +112,7 @@ fn the_guest_mounts_a_stored_layer_read_only_as_erofs() {
     let serial = &digest[..20];
     let mut machine = Machine {
         serial: Serial::new(),
-        block: Block::new(disk, serial.as_bytes()),
+        block: Block::new(disk, serial.as_bytes()).unwrap(),
         memory: vm.memory(),
         interrupt: vm.interrupt(LINE),
     };

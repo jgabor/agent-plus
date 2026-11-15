@@ -386,6 +386,62 @@ fn removing_an_agent_frees_only_the_layers_no_other_agent_uses() {
     assert!(agents.list().unwrap().is_empty());
 }
 
+// spec(Build): A layer's copy is freed with the layer.
+#[test]
+fn removing_an_agent_frees_the_copies_of_the_layers_it_frees() {
+    let root = store_root("remove-copies");
+    let agents = Agents::new(&root);
+    let a = layers(&root, &["shared", "only a"]);
+    let b = layers(&root, &["shared"]);
+    agents
+        .record(&agent("a", "/work/a", a.clone()), false)
+        .unwrap();
+    agents.record(&agent("b", "/work/b", b), false).unwrap();
+    let store = Layers::new(&root);
+    for layer in &a {
+        store.open(&layer.digest).unwrap();
+    }
+    let copy = |layer: &Layer| root.join("plain-layers").join(&layer.digest);
+
+    agents.remove("a").unwrap();
+
+    assert!(copy(&a[0]).exists());
+    assert!(!copy(&a[1]).exists());
+}
+
+// spec(Build): A layer's copy is freed with the layer.
+#[test]
+fn a_copy_made_while_its_layer_is_freed_is_freed_too() {
+    let root = store_root("copy-race");
+    let agents = Agents::new(&root);
+    let store = Layers::new(&root);
+    let content: Vec<u8> = (0..4u32 << 20).map(|i| (i * 7 % 251) as u8).collect();
+    for round in 0..20 {
+        let digest = store.put(&content, -7).unwrap();
+        let layer = Layer {
+            key: "key".to_string(),
+            digest: digest.clone(),
+            instruction: "ADD ./big".to_string(),
+        };
+        agents
+            .record(&agent("a", "/work/a", vec![layer]), false)
+            .unwrap();
+        let opener = {
+            let root = root.clone();
+            let digest = digest.clone();
+            thread::spawn(move || {
+                // The layer may be gone before this opens it.
+                let _ = Layers::new(&root).open(&digest);
+            })
+        };
+        agents.remove("a").unwrap();
+        opener.join().unwrap();
+
+        let copy = root.join("plain-layers").join(&digest);
+        assert!(!copy.exists(), "round {round} left a copy of a freed layer");
+    }
+}
+
 #[test]
 fn removing_an_agent_leaves_layers_no_agent_recorded() {
     let root = store_root("unrecorded");

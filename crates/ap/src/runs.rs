@@ -633,7 +633,7 @@ fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Err
     let layers = names
         .into_iter()
         .map(|name| {
-            let disk = store.get(&name.digest).map_err(|error| {
+            let disk = store.open(&name.digest).map_err(|error| {
                 Error::Failed(format!(
                     "can't read the layer for {}: {error}",
                     name.instruction
@@ -641,7 +641,7 @@ fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Err
             })?;
             Ok(Layer {
                 digest: name.digest,
-                disk,
+                disk: Box::new(disk),
             })
         })
         .collect::<Result<_, Error>>()?;

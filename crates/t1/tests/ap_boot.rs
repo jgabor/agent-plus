@@ -19,8 +19,8 @@ fn kernel_image() -> &'static [u8] {
 fn boot_silent_init(timeout: Duration) -> (Result<Option<u8>, Error>, u32) {
     let init = fs::read(guest_binary::build("test-init")).unwrap();
     let guest = Guest {
-        kernel: kernel_image(),
-        init: &init,
+        kernel: kernel_image().into(),
+        init: (&init).into(),
         files: &[],
         layers: Vec::new(),
         request: None,
@@ -57,8 +57,8 @@ fn a_guest_past_its_timeout_is_stopped_and_reported() {
 fn a_commands_streams_arrive_whole_and_separate_with_its_status() {
     let init = fs::read(guest_binary::build("output-init")).unwrap();
     let guest = Guest {
-        kernel: kernel_image(),
-        init: &init,
+        kernel: kernel_image().into(),
+        init: (&init).into(),
         files: &[],
         layers: Vec::new(),
         request: Some(ToGuest::Run {

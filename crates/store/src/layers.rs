@@ -3,9 +3,13 @@
 //!
 //! A layer's file is its zstd frame, then a skippable frame that holds the
 //! level it was compressed at. Any zstd decoder skips that frame.
+//!
+//! A run reads a layer from an uncompressed copy, so that the host keeps only
+//! the blocks its guest reads, in its page cache, rather than the whole layer
+//! in the run's memory.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,6 +18,8 @@ use graviola::hashing::sha2::Sha256Context;
 /// The layers in a store. Creating one touches nothing.
 pub struct Layers {
     dir: PathBuf,
+    /// The uncompressed copies that runs read.
+    plain: PathBuf,
 }
 
 impl Layers {
@@ -22,6 +28,7 @@ impl Layers {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Layers {
             dir: root.as_ref().join("zstd-layers"),
+            plain: root.as_ref().join("plain-layers"),
         }
     }
 
@@ -95,6 +102,74 @@ impl Layers {
             ));
         }
         Ok(data)
+    }
+
+    /// The layer with this digest, as an open file of its uncompressed bytes.
+    /// The first open makes that copy from the layer's frame, and checks it
+    /// against the digest. Later opens read the copy as it is.
+    pub fn open(&self, digest: &str) -> io::Result<File> {
+        if !is_digest(digest) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{digest:?} isn't a SHA-256 digest"),
+            ));
+        }
+        let path = self.plain.join(digest);
+        match File::open(&path) {
+            Ok(file) => return Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let frame = BufReader::new(File::open(self.dir.join(digest))?);
+        fs::create_dir_all(&self.plain)?;
+        let (partial, mut file) = create_partial(&self.plain, digest)?;
+        let mut hash = Sha256Context::new();
+        let mut writing_failed = false;
+        let decoded = crate::decompress_to(frame, |piece| {
+            hash.update(piece);
+            file.write_all(piece).inspect_err(|_| writing_failed = true)
+        });
+        match decoded {
+            Err(error) if !writing_failed => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("layer {digest} isn't a zstd frame: {error}"),
+                ));
+            }
+            decoded => decoded?,
+        }
+        let actual = hex(&hash.finish());
+        if actual != digest {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("layer {digest} holds bytes with digest {actual}"),
+            ));
+        }
+        file.sync_all()?;
+        // Opened before it has its name, which another run's cleanup may
+        // remove as soon as it does.
+        let copy = File::open(&partial.0)?;
+        // Another run may have finished first. Its copy holds the same
+        // bytes, so replacing it is harmless.
+        fs::rename(&partial.0, &path)?;
+        // Freeing removes the layer, then its copy. A layer freed while this
+        // made the copy is gone by now, so the copy goes too, and this run
+        // keeps reading what it opened.
+        if !self.path(digest).try_exists()? {
+            self.remove_copy(digest)?;
+            return Ok(copy);
+        }
+        sync_up_from(&self.plain)?;
+        Ok(copy)
+    }
+
+    /// Removes the uncompressed copy of the layer with this digest, if there
+    /// is one. A run that has it open keeps reading it.
+    pub(crate) fn remove_copy(&self, digest: &str) -> io::Result<()> {
+        match fs::remove_file(self.plain.join(digest)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Syncs the directory that holds the layers, and every directory above
@@ -190,7 +265,11 @@ pub(crate) fn sync_up_from(dir: &Path) -> io::Result<()> {
 pub(crate) fn sha256(data: &[u8]) -> String {
     let mut hash = Sha256Context::new();
     hash.update(data);
-    hash.finish().iter().map(|b| format!("{b:02x}")).collect()
+    hex(&hash.finish())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Removes an unfinished file, whichever way its writer returns.

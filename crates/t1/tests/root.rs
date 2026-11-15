@@ -67,8 +67,8 @@ fn layers(probe: Vec<u8>) -> [Vec<u8>; 2] {
 /// it printed, by name.
 fn boot_with(init: &[u8], kernel: &[u8], layers: Vec<Layer>) -> BTreeMap<String, String> {
     let guest = Guest {
-        kernel,
-        init,
+        kernel: kernel.into(),
+        init: init.into(),
         files: &[],
         layers,
         request: Some(ToGuest::Run {
@@ -113,7 +113,7 @@ fn the_guest_runs_from_its_layers_under_a_tmpfs_upper_layer() {
             .iter()
             .map(|digest| Layer {
                 digest: digest.clone(),
-                disk: stored.get(digest).unwrap(),
+                disk: Box::new(stored.get(digest).unwrap()),
             })
             .collect()
     };
@@ -163,7 +163,7 @@ fn ten_layers_stack_in_order() {
         .iter()
         .map(|image| {
             let digest = stored.put(image, LEVEL).unwrap();
-            let disk = stored.get(&digest).unwrap();
+            let disk = Box::new(stored.get(&digest).unwrap());
             Layer { digest, disk }
         })
         .collect();

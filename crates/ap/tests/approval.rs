@@ -404,6 +404,7 @@ const SHARES_CHECKED: &str = "`SHARE` is not built yet";
 // spec(Grants): If a share now resolves somewhere you haven't approved, for example because `data` became a symlink to `~/.ssh`, the run asks again.
 // spec(SHARE): A `<src>` outside the build context, and any `rw` share, is a [grant](#grants).
 // spec(Grants): Without a terminal, a build or run that needs approval fails.
+// spec(Grants): What you approve then is added to the Agentfile's approval, so the next run doesn't ask.
 #[test]
 fn a_share_that_now_resolves_outside_asks_again_at_run() {
     let scratch = Scratch::new("share-moved");

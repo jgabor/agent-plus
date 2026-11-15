@@ -2357,3 +2357,20 @@ fn the_report_links_to_each_earlier_unread_report() {
     let asked: Vec<&String> = calls.iter().filter(|c| c.contains("reactions")).collect();
     assert_eq!(asked.len(), 3, "{calls:?}");
 }
+
+/// A marked sentence is still a sentence of SPEC.md, and so is one that
+/// shares its paragraph.
+#[test]
+fn a_change_to_a_marked_paragraph_is_listed() {
+    let repo = with_rules("marked");
+    repo.write("SPEC.md", "# A\n\nOne. *Proposed:* Later.\n\nGone.\n");
+    repo.commit("Mark one", 30);
+    repo.write("SPEC.md", "# A\n\nUno. *Proposed:* Later.\n\nGone.\n");
+    repo.merge("Change a marked paragraph (#9)", 2, &CLEAN);
+    let report = repo.report();
+    assert!(
+        report
+            .contains("\n## SPEC.md\n\n### A\n\n- Changed in #9:\n  - Was: One.\n  - Now: Uno.\n"),
+        "{report}"
+    );
+}

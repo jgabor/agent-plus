@@ -303,22 +303,13 @@ fn changes(root: &Path, commit: &str, pr: &str, report: &mut Report) -> Result<(
     if touched.contains(&SPEC) {
         let (before, after) = both(SPEC)?;
         // Each heading's changes stay together, in the order it first changed.
-        for (heading, was, now) in spec_edits(&before, &after, commit)? {
+        for change in spec_edits(&before, &after, commit, pr)? {
             let changes = &mut report.spec_changes;
-            let at = match changes.iter().rposition(|c| c.heading == heading) {
+            let at = match changes.iter().rposition(|c| c.heading == change.heading) {
                 Some(last) => last + 1,
                 None => changes.len(),
             };
-            let pr = pr.to_string();
-            changes.insert(
-                at,
-                SpecChange {
-                    heading,
-                    pr,
-                    was,
-                    now,
-                },
-            );
+            changes.insert(at, change);
         }
     }
     for file in RULES {
@@ -341,7 +332,8 @@ fn changes(root: &Path, commit: &str, pr: &str, report: &mut Report) -> Result<(
     Ok(())
 }
 
-/// The sentences one side has and the other doesn't, under each heading. Under
+/// The sentences one side has and the other doesn't, under each heading, marked
+/// or not. Under
 /// one heading, the first removed and the first added are one change, and so
 /// on, and what is left over was removed or added. A sentence ignores
 /// whitespace, so a reflowed paragraph changes none.
@@ -349,9 +341,11 @@ fn spec_edits(
     before: &str,
     after: &str,
     commit: &str,
-) -> Result<Vec<(String, Option<String>, Option<String>)>, Problem> {
-    let units =
-        |text: &str| spec::extract(text).map_err(|e| Problem(format!("SPEC.md at {commit}: {e}")));
+    pr: &str,
+) -> Result<Vec<SpecChange>, Problem> {
+    let units = |text: &str| {
+        spec::extract_all(text).map_err(|e| Problem(format!("SPEC.md at {commit}: {e}")))
+    };
     let (before, after) = (units(before)?, units(after)?);
     let only = |these: &[spec::Unit], those: &[spec::Unit]| -> Vec<spec::Unit> {
         let others: HashSet<(&str, &str)> = those
@@ -384,7 +378,12 @@ fn spec_edits(
         loop {
             match (was.next(), now.next()) {
                 (None, None) => break,
-                (was, now) => edits.push((heading.to_string(), was, now)),
+                (was, now) => edits.push(SpecChange {
+                    heading: heading.to_string(),
+                    pr: pr.to_string(),
+                    was,
+                    now,
+                }),
             }
         }
     }

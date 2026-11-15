@@ -13,8 +13,20 @@ const MARKERS: [&str; 3] = ["*Proposed*", "*Proposed:*", "**Planned.**"];
 /// Returns the units that are promises or waivable, in document order.
 /// Marked units are left out.
 pub fn extract(spec: &str) -> Result<Vec<Unit>, String> {
+    extract_with(spec, false)
+}
+
+/// Returns every unit, marked or not, in document order.
+pub fn extract_all(spec: &str) -> Result<Vec<Unit>, String> {
+    extract_with(spec, true)
+}
+
+fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
     let lines: Vec<&str> = spec.lines().collect();
-    let mut extractor = Extractor::default();
+    let mut extractor = Extractor {
+        keep_marked,
+        ..Extractor::default()
+    };
     let mut headings = HashSet::new();
     let mut fence: Option<(u8, usize)> = None;
     for (index, line) in lines.iter().enumerate() {
@@ -72,6 +84,7 @@ struct Extractor<'a> {
     in_item: bool,
     /// A marker earlier in this list item covers what follows it.
     marked_item: bool,
+    keep_marked: bool,
 }
 
 impl Extractor<'_> {
@@ -82,7 +95,7 @@ impl Extractor<'_> {
         let marked = MARKERS.iter().any(|m| text.contains(m)) || self.marked_item;
         self.marked_item = marked && (self.in_item || self.marked_item);
         self.in_item = false;
-        (!text.is_empty() && !marked).then_some(text)
+        (!text.is_empty() && (self.keep_marked || !marked)).then_some(text)
     }
 
     /// Ends a paragraph or list item, which holds any number of sentences.

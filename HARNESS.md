@@ -770,16 +770,16 @@ does the following on `main`:
    under its heading, with its PR, and each heading of AGENTS.md and
    HARNESS.md whose text changed, with its PRs. Under one heading, a commit's
    removed sentences and its added ones pair up in order, and each pair is a
-   change. Whitespace doesn't count, and a commit with no record is named by
-   its commit. Then comes a link to each earlier unread report. What merged
-   and the checks fold below that, each with its count in the summary. A
-   section with nothing in it is left out.
-   A report with a change to SPEC.md or the rules ends, after the folds,
-   with "Mark this report read by reacting with :eyes:." Until the owner's
-   account reacts to it with :eyes:, it is unread. A reaction from anyone
-   else doesn't count. A report with neither change has no such line, and
-   needs no mark. `cargo xtask report` prints the same report without the
-   line, because nothing can react to it.
+   change. A marked sentence counts, whitespace doesn't, and a commit with no
+   record is named by its commit. Then comes a link to each earlier unread
+   report. What merged and the checks fold below that, each with its count in
+   the summary. A section with nothing in it is left out. A report with a
+   change to SPEC.md or the rules ends, after the folds, with "Mark this
+   report read by reacting with :eyes:." Until the owner's account reacts to
+   it with :eyes:, it is unread. A reaction from anyone else doesn't count. A
+   report with neither change has no such line, and needs no mark. `cargo
+   xtask report` prints the same report without the line, because nothing can
+   react to it.
 4. Post status `xtask/nightly` on the tested commit.
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad

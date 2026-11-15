@@ -281,7 +281,7 @@ fn a_run_starts_in_its_workdir_or_its_only_directory_share() {
 // spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.
 // spec(SHARE): Without `<dest>`, the [mirror rule](#paths) decides the guest path.
 // spec(SHARE): A shared file is the agent's view of that one file.
-// spec(SHARE): If a program on your host replaces the file instead of changing it, as some editors do when they save, the agent gets a `Stale file handle` error for it until the next run.
+// spec(SHARE): If a program on your host replaces the file instead of changing it, as some editors do when they save, opening it in the agent fails with a `Stale file handle` error until the next run.
 // spec(SHARE): The agent can't remove or rename a shared file, which fails with a `Device or resource busy` error.
 #[test]
 fn a_run_shows_a_shared_file_and_nothing_beside_it() {
@@ -308,7 +308,7 @@ fn a_run_shows_a_shared_file_and_nothing_beside_it() {
     printed(
         &scratch.sh(
             name,
-            "! ls -A / ~ | grep -e beside -e notes -e Agentfile -e ap-share",
+            "! ls -A / /run ~ | grep -e beside -e notes -e Agentfile -e ap-share",
         ),
         "",
     );

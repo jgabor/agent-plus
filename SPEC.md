@@ -1392,8 +1392,8 @@ How it works:
   never on your host, so it can't reach host files outside the share.
 - A shared file is the agent's view of that one file. If a program on your
   host replaces the file instead of changing it, as some editors do when
-  they save, the agent gets a `Stale file handle` error for it until the
-  next run.
+  they save, opening it in the agent fails with a `Stale file handle` error
+  until the next run.
 - The agent can't remove or rename a shared file, which fails with a
   `Device or resource busy` error.
 - Files the agent has not written show your changes live. The exception is

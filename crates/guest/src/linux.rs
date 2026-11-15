@@ -347,7 +347,8 @@ pub fn mount_file_share(tag: &str, name: &OsStr, target: &Path) -> io::Result<()
         (path.to_str().map(str::to_owned))
             .ok_or_else(|| io::Error::other("a share's guest path isn't text"))
     };
-    let stage = format!("/.{tag}");
+    // SPEC.md reserves `/run`, so no share is mounted there.
+    let stage = format!("/run/{tag}");
     let file = text(&Path::new(&stage).join(name))?;
     let target = text(target)?;
     fs::create_dir_all(&stage)?;

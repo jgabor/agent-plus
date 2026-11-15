@@ -603,7 +603,10 @@ impl Share {
             if name != *only {
                 return Err(libc::ENOENT);
             }
-            still_the_file(file, &self.root, &name)?;
+            // The file that was checked is the one the guest gets.
+            let fd = still_the_file(file, &self.root, &name)?;
+            let (root, place) = (Rc::clone(&self.root), self.node(ROOT)?.place);
+            return self.remember(root, place, name, fd);
         }
         let (directory, place) = {
             let found = self.node(parent)?;
@@ -1228,9 +1231,10 @@ fn parse(bytes: &[u8]) -> Option<Request<'_>> {
     })
 }
 
-/// Fails with `ESTALE` unless `name` in `directory` is still a file share's
-/// `file`, which a file the host put in its place isn't.
-fn still_the_file(file: &OwnedFd, directory: &OwnedFd, name: &CStr) -> Result<(), i32> {
+/// `name` in `directory`, opened with `O_PATH`, or `ESTALE` unless it is
+/// still a file share's `file`, which a file the host put in its place
+/// isn't.
+fn still_the_file(file: &OwnedFd, directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, i32> {
     let flags = libc::O_PATH | libc::O_NOFOLLOW;
     let found = sys::open_beneath(directory.as_fd(), name, flags).map_err(errno)?;
     let identity = |fd: BorrowedFd| {
@@ -1239,7 +1243,7 @@ fn still_the_file(file: &OwnedFd, directory: &OwnedFd, name: &CStr) -> Result<()
             .map_err(errno)
     };
     match identity(found.as_fd())? == identity(file.as_fd())? {
-        true => Ok(()),
+        true => Ok(found),
         false => Err(libc::ESTALE),
     }
 }

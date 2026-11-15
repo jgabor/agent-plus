@@ -597,3 +597,60 @@ fn a_rename_over_a_directory_records_what_it_replaced() {
     assert!(last(r#"DELETE "target/ghost""#) < cleared, "{records:#?}");
     assert!(cleared < last(r#"DIR "target" 755"#), "{records:#?}");
 }
+
+#[test]
+fn every_handle_of_a_removed_file_sees_its_mode() {
+    let tree = Tree::new("cow-handle-modes");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let (file, first) = guest.create(1, b"temp", 0).unwrap();
+    let second = guest.open(file, O_RDWR).unwrap();
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o640), 0);
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    let mode_of = |guest: &mut Guest, handle: u64| {
+        // `struct fuse_getattr_in`, with `FUSE_GETATTR_FH`.
+        let mut body = 1u32.to_le_bytes().to_vec();
+        body.extend([0; 4]);
+        body.extend(handle.to_le_bytes());
+        let (error, attr) = guest.call(GETATTR, file, &body);
+        assert_eq!(error, 0);
+        u32::from_le_bytes(attr[16 + 60..16 + 64].try_into().unwrap())
+    };
+    assert_eq!(mode_of(&mut guest, second), S_IFREG | 0o640);
+    let mut body = (FATTR_MODE | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(first.to_le_bytes());
+    body.resize(68, 0);
+    body.extend(0o600u32.to_le_bytes());
+    body.resize(88, 0);
+    assert_eq!(guest.call(SETATTR, file, &body).0, 0);
+    assert_eq!(mode_of(&mut guest, second), S_IFREG | 0o600);
+}
+
+#[test]
+fn a_lock_held_on_your_file_holds_after_the_agent_writes_it() {
+    let tree = Tree::new("cow-lock-held");
+    let path = tree.root.join("hello.txt");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, reader, 8, F_RDLCK, LK_FLOCK).0, 0);
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    assert!(host_locked(&path, libc::F_WRLCK as i16));
+    let host = File::open(&path).unwrap();
+    // SAFETY: flock takes no pointer.
+    let taken = unsafe {
+        libc::flock(
+            std::os::fd::AsRawFd::as_raw_fd(&host),
+            libc::LOCK_EX | libc::LOCK_NB,
+        )
+    };
+    assert_eq!(taken, -1);
+    // Closing the file lets them go.
+    let mut flush = reader.to_le_bytes().to_vec();
+    flush.extend([0; 8]);
+    flush.extend(7u64.to_le_bytes());
+    assert_eq!(guest.call(FLUSH, hello, &flush).0, 0);
+    guest.release(reader);
+    assert!(!host_locked(&path, libc::F_WRLCK as i16));
+}

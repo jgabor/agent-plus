@@ -146,6 +146,9 @@ enum Handle {
         node: u64,
         mode: u32,
         lower: bool,
+        /// Your file, which this handle had open before the agent's copy
+        /// was made, kept so a `flock` on it holds.
+        kept: Option<OwnedFd>,
     },
     /// An open directory, listed when it opened.
     Dir { entries: Vec<Dirent> },
@@ -169,6 +172,9 @@ pub(super) struct Cow {
     /// The file that holds each guest lock owner's POSIX locks, by node and
     /// owner.
     locks: BTreeMap<(u64, u64), OwnedFd>,
+    /// Lock files on your file, for nodes that have the agent's copy now,
+    /// kept so their locks hold until the guest lets them go.
+    held: Vec<((u64, u64), OwnedFd)>,
     next_node: u64,
     next_handle: u64,
 }
@@ -376,6 +382,7 @@ impl Cow {
             paths: BTreeMap::from([(Vec::new(), ROOT)]),
             handles: BTreeMap::new(),
             locks: BTreeMap::new(),
+            held: Vec::new(),
             next_node: ROOT + 1,
             next_handle: 1,
         })
@@ -490,6 +497,18 @@ impl Cow {
         Ok(())
     }
 
+    /// Records that `path`, just made in the tree, is `entry`, or removes it
+    /// from the tree again, so a path is in the tree only with its record.
+    fn keep(&mut self, path: &[u8], entry: Entry) -> Result<(), i32> {
+        let flags = match entry {
+            Entry::Dir { .. } => libc::AT_REMOVEDIR,
+            _ => 0,
+        };
+        self.set(path, entry).inspect_err(|_| {
+            let _ = self.unlink_upper(path, flags);
+        })
+    }
+
     /// Records your file at `path` as it is before the agent's first change
     /// there. `stat` is your file's, if the caller has it.
     fn base(&mut self, path: &[u8], stat: Option<&libc::stat>) -> Result<(), i32> {
@@ -597,11 +616,26 @@ impl Cow {
                 }
             }
         };
-        self.set(path, entry)?;
+        if !matches!(entry, Entry::Dir { .. }) {
+            self.keep(path, entry)?;
+        } else {
+            self.set(path, entry)?;
+        }
         // What the guest has open of your file reads the copy from now on,
-        // and its POSIX locks are taken there.
+        // and its POSIX locks are taken there. The locks it holds on your
+        // file hold until it lets them go.
         let node = self.paths.get(path).copied();
-        self.locks.retain(|(locked, _), _| Some(*locked) != node);
+        let moved: Vec<_> = self
+            .locks
+            .keys()
+            .filter(|(locked, _)| Some(*locked) == node)
+            .copied()
+            .collect();
+        for key in moved {
+            if let Some(fd) = self.locks.remove(&key) {
+                self.held.push((key, fd));
+            }
+        }
         let readers: Vec<_> = self
             .handles
             .iter()
@@ -610,8 +644,14 @@ impl Cow {
             .collect();
         for id in readers {
             let fd = self.open_upper(path, READ_FLAGS)?;
-            if let Some(Handle::File { fd: old, lower, .. }) = self.handles.get_mut(&id) {
-                *old = fd;
+            if let Some(Handle::File {
+                fd: old,
+                lower,
+                kept,
+                ..
+            }) = self.handles.get_mut(&id)
+            {
+                *kept = Some(std::mem::replace(old, fd));
                 *lower = false;
             }
         }
@@ -701,6 +741,7 @@ impl Cow {
             }
             self.nodes.remove(&node);
             self.locks.retain(|(locked, _), _| *locked != node);
+            self.held.retain(|((locked, _), _)| *locked != node);
         }
     }
 
@@ -766,6 +807,7 @@ impl Cow {
             node,
             mode,
             lower,
+            kept: None,
         }))
     }
 
@@ -896,7 +938,7 @@ impl Cow {
             self.fresh(parent, &name)?;
             let fd = self.create_upper(&path, open_flags(flags) & !libc::O_TRUNC)?;
             let mode = mode & !umask & PERMISSIONS;
-            self.set(&path, Entry::File { mode })?;
+            self.keep(&path, Entry::File { mode })?;
             let mut out = self.remember(path)?;
             let node = u64_at(&out, 0).ok_or(libc::EIO)?;
             let mode = libc::S_IFREG | mode;
@@ -905,6 +947,7 @@ impl Cow {
                 node,
                 mode,
                 lower: false,
+                kept: None,
             };
             out.extend(open_out(self.add_handle(handle)));
             return Ok(out);
@@ -933,7 +976,7 @@ impl Cow {
         // What you have at this path stays out of the agent's directory.
         let opaque = self.open_lower(&path, PATH_FLAGS).is_ok();
         let mode = mode & !umask & PERMISSIONS;
-        self.set(&path, Entry::Dir { mode, opaque })?;
+        self.keep(&path, Entry::Dir { mode, opaque })?;
         self.remember(path)
     }
 
@@ -942,7 +985,7 @@ impl Cow {
     fn make(&mut self, parent: u64, name: &CStr, entry: Entry) -> Answer {
         let path = self.fresh(parent, name)?;
         self.create_upper(&path, libc::O_WRONLY)?;
-        self.set(&path, entry)?;
+        self.keep(&path, entry)?;
         self.remember(path)
     }
 
@@ -1196,7 +1239,10 @@ impl Cow {
                 _ => None,
             };
             if let Some(changed) = changed {
-                self.set(&path, changed)?;
+                self.set(&path, changed.clone())?;
+                if let Entry::File { mode } = changed {
+                    self.set_handle_modes(node, libc::S_IFREG | mode);
+                }
             }
         }
         let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
@@ -1224,9 +1270,9 @@ impl Cow {
         let Some(Handle::File {
             fd,
             node: open,
-            mode,
             lower: false,
-        }) = self.handles.get_mut(&handle)
+            ..
+        }) = self.handles.get(&handle)
         else {
             return Err(libc::ENOENT);
         };
@@ -1236,9 +1282,6 @@ impl Cow {
         if valid & FATTR_SIZE != 0 {
             sys::ftruncate(fd.as_fd(), field(16)?).map_err(errno)?;
         }
-        if valid & FATTR_MODE != 0 {
-            *mode = libc::S_IFREG | word(68)? & PERMISSIONS;
-        }
         let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
         if valid & times != 0 {
             let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
@@ -1246,9 +1289,31 @@ impl Cow {
             sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
         }
         let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
-        stat.st_mode = *mode;
         stat.st_ino = node;
+        if valid & FATTR_MODE != 0 {
+            self.set_handle_modes(node, libc::S_IFREG | word(68)? & PERMISSIONS);
+        }
+        let Some(Handle::File { mode, .. }) = self.handles.get(&handle) else {
+            return Err(libc::EIO);
+        };
+        stat.st_mode = *mode;
         Ok(attr_out(&stat))
+    }
+
+    /// Gives each handle the guest has open on `node` the mode `mode`, for
+    /// when its node is gone.
+    fn set_handle_modes(&mut self, node: u64, mode: u32) {
+        for handle in self.handles.values_mut() {
+            if let Handle::File {
+                node: open,
+                mode: old,
+                ..
+            } = handle
+                && *open == node
+            {
+                *old = mode;
+            }
+        }
     }
 
     /// `struct fuse_fallocate_in`.
@@ -1342,6 +1407,7 @@ impl Cow {
         let (_, node) = self.file(body)?;
         let owner = u64_at(body, 16).ok_or(libc::EINVAL)?;
         self.locks.remove(&(node, owner));
+        self.held.retain(|(key, _)| *key != (node, owner));
         Ok(Vec::new())
     }
 

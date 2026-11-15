@@ -22,19 +22,24 @@ fn a_record_is_a_whole_line_or_none() {
         }
     };
     limit(100);
-    let mut refused = 0;
+    let mut refused = Vec::new();
     for at in 0..20 {
         let name = format!("file{at}");
         match guest.create(1, name.as_bytes(), 0) {
             Ok((_, handle)) => guest.release(handle),
-            Err(_) => refused += 1,
+            Err(_) => refused.push(name),
         }
     }
     limit(libc::RLIM_INFINITY);
+    // What failed can be made again.
+    for name in &refused {
+        let (_, handle) = guest.create(1, name.as_bytes(), 0).unwrap();
+        guest.release(handle);
+    }
     let (_, handle) = guest.create(1, b"after", 0).unwrap();
     guest.release(handle);
     drop(guest);
-    assert!(refused > 0);
+    assert!(!refused.is_empty());
     let records = records(&pending);
     for line in &records {
         let words: Vec<_> = line.split(' ').collect();

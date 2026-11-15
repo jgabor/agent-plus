@@ -1,3 +1,3 @@
-version = "7.3.3-ap.3"
-url = "https://github.com/jgabor/agent-plus-guest/releases/download/kernel-7.3.3-ap.3/vmlinux"
-sha256 = "44489e9b6d055bc964910a92e5c3fe4a28cbe159524f83e6265cba7d40ce6fec"
+version = "7.3.3-ap.4"
+url = "https://github.com/jgabor/agent-plus-guest/releases/download/kernel-7.3.3-ap.4/vmlinux"
+sha256 = "3962ddbaca038271001abefd0ccbe145a9d44493d9f9ab0ae84755d44d18c8a5"

@@ -19,6 +19,7 @@ mod mutation;
 mod nightly;
 mod readme;
 mod refresh;
+mod remove;
 mod report;
 mod roadmap;
 mod score;
@@ -62,6 +63,8 @@ commands:
                    prove a PR with this xtask in its rebased tree, for a merge
   mirror <number> <label>
                    copy a parking label from an issue or PR to its other side
+  remove           delete this worktree and its local branch, unless git
+                   refuses because the worktree holds changes
 
 exit status: 0 pass, 1 failure, 2 bad usage or environment error
 ";
@@ -138,13 +141,15 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["mirror", ..] => Err(Problem(format!(
             "`mirror` takes `<number> <label>`\n\n{USAGE}"
         ))),
+        ["remove"] => remove::run(),
         ["-h" | "--help" | "help"] => {
             print!("{USAGE}");
             Ok(Verdict::Pass)
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "refresh"),
+            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "refresh"
+            | "remove"),
             extra,
             ..,
         ] => Err(Problem(format!(

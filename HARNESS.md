@@ -507,6 +507,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 | `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |
+| `cargo xtask remove` | Removes the worktree it runs in, and its local branch. It exits 1 and keeps both when git refuses a worktree with changes. When git fails after it starts deleting, `remove` deletes what is left at the path git recorded, and deletes the branch only once the directory stays gone |
 
 `cargo xtask next` prints an array of
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number

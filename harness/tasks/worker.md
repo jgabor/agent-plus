@@ -58,16 +58,16 @@ can't continue alone, park the issue as AGENTS.md says.
    last, because nothing can run in the worktree afterwards:
 
    ```sh
-   here=$(pwd -P)
-   branch=$(git branch --show-current)
-   cd "$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
-   git worktree remove "$here" && git branch -D "$branch"
+   cargo xtask remove
    ```
 
-   If `git worktree remove` refuses, the worktree holds changes that didn't
-   merge. Leave it, and say so in your status comment. When you stop in any
-   other way, such as parking before `prepare` passes, keep the worktree,
-   except as step 2 says.
+   It exits 1 and keeps the worktree and its branch when git refuses, because
+   the worktree holds changes that didn't merge. Leave it, and say so in your
+   status comment. When something writes to the worktree during the removal,
+   git can fail with `Directory not empty`, and `remove` deletes what is left.
+   Any other exit 1 names the path it couldn't delete, so say that instead.
+   When you stop in any other way, such as parking before `prepare` passes,
+   keep the worktree, except as step 2 says.
 
 Your checkout's `xtask` may be older than this brief. If `status`, or a command
 given `--thread`, exits 2 with a usage message, rebase your branch onto

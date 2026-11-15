@@ -148,8 +148,9 @@ impl Place {
     /// The place of the file `name` is, with the file's own mode: a `.git`
     /// that isn't a directory can't be changed.
     fn of_file(self, name: &[u8], mode: u32) -> Place {
+        let dot_git = fold(name).as_deref() == Some(DOT_GIT);
         match self.of(name) {
-            Place::Git { .. } if !is(mode, libc::S_IFDIR) => Place::Fixed,
+            Place::Git { .. } if dot_git && !is(mode, libc::S_IFDIR) => Place::Fixed,
             place => place,
         }
     }
@@ -338,6 +339,12 @@ fn open_flags(flags: i32) -> i32 {
 
 fn writes(flags: i32) -> bool {
     flags & libc::O_ACCMODE != libc::O_RDONLY || flags & (libc::O_TRUNC | libc::O_APPEND) != 0
+}
+
+/// Whether a file can't change in place because it has another name, which
+/// may be a protected one the guest hasn't looked up.
+fn aliased(stat: &libc::stat) -> bool {
+    !is(stat.st_mode, libc::S_IFDIR) && stat.st_nlink > 1
 }
 
 /// A time from `SETATTR`, or the one that leaves it as it is.
@@ -552,6 +559,9 @@ impl Share {
         // The name may have moved on to another file since the lookup, so
         // the file is truncated only once it is known to be this one.
         let fd = self.reopen(found, open_flags(flags) & !libc::O_TRUNC)?;
+        if writes(flags) && aliased(&sys::fstat(fd.as_fd()).map_err(errno)?) {
+            return Err(libc::EPERM);
+        }
         if flags & libc::O_TRUNC != 0 {
             sys::ftruncate(fd.as_fd(), 0).map_err(errno)?;
         }
@@ -664,7 +674,7 @@ impl Share {
             .get(&(stat.st_dev, stat.st_ino))
             .and_then(|node| self.nodes.get(node))
             .is_some_and(|node| node.place == Place::Fixed);
-        if fixed {
+        if fixed || aliased(&stat) {
             return Err(libc::EPERM);
         }
         let mut out = self.found(directory, place, name)?;
@@ -723,6 +733,9 @@ impl Share {
             own = self.reopen(found, access | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
             own.as_fd()
         };
+        if aliased(&sys::fstat(fd).map_err(errno)?) {
+            return Err(libc::EPERM);
+        }
         if valid & FATTR_SIZE != 0 {
             sys::ftruncate(fd, field(16)?).map_err(errno)?;
         }

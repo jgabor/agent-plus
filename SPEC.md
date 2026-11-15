@@ -1403,6 +1403,8 @@ How it works:
 - A lock that would wait for another holder fails at once with an
   `Operation not supported` error, because the agent's machine waits for
   each answer from your host.
+- An agent's first POSIX lock on a file fails if the name the agent opened
+  the file by is gone.
 
 In `rw` shares, the files your host acts on are read-only to the agent.
 
@@ -1422,6 +1424,8 @@ In `rw` shares, the files your host acts on are read-only to the agent.
   git directory, and no symlink can be made in those places, so nothing
   the agent wrote becomes a git directory.
 - Names match case-insensitively, as they do on macOS filesystems.
+- A file with more than one hard link can't be changed in place in an `rw`
+  share, because another of its names may be one of these.
 - A change these rules refuse fails with an `Operation not permitted`
   error.
 

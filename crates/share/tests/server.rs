@@ -648,15 +648,63 @@ fn a_root_in_a_git_directory_keeps_its_place() {
     );
 }
 
+// spec(SHARE): A file with more than one hard link can't be changed in place in an `rw` share, because another of its names may be one of these.
 #[test]
-fn a_fixed_file_stays_fixed_by_another_name() {
+fn a_file_with_another_name_can_t_be_changed_in_place() {
     let tree = protected_tree("alias");
     fs::hard_link(tree.root.join("Agentfile"), tree.root.join("alias")).unwrap();
+    fs::hard_link(tree.root.join("hello.txt"), tree.root.join("dir/twin")).unwrap();
     let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
-    guest.walk("Agentfile").unwrap();
-    assert_eq!(guest.create(1, b"alias", O_TRUNC), Err(EPERM));
+    // The other name is found first, so nothing says it is an Agentfile.
+    let alias = guest.walk("alias").unwrap();
     assert_eq!(guest.overwrite("alias", b"agent"), Err(EPERM));
+    assert_eq!(guest.create(1, b"alias", O_TRUNC), Err(EPERM));
+    assert_eq!(guest.setattr(alias, FATTR_SIZE, 0, 0), EPERM);
+    assert_eq!(guest.setattr(alias, FATTR_MODE, 0, 0o777), EPERM);
+    assert_eq!(guest.overwrite("dir/twin", b"agent"), Err(EPERM));
     assert_eq!(fs::read(tree.root.join("Agentfile")).unwrap(), b"host");
+    // Its names still move and go, and with one name left, it changes.
+    let dir = guest.walk("dir").unwrap();
+    assert_eq!(guest.rename(dir, b"twin", 1, b"moved", 0), 0);
+    assert_eq!(guest.remove(UNLINK, 1, b"moved"), 0);
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    // A link the agent makes takes the change away too.
+    let hello = guest.walk("hello.txt").unwrap();
+    guest.link(hello, dir, b"again").unwrap();
+    assert_eq!(guest.overwrite("hello.txt", b"more"), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"agent");
+}
+
+#[test]
+fn files_in_a_git_directory_beneath_modules_still_change() {
+    let tree = protected_tree("nested-head");
+    fs::write(tree.root.join(".git/modules/sub/HEAD"), b"host").unwrap();
+    fs::write(tree.root.join(".git/worktrees/wt/HEAD"), b"host").unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    guest.overwrite(".git/modules/sub/HEAD", b"agent").unwrap();
+    guest.overwrite(".git/worktrees/wt/HEAD", b"agent").unwrap();
+    let sub = guest.walk(".git/modules/sub").unwrap();
+    let (_, handle) = guest.create(sub, b"index.lock", 0).unwrap();
+    assert_eq!(guest.write(handle, 0, b"index"), Ok(5));
+    assert_eq!(
+        fs::read(tree.root.join(".git/modules/sub/HEAD")).unwrap(),
+        b"agent"
+    );
+}
+
+// spec(SHARE): An agent's first POSIX lock on a file fails if the name the agent opened the file by is gone.
+#[test]
+fn a_first_lock_needs_the_file_s_name() {
+    let tree = Tree::new("lock-unlinked");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let (_, handle) = guest.create(1, b"temp", 0).unwrap();
+    assert_eq!(guest.lock(SETLK, handle, 7, F_WRLCK, 0).0, 0);
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    // The owner that locked it keeps its lock file.
+    assert_eq!(guest.lock(SETLK, handle, 7, F_UNLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, handle, 8, F_WRLCK, 0).0, ENOENT);
+    // `flock` needs no name.
+    assert_eq!(guest.lock(SETLK, handle, 8, F_WRLCK, LK_FLOCK).0, 0);
 }
 
 // spec(SHARE): The agent can't make a device, a FIFO, or a socket in an `rw` share, change a file's owner, or set an extended attribute.

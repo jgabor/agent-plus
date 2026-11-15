@@ -219,3 +219,38 @@ fn remove_deletes_only_its_own_worktree_when_a_name_differs_by_a_space() {
     assert!(repo.is_listed());
     assert!(repo.has_branch());
 }
+
+#[test]
+fn remove_refuses_a_worktree_path_that_isnt_utf8_and_deletes_nothing() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new("bytes");
+    let raw = repo
+        .worktree
+        .with_file_name(std::ffi::OsStr::from_bytes(b"victim-\xff"));
+    let lossy = repo.worktree.with_file_name("victim-\u{fffd}");
+    for (path, branch) in [(&raw, "8-raw"), (&lossy, "9-lossy")] {
+        let output = repo
+            .command("git", &repo.main)
+            .args(["worktree", "add", "-q", "-b", branch])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", describe(&output));
+    }
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"), &raw)
+        .arg("remove")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", describe(&output));
+    assert!(raw.join("Cargo.toml").exists());
+    assert!(lossy.join("Cargo.toml").exists());
+    for branch in ["8-raw", "9-lossy"] {
+        assert!(
+            !repo
+                .git(&repo.main, &["branch", "--list", branch])
+                .trim()
+                .is_empty()
+        );
+    }
+}

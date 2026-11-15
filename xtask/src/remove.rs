@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::base::{git, git_text};
+use crate::base::git;
 use crate::{Problem, Verdict};
 
 /// How many times to delete what is left, because the writer can come back.
@@ -46,8 +46,28 @@ fn parse(listing: &str) -> Vec<Worktree> {
     worktrees
 }
 
+/// Runs git, and refuses output that isn't UTF-8. A lossy decoding could turn
+/// two different paths or branches into the same one.
+fn text(dir: &Path, args: &[&str]) -> Result<String, Problem> {
+    let output = git(dir, args)?;
+    if !output.status.success() {
+        return Err(Problem(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        Problem(format!(
+            "`git {}` printed a path or branch that isn't UTF-8, which \
+             `remove` doesn't handle",
+            args.join(" ")
+        ))
+    })
+}
+
 fn list(dir: &Path) -> Result<Vec<Worktree>, Problem> {
-    Ok(parse(&git_text(
+    Ok(parse(&text(
         dir,
         &["worktree", "list", "--porcelain", "-z"],
     )?))
@@ -87,7 +107,7 @@ fn delete(path: &Path) -> Result<(), String> {
 pub fn run() -> Result<Verdict, Problem> {
     let here = std::env::current_dir()
         .map_err(|e| Problem(format!("couldn't read the current directory: {e}")))?;
-    let top = git_text(&here, &["rev-parse", "--show-toplevel"])?;
+    let top = text(&here, &["rev-parse", "--show-toplevel"])?;
     let top = PathBuf::from(top.strip_suffix('\n').unwrap_or(&top));
     let worktrees = list(&here)?;
     let Some(main) = worktrees.first() else {
@@ -137,7 +157,7 @@ pub fn run() -> Result<Verdict, Problem> {
         );
         return Ok(Verdict::Fail);
     }
-    git_text(&main, &["branch", "-D", &branch])?;
+    text(&main, &["branch", "-D", &branch])?;
     println!("removed {} and branch {branch}", path.display());
     Ok(Verdict::Pass)
 }

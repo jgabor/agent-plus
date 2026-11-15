@@ -136,6 +136,9 @@ impl Repo {
         common::write_tool(&systemd, SYSTEMD_RUN);
         repo.set_issues(NO_ISSUES);
         repo.set_report_comments(&[]);
+        // The nightly asks for `cargo mutants` before any step, so a test
+        // doesn't depend on whether this machine has it.
+        repo.set_mutants("echo \"this test runs no mutants\" >&2\nexit 1\n");
         let files = [
             (
                 "Cargo.toml",
@@ -313,12 +316,13 @@ impl Repo {
         ]);
     }
 
-    /// Puts a fake `cargo-mutants` on the path. It logs its arguments and limits,
-    /// and then runs `body`, with `$d` as this directory.
+    /// Puts a fake `cargo-mutants` on the path. It answers `--version`, and
+    /// otherwise logs its arguments and limits, and then runs `body`, with `$d`
+    /// as this directory.
     fn set_mutants(&self, body: &str) {
         let path = self.bin.join("cargo-mutants");
         let script = format!(
-            "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
+            "#!/bin/sh\nif [ \"$2\" = --version ]; then echo cargo-mutants 0.0.0; exit 0; fi\nd=\"$(dirname \"$0\")\"\nprintf '%s\\n' \"$*\" >> \"$d/mutants-calls\"\necho \"$TMPDIR\" > \"$d/mutants-tmp\"\nmkdir -p target/mutants/mutants.out\n{body}"
         );
         common::write_tool(&path, &script);
     }
@@ -1322,6 +1326,29 @@ fn a_missing_tool_stops_nightly_before_any_check() {
         stderr(&output).contains("no clippy here"),
         "{}",
         stderr(&output)
+    );
+    assert_eq!(repo.calls(), Vec::<String>::new());
+    assert!(!repo.root.join("target/bench").exists());
+}
+
+#[test]
+fn missing_cargo_mutants_stops_nightly_before_any_step() {
+    let repo = Repo::new("no-mutants");
+    let shim = repo.bin.join("cargo");
+    common::write_tool(
+        &shim,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = mutants ]; then echo \"error: no such command: \\`mutants\\`\" >&2; exit 101; fi\nexec \"{}\" \"$@\"\n",
+            env::var("CARGO").expect("cargo sets CARGO for tests")
+        ),
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("no such command: `mutants`"), "{stderr}");
+    assert!(
+        stderr.contains("Install it with `cargo install --locked cargo-mutants`"),
+        "{stderr}"
     );
     assert_eq!(repo.calls(), Vec::<String>::new());
     assert!(!repo.root.join("target/bench").exists());

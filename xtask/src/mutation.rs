@@ -9,6 +9,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 
 const SECONDS: u64 = 3600;
 const SECONDS_OVERRIDE: &str = "XTASK_MUTATION_SECONDS";
@@ -18,6 +19,23 @@ const MAX_LISTED: usize = 100;
 const COMPLETED: [i32; 3] = [0, 2, 3];
 /// The harness's own packages, which fakes join by their `fake-` prefix.
 const NOT_PRODUCT: [&str; 4] = ["fuzz", "t1", "t2", "xtask"];
+
+/// Fails before the nightly's first step when `cargo mutants` can't run, so a
+/// night doesn't spend its earlier steps only to fail at the last one.
+pub fn require_tool(root: &Path) -> Result<(), Problem> {
+    let output = Command::new("cargo")
+        .args(["mutants", "--version"])
+        .current_dir(root)
+        .output()
+        .map_err(workspace::no_cargo)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(Problem(format!(
+        "`cargo mutants` can't run: {}. Install it with `cargo install --locked cargo-mutants`",
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
 
 /// `None` when nothing it covers has changed. Survivors become issues, so they
 /// don't fail the night.

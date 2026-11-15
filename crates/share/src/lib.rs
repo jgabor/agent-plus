@@ -16,7 +16,7 @@ mod sys;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -73,16 +73,17 @@ pub fn main(args: &[OsString]) -> u8 {
 }
 
 fn run(args: &[OsString]) -> io::Result<()> {
-    let roots = open_roots(args)?;
+    let mut server = Server::new(open_roots(args)?)?;
     raise_descriptor_limit();
-    let access: Vec<_> = roots
-        .iter()
+    let access: Vec<_> = server
+        .roots()
+        .into_iter()
         .map(|(root, mode)| {
             let access = match mode {
                 Mode::ReadOnly => landlock::Access::Read,
                 Mode::ReadWrite => landlock::Access::ReadWrite,
             };
-            (root.as_fd(), access)
+            (root, access)
         })
         .collect();
     landlock::restrict(&access)?;
@@ -90,7 +91,7 @@ fn run(args: &[OsString]) -> io::Result<()> {
     // in this process owns it.
     let mut socket = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
     vmm::confine::confine_share_server(socket.as_raw_fd())?;
-    serve(&mut socket, &mut Server::new(roots)?)
+    serve(&mut socket, &mut server)
 }
 
 fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {

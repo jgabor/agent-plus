@@ -993,3 +993,17 @@ fn host_flock(path: &Path, kind: i32) -> bool {
     // SAFETY: flock takes no pointer.
     unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), kind | libc::LOCK_NB) == 0 }
 }
+
+#[test]
+fn a_root_in_a_git_directory_keeps_its_place() {
+    let tree = protected_tree("root-in-git");
+    let mut guest = Guest::with(&tree.root.join(".git"), Mode::ReadWrite);
+    assert_eq!(guest.overwrite("config", b"agent"), Err(EPERM));
+    assert_eq!(guest.overwrite("modules/sub/config", b"agent"), Err(EPERM));
+    guest.overwrite("HEAD", b"agent").unwrap();
+    let mut hooks = Guest::with(&tree.root.join(".git/hooks"), Mode::ReadWrite);
+    assert_eq!(hooks.overwrite("pre-commit", b"agent"), Err(EPERM));
+    assert_eq!(hooks.create(1, b"post-merge", 0), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join(".git/config")).unwrap(), b"host");
+    assert_eq!(fs::read(tree.root.join(".git/hooks/pre-commit")).unwrap(), b"host");
+}

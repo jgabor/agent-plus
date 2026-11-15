@@ -236,6 +236,8 @@ fn sequence(
         && !(mode != Mode::Merge && base::is_exact_revert(&tree.path, &fetched.main)?)
     {
         status.proving("its own xtask");
+        // Each proof can take most of the timeout, so its own gets a new one.
+        report_slot()?;
         match prove_with_its_own(&tree.path, &scoring)? {
             Ok(own) => proof = own.after(proof),
             Err(failed) => {
@@ -448,7 +450,8 @@ fn is_worker() -> bool {
 }
 
 /// Tells the supervisor that the worker holds the slot, so that the timeout
-/// starts. The xtask of `main` says so again, and gets a new timeout.
+/// starts. The xtask of `main` says so again, and gets a new timeout, and
+/// again before a PR's own xtask proves it.
 fn report_slot() -> Result<(), Problem> {
     let couldnt = |e: io::Error| Problem(format!("couldn't tell the supervisor: {e}"));
     let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
@@ -932,9 +935,12 @@ fn prove_with_its_own(
     }
     fs::create_dir_all(&own).map_err(couldnt)?;
     let mut command = process::Command::new(program);
+    // Its input reaches the supervisor, and the PR's code mustn't renew the
+    // timeout.
     command
         .args(["prove", &scoring.number.to_string(), scoring.mode.command()])
-        .current_dir(tree);
+        .current_dir(tree)
+        .stdin(process::Stdio::null());
     if let Some(kept) = scoring.kept {
         let file = own.join("kept.toml");
         ledger::write_file(&file, kept)?;

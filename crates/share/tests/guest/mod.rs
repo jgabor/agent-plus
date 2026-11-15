@@ -455,3 +455,63 @@ pub fn protected_tree(label: &str) -> Tree {
     }
     tree
 }
+
+/// Whether the host can't take a lock of `kind` on the whole file now.
+pub fn host_locked(path: &Path, kind: i16) -> bool {
+    let file = File::options().read(true).write(true).open(path).unwrap();
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = kind;
+    // SAFETY: `lock` is a `struct flock`, which outlives the call.
+    let got = unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            libc::F_OFD_GETLK,
+            &mut lock,
+        )
+    };
+    assert_eq!(got, 0);
+    lock.l_type != libc::F_UNLCK as i16
+}
+
+pub const EXDEV: i32 = 18;
+pub const ENOTEMPTY: i32 = 39;
+pub const S_IFIFO: u32 = 0o010_000;
+pub const S_IFCHR: u32 = 0o020_000;
+pub const S_IFSOCK: u32 = 0o140_000;
+
+impl Guest {
+    /// A guest of a copy-on-write share of `root`, which keeps the agent's
+    /// changes in `pending`, a new directory.
+    pub fn cow(root: &Path, pending: &Path) -> Self {
+        fs::create_dir(pending).unwrap();
+        let pending = OwnedFd::from(File::open(pending).unwrap());
+        Self::with(root, Mode::CopyOnWrite(pending))
+    }
+
+    pub fn mknod(&mut self, parent: u64, name: &[u8], mode: u32, rdev: u32) -> Result<u64, i32> {
+        let mut body = mode.to_le_bytes().to_vec();
+        body.extend(rdev.to_le_bytes());
+        body.extend([0; 8]);
+        body.extend(named(name));
+        match self.call(MKNOD, parent, &body) {
+            (0, out) => Ok(node_of(&out)),
+            (error, _) => Err(error),
+        }
+    }
+
+    /// The mode of the file at `path`, as the guest sees it.
+    pub fn mode(&mut self, path: &str) -> Result<u32, i32> {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent = self.walk(parent)?;
+        self.lookup(parent, name.as_bytes()).map(|(_, mode)| mode)
+    }
+}
+
+/// The records a copy-on-write share kept in `pending`, one to a line.
+pub fn records(pending: &Path) -> Vec<String> {
+    fs::read_to_string(pending.join("records"))
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect()
+}

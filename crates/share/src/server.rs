@@ -9,7 +9,8 @@
 //!
 //! An `ro` share refuses every write. An `rw` share refuses the writes that
 //! SPEC.md's `SHARE` protects, by the place each name has, which [`Place`]
-//! works out from the names above it.
+//! works out from the names above it. A copy-on-write share writes none of
+//! the host's files, and [`cow`] says where its changes go.
 //!
 //! File locks pass through: `flock` as `flock` on the guest's open file, and
 //! a POSIX lock as an open file description lock on a file the server opens
@@ -25,7 +26,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Component;
 use std::rc::Rc;
 
+use crate::landlock::Access;
 use crate::sys;
+
+mod cow;
 
 const IN_HEADER: usize = 40;
 const OUT_HEADER: usize = 16;
@@ -106,11 +110,13 @@ const GIT_FILES: [&str; 5] = ["config", "config.worktree", "commondir", "gitdir"
 const AGENTFILES: [&str; 2] = ["agentfile", "agentfile.lock"];
 const DOT_GIT: &str = ".git";
 
-/// What a share allows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
+/// What a share allows. A copy-on-write share keeps the agent's changes
+/// in a directory of its own, `P`.
+#[derive(Debug)]
+pub enum Mode<P = OwnedFd> {
     ReadOnly,
     ReadWrite,
+    CopyOnWrite(P),
 }
 
 /// Where a file sits, for what an `rw` share protects. It follows from the
@@ -224,7 +230,7 @@ struct Handle {
 /// One share: its root, and what the guest holds of it.
 struct Share {
     root: Rc<OwnedFd>,
-    mode: Mode,
+    read_only: bool,
     nodes: BTreeMap<u64, Node>,
     /// The node each host file has, by device and inode.
     known: BTreeMap<(u64, u64), u64>,
@@ -238,7 +244,14 @@ struct Share {
 
 /// Answers every share's requests.
 pub struct Server {
-    shares: Vec<Share>,
+    shares: Vec<Served>,
+}
+
+/// A share, as the server serves it.
+enum Served {
+    /// The host's own files, read-only or read-write.
+    Direct(Share),
+    CopyOnWrite(cow::Cow),
 }
 
 /// The request's fields that every answer depends on.
@@ -400,7 +413,7 @@ fn busy(error: io::Error, wait: bool) -> i32 {
 }
 
 impl Share {
-    fn new(root: OwnedFd, mode: Mode, place: Place) -> io::Result<Self> {
+    fn new(root: OwnedFd, read_only: bool, place: Place) -> io::Result<Self> {
         let stat = sys::fstat(root.as_fd())?;
         if !is(stat.st_mode, libc::S_IFDIR) {
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
@@ -418,7 +431,7 @@ impl Share {
         };
         Ok(Self {
             root,
-            mode,
+            read_only,
             nodes: BTreeMap::from([(ROOT, node)]),
             known: BTreeMap::from([((stat.st_dev, stat.st_ino), ROOT)]),
             handles: BTreeMap::new(),
@@ -546,7 +559,7 @@ impl Share {
 
     fn open(&mut self, node: u64, body: &[u8]) -> Answer {
         let flags = u32_at(body, 0).ok_or(libc::EINVAL)? as i32;
-        if writes(flags) && self.mode == Mode::ReadOnly {
+        if writes(flags) && self.read_only {
             return Err(libc::EROFS);
         }
         let found = self.node(node)?;
@@ -902,7 +915,7 @@ impl Share {
 
     /// `struct fuse_fsync_in`. An `ro` share has nothing to write back.
     fn fsync(&self, body: &[u8]) -> Answer {
-        if self.mode == Mode::ReadOnly {
+        if self.read_only {
             return Ok(Vec::new());
         }
         let handle = self.handle(body)?;
@@ -922,7 +935,7 @@ impl Share {
             }
             let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
             let read = || self.reopen(found, libc::O_RDONLY | flags);
-            let fd = match self.mode == Mode::ReadWrite && found.place != Place::Fixed {
+            let fd = match !self.read_only && found.place != Place::Fixed {
                 true => self
                     .reopen(found, libc::O_RDWR | flags)
                     .or_else(|_| read())?,
@@ -1038,20 +1051,36 @@ impl Server {
     pub fn new(roots: Vec<(OwnedFd, Mode)>) -> io::Result<Self> {
         let shares = roots
             .into_iter()
-            .map(|(root, mode)| {
-                let place = root_place(&root);
-                Share::new(root, mode, place)
+            .map(|(root, mode)| match mode {
+                Mode::CopyOnWrite(pending) => cow::Cow::new(root, pending).map(Served::CopyOnWrite),
+                mode => {
+                    let place = root_place(&root);
+                    let read_only = matches!(mode, Mode::ReadOnly);
+                    Share::new(root, read_only, place).map(Served::Direct)
+                }
             })
             .collect::<io::Result<_>>()?;
         Ok(Self { shares })
     }
 
-    /// Each share's root, and what it allows, in share order.
-    pub fn roots(&self) -> Vec<(BorrowedFd<'_>, Mode)> {
-        self.shares
-            .iter()
-            .map(|share| (share.root.as_fd(), share.mode))
-            .collect()
+    /// The directories the server reaches files beneath, and what it does
+    /// there, in share order.
+    pub(crate) fn access(&self) -> Vec<(BorrowedFd<'_>, Access)> {
+        let mut access = Vec::new();
+        for share in &self.shares {
+            match share {
+                Served::Direct(share) if share.read_only => {
+                    access.push((share.root.as_fd(), Access::Read));
+                }
+                Served::Direct(share) => access.push((share.root.as_fd(), Access::ReadWrite)),
+                Served::CopyOnWrite(share) => {
+                    let (root, pending) = share.directories();
+                    access.push((root, Access::Read));
+                    access.push((pending, Access::ReadWrite));
+                }
+            }
+        }
+        access
     }
 
     /// The answer to one request for share `share`, or nothing for a request
@@ -1061,7 +1090,10 @@ impl Server {
             return Vec::new();
         };
         let result = match self.shares.get_mut(share as usize) {
-            Some(found) => match dispatch(found, &request) {
+            Some(found) => match match found {
+                Served::Direct(found) => dispatch(found, &request),
+                Served::CopyOnWrite(found) => cow::dispatch(found, &request),
+            } {
                 Some(result) => result,
                 None => return Vec::new(),
             },
@@ -1097,7 +1129,7 @@ fn parse(bytes: &[u8]) -> Option<Request<'_>> {
 /// The answer to a request, or `None` for one that gets no answer.
 fn dispatch(share: &mut Share, request: &Request) -> Option<Answer> {
     let Request { node, body, .. } = *request;
-    if WRITES.contains(&request.opcode) && share.mode == Mode::ReadOnly {
+    if WRITES.contains(&request.opcode) && share.read_only {
         return Some(Err(libc::EROFS));
     }
     Some(match request.opcode {

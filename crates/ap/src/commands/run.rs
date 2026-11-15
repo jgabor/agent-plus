@@ -154,7 +154,7 @@ fn run_agent(
     root: &Path,
     args: &Args,
     layers: &[LayerName],
-    shares: &[(File, share::Mode)],
+    shares: &[(File, share::Mode<File>)],
     start: Start,
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
@@ -196,7 +196,16 @@ fn run_agent(
         true => None,
         false => {
             let roots: Vec<_> = (shares.iter())
-                .map(|(root, mode)| (root.as_fd(), *mode))
+                .map(|(root, mode)| {
+                    let mode = match mode {
+                        share::Mode::ReadOnly => share::Mode::ReadOnly,
+                        share::Mode::ReadWrite => share::Mode::ReadWrite,
+                        share::Mode::CopyOnWrite(pending) => {
+                            share::Mode::CopyOnWrite(pending.as_fd())
+                        }
+                    };
+                    (root.as_fd(), mode)
+                })
                 .collect();
             let server = share::start(exe, &roots).map_err(fail("can't start the share server"))?;
             let inherited = share::inheritable(server.socket.as_fd())
@@ -458,7 +467,7 @@ fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Re
 }
 
 /// The roots of a run's shares, opened, in share order.
-type Roots = Vec<(File, share::Mode)>;
+type Roots = Vec<(File, share::Mode<File>)>;
 
 /// Everything the run needs before its VM starts: the store's root, the
 /// agent's layers, its shares' roots, and how to start its harness.

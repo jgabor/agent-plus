@@ -232,7 +232,6 @@ fn a_root_must_be_a_directory() {
     assert!(Server::new(vec![(file, Mode::ReadOnly)]).is_err());
 }
 
-// spec(SHARE): `rw` | Allowed | Changed immediately
 #[test]
 fn writes_in_a_read_write_share_change_the_host_s_files() {
     let tree = Tree::new("rw");
@@ -241,7 +240,10 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
 
     let (file, handle) = guest.create(1, b"new.txt", 0).unwrap();
     assert_eq!(guest.write(handle, 0, b"written by the agent"), Ok(20));
-    assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"written by the agent");
+    assert_eq!(
+        fs::read(root.join("new.txt")).unwrap(),
+        b"written by the agent"
+    );
     guest.release(handle);
     assert_eq!(guest.create(1, b"new.txt", O_EXCL), Err(EEXIST));
 
@@ -251,13 +253,19 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
     let handle = guest.open(hello, O_WRONLY | O_APPEND).unwrap();
     guest.write(handle, 0, b", appended").unwrap();
     guest.release(handle);
-    assert_eq!(fs::read(root.join("hello.txt")).unwrap(), b"changed, appended");
+    assert_eq!(
+        fs::read(root.join("hello.txt")).unwrap(),
+        b"changed, appended"
+    );
 
     assert_eq!(guest.setattr(file, FATTR_SIZE, 7, 0), 0);
     assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"written");
     assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), 0);
     let mode = fs::metadata(root.join("new.txt")).unwrap().permissions();
-    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777, 0o600);
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+        0o600
+    );
     assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
     assert_eq!(guest.setattr(file, FATTR_UID, 0, 0), EPERM);
 
@@ -278,8 +286,14 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
         guest.rename(made, b"moved.txt", made, b"hard", RENAME_NOREPLACE),
         EEXIST
     );
-    assert_eq!(guest.rename(made, b"moved.txt", 1, b"hello.txt", RENAME_EXCHANGE), 0);
-    assert_eq!(fs::read(root.join("made/moved.txt")).unwrap(), b"changed, appended");
+    assert_eq!(
+        guest.rename(made, b"moved.txt", 1, b"hello.txt", RENAME_EXCHANGE),
+        0
+    );
+    assert_eq!(
+        fs::read(root.join("made/moved.txt")).unwrap(),
+        b"changed, appended"
+    );
 
     assert_eq!(guest.remove(UNLINK, made, b"link"), 0);
     assert_eq!(guest.remove(UNLINK, made, b"hard"), 0);
@@ -332,11 +346,18 @@ fn an_agentfile_can_t_be_created_changed_removed_or_renamed() {
         assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0o777), EPERM, "{path}");
         assert_eq!(guest.link(node, dir, b"alias"), Err(EPERM), "{path}");
     }
-    for (parent, name) in [(1, &b"Agentfile"[..]), (1, b"Agentfile.lock"), (app, b"Agentfile")] {
+    for (parent, name) in [
+        (1, &b"Agentfile"[..]),
+        (1, b"Agentfile.lock"),
+        (app, b"Agentfile"),
+    ] {
         assert_eq!(guest.remove(UNLINK, parent, name), EPERM);
         assert_eq!(guest.rename(parent, name, dir, b"moved", 0), EPERM);
         assert_eq!(guest.rename(1, b"hello.txt", parent, name, 0), EPERM);
-        assert_eq!(guest.rename(1, b"hello.txt", parent, name, RENAME_EXCHANGE), EPERM);
+        assert_eq!(
+            guest.rename(1, b"hello.txt", parent, name, RENAME_EXCHANGE),
+            EPERM
+        );
     }
     for name in [&b"Agentfile"[..], b"Agentfile.lock"] {
         assert_eq!(guest.create(dir, name, 0), Err(EPERM));
@@ -361,22 +382,33 @@ fn a_git_entry_can_t_be_created_removed_or_renamed() {
     assert_eq!(guest.mkdir(dir, b".git"), Err(EPERM));
     assert_eq!(guest.create(dir, b".git", 0), Err(EPERM));
     assert_eq!(guest.symlink(dir, b".git", b"/elsewhere"), Err(EPERM));
-    assert_eq!(guest.rename(1, b"dir", worktree, b".git", RENAME_EXCHANGE), EPERM);
+    assert_eq!(
+        guest.rename(1, b"dir", worktree, b".git", RENAME_EXCHANGE),
+        EPERM
+    );
     assert_eq!(guest.rename(1, b".git", dir, b"stolen", 0), EPERM);
     assert_eq!(guest.remove(RMDIR, 1, b".git"), EPERM);
     assert_eq!(guest.remove(UNLINK, worktree, b".git"), EPERM);
-    assert_eq!(guest.overwrite("worktree/.git", b"gitdir: /elsewhere"), Err(EPERM));
+    assert_eq!(
+        guest.overwrite("worktree/.git", b"gitdir: /elsewhere"),
+        Err(EPERM)
+    );
     let file = guest.walk("worktree/.git").unwrap();
     assert_eq!(guest.setattr(file, FATTR_SIZE, 0, 0), EPERM);
     assert_eq!(fs::read(tree.root.join("worktree/.git")).unwrap(), b"host");
     assert!(!tree.root.join("dir/.git").exists());
     // What else is in a `.git` directory changes, as git changes it.
-    guest.overwrite(".git/HEAD", b"ref: refs/heads/agent").unwrap();
+    guest
+        .overwrite(".git/HEAD", b"ref: refs/heads/agent")
+        .unwrap();
     guest.overwrite(".git/refs/heads/main", b"agent").unwrap();
     let refs = guest.walk(".git/refs/heads").unwrap();
     let (_, handle) = guest.create(refs, b"config", 0).unwrap();
     guest.release(handle);
-    assert_eq!(fs::read(tree.root.join(".git/HEAD")).unwrap(), b"ref: refs/heads/agent");
+    assert_eq!(
+        fs::read(tree.root.join(".git/HEAD")).unwrap(),
+        b"ref: refs/heads/agent"
+    );
 }
 
 // spec(SHARE): In every git directory, including `.git/modules/*` and `.git/worktrees/*`, these are read-only, because git runs hooks and configured commands on your host: `config`, `config.worktree`, `commondir`, `gitdir`, and `hooks/`.
@@ -401,11 +433,27 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
         assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0o777), EPERM, "{path}");
         let (parent, name) = path.rsplit_once('/').unwrap();
         let parent = guest.walk(parent).unwrap();
-        assert_eq!(guest.remove(UNLINK, parent, name.as_bytes()), EPERM, "{path}");
-        assert_eq!(guest.rename(parent, name.as_bytes(), 1, b"out", 0), EPERM, "{path}");
-        assert_eq!(guest.rename(1, b"hello.txt", parent, name.as_bytes(), 0), EPERM);
+        assert_eq!(
+            guest.remove(UNLINK, parent, name.as_bytes()),
+            EPERM,
+            "{path}"
+        );
+        assert_eq!(
+            guest.rename(parent, name.as_bytes(), 1, b"out", 0),
+            EPERM,
+            "{path}"
+        );
+        assert_eq!(
+            guest.rename(1, b"hello.txt", parent, name.as_bytes(), 0),
+            EPERM
+        );
     }
-    for dir in [".git", ".git/modules/sub", ".git/worktrees/wt", "nested/.git"] {
+    for dir in [
+        ".git",
+        ".git/modules/sub",
+        ".git/worktrees/wt",
+        "nested/.git",
+    ] {
         let parent = guest.walk(dir).unwrap();
         for name in [&b"config"[..], b"config.worktree", b"commondir", b"gitdir"] {
             if guest.lookup(parent, name).is_err() {
@@ -421,18 +469,31 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
     let hooks = guest.walk(".git/hooks").unwrap();
     assert_eq!(guest.create(hooks, b"post-merge", 0), Err(EPERM));
     assert_eq!(guest.mkdir(hooks, b"more"), Err(EPERM));
-    assert_eq!(guest.rename(1, b"hello.txt", hooks, b"post-merge", 0), EPERM);
+    assert_eq!(
+        guest.rename(1, b"hello.txt", hooks, b"post-merge", 0),
+        EPERM
+    );
     let git = guest.walk(".git").unwrap();
     assert_eq!(guest.remove(RMDIR, git, b"hooks"), EPERM);
     // A directory the agent filled can't move into a place git reads as a
     // git directory, and neither can a symlink.
     let staged = guest.mkdir(1, b"staged").unwrap();
-    guest.create(staged, b"config", 0).map(|(_, h)| guest.release(h)).unwrap();
+    guest
+        .create(staged, b"config", 0)
+        .map(|(_, h)| guest.release(h))
+        .unwrap();
     let modules = guest.walk(".git/modules").unwrap();
     assert_eq!(guest.rename(1, b"staged", modules, b"evil", 0), EPERM);
     assert_eq!(guest.symlink(modules, b"evil", b"../../staged"), Err(EPERM));
-    assert_eq!(guest.rename(1, b"staged", git, b"worktrees", RENAME_EXCHANGE), EPERM);
-    for file in [".git/config", ".git/hooks/pre-commit", ".git/modules/sub/config"] {
+    assert_eq!(
+        guest.rename(1, b"staged", git, b"worktrees", RENAME_EXCHANGE),
+        EPERM
+    );
+    for file in [
+        ".git/config",
+        ".git/hooks/pre-commit",
+        ".git/modules/sub/config",
+    ] {
         assert_eq!(fs::read(tree.root.join(file)).unwrap(), b"host", "{file}");
     }
     assert!(!tree.root.join(".git/hooks/post-merge").exists());
@@ -459,7 +520,13 @@ fn protected_names_match_without_regard_to_case() {
         assert_eq!(guest.mkdir(dir, name), Err(EPERM), "{name:?}");
     }
     let git = guest.walk(".git").unwrap();
-    for name in [&b"CONFIG"[..], b"Config.Worktree", b"HOOKS", b"CommonDir", b"GITDIR"] {
+    for name in [
+        &b"CONFIG"[..],
+        b"Config.Worktree",
+        b"HOOKS",
+        b"CommonDir",
+        b"GITDIR",
+    ] {
         assert_eq!(guest.create(git, name, 0), Err(EPERM), "{name:?}");
     }
     assert!(!tree.root.join("dir/AGENTFILE").exists());
@@ -479,7 +546,10 @@ fn file_locks_pass_through_to_the_host() {
         init.resize(64, 0);
         let (_, out) = guest.call(INIT, 0, &init);
         let flags = u32::from_le_bytes(out[12..16].try_into().unwrap());
-        assert_eq!(flags & (POSIX_LOCKS | FLOCK_LOCKS), POSIX_LOCKS | FLOCK_LOCKS);
+        assert_eq!(
+            flags & (POSIX_LOCKS | FLOCK_LOCKS),
+            POSIX_LOCKS | FLOCK_LOCKS
+        );
 
         let node = guest.walk("hello.txt").unwrap();
         let handle = guest.open(node, 0).unwrap();
@@ -500,11 +570,17 @@ fn file_locks_pass_through_to_the_host() {
         assert_eq!(guest.lock(SETLKW, handle, 7, F_RDLCK, 0).0, EOPNOTSUPP);
         let (error, conflict) = guest.lock(GETLK, handle, 7, F_RDLCK, 0);
         assert_eq!(error, 0);
-        assert_eq!(u32::from_le_bytes(conflict[16..20].try_into().unwrap()), F_WRLCK);
+        assert_eq!(
+            u32::from_le_bytes(conflict[16..20].try_into().unwrap()),
+            F_WRLCK
+        );
         drop(host);
         assert_eq!(guest.lock(SETLKW, handle, 7, F_RDLCK, 0).0, 0);
         let (_, free) = guest.lock(GETLK, handle, 9, F_RDLCK, 0);
-        assert_eq!(u32::from_le_bytes(free[16..20].try_into().unwrap()), F_UNLCK);
+        assert_eq!(
+            u32::from_le_bytes(free[16..20].try_into().unwrap()),
+            F_UNLCK
+        );
         // Closing the file in the guest lets the owner's locks go.
         let mut flush = handle.to_le_bytes().to_vec();
         flush.extend([0; 8]);
@@ -570,5 +646,8 @@ fn a_root_in_a_git_directory_keeps_its_place() {
     assert_eq!(hooks.overwrite("pre-commit", b"agent"), Err(EPERM));
     assert_eq!(hooks.create(1, b"post-merge", 0), Err(EPERM));
     assert_eq!(fs::read(tree.root.join(".git/config")).unwrap(), b"host");
-    assert_eq!(fs::read(tree.root.join(".git/hooks/pre-commit")).unwrap(), b"host");
+    assert_eq!(
+        fs::read(tree.root.join(".git/hooks/pre-commit")).unwrap(),
+        b"host"
+    );
 }

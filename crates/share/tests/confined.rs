@@ -27,12 +27,7 @@ fn confined_server_process() {
     let Some(args) = env::var_os(ARGS) else {
         return;
     };
-    let args: Vec<OsString> = args
-        .to_str()
-        .unwrap()
-        .lines()
-        .map(OsString::from)
-        .collect();
+    let args: Vec<OsString> = args.to_str().unwrap().lines().map(OsString::from).collect();
     let status = share::main(&args);
     // The filter allows nothing the test harness does after a test, so
     // the process ends here.
@@ -45,11 +40,7 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     let tree = Tree::new("confined-rw");
     let other = Tree::new("confined-ro");
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let args = format!(
-        "rw\n{}\nro\n{}",
-        tree.root.display(),
-        other.root.display()
-    );
+    let args = format!("rw\n{}\nro\n{}", tree.root.display(), other.root.display());
     let mut server = Command::new(env::current_exe().unwrap())
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args)
@@ -86,7 +77,10 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     guest.symlink(made, b"link", b"../new.txt").unwrap();
     guest.link(file, made, b"hard").unwrap();
     assert_eq!(guest.rename(1, b"new.txt", made, b"moved", 0), 0);
-    assert_eq!(guest.rename(made, b"moved", 1, b"hello.txt", RENAME_EXCHANGE), 0);
+    assert_eq!(
+        guest.rename(made, b"moved", 1, b"hello.txt", RENAME_EXCHANGE),
+        0
+    );
     assert_eq!(fs::read(root.join("hello.txt")).unwrap(), b"from");
     assert_eq!(fs::read(root.join("made/hard")).unwrap(), b"from");
     for name in [&b"link"[..], b"hard", b"moved"] {

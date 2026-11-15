@@ -3,7 +3,6 @@
 
 #![allow(dead_code)]
 
-
 use share::{Mode, Server};
 use std::collections::BTreeSet;
 use std::fs::{self, File};

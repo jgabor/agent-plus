@@ -73,11 +73,9 @@ const FALLOCATE: u32 = 43;
 const RENAME2: u32 = 45;
 /// Every request that would change a file or a directory.
 const WRITES: [u32; 17] = [
-    SETATTR, SYMLINK, MKNOD, MKDIR, UNLINK, RMDIR, RENAME, LINK, WRITE,
-    21, // SETXATTR
+    SETATTR, SYMLINK, MKNOD, MKDIR, UNLINK, RMDIR, RENAME, LINK, WRITE, 21, // SETXATTR
     24, // REMOVEXATTR
-    CREATE, FALLOCATE, RENAME2,
-    47, // COPY_FILE_RANGE
+    CREATE, FALLOCATE, RENAME2, 47, // COPY_FILE_RANGE
     51, // TMPFILE
     48, // SETUPMAPPING
 ];
@@ -123,7 +121,9 @@ enum Place {
     /// A git directory. A `nested` one is beneath `modules` or `worktrees`,
     /// where git keeps other git directories, possibly under names with
     /// several parts, so every directory beneath it counts as one too.
-    Git { nested: bool },
+    Git {
+        nested: bool,
+    },
     /// `modules` or `worktrees` in a git directory.
     Holder,
     /// Read-only, with everything beneath it.
@@ -327,18 +327,14 @@ fn entry_name(body: &[u8]) -> Result<CString, i32> {
 /// Two names, one after the other, as a rename sends them.
 fn two_names(body: &[u8]) -> Result<(CString, CString), i32> {
     let first = entry_name(body)?;
-    let rest = body
-        .get(first.as_bytes().len() + 1..)
-        .ok_or(libc::EINVAL)?;
+    let rest = body.get(first.as_bytes().len() + 1..).ok_or(libc::EINVAL)?;
     Ok((first, entry_name(rest)?))
 }
 
 /// The flags of a guest's open that reach the host. The rest can't apply to
 /// a file that exists, or are the server's to choose.
 fn open_flags(flags: i32) -> i32 {
-    flags & (libc::O_ACCMODE | libc::O_APPEND | libc::O_TRUNC)
-        | libc::O_NOFOLLOW
-        | libc::O_NONBLOCK
+    flags & (libc::O_ACCMODE | libc::O_APPEND | libc::O_TRUNC) | libc::O_NOFOLLOW | libc::O_NONBLOCK
 }
 
 fn writes(flags: i32) -> bool {
@@ -749,9 +745,7 @@ impl Share {
     /// The name, then the symlink's target, which only the guest resolves.
     fn symlink(&mut self, parent: u64, body: &[u8]) -> Answer {
         let name = entry_name(body)?;
-        let rest = body
-            .get(name.as_bytes().len() + 1..)
-            .ok_or(libc::EINVAL)?;
+        let rest = body.get(name.as_bytes().len() + 1..).ok_or(libc::EINVAL)?;
         let target = CStr::from_bytes_until_nul(rest).map_err(|_| libc::EINVAL)?;
         if target.is_empty() {
             return Err(libc::ENOENT);
@@ -778,8 +772,7 @@ impl Share {
             return Err(libc::EPERM);
         }
         let inode = (found.device, found.inode);
-        sys::linkat(found.parent.as_fd(), &found.name, directory.as_fd(), &name)
-            .map_err(errno)?;
+        sys::linkat(found.parent.as_fd(), &found.name, directory.as_fd(), &name).map_err(errno)?;
         let flags = libc::O_PATH | libc::O_NOFOLLOW;
         let fd = sys::open_beneath(directory.as_fd(), &name, flags).map_err(errno)?;
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
@@ -822,7 +815,9 @@ impl Share {
         let mode = |directory: &OwnedFd, name: &CStr| {
             let flags = libc::O_PATH | libc::O_NOFOLLOW;
             let fd = sys::open_beneath(directory.as_fd(), name, flags).map_err(errno)?;
-            sys::fstat(fd.as_fd()).map(|stat| stat.st_mode).map_err(errno)
+            sys::fstat(fd.as_fd())
+                .map(|stat| stat.st_mode)
+                .map_err(errno)
         };
         if !into_place.takes(new.as_bytes(), mode(&from, &old)?) {
             return Err(libc::EPERM);
@@ -900,7 +895,9 @@ impl Share {
             let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
             let read = || self.reopen(found, libc::O_RDONLY | flags);
             let fd = match self.mode == Mode::ReadWrite && found.place != Place::Fixed {
-                true => self.reopen(found, libc::O_RDWR | flags).or_else(|_| read())?,
+                true => self
+                    .reopen(found, libc::O_RDWR | flags)
+                    .or_else(|_| read())?,
                 false => read()?,
             };
             self.locks.insert((node, owner), fd);

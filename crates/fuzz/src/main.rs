@@ -386,7 +386,11 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     for name in PROTECTED {
         let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
         let found = fs::read(base.join(name)).ok();
-        assert_eq!(found.as_deref(), Some(expected), "{name} changed: {input:?}");
+        assert_eq!(
+            found.as_deref(),
+            Some(expected),
+            "{name} changed: {input:?}"
+        );
     }
     let names = |dir: &Path| -> Vec<_> {
         let mut names: Vec<_> = fs::read_dir(dir)
@@ -396,8 +400,16 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
         names.sort();
         names
     };
-    assert_eq!(names(&base), ["outside", "root"], "a file beside the root: {input:?}");
-    assert_eq!(names(&base.join("outside")), ["secret"], "a file outside: {input:?}");
+    assert_eq!(
+        names(&base),
+        ["outside", "root"],
+        "a file beside the root: {input:?}"
+    );
+    assert_eq!(
+        names(&base.join("outside")),
+        ["secret"],
+        "a file outside: {input:?}"
+    );
     let _ = fs::remove_dir_all(&base);
     answered
 }

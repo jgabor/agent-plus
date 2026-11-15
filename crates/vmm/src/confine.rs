@@ -526,8 +526,8 @@ mod tests {
     }
 
     const WRITING: [u32; 12] = [
-        PWRITE64, FTRUNCATE, FALLOCATE, FSYNC, FDATASYNC, FCHMOD, UTIMENSAT, MKDIRAT,
-        UNLINKAT, SYMLINKAT, LINKAT, RENAMEAT2,
+        PWRITE64, FTRUNCATE, FALLOCATE, FSYNC, FDATASYNC, FCHMOD, UTIMENSAT, MKDIRAT, UNLINKAT,
+        SYMLINKAT, LINKAT, RENAMEAT2,
     ];
 
     #[test]
@@ -547,8 +547,16 @@ mod tests {
     #[test]
     fn only_a_server_with_an_rw_share_changes_files() {
         for number in WRITING {
-            assert_eq!(share_call(number, [4, 1, 4, 1, 0, 0]), RET_KILL_PROCESS, "{number}");
-            assert_eq!(writing_call(number, [4, 0, 4, 0, 0, 0]), RET_ALLOW, "{number}");
+            assert_eq!(
+                share_call(number, [4, 1, 4, 1, 0, 0]),
+                RET_KILL_PROCESS,
+                "{number}"
+            );
+            assert_eq!(
+                writing_call(number, [4, 0, 4, 0, 0, 0]),
+                RET_ALLOW,
+                "{number}"
+            );
         }
     }
 
@@ -566,16 +574,26 @@ mod tests {
         ] {
             let mut args = [4, 1, 4, 1, 0, 0];
             args[at] = cwd;
-            assert_eq!(writing_call(number, args), RET_KILL_PROCESS, "{number} {at}");
+            assert_eq!(
+                writing_call(number, args),
+                RET_KILL_PROCESS,
+                "{number} {at}"
+            );
         }
         // Times change only for a descriptor, never for a path, whichever
         // half of the pointer is set.
         for path in [1, 1 << 32, u64::MAX] {
-            assert_eq!(writing_call(UTIMENSAT, [4, path, 0, 0, 0, 0]), RET_KILL_PROCESS);
+            assert_eq!(
+                writing_call(UTIMENSAT, [4, path, 0, 0, 0, 0]),
+                RET_KILL_PROCESS
+            );
         }
         assert_eq!(writing_call(UTIMENSAT, [4, 0, 1, 0, 0, 0]), RET_ALLOW);
         assert_eq!(writing_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        assert_eq!(writing_call(OPENAT2, [cwd, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            writing_call(OPENAT2, [cwd, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
     }
 
     #[test]

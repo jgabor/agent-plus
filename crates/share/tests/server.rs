@@ -651,3 +651,14 @@ fn a_root_in_a_git_directory_keeps_its_place() {
         b"host"
     );
 }
+
+#[test]
+fn a_fixed_file_stays_fixed_by_another_name() {
+    let tree = protected_tree("alias");
+    fs::hard_link(tree.root.join("Agentfile"), tree.root.join("alias")).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    guest.walk("Agentfile").unwrap();
+    assert_eq!(guest.create(1, b"alias", O_TRUNC), Err(EPERM));
+    assert_eq!(guest.overwrite("alias", b"agent"), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join("Agentfile")).unwrap(), b"host");
+}

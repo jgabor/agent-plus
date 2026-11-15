@@ -648,7 +648,10 @@ impl Share {
         if place.fixes(name.as_bytes()) {
             return Err(libc::EPERM);
         }
-        let flags = open_flags(flags) | flags & libc::O_EXCL;
+        // A file that was there is truncated only once it is known not to be
+        // a fixed one.
+        let truncate = flags & libc::O_TRUNC != 0;
+        let flags = open_flags(flags) & !libc::O_TRUNC | flags & libc::O_EXCL;
         let fd = sys::create_beneath(directory.as_fd(), &name, flags, mode & !umask & 0o7777)
             .map_err(errno)?;
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
@@ -665,6 +668,9 @@ impl Share {
         let node = u64_at(&out, 0).ok_or(libc::EIO)?;
         if self.node(node)?.inode != stat.st_ino {
             return Err(libc::ESTALE);
+        }
+        if truncate {
+            sys::ftruncate(fd.as_fd(), 0).map_err(errno)?;
         }
         out.extend(open_out(self.add_handle(fd, node)));
         Ok(out)

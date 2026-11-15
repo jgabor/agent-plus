@@ -9,8 +9,14 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 const CREATE_RULESET_VERSION: u32 = 1;
 const RULE_PATH_BENEATH: u32 = 1;
 
+const WRITE_FILE: u64 = 1 << 1;
 const READ_FILE: u64 = 1 << 2;
 const READ_DIR: u64 = 1 << 3;
+const REMOVE_DIR: u64 = 1 << 4;
+const REMOVE_FILE: u64 = 1 << 5;
+const MAKE_DIR: u64 = 1 << 7;
+const MAKE_REG: u64 = 1 << 8;
+const MAKE_SYM: u64 = 1 << 12;
 /// Every right the first version knows, which is every right but the ones
 /// later versions add.
 const VERSION_1: u64 = (1 << 13) - 1;
@@ -34,6 +40,9 @@ struct PathBeneath {
 /// What the share server may do beneath a root.
 pub enum Access {
     Read,
+    /// Reading, and changing files, directories, and symlinks. Never
+    /// running a file, or making a device, a FIFO, or a socket.
+    ReadWrite,
 }
 
 /// Every file right this kernel's Landlock knows of.
@@ -54,6 +63,18 @@ fn handled(version: c_long) -> u64 {
 fn allowed(access: &Access) -> u64 {
     match access {
         Access::Read => READ_FILE | READ_DIR,
+        Access::ReadWrite => {
+            READ_FILE
+                | READ_DIR
+                | WRITE_FILE
+                | REMOVE_DIR
+                | REMOVE_FILE
+                | MAKE_DIR
+                | MAKE_REG
+                | MAKE_SYM
+                | REFER
+                | TRUNCATE
+        }
     }
 }
 
@@ -189,5 +210,15 @@ mod tests {
     #[test]
     fn a_read_only_root_allows_reading_alone() {
         assert_eq!(allowed(&Access::Read), 0b1100);
+    }
+
+    #[test]
+    fn a_read_write_root_never_runs_a_file_or_makes_a_special_one() {
+        let rights = allowed(&Access::ReadWrite);
+        let execute = 1;
+        let special = (1 << 6) | (1 << 9) | (1 << 10) | (1 << 11);
+        assert_eq!(rights & (execute | special | IOCTL_DEV), 0);
+        assert_eq!(rights & (REFER | TRUNCATE), REFER | TRUNCATE);
+        assert_eq!(rights.count_ones(), 10);
     }
 }

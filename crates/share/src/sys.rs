@@ -115,3 +115,188 @@ pub fn read_directory(fd: BorrowedFd, buffer: &mut [u8], offset: u64) -> io::Res
     })?;
     Ok(len as usize)
 }
+
+/// Opens `name` beneath `directory` as [`open_beneath`] does, and with
+/// `O_CREAT`, makes it with `mode` if it is missing.
+pub fn create_beneath(
+    directory: BorrowedFd,
+    name: &CStr,
+    flags: i32,
+    mode: u32,
+) -> io::Result<OwnedFd> {
+    let how = OpenHow {
+        flags: (flags | libc::O_CREAT | libc::O_CLOEXEC) as u64,
+        mode: u64::from(mode),
+        resolve: BENEATH,
+    };
+    // SAFETY: as in `open_beneath`.
+    let fd = check(unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &raw const how,
+            size_of::<OpenHow>(),
+        )
+    })?;
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+pub fn pwrite(fd: BorrowedFd, data: &[u8], offset: u64) -> io::Result<usize> {
+    let offset = i64::try_from(offset).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: `data` holds the length passed.
+    let len = check(unsafe {
+        libc::syscall(
+            libc::SYS_pwrite64,
+            fd.as_raw_fd(),
+            data.as_ptr(),
+            data.len(),
+            offset,
+        )
+    })?;
+    Ok(len as usize)
+}
+
+pub fn ftruncate(fd: BorrowedFd, size: u64) -> io::Result<()> {
+    let size = i64::try_from(size).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: this call takes no pointer.
+    check(unsafe { libc::syscall(libc::SYS_ftruncate, fd.as_raw_fd(), size) }).map(drop)
+}
+
+pub fn fchmod(fd: BorrowedFd, mode: u32) -> io::Result<()> {
+    // SAFETY: this call takes no pointer.
+    check(unsafe { libc::syscall(libc::SYS_fchmod, fd.as_raw_fd(), mode) }).map(drop)
+}
+
+/// Sets the access and change times of the file `fd` is, and never of a
+/// path: the name it passes is always null.
+pub fn futimens(fd: BorrowedFd, times: &[libc::timespec; 2]) -> io::Result<()> {
+    // SAFETY: `times` is two `struct timespec`s, which outlive the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_utimensat,
+            fd.as_raw_fd(),
+            std::ptr::null::<libc::c_char>(),
+            times.as_ptr(),
+            0,
+        )
+    })
+    .map(drop)
+}
+
+pub fn fallocate(fd: BorrowedFd, mode: i32, offset: u64, len: u64) -> io::Result<()> {
+    let bad = || io::Error::from_raw_os_error(libc::EINVAL);
+    let offset = i64::try_from(offset).map_err(|_| bad())?;
+    let len = i64::try_from(len).map_err(|_| bad())?;
+    // SAFETY: this call takes no pointer.
+    check(unsafe { libc::syscall(libc::SYS_fallocate, fd.as_raw_fd(), mode, offset, len) })
+        .map(drop)
+}
+
+pub fn fsync(fd: BorrowedFd, data_only: bool) -> io::Result<()> {
+    let call = match data_only {
+        true => libc::SYS_fdatasync,
+        false => libc::SYS_fsync,
+    };
+    // SAFETY: this call takes no pointer.
+    check(unsafe { libc::syscall(call, fd.as_raw_fd()) }).map(drop)
+}
+
+/// Makes the directory `name` in `directory`. A name is one entry, so
+/// nothing is made anywhere else.
+pub fn mkdirat(directory: BorrowedFd, name: &CStr, mode: u32) -> io::Result<()> {
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_mkdirat,
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            mode,
+        )
+    })
+    .map(drop)
+}
+
+pub fn unlinkat(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<()> {
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_unlinkat,
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            flags,
+        )
+    })
+    .map(drop)
+}
+
+pub fn symlinkat(target: &CStr, directory: BorrowedFd, name: &CStr) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and outlive the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_symlinkat,
+            target.as_ptr(),
+            directory.as_raw_fd(),
+            name.as_ptr(),
+        )
+    })
+    .map(drop)
+}
+
+/// Links `old` in `from` as `new` in `to`. A symlink is linked as itself.
+pub fn linkat(from: BorrowedFd, old: &CStr, to: BorrowedFd, new: &CStr) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and outlive the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_linkat,
+            from.as_raw_fd(),
+            old.as_ptr(),
+            to.as_raw_fd(),
+            new.as_ptr(),
+            0,
+        )
+    })
+    .map(drop)
+}
+
+pub fn renameat2(
+    from: BorrowedFd,
+    old: &CStr,
+    to: BorrowedFd,
+    new: &CStr,
+    flags: u32,
+) -> io::Result<()> {
+    // SAFETY: both names are NUL-terminated and outlive the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            from.as_raw_fd(),
+            old.as_ptr(),
+            to.as_raw_fd(),
+            new.as_ptr(),
+            flags,
+        )
+    })
+    .map(drop)
+}
+
+/// An open file description lock: `F_OFD_SETLK` or `F_OFD_GETLK`, which
+/// never waits.
+pub fn ofd_lock(fd: BorrowedFd, command: i32, lock: &mut libc::flock) -> io::Result<()> {
+    // SAFETY: `lock` is a `struct flock`, which outlives the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_fcntl,
+            fd.as_raw_fd(),
+            command,
+            lock as *mut libc::flock,
+        )
+    })
+    .map(drop)
+}
+
+pub fn flock(fd: BorrowedFd, operation: i32) -> io::Result<()> {
+    // SAFETY: this call takes no pointer.
+    check(unsafe { libc::syscall(libc::SYS_flock, fd.as_raw_fd(), operation) }).map(drop)
+}

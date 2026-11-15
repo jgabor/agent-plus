@@ -10,6 +10,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vmm::GuestMemory;
 use vmm::virtio::Transport;
@@ -28,7 +29,7 @@ struct Target {
 }
 
 /// Network rules join this list when they exist.
-const TARGETS: [Target; 3] = [
+const TARGETS: [Target; 4] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -133,6 +134,73 @@ const TARGETS: [Target; 3] = [
             "28 ",
             "1 1 ",
             "5 ",
+        ],
+    },
+    Target {
+        name: "fuse-rw",
+        check: |input| {
+            fuse_rw_input(input);
+        },
+        corpus: &[
+            "",
+            // A file made, written, truncated, renamed, linked, and removed.
+            concat!(
+                "26 0 w:7 w:31 w:65536 w:4294967295\n",
+                "35 1 w:66 w:420 w:18 w:0 new.txt\n",
+                "16 0 1 0 w:5 w:0 0 w:0 w:0 agent\n",
+                "4 2 w:8 w:0 0 2 0 0 0 0 w:0 w:0 w:0 w:0 w:0 w:0 w:0 w:0\n",
+                "9 1 w:493 w:18 made\n12 1 3 new.txt moved\n13 3 2 hard\n",
+                "6 3 link ../hello.txt\n10 3 link\n10 3 hard\n",
+            ),
+            // What SPEC.md protects, written to, removed, and replaced.
+            concat!(
+                "1 1 Agentfile\n14 2 w:1 w:0\n10 1 Agentfile\n",
+                "1 1 .git\n1 3 config\n14 4 w:513 w:0\n12 1 3 hello.txt config\n",
+                "1 3 hooks\n35 5 w:66 w:493 w:0 w:0 post-merge\n11 1 .git\n",
+            ),
+            // Locks, and a rename that exchanges.
+            concat!(
+                "1 1 hello.txt\n14 2 w:2 w:0\n32 0 1 7 0 9223372036854775807 w:1 w:0 w:0 w:0\n",
+                "31 0 1 8 0 9223372036854775807 w:1 w:0 w:0 w:0\n25 2 1 w:0 w:0 7\n",
+                "45 1 1 w:2 w:0 hello.txt Agentfile\n",
+            ),
+        ],
+        words: &[
+            "\n",
+            " ",
+            "1 ",
+            "2 ",
+            "3 ",
+            "w:0 ",
+            "w:1 ",
+            "w:2 ",
+            "w:66 ",
+            "w:493 ",
+            "0xffffffffffffffff ",
+            "..",
+            "/",
+            "hello.txt",
+            "escape",
+            "dirlink",
+            "dir",
+            "Agentfile",
+            "AGENTFILE",
+            ".git",
+            ".GIT",
+            "config",
+            "hooks",
+            "modules",
+            "4 ",
+            "6 ",
+            "9 ",
+            "10 ",
+            "11 ",
+            "12 ",
+            "13 ",
+            "16 ",
+            "32 ",
+            "35 ",
+            "45 ",
         ],
     },
 ];
@@ -272,7 +340,89 @@ fn fuse_input(input: &str) -> usize {
     fuse_input_with(&mut server, input)
 }
 
+/// The host files an `rw` share's guest must never change: the file
+/// outside the root, and what SPEC.md protects inside it.
+const PROTECTED: [&str; 4] = [
+    "outside/secret",
+    "root/Agentfile",
+    "root/.git/config",
+    "root/.git/hooks/pre-commit",
+];
+
+/// Plays a guest of an `rw` share, as [`fuse_input`] does, in a tree of its
+/// own. Panics as it does, and also if anything outside the root, or
+/// anything [`PROTECTED`] in it, changed, or if anything appeared beside
+/// the root.
+fn fuse_rw_input(input: &str) -> usize {
+    fuse_rw_input_at(input, "root")
+}
+
+/// [`fuse_rw_input`] with the share's root at `served` in the tree, which
+/// a test moves to stand in for a server that escaped it.
+fn fuse_rw_input_at(input: &str, served: &str) -> usize {
+    static RUNS: AtomicU64 = AtomicU64::new(0);
+    let run = RUNS.fetch_add(1, Ordering::Relaxed);
+    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/fuzz-share-rw")
+        .join(format!("{}-{run}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    let root = base.join("root");
+    fs::create_dir_all(root.join("dir")).expect("the fuzz tree");
+    fs::create_dir_all(root.join(".git/hooks")).expect("the fuzz tree");
+    fs::create_dir_all(base.join("outside")).expect("the fuzz tree");
+    fs::write(base.join("outside/secret"), CANARY).expect("the fuzz tree");
+    for name in &PROTECTED[1..] {
+        fs::write(base.join(name), INSIDE).expect("the fuzz tree");
+    }
+    fs::write(root.join("hello.txt"), INSIDE).expect("the fuzz tree");
+    symlink("../outside/secret", root.join("escape")).expect("the fuzz tree");
+    symlink("../outside", root.join("dirlink")).expect("the fuzz tree");
+    let mut server = share::Server::new(vec![(
+        OwnedFd::from(File::open(base.join(served)).expect("the fuzz root")),
+        share::Mode::ReadWrite,
+    )])
+    .expect("the share server");
+    let answered = fuse_answers(&mut server, input);
+    for name in PROTECTED {
+        let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
+        let found = fs::read(base.join(name)).ok();
+        assert_eq!(
+            found.as_deref(),
+            Some(expected),
+            "{name} changed: {input:?}"
+        );
+    }
+    let names = |dir: &Path| -> Vec<_> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .expect("the fuzz tree")
+            .map(|entry| entry.expect("the fuzz tree").file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(
+        names(&base),
+        ["outside", "root"],
+        "a file beside the root: {input:?}"
+    );
+    assert_eq!(
+        names(&base.join("outside")),
+        ["secret"],
+        "a file outside: {input:?}"
+    );
+    let _ = fs::remove_dir_all(&base);
+    answered
+}
+
 fn fuse_input_with(server: &mut share::Server, input: &str) -> usize {
+    let answered = fuse_answers(server, input);
+    let hello = fs::read(fuse_tree().join("root/hello.txt")).expect("the fuzz root");
+    assert_eq!(hello, INSIDE, "the share changed");
+    answered
+}
+
+/// Sends each request in `input`, and checks each answer.
+fn fuse_answers(server: &mut share::Server, input: &str) -> usize {
     let mut answered = 0;
     for (unique, line) in (1u64..).zip(input.lines()) {
         let mut words = line.split(' ');
@@ -314,8 +464,6 @@ fn fuse_input_with(server: &mut share::Server, input: &str) -> usize {
             answered += 1;
         }
     }
-    let hello = fs::read(fuse_tree().join("root/hello.txt")).expect("the fuzz root");
-    assert_eq!(hello, INSIDE, "the share changed");
     answered
 }
 
@@ -556,6 +704,27 @@ mod tests {
         let mut server =
             share::Server::new(vec![(OwnedFd::from(root), share::Mode::ReadOnly)]).unwrap();
         fuse_input_with(&mut server, "1 1 secret\n14 2 w:0 w:0\n15 0 1 0 w:4096\n");
+    }
+
+    #[test]
+    fn the_fuse_rw_corpus_changes_files_but_nothing_protected() {
+        let corpus = TARGETS[3].corpus;
+        assert_eq!(fuse_rw_input(corpus[0]), 0);
+        // INIT, the create, the write, the truncate, and the rest.
+        assert_eq!(fuse_rw_input(corpus[1]), 10);
+        // The four lookups alone: every change is refused.
+        assert_eq!(fuse_rw_input(corpus[2]), 4);
+        // The lookup, the open, both locks, and the flush.
+        assert_eq!(fuse_rw_input(corpus[3]), 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside/secret changed")]
+    fn a_change_outside_an_rw_share_is_found() {
+        fuse_rw_input_at(
+            "1 1 outside\n1 2 secret\n14 3 w:1 w:0\n16 0 1 0 w:3 w:0 0 w:0 w:0 bad\n",
+            ".",
+        );
     }
 
     #[test]

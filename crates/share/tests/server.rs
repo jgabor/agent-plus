@@ -2,240 +2,17 @@
 //! process: each request is a FUSE request as a guest's kernel, or a guest
 //! that took its kernel over, would send it.
 
+mod guest;
+
+use guest::*;
 use share::{Mode, Server};
-use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-use vmm::fs::{Relay, Server as _};
-
-const CANARY: &[u8] = b"a host file outside the share";
-const INSIDE: &[u8] = b"inside the share";
-
-const LOOKUP: u32 = 1;
-const FORGET: u32 = 2;
-const GETATTR: u32 = 3;
-const READLINK: u32 = 5;
-const OPEN: u32 = 14;
-const READ: u32 = 15;
-const STATFS: u32 = 17;
-const RELEASE: u32 = 18;
-const INIT: u32 = 26;
-const OPENDIR: u32 = 27;
-const READDIR: u32 = 28;
-const BATCH_FORGET: u32 = 42;
-const WRITES: [u32; 17] = [
-    4, 6, 8, 9, 10, 11, 12, 13, 16, 21, 24, 35, 43, 45, 47, 48, 51,
-];
-
-const ENOENT: i32 = 2;
-const EBADF: i32 = 9;
-const ENODEV: i32 = 19;
-const ENOTDIR: i32 = 20;
-const EINVAL: i32 = 22;
-const EROFS: i32 = 30;
-const ENOSYS: i32 = 38;
-const ELOOP: i32 = 40;
-const ESTALE: i32 = 116;
-const O_WRONLY: u32 = 1;
-const O_RDWR: u32 = 2;
-const O_TRUNC: u32 = 0o1000;
-const O_APPEND: u32 = 0o2000;
-const S_IFMT: u32 = 0o170_000;
-const S_IFLNK: u32 = 0o120_000;
-const S_IFDIR: u32 = 0o040_000;
-const S_IFREG: u32 = 0o100_000;
-
-/// A directory tree with a share's root and a host file beside it.
-struct Tree {
-    base: PathBuf,
-    root: PathBuf,
-    secret: PathBuf,
-}
-
-impl Tree {
-    fn new(label: &str) -> Self {
-        let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("share-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        let root = base.join("root");
-        let secret = base.join("outside/secret");
-        fs::create_dir_all(root.join("dir")).unwrap();
-        fs::create_dir_all(base.join("outside")).unwrap();
-        fs::write(&secret, CANARY).unwrap();
-        fs::write(root.join("hello.txt"), INSIDE).unwrap();
-        fs::write(root.join("dir/nested.txt"), b"nested").unwrap();
-        symlink("hello.txt", root.join("link")).unwrap();
-        symlink("../outside/secret", root.join("escape")).unwrap();
-        symlink(&secret, root.join("absolute")).unwrap();
-        symlink("../outside", root.join("dirlink")).unwrap();
-        Tree { base, root, secret }
-    }
-}
-
-impl Drop for Tree {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.base);
-    }
-}
-
-/// A guest's view: requests go through the device's relay to a server on a
-/// thread of its own, as they go to the share server's process.
-struct Guest {
-    relay: Relay,
-    unique: u64,
-    server: Option<JoinHandle<()>>,
-}
-
-/// What came back: the error, and the payload.
-type Reply = (i32, Vec<u8>);
-
-impl Guest {
-    fn new(root: &Path) -> Self {
-        let (mine, theirs) = UnixStream::pair().unwrap();
-        let root = OwnedFd::from(File::open(root).unwrap());
-        let server = thread::spawn(move || {
-            let mut server = Server::new(vec![(root, Mode::ReadOnly)]).unwrap();
-            let mut theirs = theirs;
-            share::serve(&mut theirs, &mut server).unwrap();
-        });
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let mut guest = Guest {
-            relay: Relay::new(OwnedFd::from(mine), deadline).unwrap(),
-            unique: 0,
-            server: Some(server),
-        };
-        let mut init = Vec::new();
-        for value in [7u32, 41, 1 << 17, u32::MAX] {
-            init.extend(value.to_le_bytes());
-        }
-        init.resize(64, 0);
-        let (error, payload) = guest.call(INIT, 0, &init);
-        assert_eq!(error, 0);
-        assert_eq!(payload.len(), 64);
-        guest
-    }
-
-    fn raw(&mut self, share: u32, request: &[u8]) -> Vec<u8> {
-        self.relay.call(share, request).unwrap()
-    }
-
-    fn call_share(&mut self, share: u32, opcode: u32, node: u64, body: &[u8]) -> Reply {
-        self.unique += 2;
-        let mut request = Vec::new();
-        request.extend(((40 + body.len()) as u32).to_le_bytes());
-        request.extend(opcode.to_le_bytes());
-        request.extend(self.unique.to_le_bytes());
-        request.extend(node.to_le_bytes());
-        request.extend([0; 16]);
-        request.extend(body);
-        let answer = self.raw(share, &request);
-        if answer.is_empty() {
-            return (0, answer);
-        }
-        assert_eq!(
-            u32::from_le_bytes(answer[..4].try_into().unwrap()) as usize,
-            answer.len()
-        );
-        assert_eq!(answer[8..16], self.unique.to_le_bytes());
-        let error = -i32::from_le_bytes(answer[4..8].try_into().unwrap());
-        (error, answer[16..].to_vec())
-    }
-
-    fn call(&mut self, opcode: u32, node: u64, body: &[u8]) -> Reply {
-        self.call_share(0, opcode, node, body)
-    }
-
-    fn lookup(&mut self, parent: u64, name: &[u8]) -> Result<(u64, u32), i32> {
-        let mut body = name.to_vec();
-        body.push(0);
-        match self.call(LOOKUP, parent, &body) {
-            (0, entry) => {
-                let node = u64::from_le_bytes(entry[..8].try_into().unwrap());
-                // The mode, in the attributes after the entry's 40 bytes.
-                let mode = u32::from_le_bytes(entry[40 + 60..40 + 64].try_into().unwrap());
-                Ok((node, mode))
-            }
-            (error, _) => Err(error),
-        }
-    }
-
-    fn open(&mut self, node: u64, flags: u32) -> Result<u64, i32> {
-        let mut body = flags.to_le_bytes().to_vec();
-        body.extend([0; 4]);
-        match self.call(OPEN, node, &body) {
-            (0, out) => Ok(u64::from_le_bytes(out[..8].try_into().unwrap())),
-            (error, _) => Err(error),
-        }
-    }
-
-    fn read(&mut self, opcode: u32, handle: u64, offset: u64, size: u32) -> Reply {
-        let mut body = handle.to_le_bytes().to_vec();
-        body.extend(offset.to_le_bytes());
-        body.extend(size.to_le_bytes());
-        body.extend([0; 20]);
-        self.call(opcode, 0, &body)
-    }
-
-    /// Looks up a path one name at a time, opens it, and reads it.
-    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, i32> {
-        let mut node = 1;
-        for name in path.split('/') {
-            node = self.lookup(node, name.as_bytes())?.0;
-        }
-        let handle = self.open(node, 0)?;
-        let (error, data) = self.read(READ, handle, 0, 4096);
-        self.read(RELEASE, handle, 0, 0);
-        match error {
-            0 => Ok(data),
-            error => Err(error),
-        }
-    }
-
-    fn list(&mut self, node: u64) -> BTreeSet<String> {
-        let (error, out) = self.call(OPENDIR, node, &[0; 8]);
-        assert_eq!(error, 0);
-        let handle = u64::from_le_bytes(out[..8].try_into().unwrap());
-        let mut names = BTreeSet::new();
-        let mut offset = 0;
-        loop {
-            // A small size, so the listing takes several requests.
-            let (error, out) = self.read(READDIR, handle, offset, 80);
-            assert_eq!(error, 0);
-            if out.is_empty() {
-                return names;
-            }
-            let mut at = 0;
-            while at < out.len() {
-                offset = u64::from_le_bytes(out[at + 8..at + 16].try_into().unwrap());
-                let len = u32::from_le_bytes(out[at + 16..at + 20].try_into().unwrap()) as usize;
-                names.insert(String::from_utf8(out[at + 24..at + 24 + len].to_vec()).unwrap());
-                at += (24 + len).next_multiple_of(8);
-            }
-        }
-    }
-}
-
-impl Drop for Guest {
-    fn drop(&mut self) {
-        // Closing the relay ends the server's loop.
-        let (mine, _) = UnixStream::pair().unwrap();
-        self.relay = Relay::new(OwnedFd::from(mine), Instant::now()).unwrap();
-        if let Some(server) = self.server.take() {
-            server.join().unwrap();
-        }
-    }
-}
-
-fn kind(mode: u32) -> u32 {
-    mode & S_IFMT
-}
+use std::thread;
 
 #[test]
 fn files_beneath_the_root_read_as_they_are() {
@@ -453,4 +230,578 @@ fn a_root_must_be_a_directory() {
     let tree = Tree::new("root-file");
     let file = OwnedFd::from(File::open(tree.root.join("hello.txt")).unwrap());
     assert!(Server::new(vec![(file, Mode::ReadOnly)]).is_err());
+}
+
+#[test]
+fn writes_in_a_read_write_share_change_the_host_s_files() {
+    let tree = Tree::new("rw");
+    let root = tree.root.clone();
+    let mut guest = Guest::with(&root, Mode::ReadWrite);
+
+    let (file, handle) = guest.create(1, b"new.txt", 0).unwrap();
+    assert_eq!(guest.write(handle, 0, b"written by the agent"), Ok(20));
+    assert_eq!(
+        fs::read(root.join("new.txt")).unwrap(),
+        b"written by the agent"
+    );
+    guest.release(handle);
+    assert_eq!(guest.create(1, b"new.txt", O_EXCL), Err(EEXIST));
+
+    guest.overwrite("hello.txt", b"changed").unwrap();
+    assert_eq!(fs::read(root.join("hello.txt")).unwrap(), b"changed");
+    let hello = guest.walk("hello.txt").unwrap();
+    let handle = guest.open(hello, O_WRONLY | O_APPEND).unwrap();
+    guest.write(handle, 0, b", appended").unwrap();
+    guest.release(handle);
+    assert_eq!(
+        fs::read(root.join("hello.txt")).unwrap(),
+        b"changed, appended"
+    );
+
+    assert_eq!(guest.setattr(file, FATTR_SIZE, 7, 0), 0);
+    assert_eq!(fs::read(root.join("new.txt")).unwrap(), b"written");
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), 0);
+    let mode = fs::metadata(root.join("new.txt")).unwrap().permissions();
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+        0o600
+    );
+    assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
+
+    let made = guest.mkdir(1, b"made").unwrap();
+    assert!(root.join("made").is_dir());
+    guest.symlink(made, b"link", b"../new.txt").unwrap();
+    assert_eq!(
+        fs::read_link(root.join("made/link")).unwrap(),
+        Path::new("../new.txt")
+    );
+    guest.link(file, made, b"hard").unwrap();
+    assert_eq!(fs::read(root.join("made/hard")).unwrap(), b"written");
+
+    assert_eq!(guest.rename(1, b"new.txt", made, b"moved.txt", 0), 0);
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(fs::read(root.join("made/moved.txt")).unwrap(), b"written");
+    assert_eq!(
+        guest.rename(made, b"moved.txt", made, b"hard", RENAME_NOREPLACE),
+        EEXIST
+    );
+    assert_eq!(
+        guest.rename(made, b"moved.txt", 1, b"hello.txt", RENAME_EXCHANGE),
+        0
+    );
+    assert_eq!(
+        fs::read(root.join("made/moved.txt")).unwrap(),
+        b"changed, appended"
+    );
+
+    assert_eq!(guest.remove(UNLINK, made, b"link"), 0);
+    assert_eq!(guest.remove(UNLINK, made, b"hard"), 0);
+    assert_eq!(guest.remove(UNLINK, made, b"moved.txt"), 0);
+    assert_eq!(guest.remove(RMDIR, 1, b"made"), 0);
+    assert!(!root.join("made").exists());
+    assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
+}
+
+#[test]
+fn a_write_never_reaches_outside_a_read_write_share() {
+    let tree = Tree::new("rw-escape");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    // Through a symlink, every write lands on the symlink or fails.
+    let escape = guest.walk("escape").unwrap();
+    assert_eq!(guest.open(escape, O_WRONLY), Err(EINVAL));
+    assert_eq!(guest.setattr(escape, FATTR_SIZE, 0, 0), ELOOP);
+    let dirlink = guest.walk("dirlink").unwrap();
+    assert_eq!(guest.create(dirlink, b"planted", 0), Err(ENOTDIR));
+    assert_eq!(guest.mkdir(dirlink, b"planted"), Err(ENOTDIR));
+    for name in [&b"../planted"[..], b"/tmp/planted", b"a/b", b"..", b"."] {
+        assert!(guest.create(1, name, 0).is_err(), "{name:?}");
+        assert!(guest.mkdir(1, name).is_err(), "{name:?}");
+        assert_ne!(guest.rename(1, b"hello.txt", 1, name, 0), 0, "{name:?}");
+    }
+    assert_eq!(guest.remove(UNLINK, 1, b"escape"), 0);
+    assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
+    let outside: Vec<_> = fs::read_dir(tree.base.join("outside")).unwrap().collect();
+    assert_eq!(outside.len(), 1);
+    assert!(!tree.base.join("planted").exists());
+}
+
+// spec(SHARE): In `rw` shares, the files your host acts on are read-only to the agent.
+// spec(SHARE): An entry named `Agentfile` or `Agentfile.lock` can't be created, changed, removed, or renamed, so an agent can't change what a later build does.
+// spec(SHARE): A change these rules refuse fails with an `Operation not permitted` error.
+#[test]
+fn an_agentfile_can_t_be_created_changed_removed_or_renamed() {
+    let tree = protected_tree("agentfile");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let app = guest.walk("app").unwrap();
+    let dir = guest.walk("dir").unwrap();
+    for path in ["Agentfile", "Agentfile.lock", "app/Agentfile"] {
+        assert_eq!(guest.overwrite(path, b"agent"), Err(EPERM), "{path}");
+        let node = guest.walk(path).unwrap();
+        assert_eq!(guest.setattr(node, FATTR_SIZE, 0, 0), EPERM, "{path}");
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0o777), EPERM, "{path}");
+        assert_eq!(guest.link(node, dir, b"alias"), Err(EPERM), "{path}");
+    }
+    for (parent, name) in [
+        (1, &b"Agentfile"[..]),
+        (1, b"Agentfile.lock"),
+        (app, b"Agentfile"),
+    ] {
+        assert_eq!(guest.remove(UNLINK, parent, name), EPERM);
+        assert_eq!(guest.rename(parent, name, dir, b"moved", 0), EPERM);
+        assert_eq!(guest.rename(1, b"hello.txt", parent, name, 0), EPERM);
+        assert_eq!(
+            guest.rename(1, b"hello.txt", parent, name, RENAME_EXCHANGE),
+            EPERM
+        );
+    }
+    for name in [&b"Agentfile"[..], b"Agentfile.lock"] {
+        assert_eq!(guest.create(dir, name, 0), Err(EPERM));
+        assert_eq!(guest.mkdir(dir, name), Err(EPERM));
+        assert_eq!(guest.symlink(dir, name, b"../hello.txt"), Err(EPERM));
+        let hello = guest.walk("hello.txt").unwrap();
+        assert_eq!(guest.link(hello, dir, name), Err(EPERM));
+    }
+    for file in ["Agentfile", "Agentfile.lock", "app/Agentfile"] {
+        assert_eq!(fs::read(tree.root.join(file)).unwrap(), b"host", "{file}");
+    }
+    assert!(!tree.root.join("dir/Agentfile").exists());
+}
+
+// spec(SHARE): An entry named `.git` can't be created, removed, or renamed, and when it is a file (as in worktrees), it can't be changed.
+#[test]
+fn a_git_entry_can_t_be_created_removed_or_renamed() {
+    let tree = protected_tree("dotgit");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let worktree = guest.walk("worktree").unwrap();
+    assert_eq!(guest.mkdir(dir, b".git"), Err(EPERM));
+    assert_eq!(guest.create(dir, b".git", 0), Err(EPERM));
+    assert_eq!(guest.symlink(dir, b".git", b"/elsewhere"), Err(EPERM));
+    assert_eq!(
+        guest.rename(1, b"dir", worktree, b".git", RENAME_EXCHANGE),
+        EPERM
+    );
+    assert_eq!(guest.rename(1, b".git", dir, b"stolen", 0), EPERM);
+    assert_eq!(guest.remove(RMDIR, 1, b".git"), EPERM);
+    assert_eq!(guest.remove(UNLINK, worktree, b".git"), EPERM);
+    assert_eq!(
+        guest.overwrite("worktree/.git", b"gitdir: /elsewhere"),
+        Err(EPERM)
+    );
+    let file = guest.walk("worktree/.git").unwrap();
+    assert_eq!(guest.setattr(file, FATTR_SIZE, 0, 0), EPERM);
+    assert_eq!(fs::read(tree.root.join("worktree/.git")).unwrap(), b"host");
+    assert!(!tree.root.join("dir/.git").exists());
+    // What else is in a `.git` directory changes, as git changes it.
+    guest
+        .overwrite(".git/HEAD", b"ref: refs/heads/agent")
+        .unwrap();
+    guest.overwrite(".git/refs/heads/main", b"agent").unwrap();
+    let refs = guest.walk(".git/refs/heads").unwrap();
+    let (_, handle) = guest.create(refs, b"config", 0).unwrap();
+    guest.release(handle);
+    assert_eq!(
+        fs::read(tree.root.join(".git/HEAD")).unwrap(),
+        b"ref: refs/heads/agent"
+    );
+}
+
+// spec(SHARE): In every git directory, including `.git/modules/*` and `.git/worktrees/*`, these are read-only, because git runs hooks and configured commands on your host: `config`, `config.worktree`, `commondir`, `gitdir`, and `hooks/`.
+#[test]
+fn a_git_directory_s_config_and_hooks_are_read_only() {
+    let tree = protected_tree("gitdir");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    for path in [
+        ".git/config",
+        ".git/config.worktree",
+        ".git/hooks/pre-commit",
+        ".git/modules/sub/config",
+        ".git/modules/sub/hooks/post-checkout",
+        ".git/modules/libs/deep/config",
+        ".git/worktrees/wt/commondir",
+        ".git/worktrees/wt/gitdir",
+        ".git/worktrees/wt/config.worktree",
+        "nested/.git/config",
+    ] {
+        assert_eq!(guest.overwrite(path, b"agent"), Err(EPERM), "{path}");
+        let node = guest.walk(path).unwrap();
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0o777), EPERM, "{path}");
+        let (parent, name) = path.rsplit_once('/').unwrap();
+        let parent = guest.walk(parent).unwrap();
+        assert_eq!(
+            guest.remove(UNLINK, parent, name.as_bytes()),
+            EPERM,
+            "{path}"
+        );
+        assert_eq!(
+            guest.rename(parent, name.as_bytes(), 1, b"out", 0),
+            EPERM,
+            "{path}"
+        );
+        assert_eq!(
+            guest.rename(1, b"hello.txt", parent, name.as_bytes(), 0),
+            EPERM
+        );
+    }
+    for dir in [
+        ".git",
+        ".git/modules/sub",
+        ".git/worktrees/wt",
+        "nested/.git",
+    ] {
+        let parent = guest.walk(dir).unwrap();
+        for name in [&b"config"[..], b"config.worktree", b"commondir", b"gitdir"] {
+            if guest.lookup(parent, name).is_err() {
+                assert_eq!(guest.create(parent, name, 0), Err(EPERM), "{dir}");
+                assert_eq!(guest.symlink(parent, name, b"/x"), Err(EPERM), "{dir}");
+            }
+        }
+        if guest.lookup(parent, b"hooks").is_err() {
+            assert_eq!(guest.mkdir(parent, b"hooks"), Err(EPERM), "{dir}");
+        }
+    }
+    // Nothing in `hooks/` changes, and nothing joins it.
+    let hooks = guest.walk(".git/hooks").unwrap();
+    assert_eq!(guest.create(hooks, b"post-merge", 0), Err(EPERM));
+    assert_eq!(guest.mkdir(hooks, b"more"), Err(EPERM));
+    assert_eq!(
+        guest.rename(1, b"hello.txt", hooks, b"post-merge", 0),
+        EPERM
+    );
+    let git = guest.walk(".git").unwrap();
+    assert_eq!(guest.remove(RMDIR, git, b"hooks"), EPERM);
+    // A directory the agent filled can't move into a place git reads as a
+    // git directory, and neither can a symlink.
+    let staged = guest.mkdir(1, b"staged").unwrap();
+    guest
+        .create(staged, b"config", 0)
+        .map(|(_, h)| guest.release(h))
+        .unwrap();
+    let modules = guest.walk(".git/modules").unwrap();
+    assert_eq!(guest.rename(1, b"staged", modules, b"evil", 0), EPERM);
+    assert_eq!(guest.symlink(modules, b"evil", b"../../staged"), Err(EPERM));
+    assert_eq!(
+        guest.rename(1, b"staged", git, b"worktrees", RENAME_EXCHANGE),
+        EPERM
+    );
+    for file in [
+        ".git/config",
+        ".git/hooks/pre-commit",
+        ".git/modules/sub/config",
+    ] {
+        assert_eq!(fs::read(tree.root.join(file)).unwrap(), b"host", "{file}");
+    }
+    assert!(!tree.root.join(".git/hooks/post-merge").exists());
+    assert!(!tree.root.join(".git/modules/evil").exists());
+}
+
+// spec(SHARE): Names match case-insensitively, as they do on macOS filesystems.
+#[test]
+fn protected_names_match_without_regard_to_case() {
+    let tree = protected_tree("case");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    for name in [
+        &b"AGENTFILE"[..],
+        b"agentfile.LOCK",
+        // The Kelvin sign folds to `k` on macOS.
+        "agentfile.loc\u{212a}".as_bytes(),
+        b".GIT",
+        b".Git",
+        // HFS+ ignores some code points in names, as git knows.
+        ".g\u{200c}it".as_bytes(),
+    ] {
+        assert_eq!(guest.create(dir, name, 0), Err(EPERM), "{name:?}");
+        assert_eq!(guest.mkdir(dir, name), Err(EPERM), "{name:?}");
+    }
+    let git = guest.walk(".git").unwrap();
+    for name in [
+        &b"CONFIG"[..],
+        b"Config.Worktree",
+        b"HOOKS",
+        b"CommonDir",
+        b"GITDIR",
+    ] {
+        assert_eq!(guest.create(git, name, 0), Err(EPERM), "{name:?}");
+    }
+    assert!(!tree.root.join("dir/AGENTFILE").exists());
+}
+
+// spec(SHARE): File locks pass through to the host.
+// spec(SHARE): A lock that would wait for another holder fails at once with an `Operation not supported` error, because the agent's machine waits for each answer from your host.
+#[test]
+fn file_locks_pass_through_to_the_host() {
+    for mode in [Mode::ReadWrite, Mode::ReadOnly] {
+        let tree = Tree::new(&format!("locks-{mode:?}"));
+        let path = tree.root.join("hello.txt");
+        let mut guest = Guest::with(&tree.root, mode);
+        let mut init = Vec::new();
+        for value in [7u32, 31, 1 << 17, u32::MAX] {
+            init.extend(value.to_le_bytes());
+        }
+        init.resize(64, 0);
+        let (_, out) = guest.call(INIT, 0, &init);
+        let flags = u32::from_le_bytes(out[12..16].try_into().unwrap());
+        assert_eq!(
+            flags & (POSIX_LOCKS | FLOCK_LOCKS),
+            POSIX_LOCKS | FLOCK_LOCKS
+        );
+
+        let node = guest.walk("hello.txt").unwrap();
+        let handle = guest.open(node, 0).unwrap();
+        // A POSIX lock the guest takes is one the host sees.
+        assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, 0).0, 0);
+        assert!(host_locked(&path, libc::F_WRLCK as i16));
+        assert!(!host_locked(&path, libc::F_RDLCK as i16));
+        // Another owner in the guest shares it, as a reader.
+        assert_eq!(guest.lock(SETLK, handle, 8, F_RDLCK, 0).0, 0);
+        assert_eq!(guest.lock(SETLK, handle, 7, F_UNLCK, 0).0, 0);
+        assert_eq!(guest.lock(SETLK, handle, 8, F_UNLCK, 0).0, 0);
+        assert!(!host_locked(&path, libc::F_WRLCK as i16));
+
+        // A lock the host holds stops the guest's, which never waits.
+        let host = File::options().read(true).write(true).open(&path).unwrap();
+        assert!(host_lock(&host, libc::F_WRLCK as i16));
+        assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, 0).0, EAGAIN);
+        assert_eq!(guest.lock(SETLKW, handle, 7, F_RDLCK, 0).0, EOPNOTSUPP);
+        let (error, conflict) = guest.lock(GETLK, handle, 7, F_RDLCK, 0);
+        assert_eq!(error, 0);
+        assert_eq!(
+            u32::from_le_bytes(conflict[16..20].try_into().unwrap()),
+            F_WRLCK
+        );
+        drop(host);
+        assert_eq!(guest.lock(SETLKW, handle, 7, F_RDLCK, 0).0, 0);
+        let (_, free) = guest.lock(GETLK, handle, 9, F_RDLCK, 0);
+        assert_eq!(
+            u32::from_le_bytes(free[16..20].try_into().unwrap()),
+            F_UNLCK
+        );
+        // Closing the file in the guest lets the owner's locks go.
+        let mut flush = handle.to_le_bytes().to_vec();
+        flush.extend([0; 8]);
+        flush.extend(7u64.to_le_bytes());
+        assert_eq!(guest.call(FLUSH, node, &flush).0, 0);
+        assert!(!host_locked(&path, libc::F_WRLCK as i16));
+
+        // `flock` passes through as `flock`.
+        assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, LK_FLOCK).0, 0);
+        assert!(!host_flock(&path, libc::LOCK_EX));
+        assert!(host_flock(&path, libc::LOCK_SH));
+        guest.release(handle);
+        assert!(host_flock(&path, libc::LOCK_EX));
+    }
+}
+
+/// Whether the host can't take a lock of `kind` on the whole file now.
+fn host_locked(path: &Path, kind: i16) -> bool {
+    let file = File::options().read(true).write(true).open(path).unwrap();
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = kind;
+    // SAFETY: `lock` is a `struct flock`, which outlives the call.
+    let got = unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(&file),
+            libc::F_OFD_GETLK,
+            &mut lock,
+        )
+    };
+    assert_eq!(got, 0);
+    lock.l_type != libc::F_UNLCK as i16
+}
+
+/// Takes a lock of `kind` on the whole file, without waiting.
+fn host_lock(file: &File, kind: i16) -> bool {
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = kind;
+    // SAFETY: as in `host_locked`.
+    unsafe {
+        libc::fcntl(
+            std::os::fd::AsRawFd::as_raw_fd(file),
+            libc::F_OFD_SETLK,
+            &mut lock,
+        ) == 0
+    }
+}
+
+/// Whether the host takes a `flock` of `kind` without waiting.
+fn host_flock(path: &Path, kind: i32) -> bool {
+    let file = File::open(path).unwrap();
+    // SAFETY: flock takes no pointer.
+    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), kind | libc::LOCK_NB) == 0 }
+}
+
+#[test]
+fn a_root_in_a_git_directory_keeps_its_place() {
+    let tree = protected_tree("root-in-git");
+    let mut guest = Guest::with(&tree.root.join(".git"), Mode::ReadWrite);
+    assert_eq!(guest.overwrite("config", b"agent"), Err(EPERM));
+    assert_eq!(guest.overwrite("modules/sub/config", b"agent"), Err(EPERM));
+    guest.overwrite("HEAD", b"agent").unwrap();
+    let mut hooks = Guest::with(&tree.root.join(".git/hooks"), Mode::ReadWrite);
+    assert_eq!(hooks.overwrite("pre-commit", b"agent"), Err(EPERM));
+    assert_eq!(hooks.create(1, b"post-merge", 0), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join(".git/config")).unwrap(), b"host");
+    assert_eq!(
+        fs::read(tree.root.join(".git/hooks/pre-commit")).unwrap(),
+        b"host"
+    );
+}
+
+// spec(SHARE): A file with more than one hard link can't be changed in place in an `rw` share, because another of its names may be one of these.
+#[test]
+fn a_file_with_another_name_can_t_be_changed_in_place() {
+    let tree = protected_tree("alias");
+    fs::hard_link(tree.root.join("Agentfile"), tree.root.join("alias")).unwrap();
+    fs::hard_link(tree.root.join("hello.txt"), tree.root.join("dir/twin")).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    // The other name is found first, so nothing says it is an Agentfile.
+    let alias = guest.walk("alias").unwrap();
+    assert_eq!(guest.overwrite("alias", b"agent"), Err(EPERM));
+    assert_eq!(guest.create(1, b"alias", O_TRUNC), Err(EPERM));
+    assert_eq!(guest.setattr(alias, FATTR_SIZE, 0, 0), EPERM);
+    assert_eq!(guest.setattr(alias, FATTR_MODE, 0, 0o777), EPERM);
+    assert_eq!(guest.overwrite("dir/twin", b"agent"), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join("Agentfile")).unwrap(), b"host");
+    // Its names still move and go, and with one name left, it changes.
+    let dir = guest.walk("dir").unwrap();
+    assert_eq!(guest.rename(dir, b"twin", 1, b"moved", 0), 0);
+    assert_eq!(guest.remove(UNLINK, 1, b"moved"), 0);
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    // A link the agent makes takes the change away too.
+    let hello = guest.walk("hello.txt").unwrap();
+    guest.link(hello, dir, b"again").unwrap();
+    assert_eq!(guest.overwrite("hello.txt", b"more"), Err(EPERM));
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"agent");
+    // Nor does a file open from before the link, even to append.
+    let (file, handle) = guest.create(1, b"open.txt", O_APPEND).unwrap();
+    assert_eq!(guest.write(handle, 0, b"one"), Ok(3));
+    fs::hard_link(tree.root.join("open.txt"), tree.root.join("Agentfile.copy")).unwrap();
+    assert_eq!(guest.write(handle, 0, b"two"), Err(EPERM));
+    let mut range = handle.to_le_bytes().to_vec();
+    for value in [0u64, 4096] {
+        range.extend(value.to_le_bytes());
+    }
+    range.extend([0; 8]);
+    assert_eq!(guest.call(43, file, &range).0, EPERM);
+    assert_eq!(fs::read(tree.root.join("open.txt")).unwrap(), b"one");
+}
+
+#[test]
+fn files_in_a_git_directory_beneath_modules_still_change() {
+    let tree = protected_tree("nested-head");
+    fs::write(tree.root.join(".git/modules/sub/HEAD"), b"host").unwrap();
+    fs::write(tree.root.join(".git/worktrees/wt/HEAD"), b"host").unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    guest.overwrite(".git/modules/sub/HEAD", b"agent").unwrap();
+    guest.overwrite(".git/worktrees/wt/HEAD", b"agent").unwrap();
+    let sub = guest.walk(".git/modules/sub").unwrap();
+    let (_, handle) = guest.create(sub, b"index.lock", 0).unwrap();
+    assert_eq!(guest.write(handle, 0, b"index"), Ok(5));
+    assert_eq!(
+        fs::read(tree.root.join(".git/modules/sub/HEAD")).unwrap(),
+        b"agent"
+    );
+}
+
+// spec(SHARE): An agent's first POSIX lock on a file fails if the name the agent last reached the file by is gone.
+#[test]
+fn a_first_lock_needs_the_file_s_name() {
+    let tree = Tree::new("lock-unlinked");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let (_, handle) = guest.create(1, b"temp", 0).unwrap();
+    assert_eq!(guest.lock(SETLK, handle, 7, F_WRLCK, 0).0, 0);
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    // The owner that locked it keeps its lock file.
+    assert_eq!(guest.lock(SETLK, handle, 7, F_UNLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, handle, 8, F_WRLCK, 0).0, ENOENT);
+    // `flock` needs no name.
+    assert_eq!(guest.lock(SETLK, handle, 8, F_WRLCK, LK_FLOCK).0, 0);
+}
+
+// spec(SHARE): The agent can't make a device, a FIFO, or a socket in an `rw` share, change a file's owner, or set an extended attribute.
+#[test]
+fn an_rw_share_makes_no_special_file_and_changes_no_owner() {
+    let tree = Tree::new("special");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    for (kind, name) in [
+        (0o020_000u32, &b"char"[..]),
+        (0o060_000, b"block"),
+        (0o010_000, b"fifo"),
+        (0o140_000, b"socket"),
+        (0o100_000, b"regular"),
+    ] {
+        let mut body = (kind | 0o644).to_le_bytes().to_vec();
+        body.extend([0; 12]);
+        body.extend(named(name));
+        assert_eq!(guest.call(MKNOD, 1, &body).0, EPERM, "{kind:o}");
+        assert!(fs::symlink_metadata(tree.root.join(std::str::from_utf8(name).unwrap())).is_err());
+    }
+    let file = guest.walk("hello.txt").unwrap();
+    for owner in [FATTR_UID, 4] {
+        assert_eq!(guest.setattr(file, owner, 0, 0), EPERM);
+    }
+    let setxattr = 21;
+    let mut body = 4u32.to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(named(b"user.agent"));
+    body.extend(b"data");
+    assert_eq!(guest.call(setxattr, file, &body).0, ENOSYS);
+    assert_eq!(guest.call(24, file, &named(b"user.agent")).0, ENOSYS);
+}
+
+// spec(SHARE): Beneath `.git/modules` and `.git/worktrees`, every directory counts as a git directory, because a submodule's name can hold `/`.
+// spec(SHARE): A directory or a symlink can't be moved or linked beneath `.git/modules` or `.git/worktrees`, or to `modules` or `worktrees` in a git directory, and no symlink can be made in those places, so nothing the agent wrote becomes a git directory.
+#[test]
+fn nothing_the_agent_wrote_becomes_a_git_directory() {
+    let tree = protected_tree("holders");
+    fs::create_dir_all(tree.root.join(".git/modules/sub/refs/heads")).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    // Deep beneath `modules`, the names are protected too.
+    let heads = guest.walk(".git/modules/sub/refs/heads").unwrap();
+    assert_eq!(guest.create(heads, b"config", 0), Err(EPERM));
+    let libs = guest.walk(".git/modules/libs").unwrap();
+    assert_eq!(guest.create(libs, b"config", 0), Err(EPERM));
+    // A payload can't take the place of `modules` or `worktrees`, as a
+    // symlink or as a directory.
+    let payload = guest.mkdir(1, b"payload").unwrap();
+    guest.mkdir(payload, b"sub").unwrap();
+    let git = guest.walk(".git").unwrap();
+    assert_eq!(guest.rename(git, b"modules", 1, b"moved-away", 0), 0);
+    assert_eq!(guest.symlink(git, b"modules", b"../payload"), Err(EPERM));
+    assert_eq!(guest.symlink(git, b"MODULES", b"../payload"), Err(EPERM));
+    assert_eq!(guest.rename(1, b"payload", git, b"modules", 0), EPERM);
+    guest.symlink(1, b"aim", b"payload").unwrap();
+    assert_eq!(guest.rename(1, b"aim", git, b"modules", 0), EPERM);
+    assert_eq!(
+        guest.rename(1, b"aim", git, b"worktrees", RENAME_EXCHANGE),
+        EPERM
+    );
+    let aim = guest.walk("aim").unwrap();
+    assert_eq!(guest.link(aim, git, b"modules"), Err(EPERM));
+    assert!(fs::symlink_metadata(tree.root.join(".git/modules")).is_err());
+    assert!(tree.root.join(".git/worktrees").is_dir());
+    // Nor can a symlink land beneath them.
+    let worktrees = guest.walk(".git/worktrees").unwrap();
+    assert_eq!(
+        guest.symlink(worktrees, b"wt2", b"../../payload"),
+        Err(EPERM)
+    );
+    assert_eq!(guest.rename(1, b"aim", worktrees, b"wt2", 0), EPERM);
+    // A symlink lands elsewhere in a git directory, as git makes them.
+    guest.symlink(git, b"elsewhere", b"refs").unwrap();
+}
+
+#[test]
+fn a_file_is_truncated_only_if_it_is_the_one_looked_up() {
+    let tree = Tree::new("stale-trunc");
+    fs::write(tree.root.join("a"), b"a").unwrap();
+    fs::write(tree.root.join("b"), b"b").unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let b = guest.walk("b").unwrap();
+    guest.walk("a").unwrap();
+    // The host replaces `b`, as an editor saves it.
+    fs::rename(tree.root.join("a"), tree.root.join("b")).unwrap();
+    assert_eq!(guest.open(b, O_WRONLY | O_TRUNC), Err(ESTALE));
+    assert_eq!(fs::read(tree.root.join("b")).unwrap(), b"a");
 }

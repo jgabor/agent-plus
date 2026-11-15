@@ -557,8 +557,15 @@ pub fn boot_sharing(
     if guest.confine {
         let input = guest.input.map(|input| input.source);
         let share_server = machine.relay.as_ref().map(ShareRelay::descriptor);
-        let layers = machine.disks.iter().filter_map(|(disk, _)| disk.descriptor());
-        let readable: Vec<RawFd> = input.into_iter().chain(share_server).chain(layers).collect();
+        let layers = machine
+            .disks
+            .iter()
+            .filter_map(|(disk, _)| disk.descriptor());
+        let readable: Vec<RawFd> = input
+            .into_iter()
+            .chain(share_server)
+            .chain(layers)
+            .collect();
         vmm::confine::confine(&readable).map_err(|error| failed("can't confine ap", error))?;
     }
     let waker = Waker::default();

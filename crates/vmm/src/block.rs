@@ -212,14 +212,11 @@ impl Block {
         sector: u64,
         len: usize,
     ) -> (u8, usize) {
-        let Some(start) = sector
-            .checked_mul(SECTOR)
-            .filter(|start| {
-                start
-                    .checked_add(len as u64)
-                    .is_some_and(|end| end <= self.sectors * SECTOR)
-            })
-        else {
+        let Some(start) = sector.checked_mul(SECTOR).filter(|start| {
+            start
+                .checked_add(len as u64)
+                .is_some_and(|end| end <= self.sectors * SECTOR)
+        }) else {
             return (STATUS_IOERR, 0);
         };
         let mut done = 0;
@@ -230,9 +227,7 @@ impl Block {
             let buffer = &mut self.buffer[..piece];
             let (from_disk, past_end) = buffer.split_at_mut(held);
             past_end.fill(0);
-            if self.disk.read_at(from_disk, at).is_err()
-                || !write_at(memory, chain, done, buffer)
-            {
+            if self.disk.read_at(from_disk, at).is_err() || !write_at(memory, chain, done, buffer) {
                 return (STATUS_IOERR, 0);
             }
             done += piece;

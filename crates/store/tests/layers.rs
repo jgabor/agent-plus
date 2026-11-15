@@ -353,16 +353,27 @@ fn a_layer_opens_as_an_uncompressed_copy_made_once() {
     let digest = layers.put(&data, 3).unwrap();
 
     let mut opened = Vec::new();
-    layers.open(&digest).unwrap().read_to_end(&mut opened).unwrap();
+    layers
+        .open(&digest)
+        .unwrap()
+        .read_to_end(&mut opened)
+        .unwrap();
 
     assert_eq!(opened, data);
     let copy = root.join("plain-layers").join(&digest);
     assert_eq!(fs::read(&copy).unwrap(), data);
-    assert_eq!(files(&root.join("plain-layers")), std::slice::from_ref(&digest));
+    assert_eq!(
+        files(&root.join("plain-layers")),
+        std::slice::from_ref(&digest)
+    );
     // A later open reads the copy, and doesn't make it again.
     fs::write(&copy, b"the copy").unwrap();
     let mut again = Vec::new();
-    layers.open(&digest).unwrap().read_to_end(&mut again).unwrap();
+    layers
+        .open(&digest)
+        .unwrap()
+        .read_to_end(&mut again)
+        .unwrap();
     assert_eq!(again, b"the copy");
 }
 

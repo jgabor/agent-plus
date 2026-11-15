@@ -1,6 +1,8 @@
 //! The frames, and what the guest and the host refuse to read.
 
-use guest::protocol::{Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
+use guest::protocol::{
+    Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Share, Size, Start, ToGuest, ToHost,
+};
 use std::io::{self, Cursor, Read};
 
 const RUN: u8 = 1;
@@ -46,10 +48,33 @@ fn start(prompt: Option<&[u8]>) -> ToGuest {
             (b"EQUALS".to_vec(), b"a=b".to_vec()),
         ],
         directory: b"/home/agent".to_vec(),
-        shares: vec![b"/srv/notes".to_vec(), b"/home/agent/work".to_vec()],
+        shares: vec![
+            Share {
+                path: b"/srv/notes".to_vec(),
+                file: None,
+            },
+            Share {
+                path: b"/home/agent/notes.txt".to_vec(),
+                file: Some(b"notes.txt".to_vec()),
+            },
+        ],
         prompt: prompt.map(<[u8]>::to_vec),
         terminal: None,
     })
+}
+
+fn directory_share(path: &[u8]) -> Share {
+    Share {
+        path: path.to_vec(),
+        file: None,
+    }
+}
+
+fn file_share(path: &[u8], file: &[u8]) -> Share {
+    Share {
+        path: path.to_vec(),
+        file: Some(file.to_vec()),
+    }
 }
 
 fn in_terminal(message: ToGuest, rows: u16, columns: u16) -> ToGuest {
@@ -181,17 +206,18 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
         argv: vec![b"h".to_vec()],
         env: vec![(b"K".to_vec(), b"v".to_vec())],
         directory: b"/d".to_vec(),
-        shares: vec![b"/s".to_vec()],
+        shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
         prompt: Some(b"p".to_vec()),
         terminal: None,
     })
     .write(&mut wire)
     .unwrap();
+    // Each share's guest path, then its file's name, empty for a directory.
     let payload = [
         &1u32.to_le_bytes()[..],
         &1u32.to_le_bytes(),
-        &1u32.to_le_bytes(),
-        b"h\0K=v\0/s\0/d\0p\0",
+        &2u32.to_le_bytes(),
+        b"h\0K=v\0/s\0\0/f\0n\0/d\0p\0",
     ]
     .concat();
     assert_eq!(wire, frame(&[&[START][..], &payload].concat()));
@@ -203,7 +229,7 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
             argv: vec![b"h".to_vec()],
             env: vec![(b"K".to_vec(), b"v".to_vec())],
             directory: b"/d".to_vec(),
-            shares: vec![b"/s".to_vec()],
+            shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
             prompt: Some(b"p".to_vec()),
             terminal: None,
         }),
@@ -263,11 +289,28 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
             ..base.clone()
         },
         Start {
-            shares: vec![b"/s\0".to_vec()],
+            shares: vec![directory_share(b"/s\0")],
             ..base.clone()
         },
         Start {
-            shares: vec![b"s".to_vec()],
+            shares: vec![directory_share(b"s")],
+            ..base.clone()
+        },
+        // A file share's file is one name in the share's root.
+        Start {
+            shares: vec![file_share(b"/f", b"")],
+            ..base.clone()
+        },
+        Start {
+            shares: vec![file_share(b"/f", b"a/b")],
+            ..base.clone()
+        },
+        Start {
+            shares: vec![file_share(b"/f", b"..")],
+            ..base.clone()
+        },
+        Start {
+            shares: vec![file_share(b"/f", b"n\0")],
             ..base.clone()
         },
         Start {

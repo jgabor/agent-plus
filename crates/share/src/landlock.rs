@@ -23,6 +23,9 @@ const VERSION_1: u64 = (1 << 13) - 1;
 const REFER: u64 = 1 << 13;
 const TRUNCATE: u64 = 1 << 14;
 const IOCTL_DEV: u64 = 1 << 15;
+/// The rights a rule on a file, not a directory, may hold, as far as
+/// [`allowed`] gives any.
+const FILE_RIGHTS: u64 = READ_FILE | WRITE_FILE | TRUNCATE;
 
 /// `struct landlock_ruleset_attr`, as far as the first version reads it.
 #[repr(C)]
@@ -37,7 +40,8 @@ struct PathBeneath {
     parent_fd: i32,
 }
 
-/// What the share server may do beneath a root.
+/// What the share server may do beneath a root, or to a root that is a
+/// file.
 pub enum Access {
     Read,
     /// Reading, and changing files, directories, and symlinks. Never
@@ -85,8 +89,8 @@ fn check(result: c_long) -> io::Result<c_long> {
     }
 }
 
-/// Lets this process open files only beneath `roots`, each as its access
-/// says, for the rest of its life. Returns false, and changes nothing, on a
+/// Lets this process open files only beneath `roots`, or a root that is a
+/// file, each as its access says, for the rest of its life. Returns false, and changes nothing, on a
 /// kernel without Landlock.
 pub fn restrict(roots: &[(BorrowedFd, Access)]) -> io::Result<bool> {
     // SAFETY: asking for the version takes no pointer.
@@ -117,8 +121,12 @@ pub fn restrict(roots: &[(BorrowedFd, Access)]) -> io::Result<bool> {
     // SAFETY: the descriptor is new, and nothing else owns it.
     let ruleset_fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
     for (root, access) in roots {
+        let mut rights = allowed(access) & handled;
+        if crate::sys::fstat(*root)?.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            rights &= FILE_RIGHTS;
+        }
         let rule = PathBeneath {
-            allowed_access: allowed(access) & handled,
+            allowed_access: rights,
             parent_fd: root.as_raw_fd(),
         };
         // SAFETY: `rule` outlives the call.
@@ -164,7 +172,21 @@ mod tests {
         };
         let base = Path::new(&base);
         let root = File::open(base.join("root")).unwrap();
-        assert!(restrict(&[(root.as_fd(), Access::Read)]).unwrap());
+        // A file of its own, beside the root, which only file rights reach.
+        let file = File::open(base.join("file")).unwrap();
+        assert!(
+            restrict(&[
+                (root.as_fd(), Access::Read),
+                (file.as_fd(), Access::ReadWrite)
+            ])
+            .unwrap()
+        );
+        let file_read = fs::read(base.join("file")).map(drop);
+        let file_written = OpenOptions::new()
+            .write(true)
+            .open(base.join("file"))
+            .map(drop);
+        println!("file {file_read:?} {file_written:?}");
         let inside = fs::read(base.join("root/inside")).map(drop);
         let listed = fs::read_dir(base.join("root")).map(drop);
         let outside = fs::read(base.join("outside")).map(drop);
@@ -183,6 +205,7 @@ mod tests {
         fs::create_dir_all(base.join("root")).unwrap();
         fs::write(base.join("root/inside"), "in").unwrap();
         fs::write(base.join("outside"), "out").unwrap();
+        fs::write(base.join("file"), "file").unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["landlock::tests::restricted_process", "--exact"])
             .args(["--nocapture", "--test-threads=1"])
@@ -197,6 +220,7 @@ mod tests {
             "{output}"
         );
         assert!(output.contains(&format!("written {denied}")), "{output}");
+        assert!(output.contains("file Ok(()) Ok(())"), "{output}");
     }
 
     #[test]

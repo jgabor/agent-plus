@@ -213,10 +213,14 @@ fn harness_refused(error: &io::Error) -> ToHost {
 fn harness(start: &Start) -> Result<Command, String> {
     add_account(Path::new("/")).map_err(|error| format!("can't add the user agent: {error}"))?;
     // After the account, which would try to give the agent a share's root.
-    for (index, path) in start.shares.iter().enumerate() {
-        let path = Path::new(OsStr::from_bytes(path));
-        linux::mount_share(&crate::share::tag(index), path)
-            .map_err(|error| format!("can't mount the share at {}: {error}", path.display()))?;
+    for (index, share) in start.shares.iter().enumerate() {
+        let path = Path::new(OsStr::from_bytes(&share.path));
+        let tag = crate::share::tag(index);
+        match &share.file {
+            None => linux::mount_share(&tag, path),
+            Some(name) => linux::mount_file_share(&tag, OsStr::from_bytes(name), path),
+        }
+        .map_err(|error| format!("can't mount the share at {}: {error}", path.display()))?;
     }
     let directory = OsStr::from_bytes(&start.directory);
     if !fs::metadata(directory).is_ok_and(|metadata| metadata.is_dir()) {

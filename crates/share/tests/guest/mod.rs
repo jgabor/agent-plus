@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use share::{Mode, Server};
+use share::{Mode, Root, Server};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
@@ -101,10 +101,21 @@ impl Guest {
     }
 
     pub fn with(root: &Path, mode: Mode) -> Self {
-        let (mine, theirs) = UnixStream::pair().unwrap();
         let root = OwnedFd::from(File::open(root).unwrap());
+        Self::serving(Root::new(root, mode))
+    }
+
+    /// A guest of the file share of `name` in `directory`.
+    pub fn file(directory: &Path, name: &str, mode: Mode) -> Self {
+        let directory = OwnedFd::from(File::open(directory).unwrap());
+        let name = std::ffi::CString::new(name).unwrap();
+        Self::serving(Root::file(directory, name, mode))
+    }
+
+    pub fn serving(root: Root) -> Self {
+        let (mine, theirs) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || {
-            let mut server = Server::new(vec![(root, mode)]).unwrap();
+            let mut server = Server::new(vec![root]).unwrap();
             let mut theirs = theirs;
             share::serve(&mut theirs, &mut server).unwrap();
         });

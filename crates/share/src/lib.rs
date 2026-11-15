@@ -15,22 +15,25 @@ mod landlock;
 mod server;
 mod sys;
 
-use std::ffi::OsString;
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-pub use server::{Mode, Server};
+pub use server::{Mode, Root, Server};
 
 /// The `argv[0]` that `ap` starts the share server with.
 pub const PROGRAM: &str = "ap-share-server";
 const READ_ONLY: &str = "ro";
 const READ_WRITE: &str = "rw";
 const COPY_ON_WRITE: &str = "cow";
+/// Before a share's mode, names the one file a file share shows.
+const FILE: &str = "file";
 const STDIN: i32 = 0;
 const STDERR: i32 = 2;
 
@@ -41,27 +44,30 @@ pub struct Started {
 }
 
 /// Starts `program`, a build of `ap`, as the share server for `roots`, in
-/// share order. Each root is a directory that the caller opened, and so is
+/// share order. Each root's directory is one the caller opened, and so is
 /// a copy-on-write share's pending directory, which must be empty. The
 /// server serves what the caller checked, and never opens a path itself.
-pub fn start(program: &Path, roots: &[(BorrowedFd, Mode<BorrowedFd>)]) -> io::Result<Started> {
+pub fn start(program: &Path, roots: &[Root<BorrowedFd>]) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     // Each root reaches the server as a descriptor it inherits, numbered in
     // its arguments. The copies are made just for it, and closed once it
     // has started.
     let mut inherited = Vec::new();
-    for (root, mode) in roots {
-        inherited.push(inheritable(*root)?);
-        if let Mode::CopyOnWrite(pending) = mode {
-            inherited.push(inheritable(*pending)?);
+    for root in roots {
+        inherited.push(inheritable(root.directory)?);
+        if let Mode::CopyOnWrite(pending) = root.mode {
+            inherited.push(inheritable(pending)?);
         }
     }
     let mut numbers = inherited.iter().map(|fd| fd.as_raw_fd().to_string());
     let mut command = Command::new(program);
     command.arg0(PROGRAM);
-    for (_, mode) in roots {
+    for root in roots {
+        if let Some(name) = &root.file {
+            command.arg(FILE).arg(OsStr::from_bytes(name.as_bytes()));
+        }
         let mut next = || numbers.next().unwrap_or_default();
-        match mode {
+        match root.mode {
             Mode::ReadOnly => command.arg(READ_ONLY).arg(next()),
             Mode::ReadWrite => command.arg(READ_WRITE).arg(next()),
             Mode::CopyOnWrite(_) => command.arg(COPY_ON_WRITE).arg(next()).arg(next()),
@@ -93,8 +99,10 @@ pub fn inheritable(fd: BorrowedFd) -> io::Result<OwnedFd> {
 
 /// The share server's process: `args` are a mode and the number of an
 /// inherited descriptor of a root directory for each share, and for a
-/// copy-on-write share the number of its pending directory's after it. It serves requests from its standard input, a socket, until the
-/// VMM hangs up, and returns the status to exit with.
+/// copy-on-write share the number of its pending directory's after it. A
+/// file share has `file` and the file's name before its mode. It serves
+/// requests from its standard input, a socket, until the VMM hangs up, and
+/// returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
     match run(args) {
         Ok(()) => 0,
@@ -120,10 +128,10 @@ fn run(args: &[OsString]) -> io::Result<()> {
     serve(&mut socket, &mut server)
 }
 
-fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
+fn open_roots(args: &[OsString]) -> io::Result<Vec<Root>> {
     let usage = || {
         io::Error::other(
-            "usage: ap-share-server ((ro | rw) descriptor | cow descriptor descriptor)...",
+            "usage: ap-share-server ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
         )
     };
     let mut taken: Vec<i32> = Vec::new();
@@ -154,15 +162,25 @@ fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
     };
     let mut roots = Vec::new();
     let mut args = args.iter();
-    while let Some(mode) = args.next() {
-        let root = take(args.next())?;
+    while let Some(mut mode) = args.next() {
+        let mut file = None;
+        if mode == FILE {
+            let name = args.next().ok_or_else(usage)?;
+            file = Some(CString::new(name.as_bytes()).map_err(|_| usage())?);
+            mode = args.next().ok_or_else(usage)?;
+        }
+        let directory = take(args.next())?;
         let mode = match mode.to_str() {
             Some(READ_ONLY) => Mode::ReadOnly,
             Some(READ_WRITE) => Mode::ReadWrite,
             Some(COPY_ON_WRITE) => Mode::CopyOnWrite(take(args.next())?),
             _ => return Err(usage()),
         };
-        roots.push((root, mode));
+        roots.push(Root {
+            directory,
+            file,
+            mode,
+        });
     }
     if roots.is_empty() {
         return Err(usage());

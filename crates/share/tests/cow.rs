@@ -5,7 +5,7 @@
 mod guest;
 
 use guest::*;
-use share::{Mode, Server};
+use share::{Mode, Root, Server};
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -151,7 +151,7 @@ fn changes_survive_the_run_and_the_next_run_starts_from_your_files() {
     // A run never takes over another run's pending directory.
     let root = OwnedFd::from(File::open(&tree.root).unwrap());
     let reused = OwnedFd::from(File::open(&first).unwrap());
-    assert!(Server::new(vec![(root, Mode::CopyOnWrite(reused))]).is_err());
+    assert!(Server::new(vec![Root::new(root, Mode::CopyOnWrite(reused))]).is_err());
 }
 
 #[test]

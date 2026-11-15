@@ -188,3 +188,56 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
     );
     assert!(records(&pending).contains(&r#"DELETE "dir""#.to_owned()));
 }
+
+#[test]
+fn a_confined_server_serves_a_file_share_s_file_alone() {
+    let tree = Tree::new("confined-file");
+    let (mine, theirs) = UnixStream::pair().unwrap();
+    let root = File::open(&tree.root).unwrap();
+    let inherited = [
+        share::inheritable(root.as_fd()).unwrap(),
+        share::inheritable(root.as_fd()).unwrap(),
+    ];
+    let args = format!(
+        "file\nhello.txt\nrw\n{}\nfile\nhello.txt\nro\n{}",
+        inherited[0].as_raw_fd(),
+        inherited[1].as_raw_fd()
+    );
+    let mut server = Command::new(env::current_exe().unwrap())
+        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
+        .env(ARGS, args)
+        .env(ARENAS, "1")
+        .stdin(OwnedFd::from(theirs))
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(inherited);
+    let mut guest = Guest::over(OwnedFd::from(mine));
+
+    guest.overwrite("hello.txt", b"from the agent").unwrap();
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_SIZE, 4, 0), 0);
+    assert_eq!(guest.read_file("dir/nested.txt"), Err(ENOENT));
+    assert_eq!(guest.create(1, b"new.txt", 0), Err(EPERM));
+
+    // The `ro` share of the same file reads it, and refuses every write.
+    let (error, entry) = guest.call_share(1, LOOKUP, 1, b"hello.txt\0");
+    assert_eq!(error, 0);
+    let node = u64::from_le_bytes(entry[..8].try_into().unwrap());
+    let (error, out) = guest.call_share(1, OPEN, node, &[0; 8]);
+    assert_eq!(error, 0);
+    let mut read = out[..8].to_vec();
+    read.extend(0u64.to_le_bytes());
+    read.extend(4096u32.to_le_bytes());
+    read.extend([0; 20]);
+    assert_eq!(guest.call_share(1, READ, 0, &read), (0, b"from".to_vec()));
+    let mut body = O_WRONLY.to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    assert_eq!(guest.call_share(1, OPEN, node, &body).0, EROFS);
+    assert_eq!(guest.call_share(1, LOOKUP, 1, b"dir\0").0, ENOENT);
+
+    drop(guest);
+    assert!(server.wait().unwrap().success());
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"from");
+    assert!(!tree.root.join("new.txt").exists());
+}

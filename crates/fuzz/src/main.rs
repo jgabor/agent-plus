@@ -335,8 +335,11 @@ fn fuse_tree() -> &'static Path {
 /// requests got an answer without an error.
 fn fuse_input(input: &str) -> usize {
     let root = File::open(fuse_tree().join("root")).expect("the fuzz root");
-    let mut server = share::Server::new(vec![(OwnedFd::from(root), share::Mode::ReadOnly)])
-        .expect("the share server");
+    let mut server = share::Server::new(vec![share::Root::new(
+        OwnedFd::from(root),
+        share::Mode::ReadOnly,
+    )])
+    .expect("the share server");
     fuse_input_with(&mut server, input)
 }
 
@@ -377,7 +380,7 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     fs::write(root.join("hello.txt"), INSIDE).expect("the fuzz tree");
     symlink("../outside/secret", root.join("escape")).expect("the fuzz tree");
     symlink("../outside", root.join("dirlink")).expect("the fuzz tree");
-    let mut server = share::Server::new(vec![(
+    let mut server = share::Server::new(vec![share::Root::new(
         OwnedFd::from(File::open(base.join(served)).expect("the fuzz root")),
         share::Mode::ReadWrite,
     )])
@@ -701,8 +704,11 @@ mod tests {
         // escaped it.
         let outside = fuse_tree().join("outside");
         let root = File::open(outside).unwrap();
-        let mut server =
-            share::Server::new(vec![(OwnedFd::from(root), share::Mode::ReadOnly)]).unwrap();
+        let mut server = share::Server::new(vec![share::Root::new(
+            OwnedFd::from(root),
+            share::Mode::ReadOnly,
+        )])
+        .unwrap();
         fuse_input_with(&mut server, "1 1 secret\n14 2 w:0 w:0\n15 0 1 0 w:4096\n");
     }
 

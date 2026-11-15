@@ -734,9 +734,15 @@ fn check_shares(
         true => "directory",
         false => "file",
     };
-    let mut resolved = HashMap::new();
+    // Each source resolves once, so the shares that name it are served
+    // what its approval checks, even if it moves in between.
+    let mut resolved: HashMap<&str, (bool, HostPath)> = HashMap::new();
     let mut checked = Vec::new();
     for share in shares {
+        if let Some((directory, host)) = resolved.get(share.source.as_str()) {
+            checked.push((host.clone(), *directory));
+            continue;
+        }
         let shown = format!("`SHARE {}`", agentfile::print_argument(&share.source));
         let host = HostPath::resolve_pinned(&share.source, context, home)
             .and_then(|host| Ok((host.is_dir()?, host)));
@@ -755,7 +761,7 @@ fn check_shares(
                 word(directory)
             )));
         }
-        resolved.insert(share.source.as_str(), host.clone());
+        resolved.insert(share.source.as_str(), (directory, host.clone()));
         checked.push((host, directory));
     }
     let only_shares: Vec<Instruction> = (instructions.iter())
@@ -765,7 +771,7 @@ fn check_shares(
     let grants = ap::approval::grants(&only_shares, |text| {
         resolved
             .get(text)
-            .cloned()
+            .map(|(_, host)| host.clone())
             .ok_or_else(|| io::Error::other(format!("{text} wasn't resolved")))
     })
     .map_err(|errors| {

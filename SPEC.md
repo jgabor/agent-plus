@@ -1428,6 +1428,15 @@ own code. It never runs that repository's hooks or uses its config or
 attributes, because those can run commands.
 
 - `ap diff <agent | run>` shows what changed, during a run or after it.
+  - It prints a unified diff of each changed text file against your file as
+    it is now, in the form `git diff` prints.
+  - A binary file, a mode change, and a symlink each get one line instead.
+    So does a file that `ap apply` would skip, other than a git-ignored one,
+    and the line says why.
+  - For a share whose root holds a `.git` directory, the first line says how
+    many commits the branch would carry.
+  - It uses no pager and no color.
+  - It exits 0 whether or not anything changed.
 - `ap discard <agent | run>` throws the changes away.
 - `ap apply <agent | run>` brings them back.
   - When the share's root on your host holds a `.git` directory, the agent's
@@ -1437,6 +1446,19 @@ attributes, because those can run commands.
     started. If the agent's history no longer descends from that commit, or
     the repository had no commits, the branch is the agent's history as it
     stands. Your working tree, hooks, and config are not touched.
+  - Before the agent's objects or the branch move in, `ap apply` writes the
+    objects to a quarantine directory and runs your host's
+    `git fsck --strict` on them, against your repository. It never runs
+    `git` on anything else the agent wrote.
+  - The files the agent wrote but didn't commit land as one last commit on
+    the branch. Its author and committer are `Agent+ <ap@localhost>`, its
+    subject is `Uncommitted changes from <agent>/<run>`, and its time is
+    when `ap apply` ran. When nothing is uncommitted, there is no such
+    commit.
+  - With no `git` on your host, `ap apply` fails the branch import, says
+    so, and everything stays pending.
+  - `ap apply` refuses a branch import into a repository whose object
+    format isn't SHA-1, says so, and everything stays pending.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and
@@ -1451,10 +1473,14 @@ attributes, because those can run commands.
   the only changes still pending are files it couldn't apply, because they
   changed on your side too or a write failed, and `ap discard` removes them.
   If the branch import fails, everything stays pending. Files it leaves out
-  on purpose, such as git-ignored ones, don't stay pending.
+  on purpose, such as git-ignored ones, don't stay pending. `ap apply` exits
+  1 if anything stays pending.
+- `ap diff`, `ap apply`, and `ap discard` take an agent or a run. A name
+  means an agent in the store if there is one, and a run otherwise. `ap`
+  never gives a run the name of an agent in the store.
 - With an agent name, `ap diff`, `ap apply`, and `ap discard` act on its
   single run with pending changes. If several runs have pending changes,
-  they list the runs and ask for one.
+  each command lists them and exits 1, without a prompt.
 - `ap rm` and `ap reset` delete pending changes too, so they refuse while an
   agent has any, unless you pass `--force`.
 
@@ -1931,6 +1957,9 @@ The first `ap build` of this Agentfile asks you to approve its grants.
 | Linux arm64 | next | Read and write access to `/dev/kvm` |
 | Windows x86_64 | next | Windows Hypervisor Platform enabled |
 | macOS on Intel | not planned | |
+
+On every host, `ap apply` needs `git` to import a branch (see
+[SHARE](#share)).
 
 The guest's CPU architecture always matches the host's. Debian builds the
 same packages for both.

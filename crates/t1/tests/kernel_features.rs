@@ -1,5 +1,6 @@
 //! Boots the pinned kernel, and checks in the guest that it has what a run
-//! mounts and drives, and what a harness needs to start.
+//! mounts and drives, what a harness needs to start, and the transport for
+//! shares.
 
 use std::fs;
 use std::time::Duration;
@@ -11,10 +12,19 @@ use vmm::{GuestMemory, Stop, Vm, boot};
 const MEMORY: usize = 256 << 20;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_LINE: &str = "console=ttyS0 reboot=t";
-const NEEDED: [&str; 6] = ["erofs", "overlay", "tmpfs", "devpts", "virtio_blk", "unix"];
+const NEEDED: [&str; 8] = [
+    "erofs",
+    "overlay",
+    "tmpfs",
+    "devpts",
+    "virtio_blk",
+    "unix",
+    "fuse",
+    "virtiofs",
+];
 
 #[test]
-fn the_guest_has_erofs_overlay_tmpfs_devpts_virtio_blk_and_unix_sockets() {
+fn the_guest_has_erofs_overlay_tmpfs_devpts_virtio_blk_unix_sockets_and_virtio_fs() {
     let image = fs::read(kernel::vmlinux()).unwrap();
     let init = fs::read(guest_binary::build("features-init")).unwrap();
     let initramfs = initramfs::build(&[Entry::File {

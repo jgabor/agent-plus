@@ -90,7 +90,10 @@ fn run(args: &[OsString]) -> io::Result<()> {
     // SAFETY: standard input is the socket `start` passed, and nothing else
     // in this process owns it.
     let mut socket = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
-    vmm::confine::confine_share_server(socket.as_raw_fd())?;
+    let writes = access
+        .iter()
+        .any(|(_, access)| matches!(access, landlock::Access::ReadWrite));
+    vmm::confine::confine_share_server(socket.as_raw_fd(), writes)?;
     serve(&mut socket, &mut server)
 }
 

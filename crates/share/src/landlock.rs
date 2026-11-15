@@ -211,4 +211,14 @@ mod tests {
     fn a_read_only_root_allows_reading_alone() {
         assert_eq!(allowed(&Access::Read), 0b1100);
     }
+
+    #[test]
+    fn a_read_write_root_never_runs_a_file_or_makes_a_special_one() {
+        let rights = allowed(&Access::ReadWrite);
+        let execute = 1;
+        let special = (1 << 6) | (1 << 9) | (1 << 10) | (1 << 11);
+        assert_eq!(rights & (execute | special | IOCTL_DEV), 0);
+        assert_eq!(rights & (REFER | TRUNCATE), REFER | TRUNCATE);
+        assert_eq!(rights.count_ones(), 10);
+    }
 }

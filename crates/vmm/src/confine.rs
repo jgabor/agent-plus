@@ -41,6 +41,8 @@ const OFFSET_ARGS: u32 = 16;
 const ENOSYS: u32 = 38;
 const CLONE_THREAD: u32 = 0x0001_0000;
 const F_GETFD: u32 = 1;
+const F_OFD_GETLK: u32 = 36;
+const F_OFD_SETLK: u32 = 37;
 const MAP_ANONYMOUS: u32 = 0x20;
 
 // x86_64 system call numbers.
@@ -75,6 +77,19 @@ const FSTATFS: u32 = 138;
 const GETDENTS64: u32 = 217;
 const READLINKAT: u32 = 267;
 const OPENAT2: u32 = 437;
+const PWRITE64: u32 = 18;
+const FLOCK: u32 = 73;
+const FSYNC: u32 = 74;
+const FDATASYNC: u32 = 75;
+const FTRUNCATE: u32 = 77;
+const FCHMOD: u32 = 91;
+const MKDIRAT: u32 = 258;
+const UNLINKAT: u32 = 263;
+const LINKAT: u32 = 265;
+const SYMLINKAT: u32 = 266;
+const UTIMENSAT: u32 = 280;
+const FALLOCATE: u32 = 285;
+const RENAMEAT2: u32 = 316;
 const AT_FDCWD: u32 = -100_i32 as u32;
 const STDERR: u32 = 2;
 const EXIT_GROUP: u32 = 231;
@@ -126,6 +141,10 @@ enum Rule {
     AllowIfSet(u32, u32, u32),
     /// Allowed unless the argument at this index is this value.
     AllowUnless(u32, u32, u32),
+    /// Allowed unless either argument at these indexes is this value.
+    AllowUnlessEither(u32, [u32; 2], u32),
+    /// Allowed when the pointer at this index is null, in both halves.
+    AllowIfNull(u32, u32),
     /// Answered with this error, without running it.
     Refuse(u32, u32),
 }
@@ -184,10 +203,14 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
 /// `socket` alone. It opens a file only relative to a descriptor it holds,
 /// and the opening code asks the kernel to stay beneath it and follow no
 /// symlink. A filter can't read those flags, so Landlock holds the server
-/// to the roots too, where the kernel has it.
-fn share_server_rules(socket: RawFd) -> Vec<Rule> {
-    use Rule::{Allow, AllowIf, AllowIfSet, AllowUnless};
-    vec![
+/// to the roots too, where the kernel has it. It takes and checks locks on
+/// the files it holds. With `writes`, for an `rw` share, it also changes
+/// files: through a descriptor it holds, or by one name in a directory it
+/// holds, which Landlock holds to the `rw` roots. Changing a file's times
+/// takes no name at all.
+fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
+    use Rule::{Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither};
+    let mut rules = vec![
         AllowIf(READ, 0, vec![socket as u32]),
         AllowIf(WRITE, 0, vec![socket as u32, STDERR]),
         AllowUnless(OPENAT2, 0, AT_FDCWD),
@@ -198,8 +221,10 @@ fn share_server_rules(socket: RawFd) -> Vec<Rule> {
         Allow(FSTAT),
         Allow(FSTATFS),
         Allow(CLOSE),
-        // Rust checks a descriptor this way before it closes it.
-        AllowIf(FCNTL, 1, vec![F_GETFD]),
+        // Rust checks a descriptor this way before it closes it. The rest
+        // are locks, which never wait.
+        AllowIf(FCNTL, 1, vec![F_GETFD, F_OFD_GETLK, F_OFD_SETLK]),
+        Allow(FLOCK),
         AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
@@ -212,7 +237,24 @@ fn share_server_rules(socket: RawFd) -> Vec<Rule> {
         Allow(SIGALTSTACK),
         Allow(EXIT),
         Allow(EXIT_GROUP),
-    ]
+    ];
+    if writes {
+        rules.extend([
+            Allow(PWRITE64),
+            Allow(FTRUNCATE),
+            Allow(FALLOCATE),
+            Allow(FSYNC),
+            Allow(FDATASYNC),
+            Allow(FCHMOD),
+            AllowIfNull(UTIMENSAT, 1),
+            AllowUnless(MKDIRAT, 0, AT_FDCWD),
+            AllowUnless(UNLINKAT, 0, AT_FDCWD),
+            AllowUnless(SYMLINKAT, 1, AT_FDCWD),
+            AllowUnlessEither(LINKAT, [0, 2], AT_FDCWD),
+            AllowUnlessEither(RENAMEAT2, [0, 2], AT_FDCWD),
+        ]);
+    }
+    rules
 }
 
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
@@ -247,6 +289,28 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
                 *number,
                 vec![load(*index), op(JUMP_EQUAL, 0, 1, *value), kill, allow],
             ),
+            Rule::AllowUnlessEither(number, [first, second], value) => (
+                *number,
+                vec![
+                    load(*first),
+                    op(JUMP_EQUAL, 3, 0, *value),
+                    load(*second),
+                    op(JUMP_EQUAL, 1, 0, *value),
+                    allow,
+                    kill,
+                ],
+            ),
+            Rule::AllowIfNull(number, index) => (
+                *number,
+                vec![
+                    load(*index),
+                    op(JUMP_EQUAL, 0, 3, 0),
+                    op(LOAD_WORD, 0, 0, OFFSET_ARGS + 8 * index + 4),
+                    op(JUMP_EQUAL, 0, 1, 0),
+                    allow,
+                    kill,
+                ],
+            ),
         };
         program.push(op(JUMP_EQUAL, 0, body.len() as u8, number));
         program.extend(body);
@@ -267,10 +331,10 @@ pub fn confine(readable: &[RawFd]) -> io::Result<()> {
 }
 
 /// Confines the share server, which has one thread, for the rest of its
-/// life. Call it once every share's root is open. Requests come from
-/// `socket`, and answers go back on it.
-pub fn confine_share_server(socket: RawFd) -> io::Result<()> {
-    install(&share_server_rules(socket))
+/// life, and lets it change files if `writes`. Call it once every share's
+/// root is open. Requests come from `socket`, and answers go back on it.
+pub fn confine_share_server(socket: RawFd, writes: bool) -> io::Result<()> {
+    install(&share_server_rules(socket, writes))
 }
 
 fn install(rules: &[Rule]) -> io::Result<()> {
@@ -338,6 +402,11 @@ mod tests {
     }
 
     fn run_rules(rules: &[Rule], arch: u32, number: u32, args: [u32; 6]) -> u32 {
+        run_wide(rules, arch, number, args.map(u64::from))
+    }
+
+    /// Runs the program on whole arguments, whose halves it loads apart.
+    fn run_wide(rules: &[Rule], arch: u32, number: u32, args: [u64; 6]) -> u32 {
         let program = compile(rules);
         let mut accumulator = 0;
         let mut pc = 0;
@@ -358,8 +427,12 @@ mod tests {
                         OFFSET_ARCH => arch,
                         offset if (OFFSET_ARGS..LOAD_ARGUMENT_LIMIT).contains(&offset) => {
                             let index = offset - OFFSET_ARGS;
-                            assert_eq!(index % 8, 0, "a load of an argument's high half");
-                            args[(index / 8) as usize]
+                            let arg = args[(index / 8) as usize];
+                            match index % 8 {
+                                0 => arg as u32,
+                                4 => (arg >> 32) as u32,
+                                _ => panic!("a load inside an argument's half"),
+                            }
                         }
                         offset => panic!("a load at {offset}"),
                     }
@@ -440,11 +513,69 @@ mod tests {
 
     fn share_call(number: u32, args: [u32; 6]) -> u32 {
         run_rules(
-            &share_server_rules(SOCKET as RawFd),
+            &share_server_rules(SOCKET as RawFd, false),
             AUDIT_ARCH_X86_64,
             number,
             args,
         )
+    }
+
+    fn writing_call(number: u32, args: [u64; 6]) -> u32 {
+        let rules = share_server_rules(SOCKET as RawFd, true);
+        run_wide(&rules, AUDIT_ARCH_X86_64, number, args)
+    }
+
+    const WRITING: [u32; 12] = [
+        PWRITE64, FTRUNCATE, FALLOCATE, FSYNC, FDATASYNC, FCHMOD, UTIMENSAT, MKDIRAT,
+        UNLINKAT, SYMLINKAT, LINKAT, RENAMEAT2,
+    ];
+
+    #[test]
+    fn the_share_server_takes_locks_on_what_it_holds() {
+        for command in [F_OFD_GETLK, F_OFD_SETLK] {
+            assert_eq!(share_call(FCNTL, [4, command, 0, 0, 0, 0]), RET_ALLOW);
+        }
+        assert_eq!(share_call(FLOCK, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        // A lock that waits would hold the guest.
+        let f_ofd_setlkw = 38;
+        assert_eq!(
+            share_call(FCNTL, [4, f_ofd_setlkw, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+    }
+
+    #[test]
+    fn only_a_server_with_an_rw_share_changes_files() {
+        for number in WRITING {
+            assert_eq!(share_call(number, [4, 1, 4, 1, 0, 0]), RET_KILL_PROCESS, "{number}");
+            assert_eq!(writing_call(number, [4, 0, 4, 0, 0, 0]), RET_ALLOW, "{number}");
+        }
+    }
+
+    #[test]
+    fn a_server_that_changes_files_does_so_beneath_what_it_holds() {
+        let cwd = u64::from(AT_FDCWD);
+        for (number, at) in [
+            (MKDIRAT, 0),
+            (UNLINKAT, 0),
+            (SYMLINKAT, 1),
+            (LINKAT, 0),
+            (LINKAT, 2),
+            (RENAMEAT2, 0),
+            (RENAMEAT2, 2),
+        ] {
+            let mut args = [4, 1, 4, 1, 0, 0];
+            args[at] = cwd;
+            assert_eq!(writing_call(number, args), RET_KILL_PROCESS, "{number} {at}");
+        }
+        // Times change only for a descriptor, never for a path, whichever
+        // half of the pointer is set.
+        for path in [1, 1 << 32, u64::MAX] {
+            assert_eq!(writing_call(UTIMENSAT, [4, path, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        }
+        assert_eq!(writing_call(UTIMENSAT, [4, 0, 1, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(writing_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(writing_call(OPENAT2, [cwd, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
     }
 
     #[test]

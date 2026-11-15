@@ -15,7 +15,7 @@ mod approvals;
 mod layers;
 mod runs;
 
-pub use agents::{Agent, Agents, Declared, Layer, valid_name};
+pub use agents::{Agent, Agents, Declared, Kind, Layer, valid_name};
 pub use approvals::Approvals;
 pub use layers::Layers;
 pub use runs::{NAME_ALPHABET, NAME_LEN, Run, Runs, random_name, record_exit, valid_run_name};

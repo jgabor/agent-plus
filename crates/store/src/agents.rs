@@ -9,13 +9,15 @@
 //! DIRECTORY /home/me/notes
 //! AGENTFILE /home/me/notes/Agentfile
 //! LAYER 0b1f63c4… 9829b1f2… "ADD ./src /work"
+//! KIND ./out directory
 //! AGENT claude
 //! SHARE ./out /work/out rw
 //! ```
 //!
 //! `DIRECTORY` is the directory the agent was built from, and `AGENTFILE` is
 //! the canonical path of the Agentfile that the build read, which keys its
-//! approval. Each `LAYER` holds
+//! approval. Each `KIND` holds a `SHARE` source, as written, and whether it
+//! was a `file` or a `directory` at build time. Each `LAYER` holds
 //! a layer's key and its digest, shortened here, and the instruction that
 //! made it, in the agent's order. Every other line is an instruction the Agentfile declared,
 //! with its arguments.
@@ -49,6 +51,8 @@ pub struct Agent {
     pub agentfile: String,
     /// The agent's layers, in order.
     pub layers: Vec<Layer>,
+    /// What each `SHARE` source was at build time.
+    pub kinds: Vec<Kind>,
     /// The instructions the Agentfile declared, in order.
     pub declared: Vec<Declared>,
 }
@@ -63,6 +67,16 @@ pub struct Layer {
     /// The instruction that made the layer, as `ap build` reports it, such
     /// as `ADD ./src /work` or `harness configuration`.
     pub instruction: String,
+}
+
+/// Whether a `SHARE` source was a file or a directory when the agent was
+/// built, so that a run can tell if that changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Kind {
+    /// The source, as the Agentfile wrote it.
+    pub source: String,
+    /// Whether it was a directory. Anything else counts as a file.
+    pub directory: bool,
 }
 
 /// An instruction that an Agentfile declared. `SYSTEM` and `PROMPT` take
@@ -319,6 +333,9 @@ fn record_text(agent: &Agent) -> io::Result<String> {
         }
         line("LAYER", &[&layer.key, &layer.digest, &layer.instruction]);
     }
+    for kind in &agent.kinds {
+        line("KIND", &[&kind.source, kind_word(kind.directory)]);
+    }
     for declared in &agent.declared {
         if !declarable(&declared.name, &declared.arguments) {
             return invalid(format!("a record can't declare `{}`", declared.name));
@@ -334,6 +351,7 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
     let mut directory = None;
     let mut agentfile = None;
     let mut layers = Vec::new();
+    let mut kinds = Vec::new();
     let mut declared = Vec::new();
     for (index, content) in text.split('\n').enumerate() {
         let fail = |message: String| format!("line {}: {message}", index + 1);
@@ -376,6 +394,18 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
                     ));
                 }
             },
+            "KIND" => match arguments.as_slice() {
+                [_, word] if word == kind_word(true) || word == kind_word(false) => {
+                    let directory = arguments.pop() == Some(kind_word(true).to_string());
+                    let source = arguments.pop().unwrap_or_default();
+                    kinds.push(Kind { source, directory });
+                }
+                _ => {
+                    return Err(fail(
+                        "`KIND` takes a source and `file` or `directory`".to_string(),
+                    ));
+                }
+            },
             _ if declarable(&word, &arguments) => declared.push(Declared {
                 name: word,
                 arguments,
@@ -394,6 +424,15 @@ fn read_record(name: &str, text: &str) -> Result<Agent, String> {
         directory,
         agentfile,
         layers,
+        kinds,
         declared,
     })
+}
+
+/// The word a record uses for a `SHARE` source's kind.
+fn kind_word(directory: bool) -> &'static str {
+    match directory {
+        true => "directory",
+        false => "file",
+    }
 }

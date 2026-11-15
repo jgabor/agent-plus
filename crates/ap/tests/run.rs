@@ -291,3 +291,96 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
         "`AUTH` is not built yet",
     );
 }
+
+/// What a run with a `SHARE` says once its shares pass their checks.
+const SHARES_CHECKED: &str = "`SHARE` is not built yet";
+
+// spec(SHARE): A missing `<src>` is an error, at build time and at run time.
+// spec(SHARE): At every run, `ap` canonicalizes `<src>` again.
+// spec(Grants): Share sources resolve at run time, so they are checked again at every run.
+#[test]
+fn a_missing_share_source_fails_the_build_and_the_run() {
+    let scratch = Scratch::new("share-missing");
+    let dir = scratch.root.join("missing");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("Agentfile"), format!("{RUNNABLE}SHARE ./app\n")).unwrap();
+    common::pin_harness(&scratch.home, &dir);
+    let output = scratch.ap(&["build", dir.to_str().unwrap()], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Agentfile:4: "), "{stderr}");
+    assert!(stderr.contains("No such file or directory"), "{stderr}");
+
+    fs::create_dir_all(dir.join("app")).unwrap();
+    scratch.build("missing", &format!("{RUNNABLE}SHARE ./app\n"));
+    refused(
+        &scratch.ap(&["run", "missing", "-p", "hi"], &[]),
+        SHARES_CHECKED,
+    );
+    fs::remove_dir(dir.join("app")).unwrap();
+    let output = scratch.ap(&["run", "missing", "-p", "hi"], &[]);
+    refused(&output, "`SHARE ./app`: ");
+    refused(&output, "No such file or directory");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SHARES_CHECKED));
+}
+
+// spec(SHARE): `ap build` records whether `<src>` is a file or a directory, and a run fails if that changed, because it can change the working directory (see [Run](#run)).
+#[test]
+fn a_share_source_that_changed_kind_fails_the_run() {
+    let scratch = Scratch::new("share-kind");
+    let dir = scratch.root.join("kind");
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(dir.join("notes"), "one").unwrap();
+    scratch.build("kind", &format!("{RUNNABLE}SHARE ./app\nSHARE ./notes\n"));
+    refused(
+        &scratch.ap(&["run", "kind", "-p", "hi"], &[]),
+        SHARES_CHECKED,
+    );
+
+    fs::remove_dir(dir.join("app")).unwrap();
+    fs::write(dir.join("app"), "now a file").unwrap();
+    refused(
+        &scratch.ap(&["run", "kind", "-p", "hi"], &[]),
+        "`SHARE ./app`: it was a directory when the agent was built, and is a file now",
+    );
+    fs::remove_file(dir.join("app")).unwrap();
+    fs::create_dir(dir.join("app")).unwrap();
+    fs::remove_file(dir.join("notes")).unwrap();
+    fs::create_dir(dir.join("notes")).unwrap();
+    refused(
+        &scratch.ap(&["run", "kind", "-p", "hi"], &[]),
+        "`SHARE ./notes`: it was a file when the agent was built, and is a directory now",
+    );
+}
+
+// spec(Grants): The build context is pinned.
+// spec(Grants): `ap build` records its canonical path, and a run with a relative `SHARE` fails if that path no longer canonicalizes to itself, for example because a directory in it became a symlink.
+#[test]
+fn a_relative_share_fails_once_the_build_context_is_a_link() {
+    let scratch = Scratch::new("share-pinned");
+    let notes = scratch.home.join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    for (name, share) in [("relative", "./app"), ("tilde", "~/notes")] {
+        fs::create_dir_all(scratch.root.join(name).join("app")).unwrap();
+        scratch.build(name, &format!("{RUNNABLE}SHARE {share}\n"));
+        refused(&scratch.ap(&["run", name, "-p", "hi"], &[]), SHARES_CHECKED);
+        // The build context moves, and a link takes its place.
+        let dir = scratch.root.join(name);
+        let moved = scratch.root.join(format!("{name}-moved"));
+        fs::rename(&dir, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, &dir).unwrap();
+    }
+    refused(
+        &scratch.ap(&["run", "relative", "-p", "hi"], &[]),
+        &format!(
+            "the agent was built from {}, which is now {}",
+            scratch.root.join("relative").display(),
+            scratch.root.join("relative-moved").display()
+        ),
+    );
+    // A share that isn't relative doesn't resolve against the build context.
+    refused(
+        &scratch.ap(&["run", "tilde", "-p", "hi"], &[]),
+        SHARES_CHECKED,
+    );
+}

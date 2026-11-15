@@ -319,7 +319,9 @@ How approval works:
   that touches no grant, such as a new `PLUGIN`.
 - Share sources resolve at run time, so they are checked again at every
   run. If a share now resolves somewhere you haven't approved, for example
-  because `data` became a symlink to `~/.ssh`, the run asks again.
+  because `data` became a symlink to `~/.ssh`, the run asks again. What
+  you approve then is added to the Agentfile's approval, so the next run
+  doesn't ask.
 - The build context is pinned. `ap build` records its canonical path, and
   a run with a relative `SHARE` fails if that path no longer canonicalizes
   to itself, for example because a directory in it became a symlink.

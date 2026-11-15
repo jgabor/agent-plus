@@ -393,3 +393,107 @@ fn a_linked_agentfile_is_approved_by_where_it_really_is() {
     let approvals = Approvals::new(scratch.store());
     assert_eq!(approvals.get(&dir.join("Agentfile")).unwrap(), None);
 }
+
+/// An agent that `ap run` checks as far as its shares.
+const SHARED: &str = "AGENT claude\nOS minimal\nNETWORK -\nSHARE ./data\n";
+
+/// What a run says once its shares pass their checks.
+const SHARES_CHECKED: &str = "`SHARE` is not built yet";
+
+// spec(SHARE): If it now resolves somewhere you haven't approved, the run asks for approval again (see [Grants](#grants)).
+// spec(Grants): If a share now resolves somewhere you haven't approved, for example because `data` became a symlink to `~/.ssh`, the run asks again.
+// spec(SHARE): A `<src>` outside the build context, and any `rw` share, is a [grant](#grants).
+// spec(Grants): Without a terminal, a build or run that needs approval fails.
+// spec(Grants): What you approve then is added to the Agentfile's approval, so the next run doesn't ask.
+#[test]
+fn a_share_that_now_resolves_outside_asks_again_at_run() {
+    let scratch = Scratch::new("share-moved");
+    let dir = scratch.project("notes", SHARED);
+    assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
+    let run = ["run", "notes", "-p", "hi"];
+    let checked = scratch.on_terminal(&dir, &run, "n\n");
+    assert_eq!(checked.code, Some(125), "{}", checked.screen);
+    assert!(
+        checked.screen.contains(SHARES_CHECKED),
+        "{}",
+        checked.screen
+    );
+    assert!(!checked.screen.contains("Approve"), "{}", checked.screen);
+
+    // `data` becomes a link to a file outside the build context.
+    let secret = scratch.home.join(".ssh/id");
+    fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    fs::write(&secret, "key").unwrap();
+    fs::remove_file(dir.join("data")).unwrap();
+    std::os::unix::fs::symlink(&secret, dir.join("data")).unwrap();
+    let asked = format!(
+        "asks for more than you approved:\n  PATH {}\n",
+        secret.display()
+    );
+    let output = scratch.ap(&dir, &run);
+    assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+    assert!(stderr(&output).contains(&asked), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("ap: approve them on a terminal\n"),
+        "{}",
+        stderr(&output)
+    );
+    let refused = scratch.on_terminal(&dir, &run, "n\n");
+    assert_eq!(refused.code, Some(125), "{}", refused.screen);
+    assert!(refused.screen.contains(&asked), "{}", refused.screen);
+    assert!(
+        refused.screen.contains("so the run didn't start"),
+        "{}",
+        refused.screen
+    );
+    assert!(
+        !refused.screen.contains(SHARES_CHECKED),
+        "{}",
+        refused.screen
+    );
+
+    let approved = scratch.on_terminal(&dir, &run, "y\n");
+    assert_eq!(approved.code, Some(125), "{}", approved.screen);
+    assert!(
+        approved.screen.contains(SHARES_CHECKED),
+        "{}",
+        approved.screen
+    );
+    let path = format!("PATH {}\n", secret.display());
+    assert!(scratch.approved(&dir).unwrap().contains(&path));
+    // The approval is kept, so the next run doesn't ask.
+    let again = scratch.on_terminal(&dir, &run, "n\n");
+    assert!(again.screen.contains(SHARES_CHECKED), "{}", again.screen);
+    assert!(!again.screen.contains("Approve"), "{}", again.screen);
+}
+
+// spec(SHARE): A `<src>` outside the build context, and any `rw` share, is a [grant](#grants).
+#[test]
+fn an_rw_share_that_now_resolves_elsewhere_asks_again_at_run() {
+    let scratch = Scratch::new("share-rw");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nNETWORK -\nSHARE ./out rw\n",
+    );
+    fs::create_dir_all(dir.join("out")).unwrap();
+    fs::create_dir_all(dir.join("elsewhere")).unwrap();
+    assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
+    let run = ["run", "notes", "-p", "hi"];
+    let output = scratch.ap(&dir, &run);
+    assert!(
+        stderr(&output).contains(SHARES_CHECKED),
+        "{}",
+        stderr(&output)
+    );
+
+    // Inside the build context, an `rw` share is a grant all the same.
+    fs::remove_dir(dir.join("out")).unwrap();
+    std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join("out")).unwrap();
+    let output = scratch.ap(&dir, &run);
+    assert_eq!(output.status.code(), Some(125), "{}", stderr(&output));
+    let asked = format!(
+        "asks for more than you approved:\n  PATH {} rw\n",
+        dir.join("elsewhere").display()
+    );
+    assert!(stderr(&output).contains(&asked), "{}", stderr(&output));
+}

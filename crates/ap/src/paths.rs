@@ -30,7 +30,14 @@ impl HostPath {
     /// canonical: `.` and `..` are resolved, and every symlink is followed,
     /// so the path must exist.
     pub fn resolve(text: &str, context: &Path, home: &Path) -> io::Result<HostPath> {
-        let context = canonical(context)?;
+        HostPath::resolve_pinned(text, &canonical(context)?, home)
+    }
+
+    /// Resolves `text` as [`HostPath::resolve`] does, against a `context`
+    /// that is canonical already, as a build recorded it. The context isn't
+    /// resolved again, so a link that took its place since can't move what
+    /// counts as inside it.
+    pub fn resolve_pinned(text: &str, context: &Path, home: &Path) -> io::Result<HostPath> {
         let joined = if text == "~" {
             home.to_path_buf()
         } else if let Some(rest) = text.strip_prefix("~/") {
@@ -41,7 +48,7 @@ impl HostPath {
             context.join(text)
         };
         let path = canonical(&joined)?;
-        let outside = !path.starts_with(&context);
+        let outside = !path.starts_with(context);
         Ok(HostPath { path, outside })
     }
 
@@ -54,6 +61,14 @@ impl HostPath {
     /// inside the build context that points outside it counts as outside.
     pub fn outside(&self) -> bool {
         self.outside
+    }
+
+    /// Whether the canonical path is a directory. A canonical path holds no
+    /// symlink, so this doesn't follow one.
+    pub fn is_dir(&self) -> io::Result<bool> {
+        std::fs::symlink_metadata(&self.path)
+            .map(|metadata| metadata.is_dir())
+            .map_err(|error| with_path(&self.path, error))
     }
 
     /// Opens the canonical path one component at a time from `/`, refusing

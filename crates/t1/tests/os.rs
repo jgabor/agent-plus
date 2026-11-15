@@ -95,7 +95,7 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
         .iter()
         .map(|layer| Layer {
             digest: layer.digest.clone(),
-            disk: stored.get(&layer.digest).unwrap(),
+            disk: Box::new(stored.get(&layer.digest).unwrap()),
         })
         .collect();
     fs::remove_dir_all(&root).unwrap();

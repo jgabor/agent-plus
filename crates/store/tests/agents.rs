@@ -386,6 +386,29 @@ fn removing_an_agent_frees_only_the_layers_no_other_agent_uses() {
     assert!(agents.list().unwrap().is_empty());
 }
 
+// spec(Build): A layer's copy is freed with the layer.
+#[test]
+fn removing_an_agent_frees_the_copies_of_the_layers_it_frees() {
+    let root = store_root("remove-copies");
+    let agents = Agents::new(&root);
+    let a = layers(&root, &["shared", "only a"]);
+    let b = layers(&root, &["shared"]);
+    agents
+        .record(&agent("a", "/work/a", a.clone()), false)
+        .unwrap();
+    agents.record(&agent("b", "/work/b", b), false).unwrap();
+    let store = Layers::new(&root);
+    for layer in &a {
+        store.open(&layer.digest).unwrap();
+    }
+    let copy = |layer: &Layer| root.join("plain-layers").join(&layer.digest);
+
+    agents.remove("a").unwrap();
+
+    assert!(copy(&a[0]).exists());
+    assert!(!copy(&a[1]).exists());
+}
+
 #[test]
 fn removing_an_agent_leaves_layers_no_agent_recorded() {
     let root = store_root("unrecorded");

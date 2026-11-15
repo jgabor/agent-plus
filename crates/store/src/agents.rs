@@ -237,6 +237,7 @@ impl Agents {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
+            self.layers.remove_copy(&layer.digest)?;
         }
         Ok(())
     }

@@ -2,6 +2,7 @@
 //! uncompressed bytes.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -340,4 +341,57 @@ fn a_layer_knows_its_level() {
     .unwrap();
     assert_eq!(layers.level(DATA_SHA256).unwrap(), None);
     assert_eq!(layers.get(DATA_SHA256).unwrap(), DATA);
+}
+
+// spec(Build): A run reads each layer from an uncompressed copy in the store, which the first run that needs the layer makes.
+#[test]
+fn a_layer_opens_as_an_uncompressed_copy_made_once() {
+    let dir = empty_root("open");
+    let root = store_root(&dir);
+    let layers = Layers::new(&root);
+    let data = sample();
+    let digest = layers.put(&data, 3).unwrap();
+
+    let mut opened = Vec::new();
+    layers.open(&digest).unwrap().read_to_end(&mut opened).unwrap();
+
+    assert_eq!(opened, data);
+    let copy = root.join("plain-layers").join(&digest);
+    assert_eq!(fs::read(&copy).unwrap(), data);
+    assert_eq!(files(&root.join("plain-layers")), std::slice::from_ref(&digest));
+    // A later open reads the copy, and doesn't make it again.
+    fs::write(&copy, b"the copy").unwrap();
+    let mut again = Vec::new();
+    layers.open(&digest).unwrap().read_to_end(&mut again).unwrap();
+    assert_eq!(again, b"the copy");
+}
+
+#[test]
+fn a_frame_that_no_longer_matches_its_digest_leaves_no_copy() {
+    let dir = empty_root("open-mismatch");
+    let root = store_root(&dir);
+    let layers = Layers::new(&root);
+    let digest = layers.put(DATA, 3).unwrap();
+    fs::write(
+        root.join("zstd-layers").join(&digest),
+        store::compress(b"other bytes", 3),
+    )
+    .unwrap();
+
+    let error = layers.open(&digest).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains(&digest), "{error}");
+    assert_eq!(files(&root.join("plain-layers")), Vec::<String>::new());
+}
+
+#[test]
+fn opening_a_missing_layer_is_not_found() {
+    let dir = empty_root("open-missing");
+    let layers = Layers::new(store_root(&dir));
+
+    let error = layers.open(DATA_SHA256).unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(layers.open("../escape").is_err());
 }

@@ -5,7 +5,8 @@
 //! What is left can't start a process or a program, or reach a host file:
 //! every call that takes a path is missing, and memory can be mapped only
 //! anonymously, so a file left open can't be read either. The exceptions are
-//! the descriptors the caller names, which may be read and nothing else.
+//! the descriptors the caller names, which may be read, at an offset or not,
+//! and nothing else.
 //! Calls that could reach past this process are narrowed by their arguments,
 //! as the kernel reads them.
 //!
@@ -189,11 +190,9 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
         Allow(EXIT_GROUP),
     ];
     if !readable.is_empty() {
-        rules.push(AllowIf(
-            READ,
-            0,
-            readable.iter().map(|fd| *fd as u32).collect(),
-        ));
+        let readable: Vec<u32> = readable.iter().map(|fd| *fd as u32).collect();
+        rules.push(AllowIf(READ, 0, readable.clone()));
+        rules.push(AllowIf(PREAD64, 0, readable));
     }
     rules
 }
@@ -508,6 +507,15 @@ mod tests {
         assert_eq!(reading(7), RET_ALLOW);
         assert_eq!(reading(9), RET_ALLOW);
         assert_eq!(reading(0), RET_KILL_PROCESS);
+        assert_eq!(reading(8), RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn only_the_named_descriptor_can_be_read_at_an_offset() {
+        assert_eq!(call(PREAD64, [0, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        let reading = |fd| run_reading(&[7, 9], AUDIT_ARCH_X86_64, PREAD64, [fd, 0, 0, 0, 0, 0]);
+        assert_eq!(reading(7), RET_ALLOW);
+        assert_eq!(reading(9), RET_ALLOW);
         assert_eq!(reading(8), RET_KILL_PROCESS);
     }
 

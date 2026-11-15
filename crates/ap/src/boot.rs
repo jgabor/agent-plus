@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use guest::linux::{self, Linux};
 use guest::protocol::{EXEC_PORT, MAX_BODY, PORT, Start, ToGuest, ToHost};
 use guest::{Channel, Event, agent, root, share};
-use vmm::block::Block;
+use vmm::block::{Block, Disk};
 use vmm::fs::{Fs, Relay as ShareRelay};
 use vmm::initramfs::{self, Entry};
 use vmm::serial::Serial;
@@ -221,8 +221,8 @@ impl Input {
 pub struct Layer {
     /// The SHA-256 of the layer's content, which names it to the guest.
     pub digest: String,
-    /// The layer's EROFS image.
-    pub disk: Vec<u8>,
+    /// The layer's EROFS image, which the guest reads as it needs it.
+    pub disk: Box<dyn Disk>,
 }
 
 /// Why a machine didn't boot and power off cleanly.
@@ -510,12 +510,14 @@ pub fn boot_sharing(
     loader::enter(&vcpu, &entry).map_err(vm_failed)?;
 
     let first_share_line = LINE + 1 + guest.layers.len() as u32;
-    let disks = (guest.layers.into_iter().zip(LINE + 1..))
+    let disks: Vec<_> = (guest.layers.into_iter().zip(LINE + 1..))
         .map(|(layer, line)| {
             let name = root::name(&layer.digest).as_bytes().to_vec();
-            (Block::new(layer.disk, &name), vm.interrupt(line))
+            let block = Block::new(layer.disk, &name)
+                .map_err(|error| failed("can't read a layer", error))?;
+            Ok((block, vm.interrupt(line)))
         })
-        .collect();
+        .collect::<Result<_, Error>>()?;
     let devices = (0..share_count)
         .zip(first_share_line..)
         .map(|(index, line)| {
@@ -555,7 +557,8 @@ pub fn boot_sharing(
     if guest.confine {
         let input = guest.input.map(|input| input.source);
         let share_server = machine.relay.as_ref().map(ShareRelay::descriptor);
-        let readable: Vec<RawFd> = input.into_iter().chain(share_server).collect();
+        let layers = machine.disks.iter().filter_map(|(disk, _)| disk.descriptor());
+        let readable: Vec<RawFd> = input.into_iter().chain(share_server).chain(layers).collect();
         vmm::confine::confine(&readable).map_err(|error| failed("can't confine ap", error))?;
     }
     let waker = Waker::default();
@@ -1011,7 +1014,7 @@ mod tests {
     fn layer(digest: &str) -> Layer {
         Layer {
             digest: digest.to_owned(),
-            disk: Vec::new(),
+            disk: Box::new(Vec::new()),
         }
     }
 

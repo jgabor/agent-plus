@@ -113,7 +113,7 @@ fn the_guest_runs_from_its_layers_under_a_tmpfs_upper_layer() {
             .iter()
             .map(|digest| Layer {
                 digest: digest.clone(),
-                disk: stored.get(digest).unwrap(),
+                disk: Box::new(stored.get(digest).unwrap()),
             })
             .collect()
     };
@@ -163,7 +163,7 @@ fn ten_layers_stack_in_order() {
         .iter()
         .map(|image| {
             let digest = stored.put(image, LEVEL).unwrap();
-            let disk = stored.get(&digest).unwrap();
+            let disk = Box::new(stored.get(&digest).unwrap());
             Layer { digest, disk }
         })
         .collect();

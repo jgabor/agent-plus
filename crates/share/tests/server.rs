@@ -689,3 +689,59 @@ fn an_rw_share_makes_no_special_file_and_changes_no_owner() {
     assert_eq!(guest.call(setxattr, file, &body).0, ENOSYS);
     assert_eq!(guest.call(24, file, &named(b"user.agent")).0, ENOSYS);
 }
+
+// spec(SHARE): Beneath `.git/modules` and `.git/worktrees`, every directory counts as a git directory, because a submodule's name can hold `/`.
+// spec(SHARE): A directory or a symlink can't be moved or linked beneath `.git/modules` or `.git/worktrees`, or to `modules` or `worktrees` in a git directory, and no symlink can be made in those places, so nothing the agent wrote becomes a git directory.
+#[test]
+fn nothing_the_agent_wrote_becomes_a_git_directory() {
+    let tree = protected_tree("holders");
+    fs::create_dir_all(tree.root.join(".git/modules/sub/refs/heads")).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    // Deep beneath `modules`, the names are protected too.
+    let heads = guest.walk(".git/modules/sub/refs/heads").unwrap();
+    assert_eq!(guest.create(heads, b"config", 0), Err(EPERM));
+    let libs = guest.walk(".git/modules/libs").unwrap();
+    assert_eq!(guest.create(libs, b"config", 0), Err(EPERM));
+    // A payload can't take the place of `modules` or `worktrees`, as a
+    // symlink or as a directory.
+    let payload = guest.mkdir(1, b"payload").unwrap();
+    guest.mkdir(payload, b"sub").unwrap();
+    let git = guest.walk(".git").unwrap();
+    assert_eq!(guest.rename(git, b"modules", 1, b"moved-away", 0), 0);
+    assert_eq!(guest.symlink(git, b"modules", b"../payload"), Err(EPERM));
+    assert_eq!(guest.symlink(git, b"MODULES", b"../payload"), Err(EPERM));
+    assert_eq!(guest.rename(1, b"payload", git, b"modules", 0), EPERM);
+    guest.symlink(1, b"aim", b"payload").unwrap();
+    assert_eq!(guest.rename(1, b"aim", git, b"modules", 0), EPERM);
+    assert_eq!(
+        guest.rename(1, b"aim", git, b"worktrees", RENAME_EXCHANGE),
+        EPERM
+    );
+    let aim = guest.walk("aim").unwrap();
+    assert_eq!(guest.link(aim, git, b"modules"), Err(EPERM));
+    assert!(fs::symlink_metadata(tree.root.join(".git/modules")).is_err());
+    assert!(tree.root.join(".git/worktrees").is_dir());
+    // Nor can a symlink land beneath them.
+    let worktrees = guest.walk(".git/worktrees").unwrap();
+    assert_eq!(
+        guest.symlink(worktrees, b"wt2", b"../../payload"),
+        Err(EPERM)
+    );
+    assert_eq!(guest.rename(1, b"aim", worktrees, b"wt2", 0), EPERM);
+    // A symlink lands elsewhere in a git directory, as git makes them.
+    guest.symlink(git, b"elsewhere", b"refs").unwrap();
+}
+
+#[test]
+fn a_file_is_truncated_only_if_it_is_the_one_looked_up() {
+    let tree = Tree::new("stale-trunc");
+    fs::write(tree.root.join("a"), b"a").unwrap();
+    fs::write(tree.root.join("b"), b"b").unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let b = guest.walk("b").unwrap();
+    guest.walk("a").unwrap();
+    // The host replaces `b`, as an editor saves it.
+    fs::rename(tree.root.join("a"), tree.root.join("b")).unwrap();
+    assert_eq!(guest.open(b, O_WRONLY | O_TRUNC), Err(ESTALE));
+    assert_eq!(fs::read(tree.root.join("b")).unwrap(), b"a");
+}

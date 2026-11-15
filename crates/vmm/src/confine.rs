@@ -207,7 +207,9 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
 /// the files it holds. With `writes`, for an `rw` share, it also changes
 /// files: through a descriptor it holds, or by one name in a directory it
 /// holds, which Landlock holds to the `rw` roots. Changing a file's times
-/// takes no name at all.
+/// takes no name at all. Landlock doesn't cover a file's mode or times, so
+/// for those, an `ro` share beside an `rw` one rests on the server's own
+/// checks.
 fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
     use Rule::{Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither};
     let mut rules = vec![

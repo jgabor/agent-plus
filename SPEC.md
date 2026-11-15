@@ -1415,6 +1415,12 @@ In `rw` shares, the files your host acts on are read-only to the agent.
   `.git/worktrees/*`, these are read-only, because git runs hooks and
   configured commands on your host: `config`, `config.worktree`,
   `commondir`, `gitdir`, and `hooks/`.
+- Beneath `.git/modules` and `.git/worktrees`, every directory counts as a
+  git directory, because a submodule's name can hold `/`.
+- A directory or a symlink can't be moved or linked beneath
+  `.git/modules` or `.git/worktrees`, or to `modules` or `worktrees` in a
+  git directory, and no symlink can be made in those places, so nothing
+  the agent wrote becomes a git directory.
 - Names match case-insensitively, as they do on macOS filesystems.
 - A change these rules refuse fails with an `Operation not permitted`
   error.

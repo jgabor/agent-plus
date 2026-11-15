@@ -161,13 +161,12 @@ impl Place {
     }
 
     /// Whether a file of `mode` may land at `name` in a directory at this
-    /// place. A directory or a symlink can't land where git looks for git
-    /// directories, so nothing the agent filled becomes one.
+    /// place. A directory or a symlink lands only where git looks for no
+    /// git directory, so nothing the agent wrote becomes one, or leads to
+    /// one.
     fn takes(self, name: &[u8], mode: u32) -> bool {
-        if is(mode, libc::S_IFDIR) {
-            return self.of(name) == Place::Plain;
-        }
-        !is(mode, libc::S_IFLNK) || !matches!(self, Place::Holder | Place::Git { nested: true })
+        let leads = is(mode, libc::S_IFDIR) || is(mode, libc::S_IFLNK);
+        !leads || self.of(name) == Place::Plain
     }
 }
 
@@ -550,8 +549,12 @@ impl Share {
         if writes(flags) && found.place == Place::Fixed {
             return Err(libc::EPERM);
         }
-        // The name may have moved on to another file since the lookup.
-        let fd = self.reopen(found, open_flags(flags))?;
+        // The name may have moved on to another file since the lookup, so
+        // the file is truncated only once it is known to be this one.
+        let fd = self.reopen(found, open_flags(flags) & !libc::O_TRUNC)?;
+        if flags & libc::O_TRUNC != 0 {
+            sys::ftruncate(fd.as_fd(), 0).map_err(errno)?;
+        }
         Ok(open_out(self.add_handle(fd, node)))
     }
 

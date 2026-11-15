@@ -305,7 +305,7 @@ fn a_run_shows_a_shared_file_and_nothing_beside_it() {
     printed(
         &scratch.sh(
             name,
-            "ls -A / ~ | grep -e beside -e notes -e Agentfile -e ap-share",
+            "! ls -A / ~ | grep -e beside -e notes -e Agentfile -e ap-share",
         ),
         "",
     );

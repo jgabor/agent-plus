@@ -159,7 +159,11 @@ fn sha256(path: &Path) -> String {
 
 fn printed(output: &Output, stdout: &str) {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), stdout, "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        stdout,
+        "{output:?}"
+    );
 }
 
 fn failed(output: &Output, says: &str) {
@@ -199,7 +203,13 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
     // With two shares, the harness starts in the agent's home.
     assert!(report.contains("\"directory\":\"/home/agent\""), "{report}");
     let ps = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
-    let name = ps.lines().nth(1).unwrap().split_whitespace().next().unwrap();
+    let name = ps
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap();
 
     // The guest reads both, the `rw` share by the mirror rule.
     printed(&scratch.sh(name, "cat /srv/notes/read.txt"), "from ro\n");
@@ -215,7 +225,10 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
     );
     assert!(!dir.join("notes/new.txt").exists());
     printed(&scratch.sh(name, "echo new > ~/work/new.txt"), "");
-    assert_eq!(fs::read_to_string(dir.join("work/new.txt")).unwrap(), "new\n");
+    assert_eq!(
+        fs::read_to_string(dir.join("work/new.txt")).unwrap(),
+        "new\n"
+    );
 
     // What the host acts on stays as it was.
     for path in ["~/work/.git/config", "~/work/Agentfile"] {
@@ -224,7 +237,10 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
             "Operation not permitted",
         );
     }
-    assert_eq!(fs::read_to_string(dir.join("work/Agentfile")).unwrap(), "keep\n");
+    assert_eq!(
+        fs::read_to_string(dir.join("work/Agentfile")).unwrap(),
+        "keep\n"
+    );
     assert_eq!(
         fs::read_to_string(dir.join("work/.git/config")).unwrap(),
         "keep\n"

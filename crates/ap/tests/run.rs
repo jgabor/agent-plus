@@ -439,7 +439,12 @@ fn a_run_whose_share_destinations_overlap_fails() {
     let share = agent
         .declared
         .iter_mut()
-        .find(|declared| declared.arguments.first().is_some_and(|source| source == "./b"))
+        .find(|declared| {
+            declared
+                .arguments
+                .first()
+                .is_some_and(|source| source == "./b")
+        })
         .unwrap();
     share.arguments[1] = "/data/b".to_owned();
     agents.record(&agent, true).unwrap();

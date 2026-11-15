@@ -7,7 +7,8 @@
 //!
 //! A [`Start`] runs the harness as the user `agent`, whom [`add_account`]
 //! adds to the guest's root first, with the environment and directory the
-//! host gives it. Its prompt is its last argument: the host's, or else the
+//! host gives it. Each share the host serves is mounted first, where the
+//! host says. Its prompt is its last argument: the host's, or else the
 //! one the agent was built with.
 //!
 //! A start with a terminal runs the harness in a new one, which it gets as
@@ -211,6 +212,12 @@ fn harness_refused(error: &io::Error) -> ToHost {
 /// The harness's command, as `agent`, or why it can't start.
 fn harness(start: &Start) -> Result<Command, String> {
     add_account(Path::new("/")).map_err(|error| format!("can't add the user agent: {error}"))?;
+    // After the account, which would try to give the agent a share's root.
+    for (index, path) in start.shares.iter().enumerate() {
+        let path = Path::new(OsStr::from_bytes(path));
+        linux::mount_share(&crate::share::tag(index), path)
+            .map_err(|error| format!("can't mount the share at {}: {error}", path.display()))?;
+    }
     let directory = OsStr::from_bytes(&start.directory);
     if !fs::metadata(directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(format!(

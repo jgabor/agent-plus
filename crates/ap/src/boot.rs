@@ -335,21 +335,23 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         }
         Report::Exec(..) | Report::ExecTook(_) => {}
     };
-    relayed(timeout, Vec::new(), request, None, print)
+    relayed(timeout, Vec::new(), None, request, None, print)
 }
 
-/// A run's machine: the agent's layers, with its harness started as `start`
-/// says, and sent `input` while it runs. It hands the harness's output to
+/// A run's machine: the agent's layers and `shares`, with its harness
+/// started as `start` says, and sent `input` while it runs. It hands the harness's output to
 /// `output`, unfiltered, on a thread of its own, and returns the harness's
 /// status.
 pub fn boot_agent(
     timeout: Duration,
     layers: Vec<Layer>,
+    shares: Option<Shares>,
     start: Start,
     input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
 ) -> Result<u8, Error> {
-    relayed(timeout, layers, Some(ToGuest::Start(start)), input, output)
+    let request = Some(ToGuest::Start(start));
+    relayed(timeout, layers, shares, request, input, output)
 }
 
 /// Boots the pinned kernel with this program as its init, and relays what
@@ -357,6 +359,7 @@ pub fn boot_agent(
 fn relayed(
     timeout: Duration,
     layers: Vec<Layer>,
+    shares: Option<Shares>,
     request: Option<ToGuest>,
     input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
@@ -387,7 +390,7 @@ fn relayed(
         input,
     };
     let mut relay = Relay::start(Instant::now() + timeout, output);
-    let result = boot(guest, |report| match report {
+    let result = boot_sharing(guest, shares, |report| match report {
         Report::Ready(release) => relay.send(Piece::Release(release.to_owned())),
         Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
         Report::Stderr(bytes) => relay.send(Piece::Stderr(bytes.to_vec())),

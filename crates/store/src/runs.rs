@@ -16,11 +16,13 @@
 //! any reason, so a run whose process is gone never reads as active.
 //!
 //! A run's log is kept apart from its record, under `logs` with the run's
-//! name, and only `ap run` writes it.
+//! name, and only `ap run` writes it. The changes a run's agent made to its
+//! copy-on-write shares wait under `pending` with the run's name, until you
+//! apply or discard them.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::agents::valid_name;
@@ -85,6 +87,7 @@ pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
 pub struct Runs {
     dir: PathBuf,
     logs: PathBuf,
+    pending: PathBuf,
 }
 
 impl Runs {
@@ -93,6 +96,7 @@ impl Runs {
         Runs {
             dir: root.as_ref().join("runs"),
             logs: root.as_ref().join("logs"),
+            pending: root.as_ref().join("pending"),
         }
     }
 
@@ -199,6 +203,25 @@ impl Runs {
                 format!("the log of run {name}: {error}"),
             )),
         }
+    }
+
+    /// Makes the directory that holds the pending changes of the run with
+    /// this name, which must have none, so a run never starts from another
+    /// run's changes. It holds what the agent wrote, so it is yours alone.
+    pub fn create_pending(&self, name: &str) -> io::Result<PathBuf> {
+        check_run_name(name)?;
+        if let Some(root) = self.pending.parent() {
+            fs::create_dir_all(root)?;
+        }
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&self.pending) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+            _ => {}
+        }
+        let dir = self.pending.join(name);
+        builder.create(&dir)?;
+        Ok(dir)
     }
 
     /// Removes the run with this name and its log. The log goes first, so a

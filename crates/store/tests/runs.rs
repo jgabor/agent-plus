@@ -89,3 +89,25 @@ fn a_run_keeps_its_status_and_log_until_it_is_removed() {
     assert!(runs.remove("../agents").is_err());
     assert!(runs.log("../agents").is_err());
 }
+
+// spec(SHARE): The next run starts from your current files, not from earlier unapplied changes.
+#[test]
+fn each_run_gets_a_pending_directory_of_its_own() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = store_root("pending");
+    let runs = Runs::new(&root);
+    let run = runs.create("notes", 1).unwrap();
+    let pending = runs.create_pending(&run.name).unwrap();
+    assert_eq!(pending, root.join("pending").join(&run.name));
+    for dir in [&pending, &root.join("pending")] {
+        let mode = fs::metadata(dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", dir.display());
+    }
+    // A run never takes over another's changes.
+    fs::write(pending.join("records"), "").unwrap();
+    let error = runs.create_pending(&run.name).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+    let other = runs.create("notes", 2).unwrap();
+    assert!(runs.create_pending(&other.name).is_ok());
+    assert!(runs.create_pending("../escape").is_err());
+}

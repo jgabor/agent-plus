@@ -645,22 +645,7 @@ impl Share {
     }
 
     fn statfs(&self) -> Answer {
-        let stat = sys::fstatfs(self.root.as_fd()).map_err(errno)?;
-        let mut out = Vec::with_capacity(80);
-        for value in [
-            stat.f_blocks,
-            stat.f_bfree,
-            stat.f_bavail,
-            stat.f_files,
-            stat.f_ffree,
-        ] {
-            out.extend(value.to_le_bytes());
-        }
-        out.extend((stat.f_bsize as u32).to_le_bytes());
-        out.extend((stat.f_namelen as u32).to_le_bytes());
-        out.extend((stat.f_frsize as u32).to_le_bytes());
-        out.resize(80, 0);
-        Ok(out)
+        statfs(self.root.as_fd())
     }
 
     /// `struct fuse_create_in`, then the name. Answers with the entry and
@@ -998,6 +983,26 @@ impl Share {
         self.locks.remove(&(node, owner));
         Ok(Vec::new())
     }
+}
+
+/// `struct fuse_statfs_out`, for the filesystem `fd` is on.
+fn statfs(fd: BorrowedFd) -> Answer {
+    let stat = sys::fstatfs(fd).map_err(errno)?;
+    let mut out = Vec::with_capacity(80);
+    for value in [
+        stat.f_blocks,
+        stat.f_bfree,
+        stat.f_bavail,
+        stat.f_files,
+        stat.f_ffree,
+    ] {
+        out.extend(value.to_le_bytes());
+    }
+    out.extend((stat.f_bsize as u32).to_le_bytes());
+    out.extend((stat.f_namelen as u32).to_le_bytes());
+    out.extend((stat.f_frsize as u32).to_le_bytes());
+    out.resize(80, 0);
+    Ok(out)
 }
 
 /// `struct fuse_init_out`, for the guest's `struct fuse_init_in`.

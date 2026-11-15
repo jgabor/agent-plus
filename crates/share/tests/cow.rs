@@ -94,7 +94,10 @@ fn the_agent_s_writes_land_in_pending_and_your_files_stay() {
     };
     assert_eq!(names(&after), names(&before));
     assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
-    assert_eq!(fs::read(tree.root.join("dir/nested.txt")).unwrap(), b"nested");
+    assert_eq!(
+        fs::read(tree.root.join("dir/nested.txt")).unwrap(),
+        b"nested"
+    );
     assert_eq!(fs::read(pending.join("tree/new.txt")).unwrap(), b"from");
     assert_eq!(
         fs::read(pending.join("tree/hello.txt")).unwrap(),
@@ -167,7 +170,11 @@ fn each_kind_of_change_is_stored_as_itself_or_as_a_record() {
     assert!(guest.mknod(made, b"fifo", S_IFIFO | 0o644, 0).is_ok());
     assert!(guest.mknod(made, b"socket", S_IFSOCK | 0o644, 0).is_ok());
     // `/dev/null`: major 1, minor 3.
-    assert!(guest.mknod(made, b"null", S_IFCHR | 0o666, (1 << 8) | 3).is_ok());
+    assert!(
+        guest
+            .mknod(made, b"null", S_IFCHR | 0o666, (1 << 8) | 3)
+            .is_ok()
+    );
     let script = guest.walk("run.sh").unwrap();
     assert_eq!(guest.setattr(script, FATTR_MODE, 0, 0o700), 0);
     assert_eq!(guest.remove(UNLINK, 1, b"hello.txt"), 0);
@@ -231,7 +238,12 @@ fn a_name_that_needs_it_is_escaped_in_a_record() {
     let tree = Tree::new("cow-names");
     let pending = pending(&tree);
     let mut guest = Guest::cow(&tree.root, &pending);
-    for name in [&b"a \"quoted\" \\ name"[..], b"line\nbreak", b"\xff\xfe", "é".as_bytes()] {
+    for name in [
+        &b"a \"quoted\" \\ name"[..],
+        b"line\nbreak",
+        b"\xff\xfe",
+        "é".as_bytes(),
+    ] {
         let (_, handle) = guest.create(1, name, 0).unwrap();
         guest.release(handle);
     }
@@ -322,7 +334,10 @@ fn a_lock_on_a_file_the_agent_wrote_is_taken_on_its_pending_copy() {
     let nested = guest.walk("dir/nested.txt").unwrap();
     let handle = guest.open(nested, 0).unwrap();
     assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, 0).0, 0);
-    assert!(host_locked(&tree.root.join("dir/nested.txt"), libc::F_WRLCK as i16));
+    assert!(host_locked(
+        &tree.root.join("dir/nested.txt"),
+        libc::F_WRLCK as i16
+    ));
     guest.release(handle);
 
     let hello = guest.walk("hello.txt").unwrap();
@@ -330,7 +345,10 @@ fn a_lock_on_a_file_the_agent_wrote_is_taken_on_its_pending_copy() {
     assert_eq!(guest.lock(SETLK, handle, 7, F_WRLCK, 0).0, 0);
     let copy = pending.join("tree/hello.txt");
     assert!(host_locked(&copy, libc::F_RDLCK as i16));
-    assert!(!host_locked(&tree.root.join("hello.txt"), libc::F_RDLCK as i16));
+    assert!(!host_locked(
+        &tree.root.join("hello.txt"),
+        libc::F_RDLCK as i16
+    ));
     assert_eq!(guest.lock(SETLK, handle, 8, F_WRLCK, LK_FLOCK).0, 0);
     let held = File::open(&copy).unwrap();
     // SAFETY: flock takes no pointer.
@@ -366,7 +384,10 @@ fn a_rename_moves_the_agent_s_copy_and_leaves_yours() {
     guest.write(handle, 0, b"deep").unwrap();
     guest.release(handle);
     assert_eq!(guest.rename(1, b"made", dir, b"landed", 0), 0);
-    assert_eq!(guest.read_file("dir/landed/inner/deep.txt").unwrap(), b"deep");
+    assert_eq!(
+        guest.read_file("dir/landed/inner/deep.txt").unwrap(),
+        b"deep"
+    );
     assert_eq!(guest.lookup(1, b"made"), Err(ENOENT));
     // The nodes the guest holds follow the move.
     assert_eq!(guest.lookup(inner, b"deep.txt").map(|_| ()), Ok(()));
@@ -420,7 +441,10 @@ fn a_directory_made_again_hides_what_you_had_in_it() {
     drop(guest);
     let records = records(&pending);
     assert!(records.contains(&r#"DIR "dir" 755 opaque"#.to_owned()));
-    assert_eq!(fs::read(tree.root.join("dir/nested.txt")).unwrap(), b"nested");
+    assert_eq!(
+        fs::read(tree.root.join("dir/nested.txt")).unwrap(),
+        b"nested"
+    );
 }
 
 #[test]
@@ -443,7 +467,11 @@ fn a_write_never_reaches_outside_a_copy_on_write_share() {
     assert_eq!(guest.remove(UNLINK, 1, b"escape"), 0);
     drop(guest);
     assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
-    assert!(fs::symlink_metadata(tree.root.join("escape")).unwrap().is_symlink());
+    assert!(
+        fs::symlink_metadata(tree.root.join("escape"))
+            .unwrap()
+            .is_symlink()
+    );
     let outside: Vec<_> = fs::read_dir(tree.base.join("outside")).unwrap().collect();
     assert_eq!(outside.len(), 1);
     assert!(!tree.base.join("planted").exists());

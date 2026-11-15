@@ -67,8 +67,8 @@ fn layers(probe: Vec<u8>) -> [Vec<u8>; 2] {
 /// it printed, by name.
 fn boot_with(init: &[u8], kernel: &[u8], layers: Vec<Layer>) -> BTreeMap<String, String> {
     let guest = Guest {
-        kernel,
-        init,
+        kernel: kernel.into(),
+        init: init.into(),
         files: &[],
         layers,
         request: Some(ToGuest::Run {

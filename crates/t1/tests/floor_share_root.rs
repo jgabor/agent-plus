@@ -80,8 +80,8 @@ fn share_owner_process() {
         contents: &probe,
     }];
     let guest = Guest {
-        kernel: &kernel,
-        init: &init,
+        kernel: (&kernel).into(),
+        init: (&init).into(),
         files: &files,
         layers: Vec::new(),
         request: Some(ToGuest::Run {

@@ -1,5 +1,6 @@
 //! Boots a machine: the host's side in [`boot`], and the guest's in [`init`].
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsStr;
 use std::fmt;
@@ -75,10 +76,11 @@ pub enum Report<'a> {
 
 /// What a machine boots.
 pub struct Guest<'a> {
-    /// An uncompressed `vmlinux`.
-    pub kernel: &'a [u8],
-    /// A static program, which runs as `/init`.
-    pub init: &'a [u8],
+    /// An uncompressed `vmlinux`. One the machine owns is freed once it is
+    /// in guest memory.
+    pub kernel: Cow<'a, [u8]>,
+    /// A static program, which runs as `/init`, freed as the kernel is.
+    pub init: Cow<'a, [u8]>,
     /// More files for the guest's root filesystem.
     pub files: &'a [Entry<'a>],
     /// An agent's layers, bottom first. With any, the guest's root is these
@@ -375,8 +377,8 @@ fn relayed(
         target: INIT_PATH,
     }];
     let guest = Guest {
-        kernel: &kernel,
-        init: &init,
+        kernel: kernel.into(),
+        init: init.into(),
         files: &files,
         layers,
         request,
@@ -493,7 +495,7 @@ pub fn boot_sharing(
     let mut entries = vec![Entry::File {
         path: "init",
         mode: 0o755,
-        contents: guest.init,
+        contents: &guest.init,
     }];
     entries.extend_from_slice(guest.files);
     let archive = initramfs::build(&entries)
@@ -503,8 +505,13 @@ pub fn boot_sharing(
     let vm = Vm::new(GuestMemory::new(MEMORY).map_err(vm_failed)?).map_err(vm_failed)?;
     vm.add_interrupt_controllers().map_err(vm_failed)?;
     let bad_kernel = |error: loader::Error| Error::Failed(format!("bad kernel: {error:?}"));
-    let entry = loader::load(vm.memory(), guest.kernel, &command_line).map_err(bad_kernel)?;
+    let entry = loader::load(vm.memory(), &guest.kernel, &command_line).map_err(bad_kernel)?;
     loader::load_initramfs(vm.memory(), &entry, &archive).map_err(bad_kernel)?;
+    // The guest has its own copies now, and a run lasts long.
+    drop(entries);
+    drop(archive);
+    drop(guest.kernel);
+    drop(guest.init);
     let mut vcpu = vm.create_vcpu().map_err(vm_failed)?;
     vm.expose_cpu_features(&vcpu).map_err(vm_failed)?;
     loader::enter(&vcpu, &entry).map_err(vm_failed)?;

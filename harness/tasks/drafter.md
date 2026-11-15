@@ -37,7 +37,10 @@ decisions and label it. Only the owner adds an `auto:*` label.
      decisions that need the owner's answer, each with its options and your
      recommendation first. Then list the decisions this draft chose, which
      the owner can overrule. Include the order of the work, and which parts
-     change SPEC.md and so need the owner's merge first.
+     change SPEC.md and so need the owner's merge first. A decision that
+     picks a crate or our own code names what was measured, or the sub-issue
+     that measures it first, and names the oracle, as Crates and our own code
+     in AGENTS.md says.
    - `## Touches`: the paths in backticks that the sub-issues will change.
    - The line `Milestone: <name>.`, on its own, last.
 5. Say the number of the issue you filed, then stop.

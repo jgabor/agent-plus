@@ -30,6 +30,7 @@ band_abs = 5.0
 [[budget]]
 key = "binary_bytes"
 name = "Stripped release binary"
+band_pct = 5.0
 
 [[budget]]
 key = "version_ms"

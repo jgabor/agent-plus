@@ -332,6 +332,21 @@ it, and never silently pick one.
   park the issue that depends on it. A PR that rewrites a sentence waits for
   the owner, even for a typo, because a program can't tell the difference.
 
+## Crates and our own code
+
+When a crate could do a job, choose by measuring. An issue that makes this
+choice names the measurement and the oracle.
+
+- Use the crate first, in a PR of its own, when it passes the floors and needs
+  nothing `ap` doesn't have, such as an async runtime. That PR's ledger record
+  is the crate's cost.
+- Write our own code only for a reason you measured: a budget, a floor, or the
+  dependency tree the crate brings. Our code does this job and no other.
+- Check our own code against an oracle its author didn't write: the crate kept
+  as a dev-dependency, a reference tool, or a published test suite. Compare in
+  tests and in the nightly fuzzer.
+- TLS and cryptography are never our own code.
+
 ## Verifying
 
 `cargo xtask gate` is the check to run before you push. A docs change also

@@ -8,8 +8,8 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::process::ExitCode;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vmm::GuestMemory;
 use vmm::virtio::Transport;
@@ -109,9 +109,30 @@ const TARGETS: [Target; 3] = [
             "1 1 hello.txt\n2 2 1\n3 2 0 0\n42 0 w:1 w:0 2 1\n16 2 1 0 w:5 w:0\n",
         ],
         words: &[
-            "\n", " ", "1 ", "2 ", "3 ", "w:0 ", "w:2 ", "w:65536 ", "0xffffffffffffffff ",
-            "..", ".", "/", "hello.txt", "escape", "absolute", "dirlink", "dir", "secret",
-            "14 ", "15 ", "27 ", "28 ", "1 1 ", "5 ",
+            "\n",
+            " ",
+            "1 ",
+            "2 ",
+            "3 ",
+            "w:0 ",
+            "w:2 ",
+            "w:65536 ",
+            "0xffffffffffffffff ",
+            "..",
+            ".",
+            "/",
+            "hello.txt",
+            "escape",
+            "absolute",
+            "dirlink",
+            "dir",
+            "secret",
+            "14 ",
+            "15 ",
+            "27 ",
+            "28 ",
+            "1 1 ",
+            "5 ",
         ],
     },
 ];

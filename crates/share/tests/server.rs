@@ -30,7 +30,9 @@ const INIT: u32 = 26;
 const OPENDIR: u32 = 27;
 const READDIR: u32 = 28;
 const BATCH_FORGET: u32 = 42;
-const WRITES: [u32; 17] = [4, 6, 8, 9, 10, 11, 12, 13, 16, 21, 24, 35, 43, 45, 47, 48, 51];
+const WRITES: [u32; 17] = [
+    4, 6, 8, 9, 10, 11, 12, 13, 16, 21, 24, 35, 43, 45, 47, 48, 51,
+];
 
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
@@ -416,7 +418,10 @@ fn a_forgotten_node_is_gone() {
     let (file, _) = guest.lookup(1, b"hello.txt").unwrap();
     assert_eq!(guest.lookup(1, b"hello.txt").unwrap().0, file);
     // Forgetting gets no answer.
-    assert_eq!(guest.call(FORGET, file, &1u64.to_le_bytes()), (0, Vec::new()));
+    assert_eq!(
+        guest.call(FORGET, file, &1u64.to_le_bytes()),
+        (0, Vec::new())
+    );
     assert_eq!(guest.call(GETATTR, file, &[0; 16]).0, 0);
     let mut batch = 1u32.to_le_bytes().to_vec();
     batch.extend([0; 4]);

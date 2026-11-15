@@ -86,7 +86,9 @@ fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
     if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err(usage());
     }
-    args.chunks_exact(2)
+    args.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             if pair[0] != OsStr::new(READ_ONLY) {
                 return Err(usage());

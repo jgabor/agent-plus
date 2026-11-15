@@ -498,7 +498,8 @@ fn dispatch(share: &mut Share, request: &Request) -> Option<Answer> {
         }
         BATCH_FORGET => {
             let count = u32_at(body, 0).unwrap_or(0) as usize;
-            for one in body.get(8..).unwrap_or(&[]).chunks_exact(16).take(count) {
+            let forgets = body.get(8..).unwrap_or(&[]).as_chunks::<16>().0;
+            for one in forgets.iter().take(count) {
                 let (Some(node), Some(lookups)) = (u64_at(one, 0), u64_at(one, 8)) else {
                     break;
                 };

@@ -172,9 +172,7 @@ mod tests {
         let output = String::from_utf8_lossy(&output.stdout);
         let denied = "Err(Os { code: 13, kind: PermissionDenied";
         assert!(
-            output.contains(&format!(
-                "inside Ok(()) listed Ok(()) outside {denied}"
-            )),
+            output.contains(&format!("inside Ok(()) listed Ok(()) outside {denied}")),
             "{output}"
         );
         assert!(output.contains(&format!("written {denied}")), "{output}");

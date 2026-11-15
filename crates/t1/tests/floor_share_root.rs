@@ -39,8 +39,8 @@ const EROFS: &str = "error 30";
 /// process, because another run of this suite may share the target
 /// directory.
 fn tree() -> PathBuf {
-    let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("floor-share-root-{}", process::id()));
+    let base =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("floor-share-root-{}", process::id()));
     let _ = fs::remove_dir_all(&base);
     let root = base.join("root");
     fs::create_dir_all(root.join("dir")).unwrap();
@@ -152,7 +152,10 @@ fn floor_share_root() {
     assert_eq!(walked, 6, "{log}");
     assert!(!log.contains(CANARY), "{log}");
     // Nothing the guest did changed the host.
-    assert_eq!(fs::read_to_string(base.join("root/hello.txt")).unwrap(), "inside");
+    assert_eq!(
+        fs::read_to_string(base.join("root/hello.txt")).unwrap(),
+        "inside"
+    );
     assert_eq!(fs::read_to_string(&secret).unwrap(), CANARY);
     assert!(!base.join("root/new.txt").exists());
     let _ = fs::remove_dir_all(&base);
@@ -166,18 +169,25 @@ fn children(pid: u32) -> Vec<String> {
     tasks
         .flatten()
         .filter_map(|task| fs::read_to_string(task.path().join("children")).ok())
-        .flat_map(|list| list.split_whitespace().map(String::from).collect::<Vec<_>>())
+        .flat_map(|list| {
+            list.split_whitespace()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
 #[test]
 fn a_machine_with_no_share_starts_no_share_server() {
-    let home = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("floor-share-none-{}", process::id()));
+    let home =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("floor-share-none-{}", process::id()));
     let _ = fs::remove_dir_all(&home);
     let store = Store::new(home.join(".local/share/ap"));
     store
-        .put(fetch::kernel().sha256, File::open(kernel::vmlinux()).unwrap())
+        .put(
+            fetch::kernel().sha256,
+            File::open(kernel::vmlinux()).unwrap(),
+        )
         .unwrap();
     let mut ap = Command::new(guest_binary::ap())
         .args(["boot", "--timeout", "30", "--", "/init", "--version"])

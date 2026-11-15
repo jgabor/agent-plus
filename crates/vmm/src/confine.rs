@@ -450,7 +450,11 @@ mod tests {
     #[test]
     fn the_share_server_reads_files_beneath_what_it_holds() {
         for number in [PREAD64, GETDENTS64, LSEEK, FSTAT, FSTATFS, CLOSE] {
-            assert_eq!(share_call(number, [4, 0, 0, 0, 0, 0]), RET_ALLOW, "{number}");
+            assert_eq!(
+                share_call(number, [4, 0, 0, 0, 0, 0]),
+                RET_ALLOW,
+                "{number}"
+            );
         }
         assert_eq!(share_call(FCNTL, [4, F_GETFD, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(OPENAT2, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
@@ -465,13 +469,28 @@ mod tests {
         for number in [OPENAT, 2, FORK, VFORK, EXECVE, EXECVEAT, CLONE, CLONE3] {
             assert_eq!(share_call(number, [0; 6]), RET_KILL_PROCESS, "{number}");
         }
-        assert_eq!(share_call(OPENAT2, [AT_FDCWD, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        assert_eq!(share_call(READLINKAT, [AT_FDCWD, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            share_call(OPENAT2, [AT_FDCWD, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(READLINKAT, [AT_FDCWD, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
         assert_eq!(share_call(READ, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
         assert_eq!(share_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        assert_eq!(share_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]), RET_KILL_PROCESS);
-        assert_eq!(share_call(IOCTL, [0, TIOCSTI, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        assert_eq!(share_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            share_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(IOCTL, [0, TIOCSTI, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
     }
 
     #[test]

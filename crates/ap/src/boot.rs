@@ -961,7 +961,9 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
                 self.disks[slot - 1].0.read(offset, data);
             }
             Some((slot, offset)) if slot <= self.disks.len() + self.shares.len() => {
-                self.shares[slot - 1 - self.disks.len()].0.read(offset, data);
+                self.shares[slot - 1 - self.disks.len()]
+                    .0
+                    .read(offset, data);
             }
             _ => data.fill(0xff),
         }

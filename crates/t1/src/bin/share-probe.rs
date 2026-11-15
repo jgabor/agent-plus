@@ -68,7 +68,10 @@ fn main() {
         ("change", done(fs::write(share.join("hello.txt"), b"x"))),
         ("mkdir", done(fs::create_dir(share.join("new")))),
         ("remove", done(fs::remove_file(share.join("hello.txt")))),
-        ("rename", done(fs::rename(share.join("link"), share.join("moved")))),
+        (
+            "rename",
+            done(fs::rename(share.join("link"), share.join("moved"))),
+        ),
     ] {
         out.push_str(&format!("{name}: {result}\n"));
     }

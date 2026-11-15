@@ -44,13 +44,7 @@ const SOL_SOCKET: c_int = 1;
 const SO_RCVTIMEO: c_int = 20;
 
 unsafe extern "C" {
-    fn setsockopt(
-        fd: c_int,
-        level: c_int,
-        name: c_int,
-        value: *const c_void,
-        len: u32,
-    ) -> c_int;
+    fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const c_void, len: u32) -> c_int;
 }
 
 /// Where requests go: the share server, or a stand-in for one.

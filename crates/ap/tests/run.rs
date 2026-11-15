@@ -384,3 +384,67 @@ fn a_relative_share_fails_once_the_build_context_is_a_link() {
         SHARES_CHECKED,
     );
 }
+
+// spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.
+#[test]
+fn a_run_with_ro_and_rw_directory_shares_gets_past_its_checks() {
+    let scratch = Scratch::new("share-modes");
+    let dir = scratch.root.join("modes");
+    fs::create_dir_all(dir.join("notes")).unwrap();
+    fs::create_dir_all(dir.join("work")).unwrap();
+    scratch.build(
+        "modes",
+        &format!("{RUNNABLE}SHARE ./notes /srv/notes ro\nSHARE ./work rw\n"),
+    );
+    let output = scratch.ap(&["run", "modes", "-p", "hi"], &[]);
+    assert_eq!(output.status.code(), Some(FAILED), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(PAST_CHECKS), "{stderr}");
+}
+
+#[test]
+fn a_copy_on_write_or_file_share_is_not_built_yet() {
+    let scratch = Scratch::new("share-not-built");
+    let dir = scratch.root.join("file");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("notes.txt"), "one").unwrap();
+    scratch.build("file", &format!("{RUNNABLE}SHARE ./notes.txt ro\n"));
+    refused(
+        &scratch.ap(&["run", "file", "-p", "hi"], &[]),
+        "`SHARE ./notes.txt`: sharing a file is not built yet",
+    );
+    fs::create_dir_all(scratch.root.join("cow/app")).unwrap();
+    scratch.build("cow", &format!("{RUNNABLE}SHARE ./app\n"));
+    refused(
+        &scratch.ap(&["run", "cow", "-p", "hi"], &[]),
+        "`SHARE ./app`: a copy-on-write `SHARE` is not built yet",
+    );
+}
+
+// spec(SHARE): A destination that overlaps another one fails the run.
+#[test]
+fn a_run_whose_share_destinations_overlap_fails() {
+    let scratch = Scratch::new("share-overlap");
+    let dir = scratch.root.join("overlap");
+    fs::create_dir_all(dir.join("a")).unwrap();
+    fs::create_dir_all(dir.join("b")).unwrap();
+    scratch.build(
+        "overlap",
+        &format!("{RUNNABLE}SHARE ./a /data ro\nSHARE ./b /srv ro\n"),
+    );
+    // A build refuses overlapping destinations, so the record is changed
+    // as a share that only the run adds would change it.
+    let agents = ::store::Agents::new(scratch.home.join(".local/share/ap"));
+    let mut agent = agents.get("overlap").unwrap().unwrap();
+    let share = agent
+        .declared
+        .iter_mut()
+        .find(|declared| declared.arguments.first().is_some_and(|source| source == "./b"))
+        .unwrap();
+    share.arguments[1] = "/data/b".to_owned();
+    agents.record(&agent, true).unwrap();
+    refused(
+        &scratch.ap(&["run", "overlap", "-p", "hi"], &[]),
+        "the destination `/data/b` overlaps `/data`",
+    );
+}

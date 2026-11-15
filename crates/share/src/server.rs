@@ -689,15 +689,23 @@ impl Share {
         Ok(out)
     }
 
+    /// Refuses a change through an open file that is fixed, or has gained
+    /// another name since it was opened.
+    fn changes(&self, handle: &Handle) -> Result<(), i32> {
+        let fixed = self.node(handle.node)?.place == Place::Fixed;
+        if fixed || aliased(&sys::fstat(handle.fd.as_fd()).map_err(errno)?) {
+            return Err(libc::EPERM);
+        }
+        Ok(())
+    }
+
     /// `struct fuse_write_in`, then the data.
     fn write(&self, body: &[u8]) -> Answer {
         let handle = self.handle(body)?;
         let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
         let size = u32_at(body, 16).ok_or(libc::EINVAL)? as usize;
         let data = body.get(40..40 + size).ok_or(libc::EINVAL)?;
-        if self.node(handle.node)?.place == Place::Fixed {
-            return Err(libc::EPERM);
-        }
+        self.changes(handle)?;
         let len = sys::pwrite(handle.fd.as_fd(), data, offset).map_err(errno)?;
         let mut out = (len as u32).to_le_bytes().to_vec();
         out.extend([0; 4]);
@@ -887,9 +895,7 @@ impl Share {
         let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
         let len = u64_at(body, 16).ok_or(libc::EINVAL)?;
         let mode = u32_at(body, 24).ok_or(libc::EINVAL)? as i32;
-        if self.node(handle.node)?.place == Place::Fixed {
-            return Err(libc::EPERM);
-        }
+        self.changes(handle)?;
         sys::fallocate(handle.fd.as_fd(), mode, offset, len).map_err(errno)?;
         Ok(Vec::new())
     }

@@ -673,6 +673,18 @@ fn a_file_with_another_name_can_t_be_changed_in_place() {
     guest.link(hello, dir, b"again").unwrap();
     assert_eq!(guest.overwrite("hello.txt", b"more"), Err(EPERM));
     assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), b"agent");
+    // Nor does a file open from before the link, even to append.
+    let (file, handle) = guest.create(1, b"open.txt", O_APPEND).unwrap();
+    assert_eq!(guest.write(handle, 0, b"one"), Ok(3));
+    fs::hard_link(tree.root.join("open.txt"), tree.root.join("Agentfile.copy")).unwrap();
+    assert_eq!(guest.write(handle, 0, b"two"), Err(EPERM));
+    let mut range = handle.to_le_bytes().to_vec();
+    for value in [0u64, 4096] {
+        range.extend(value.to_le_bytes());
+    }
+    range.extend([0; 8]);
+    assert_eq!(guest.call(43, file, &range).0, EPERM);
+    assert_eq!(fs::read(tree.root.join("open.txt")).unwrap(), b"one");
 }
 
 #[test]
@@ -692,7 +704,7 @@ fn files_in_a_git_directory_beneath_modules_still_change() {
     );
 }
 
-// spec(SHARE): An agent's first POSIX lock on a file fails if the name the agent opened the file by is gone.
+// spec(SHARE): An agent's first POSIX lock on a file fails if the name the agent last reached the file by is gone.
 #[test]
 fn a_first_lock_needs_the_file_s_name() {
     let tree = Tree::new("lock-unlinked");

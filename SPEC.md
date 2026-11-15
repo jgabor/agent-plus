@@ -1403,8 +1403,8 @@ How it works:
 - A lock that would wait for another holder fails at once with an
   `Operation not supported` error, because the agent's machine waits for
   each answer from your host.
-- An agent's first POSIX lock on a file fails if the name the agent opened
-  the file by is gone.
+- An agent's first POSIX lock on a file fails if the name the agent last
+  reached the file by is gone.
 
 In `rw` shares, the files your host acts on are read-only to the agent.
 

@@ -64,6 +64,9 @@ fn main() -> ExitCode {
     if program.as_deref() == Some(OsStr::new(ap::runs::RUN_PROCESS)) {
         return ExitCode::from(ap::runs::run_process(&args));
     }
+    if program.as_deref() == Some(OsStr::new(share::PROGRAM)) {
+        return ExitCode::from(share::main(&args));
+    }
     if program.as_deref() == Some(OsStr::new(ap::runs::CLEANUP)) {
         return ExitCode::from(ap::runs::cleanup(&args));
     }

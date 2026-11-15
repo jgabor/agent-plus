@@ -31,6 +31,7 @@ const MS_RDONLY: c_ulong = 1;
 const MS_MOVE: c_ulong = 8192;
 const MS_NOSUID: c_ulong = 2;
 const MS_NOEXEC: c_ulong = 8;
+const MS_NODEV: c_ulong = 4;
 const O_RDWR: c_int = 2;
 const O_NOCTTY: c_int = 0o400;
 const O_CLOEXEC: c_int = 0o2000000;
@@ -316,6 +317,17 @@ fn poll_retrying(fds: &mut [PollFd]) -> io::Result<()> {
 }
 
 /// Connects to `port` on the host over vsock.
+/// Mounts the share whose device has `tag` at `target`, which it creates.
+/// Its files keep their modes, but the guest makes no device of a device
+/// file, and runs no program as its owner.
+pub fn mount_share(tag: &str, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    let target = target
+        .to_str()
+        .ok_or_else(|| io::Error::other("a share's guest path isn't text"))?;
+    mount_with(tag, target, "virtiofs", MS_NOSUID | MS_NODEV, "")
+}
+
 pub fn connect_to_host(port: u32) -> io::Result<File> {
     // SAFETY: this call takes no pointers.
     let fd = checked(unsafe { socket(AF_VSOCK, SOCK_STREAM, 0) })?;

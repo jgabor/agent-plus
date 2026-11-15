@@ -127,6 +127,58 @@ pub fn restrict(roots: &[(BorrowedFd, Access)]) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, File, OpenOptions};
+    use std::os::fd::AsFd;
+    use std::path::Path;
+    use std::process::Command;
+
+    const ROOT_VARIABLE: &str = "AP_SHARE_LANDLOCK_ROOT";
+
+    /// Restricts itself to a root, then tries files inside and outside it.
+    /// It does nothing in a normal test run.
+    #[test]
+    fn restricted_process() {
+        let Some(base) = std::env::var_os(ROOT_VARIABLE) else {
+            return;
+        };
+        let base = Path::new(&base);
+        let root = File::open(base.join("root")).unwrap();
+        assert!(restrict(&[(root.as_fd(), Access::Read)]).unwrap());
+        let inside = fs::read(base.join("root/inside")).map(drop);
+        let listed = fs::read_dir(base.join("root")).map(drop);
+        let outside = fs::read(base.join("outside")).map(drop);
+        let written = OpenOptions::new()
+            .write(true)
+            .open(base.join("root/inside"))
+            .map(drop);
+        println!("inside {inside:?} listed {listed:?} outside {outside:?} written {written:?}");
+    }
+
+    #[test]
+    fn a_restricted_process_reads_only_beneath_its_roots() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/landlock-test")
+            .join(std::process::id().to_string());
+        fs::create_dir_all(base.join("root")).unwrap();
+        fs::write(base.join("root/inside"), "in").unwrap();
+        fs::write(base.join("outside"), "out").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["landlock::tests::restricted_process", "--exact"])
+            .args(["--nocapture", "--test-threads=1"])
+            .env(ROOT_VARIABLE, &base)
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&base);
+        let output = String::from_utf8_lossy(&output.stdout);
+        let denied = "Err(Os { code: 13, kind: PermissionDenied";
+        assert!(
+            output.contains(&format!(
+                "inside Ok(()) listed Ok(()) outside {denied}"
+            )),
+            "{output}"
+        );
+        assert!(output.contains(&format!("written {denied}")), "{output}");
+    }
 
     #[test]
     fn each_version_handles_the_rights_it_knows() {

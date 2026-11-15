@@ -13,6 +13,7 @@ guest = { path = "../guest" }
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 erofs = { path = "../erofs" }
+share = { path = "../share" }
 store = { path = "../store" }
 
 [lints.cargo]

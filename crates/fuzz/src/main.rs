@@ -3,7 +3,12 @@
 //! and adds no C to the tree. A run is reproduced by passing its seed again.
 
 use std::env;
+use std::fs::{self, File};
+use std::os::fd::OwnedFd;
+use std::os::unix::fs::symlink;
 use std::panic;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vmm::GuestMemory;
@@ -23,7 +28,7 @@ struct Target {
 }
 
 /// Network rules join this list when they exist.
-const TARGETS: [Target; 2] = [
+const TARGETS: [Target; 3] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -82,6 +87,31 @@ const TARGETS: [Target; 2] = [
             "set 0x84 1 4\n",
             "set 0x30 1 4\n",
             "mem 0x2000 0x90000\n",
+        ],
+    },
+    Target {
+        name: "fuse",
+        check: |input| {
+            fuse_input(input);
+        },
+        corpus: &[
+            "",
+            // INIT, then a file looked up, opened, read, and released.
+            concat!(
+                "26 0 w:7 w:31 w:65536 w:4294967295\n1 1 hello.txt\n",
+                "14 2 w:0 w:0\n15 0 1 0 w:4096\n18 0 1 0\n",
+            ),
+            // A directory listed.
+            "26 0 w:7 w:31 w:0 w:0\n1 1 dir\n27 2 0\n28 0 1 0 w:4096\n1 2 nested.txt\n",
+            // Symlinks read, and followed as directories.
+            "1 1 escape\n5 2\n1 2 secret\n1 1 absolute\n5 3\n14 3 w:0 w:0\n",
+            // Forgetting, and a write.
+            "1 1 hello.txt\n2 2 1\n3 2 0 0\n42 0 w:1 w:0 2 1\n16 2 1 0 w:5 w:0\n",
+        ],
+        words: &[
+            "\n", " ", "1 ", "2 ", "3 ", "w:0 ", "w:2 ", "w:65536 ", "0xffffffffffffffff ",
+            "..", ".", "/", "hello.txt", "escape", "absolute", "dirlink", "dir", "secret",
+            "14 ", "15 ", "27 ", "28 ", "1 1 ", "5 ",
         ],
     },
 ];
@@ -167,6 +197,109 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
     }
     device.signal_used();
     accepted
+}
+
+const CANARY: &[u8] = b"canary: a host file outside the share";
+const INSIDE: &[u8] = b"inside the share";
+
+/// A share's root, beside a host file that no answer may hold. Every run
+/// makes the same tree, so runs at once can share it.
+fn fuse_tree() -> &'static Path {
+    static TREE: OnceLock<PathBuf> = OnceLock::new();
+    TREE.get_or_init(|| {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fuzz-share");
+        let root = base.join("root");
+        fs::create_dir_all(root.join("dir")).expect("the fuzz tree");
+        fs::create_dir_all(base.join("outside")).expect("the fuzz tree");
+        let secret = base.join("outside/secret");
+        let files = [
+            (secret.clone(), CANARY),
+            (root.join("hello.txt"), INSIDE),
+            (root.join("dir/nested.txt"), INSIDE),
+        ];
+        for (path, contents) in files {
+            if fs::read(&path).ok().as_deref() != Some(contents) {
+                fs::write(&path, contents).expect("the fuzz tree");
+            }
+        }
+        let links = [
+            (PathBuf::from("../outside/secret"), "escape"),
+            (secret, "absolute"),
+            (PathBuf::from("../outside"), "dirlink"),
+        ];
+        for (target, name) in links {
+            match symlink(target, root.join(name)) {
+                Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => {
+                    panic!("the fuzz tree: {error}")
+                }
+                _ => {}
+            }
+        }
+        base
+    })
+}
+
+/// Plays a guest that sends the share server FUSE requests: each line is an
+/// opcode, a node, and a body, whose words are a `u64` each, a `u32` after
+/// `w:`, or a name ending in a NUL. Panics if an answer is malformed, holds
+/// the host file outside the root, or the share changed. Returns how many
+/// requests got an answer without an error.
+fn fuse_input(input: &str) -> usize {
+    let root = File::open(fuse_tree().join("root")).expect("the fuzz root");
+    let mut server = share::Server::new(vec![(OwnedFd::from(root), share::Mode::ReadOnly)])
+        .expect("the share server");
+    fuse_input_with(&mut server, input)
+}
+
+fn fuse_input_with(server: &mut share::Server, input: &str) -> usize {
+    let mut answered = 0;
+    for (unique, line) in (1u64..).zip(input.lines()) {
+        let mut words = line.split(' ');
+        let (Some(opcode), Some(node)) = (number(words.next()), number(words.next())) else {
+            continue;
+        };
+        let mut body = Vec::new();
+        for word in words {
+            match (word.strip_prefix("w:"), number(Some(word))) {
+                (Some(value), _) => match number(Some(value)) {
+                    Some(value) => body.extend((value as u32).to_le_bytes()),
+                    None => body.extend(word.as_bytes()),
+                },
+                (None, Some(value)) => body.extend(value.to_le_bytes()),
+                (None, None) => {
+                    body.extend(word.as_bytes());
+                    body.push(0);
+                }
+            }
+        }
+        let mut request = Vec::new();
+        request.extend(((40 + body.len()) as u32).to_le_bytes());
+        request.extend((opcode as u32).to_le_bytes());
+        request.extend(unique.to_le_bytes());
+        request.extend(node.to_le_bytes());
+        request.extend([0; 16]);
+        request.extend(body);
+        let answer = server.answer(0, &request);
+        if answer.is_empty() {
+            continue;
+        }
+        assert_eq!(answer.len(), u32_at(&answer, 0) as usize, "{line:?}");
+        assert_eq!(answer[8..16], unique.to_le_bytes(), "{line:?}");
+        assert!(
+            !answer.windows(CANARY.len()).any(|window| window == CANARY),
+            "{line:?} reached outside the share"
+        );
+        if u32_at(&answer, 4) == 0 {
+            answered += 1;
+        }
+    }
+    let hello = fs::read(fuse_tree().join("root/hello.txt")).expect("the fuzz root");
+    assert_eq!(hello, INSIDE, "the share changed");
+    answered
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
 }
 
 struct Random(u64);
@@ -377,6 +510,31 @@ mod tests {
         let corpus = TARGETS[1].corpus;
         assert_eq!(device_input(corpus[1]), 1);
         assert_eq!(device_input(corpus[2]), 0);
+    }
+
+    #[test]
+    fn the_fuse_corpus_reaches_the_files() {
+        let corpus = TARGETS[2].corpus;
+        assert_eq!(fuse_input(corpus[0]), 0);
+        // INIT, the lookup, the open, the read, and the release.
+        assert_eq!(fuse_input(corpus[1]), 5);
+        assert_eq!(fuse_input(corpus[2]), 5);
+        // Two lookups and their links, and nothing through a symlink.
+        assert_eq!(fuse_input(corpus[3]), 4);
+        // The lookup, and nothing for a node once it is forgotten.
+        assert_eq!(fuse_input(corpus[4]), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "reached outside the share")]
+    fn an_answer_holding_the_outside_file_is_found() {
+        // A root that holds the host file stands in for a server that
+        // escaped it.
+        let outside = fuse_tree().join("outside");
+        let root = File::open(outside).unwrap();
+        let mut server =
+            share::Server::new(vec![(OwnedFd::from(root), share::Mode::ReadOnly)]).unwrap();
+        fuse_input_with(&mut server, "1 1 secret\n14 2 w:0 w:0\n15 0 1 0 w:4096\n");
     }
 
     #[test]

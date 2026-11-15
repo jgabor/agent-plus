@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 agentfile = { path = "../agentfile" }
+share = { path = "../share" }
 vmm = { path = "../vmm" }
 
 [lints.cargo]

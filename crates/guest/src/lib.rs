@@ -4,6 +4,7 @@ pub mod agent;
 pub mod linux;
 pub mod protocol;
 pub mod root;
+pub mod share;
 
 use std::ffi::{CStr, c_ulong};
 use std::io;

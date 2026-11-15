@@ -198,6 +198,8 @@ fn share_server_rules(socket: RawFd) -> Vec<Rule> {
         Allow(FSTAT),
         Allow(FSTATFS),
         Allow(CLOSE),
+        // Rust checks a descriptor this way before it closes it.
+        AllowIf(FCNTL, 1, vec![F_GETFD]),
         AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
@@ -450,6 +452,7 @@ mod tests {
         for number in [PREAD64, GETDENTS64, LSEEK, FSTAT, FSTATFS, CLOSE] {
             assert_eq!(share_call(number, [4, 0, 0, 0, 0, 0]), RET_ALLOW, "{number}");
         }
+        assert_eq!(share_call(FCNTL, [4, F_GETFD, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(OPENAT2, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(READLINKAT, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
@@ -468,6 +471,7 @@ mod tests {
         assert_eq!(share_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
         assert_eq!(share_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]), RET_KILL_PROCESS);
         assert_eq!(share_call(IOCTL, [0, TIOCSTI, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(share_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]), RET_KILL_PROCESS);
     }
 
     #[test]

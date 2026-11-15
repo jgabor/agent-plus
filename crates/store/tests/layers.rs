@@ -343,9 +343,9 @@ fn a_layer_knows_its_level() {
     assert_eq!(layers.get(DATA_SHA256).unwrap(), DATA);
 }
 
-// spec(Build): A run reads each layer from an uncompressed copy in the store, which the first run that needs the layer makes.
+// spec(Build): A run reads each layer from an uncompressed copy in the store, which the first run that needs the layer makes, after checking the layer against its digest.
 #[test]
-fn a_layer_opens_as_an_uncompressed_copy_made_once() {
+fn a_layer_opens_as_an_uncompressed_copy() {
     let dir = empty_root("open");
     let root = store_root(&dir);
     let layers = Layers::new(&root);
@@ -366,14 +366,25 @@ fn a_layer_opens_as_an_uncompressed_copy_made_once() {
         files(&root.join("plain-layers")),
         std::slice::from_ref(&digest)
     );
-    // A later open reads the copy, and doesn't make it again.
-    fs::write(&copy, b"the copy").unwrap();
+}
+
+// spec(Build): Later runs read the copy as it is, without checking it again.
+#[test]
+fn a_later_open_reads_the_copy_as_it_is() {
+    let dir = empty_root("open-again");
+    let root = store_root(&dir);
+    let layers = Layers::new(&root);
+    let digest = layers.put(&sample(), 3).unwrap();
+    layers.open(&digest).unwrap();
+    fs::write(root.join("plain-layers").join(&digest), b"the copy").unwrap();
+
     let mut again = Vec::new();
     layers
         .open(&digest)
         .unwrap()
         .read_to_end(&mut again)
         .unwrap();
+
     assert_eq!(again, b"the copy");
 }
 

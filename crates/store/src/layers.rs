@@ -149,8 +149,16 @@ impl Layers {
         // Another run may have finished first. Its copy holds the same
         // bytes, so replacing it is harmless.
         fs::rename(&partial.0, &path)?;
+        let copy = File::open(&path)?;
+        // Freeing removes the layer, then its copy. A layer freed while this
+        // made the copy is gone by now, so the copy goes too, and this run
+        // keeps reading what it opened.
+        if !self.path(digest).try_exists()? {
+            self.remove_copy(digest)?;
+            return Ok(copy);
+        }
         sync_up_from(&self.plain)?;
-        File::open(&path)
+        Ok(copy)
     }
 
     /// Removes the uncompressed copy of the layer with this digest, if there

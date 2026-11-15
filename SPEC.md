@@ -379,7 +379,9 @@ directory) and writes an image into the local store.
   a layer only when no agent or active run still needs it, and no repository
   an agent kept still depends on it (see [REPO](#repo)). A run reads each
   layer from an uncompressed copy in the store, which the first run that
-  needs the layer makes. A layer's copy is freed with the layer.
+  needs the layer makes, after checking the layer against its digest. Later
+  runs read the copy as it is, without checking it again. A layer's copy is
+  freed with the layer.
 - **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile. It
   records the resolved harness version and digest, the OS image digest, the
   commit for every source, and the digest of every file `ap` downloads.

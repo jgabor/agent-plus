@@ -18,6 +18,10 @@
 //! runtime directory, and keeps it until it exits. It talks to the run
 //! process over a socket pair of its own.
 //!
+//! A run with shares has a third process, the share server, which `ap run`
+//! starts with the roots it opened. The run process inherits the VMM's end
+//! of the server's socket, and the only one, so the server ends with it.
+//!
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes. The
 //! run process sends the harness's output, unfiltered, then how the run
@@ -60,7 +64,7 @@ use std::time::{Duration, Instant};
 
 use guest::protocol::{Exec, MAX_OUTPUT, Size, Start, ToGuest, ToHost};
 
-use crate::boot::{self, EXEC_WINDOW, Error, Input, Layer, Report};
+use crate::boot::{self, EXEC_WINDOW, Error, Input, Layer, Report, Shares};
 
 /// The `argv[0]` that starts `ap` as a run process.
 pub const RUN_PROCESS: &str = "ap-run-process";
@@ -524,7 +528,9 @@ impl Execs {
 
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
 /// process id is the first argument, for the run named by the second, with
-/// its end of a socket pair with `ap run` as its standard input. It returns
+/// its end of a socket pair with `ap run` as its standard input. A run with
+/// shares has a third argument: the number of an inherited descriptor, the
+/// VMM's end of the share server's socket. It returns
 /// the status to exit with, which nobody reads, because it reports how the
 /// run ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
@@ -536,10 +542,17 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if args.len() != 2 || orphaned {
+    if !(2..=3).contains(&args.len()) || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
+    let shares = match args.get(2).map(|fd| fd.to_str()?.parse::<i32>().ok()) {
+        None => None,
+        // SAFETY: `ap run` passed this descriptor for this process alone,
+        // and nothing else in it owns it.
+        Some(Some(fd)) if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+        Some(_) => return 125,
+    };
     // SAFETY: `ap run` passes its socket as standard input, and nothing else
     // in this process uses it.
     let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
@@ -552,7 +565,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         return 125;
     };
     let output = Arc::new(ToRun::new(output));
-    let end = match serve(&args[1].to_string_lossy(), &stream, &output) {
+    let end = match serve(&args[1].to_string_lossy(), &stream, shares, &output) {
         Ok(status) => End::Exited(status),
         Err(error) => End::Failed(error.exit_code(), error.to_string()),
     };
@@ -594,8 +607,13 @@ fn record_exit(status: u8) {
 
 /// Locks the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, and boots the agent with its output sent to
-/// `output`.
-fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Error> {
+/// `output`, and with the shares the server at the end of `shares` serves.
+fn serve(
+    name: &str,
+    stream: &UnixStream,
+    shares: Option<OwnedFd>,
+    output: &Arc<ToRun>,
+) -> Result<u8, Error> {
     let root = crate::store::default_root(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
@@ -659,8 +677,13 @@ fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Err
         Arc::clone(output),
         start.terminal.is_some(),
     );
+    let shares = match (shares, start.shares.len()) {
+        (None, 0) => None,
+        (Some(socket), count @ 1..) => Some(Shares { socket, count }),
+        _ => return Err(lost(bad_message())),
+    };
     let output = Arc::clone(output);
-    boot::boot_agent(TIMEOUT, layers, start, Some(&input), move |report| {
+    let report = move |report: Report| {
         let mut message = Vec::new();
         match report {
             Report::Ready(_) => return,
@@ -683,7 +706,8 @@ fn serve(name: &str, stream: &UnixStream, output: &Arc<ToRun>) -> Result<u8, Err
             Report::ExecTook(id) => push_exec_frame(&mut message, id, TOOK, &[]),
         }
         output.send(&message);
-    })
+    };
+    boot::boot_agent(TIMEOUT, layers, shares, start, Some(&input), report)
 }
 
 /// What the run process writes to `ap run`: what the run does, then how it

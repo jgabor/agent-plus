@@ -10,6 +10,10 @@
 //! guest, and your terminal is put in raw mode for as long as the run lasts,
 //! so every key reaches the harness. Its resizes follow.
 //!
+//! An agent's `ro` and `rw` directory shares are checked again, then opened,
+//! and a share server serves those handles to the run. The guest mounts each
+//! at the place SPEC.md's Paths section gives it.
+//!
 //! Only an agent with `NETWORK -` runs. Everything else on #297's list of
 //! what isn't built yet fails with 125 and says so, before any VM starts.
 
@@ -18,7 +22,7 @@ use std::ffi::OsString;
 use std::fs::{DirBuilder, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,7 +33,10 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentfile::{Files, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, Sign};
+use agentfile::{
+    Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, ShareMode,
+    Sign,
+};
 use ap::boot::Error;
 use ap::filter::Filter;
 use ap::paths::HostPath;
@@ -62,8 +69,7 @@ const FLAGS_NOT_BUILT: [&str; 6] = [
 
 /// The instructions a run can't honor yet. `ap build` refuses the ones that
 /// need a fetch, so an agent that has them can't be built either.
-const NOT_BUILT: [&str; 11] = [
-    "SHARE",
+const NOT_BUILT: [&str; 10] = [
     "SECRET",
     "AUTH",
     "PERSIST",
@@ -130,7 +136,9 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
-    match start(args).and_then(|(root, layers, start)| run_agent(&root, args, &layers, start)) {
+    let started = start(args)
+        .and_then(|(root, layers, shares, start)| run_agent(&root, args, &layers, &shares, start));
+    match started {
         Ok(status) => status,
         Err(error) => {
             eprintln!("ap: {error}");
@@ -140,8 +148,15 @@ pub fn run(args: &Args) -> u8 {
 }
 
 /// Names the run, starts its processes, and relays its output, filtered,
-/// until it ends.
-fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Result<u8, Error> {
+/// until it ends. `shares` are the opened roots of its shares, in share
+/// order.
+fn run_agent(
+    root: &Path,
+    args: &Args,
+    layers: &[LayerName],
+    shares: &[(File, share::Mode<File>)],
+    start: Start,
+) -> Result<u8, Error> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
@@ -175,15 +190,47 @@ fn run_agent(root: &Path, args: &Args, layers: &[LayerName], start: Start) -> Re
         .map_err(fail("can't start the run's cleanup"))?;
     let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
     let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
-    let mut process = Command::new(exe)
+    // The share server ends once the run process, which holds the only
+    // other end of its socket, does.
+    let share_socket = match shares.is_empty() {
+        true => None,
+        false => {
+            let roots: Vec<_> = (shares.iter())
+                .map(|(root, mode)| {
+                    let mode = match mode {
+                        share::Mode::ReadOnly => share::Mode::ReadOnly,
+                        share::Mode::ReadWrite => share::Mode::ReadWrite,
+                        share::Mode::CopyOnWrite(pending) => {
+                            share::Mode::CopyOnWrite(pending.as_fd())
+                        }
+                    };
+                    (root.as_fd(), mode)
+                })
+                .collect();
+            let server = share::start(exe, &roots).map_err(fail("can't start the share server"))?;
+            let inherited = share::inheritable(server.socket.as_fd())
+                .map_err(fail("can't start the share server"))?;
+            Some(inherited)
+        }
+    };
+    let mut command = Command::new(exe);
+    command
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
-        .arg(&run.name)
+        .arg(&run.name);
+    if let Some(socket) = &share_socket {
+        command.arg(socket.as_raw_fd().to_string());
+    }
+    let mut process = command
         .stdin(OwnedFd::from(theirs))
         .stdout(held.try_clone().map_err(fail("can't start the run"))?)
         .process_group(0)
         .spawn()
         .map_err(fail("can't start the run process"))?;
+    // The command holds this process's copy of the run process's end of the
+    // socket, which must close so that the run's end reads as an end.
+    drop(command);
+    drop(share_socket);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.
     let mut log = runs
@@ -419,9 +466,12 @@ fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Re
     }
 }
 
+/// The roots of a run's shares, opened, in share order.
+type Roots = Vec<(File, share::Mode<File>)>;
+
 /// Everything the run needs before its VM starts: the store's root, the
-/// agent's layers, and how to start its harness.
-fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
+/// agent's layers, its shares' roots, and how to start its harness.
+fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> {
     let fail = |message: String| Error::Failed(message);
     if let Some(flag) = args.not_built {
         return Err(fail(format!("`ap run {flag}` is not built yet")));
@@ -471,18 +521,50 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         let messages: Vec<String> = errors.into_iter().map(|error| error.message).collect();
         fail(format!("agent {name} can't run: {}", messages.join("; ")))
     };
-    // A share is checked before it is refused, so its checks are kept now.
-    if let Some(instruction) = instructions.iter().find(|instruction| {
-        instruction.name != "SHARE" && NOT_BUILT.contains(&instruction.name.as_str())
-    }) {
+    if let Some(instruction) =
+        (instructions.iter()).find(|instruction| NOT_BUILT.contains(&instruction.name.as_str()))
+    {
         return Err(fail(format!("`{}` is not built yet", instruction.name)));
     }
     let files = Files::read(&instructions).map_err(unreadable)?;
-    if !files.share.is_empty() {
-        let home = home.clone().unwrap_or_default();
-        check_shares(&root, &record, &instructions, &files.share, &home)?;
-        return Err(fail("`SHARE` is not built yet".to_owned()));
+    let home_dir = home.clone().unwrap_or_default();
+    let checked = check_shares(&root, &record, &instructions, &files.share, &home_dir)?;
+    let mut roots = Vec::new();
+    for (share, (host, directory)) in files.share.iter().zip(&checked) {
+        let shown = format!("`SHARE {}`", agentfile::print_argument(&share.source));
+        let mode = match share.mode {
+            ShareMode::CopyOnWrite => {
+                return Err(fail(format!(
+                    "{shown}: a copy-on-write `SHARE` is not built yet. Give it `ro` or `rw`"
+                )));
+            }
+            ShareMode::ReadOnly => share::Mode::ReadOnly,
+            ShareMode::ReadWrite => share::Mode::ReadWrite,
+        };
+        if !directory {
+            return Err(fail(format!("{shown}: sharing a file is not built yet")));
+        }
+        // The share server serves this handle, so a symlink swapped in
+        // since the check fails the run instead of being followed.
+        let opened = host
+            .open()
+            .map_err(|error| fail(format!("{shown}: {error}")))?;
+        roots.push((opened, mode));
     }
+    let context_name = Path::new(&record.directory)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let placed = GuestPath::read(&instructions, context_name).map_err(unreadable)?;
+    // Each share's guest path, in share order.
+    let shares: Vec<String> = (files.share.iter())
+        .map(|share| {
+            (placed.iter())
+                .find(|placed| placed.line == share.line)
+                .map(|placed| placed.path.clone())
+                .ok_or_else(|| fail(format!("line {} has no guest path", share.line)))
+        })
+        .collect::<Result<_, _>>()?;
     let settings = Settings::read(&instructions).map_err(unreadable)?;
     let tier = match settings.os {
         Os::Minimal => None,
@@ -545,9 +627,17 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
     for (key, value) in [("HOME", HOME), ("USER", "agent"), ("LOGNAME", "agent")] {
         env.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
     }
-    let directory = files
-        .workdir
-        .map_or_else(|| HOME.to_owned(), |workdir| guest_path(&workdir.path));
+    // SPEC.md's Run section: `WORKDIR`, then the only directory share, then
+    // the agent's home.
+    let directory_shares: Vec<&String> = (shares.iter().zip(&checked))
+        .filter(|(_, (_, directory))| *directory)
+        .map(|(path, _)| path)
+        .collect();
+    let directory = match (files.workdir, &directory_shares[..]) {
+        (Some(workdir), _) => guest_path(&workdir.path),
+        (None, [only]) => (*only).clone(),
+        (None, _) => HOME.to_owned(),
+    };
     let harness = super::build::harness_path(settings.agent.harness);
     // `--` keeps a prompt that starts with `-` from reading as a flag.
     let argv = match settings.agent.harness {
@@ -607,24 +697,30 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Start), Error> {
         argv: argv.into_iter().map(String::into_bytes).collect(),
         env: env.into_iter().collect(),
         directory: directory.into_bytes(),
+        shares: shares.into_iter().map(String::into_bytes).collect(),
         prompt: args.prompt.clone(),
         terminal,
     };
-    Ok((root, layers, start))
+    Ok((root, layers, roots, start))
 }
 
 /// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a
 /// run does: a relative source needs the build context to be where it was,
 /// every source must still exist and be the kind it was at build time, and
-/// what it resolves to now must be approved, or you are asked again.
+/// what it resolves to now must be approved, or you are asked again. It
+/// returns each source as it resolves now, and whether it is a directory,
+/// in share order.
 fn check_shares(
     root: &Path,
     record: &::store::Agent,
     instructions: &[Instruction],
     shares: &[Share],
     home: &Path,
-) -> Result<(), Error> {
+) -> Result<Vec<(HostPath, bool)>, Error> {
     let fail = |message: String| Error::Failed(message);
+    if shares.is_empty() {
+        return Ok(Vec::new());
+    }
     let context = Path::new(&record.directory);
     let relative =
         |source: &str| !(source.starts_with('/') || source == "~" || source.starts_with("~/"));
@@ -647,8 +743,15 @@ fn check_shares(
         true => "directory",
         false => "file",
     };
-    let mut resolved = HashMap::new();
+    // Each source resolves once, so the shares that name it are served
+    // what its approval checks, even if it moves in between.
+    let mut resolved: HashMap<&str, (bool, HostPath)> = HashMap::new();
+    let mut checked = Vec::new();
     for share in shares {
+        if let Some((directory, host)) = resolved.get(share.source.as_str()) {
+            checked.push((host.clone(), *directory));
+            continue;
+        }
         let shown = format!("`SHARE {}`", agentfile::print_argument(&share.source));
         let host = HostPath::resolve_pinned(&share.source, context, home)
             .and_then(|host| Ok((host.is_dir()?, host)));
@@ -667,7 +770,8 @@ fn check_shares(
                 word(directory)
             )));
         }
-        resolved.insert(share.source.as_str(), host);
+        resolved.insert(share.source.as_str(), (directory, host.clone()));
+        checked.push((host, directory));
     }
     let only_shares: Vec<Instruction> = (instructions.iter())
         .filter(|instruction| instruction.name == "SHARE")
@@ -676,7 +780,7 @@ fn check_shares(
     let grants = ap::approval::grants(&only_shares, |text| {
         resolved
             .get(text)
-            .cloned()
+            .map(|(_, host)| host.clone())
             .ok_or_else(|| io::Error::other(format!("{text} wasn't resolved")))
     })
     .map_err(|errors| {
@@ -690,7 +794,8 @@ fn check_shares(
         &record.agentfile,
         grants.paths,
     )
-    .map_err(fail)
+    .map_err(fail)?;
+    Ok(checked)
 }
 
 /// An `ENV` value with its variables read from this process's environment,

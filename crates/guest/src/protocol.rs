@@ -111,6 +111,10 @@ pub struct Start {
     pub env: Vec<(Vec<u8>, Vec<u8>)>,
     /// The directory the harness starts in.
     pub directory: Vec<u8>,
+    /// Where each share is mounted, in the order the host lists them. The
+    /// share at index `i` is the device that [`crate::share::tag`] names
+    /// for `i`. Each path is absolute.
+    pub shares: Vec<Vec<u8>>,
     /// The prompt, which follows the last argument. `None` takes the one the
     /// agent was built with.
     pub prompt: Option<Vec<u8>>,
@@ -221,25 +225,32 @@ fn read_argv(payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
     Ok(args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect())
 }
 
-/// A start's payload: the number of arguments and the number of variables,
+/// A start's payload: the number of arguments, of variables, and of shares,
 /// each a little-endian `u32`, then the arguments, the variables as
-/// `key=value`, the directory, and the prompt if there is one. Every string
+/// `key=value`, the shares' guest paths, the directory, and the prompt if
+/// there is one. Every string
 /// ends with a NUL. A start in a terminal has its own tag, and the terminal's
 /// rows and columns, each a little-endian `u16`, before the payload.
 fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
-    if start.argv.is_empty() || start.env.iter().any(|(key, _)| !is_key(key)) {
+    let relative = |path: &Vec<u8>| !path.starts_with(b"/");
+    if start.argv.is_empty()
+        || start.env.iter().any(|(key, _)| !is_key(key))
+        || start.shares.iter().any(relative)
+    {
         return Err(ProtocolError::Malformed);
     }
     let count = |n: usize| u32::try_from(n).map_err(|_| ProtocolError::Malformed);
     let mut payload = Vec::new();
     payload.extend_from_slice(&count(start.argv.len())?.to_le_bytes());
     payload.extend_from_slice(&count(start.env.len())?.to_le_bytes());
+    payload.extend_from_slice(&count(start.shares.len())?.to_le_bytes());
     let variables = start
         .env
         .iter()
         .map(|(key, value)| [key.as_slice(), b"=", value].concat());
     let strings = (start.argv.iter().cloned())
         .chain(variables)
+        .chain(start.shares.iter().cloned())
         .chain([start.directory.clone()])
         .chain(start.prompt.clone());
     for text in strings {
@@ -259,7 +270,11 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
     let (envc, rest) = rest
         .split_first_chunk::<4>()
         .ok_or(ProtocolError::Malformed)?;
+    let (sharec, rest) = rest
+        .split_first_chunk::<4>()
+        .ok_or(ProtocolError::Malformed)?;
     let (argc, envc) = (u32::from_le_bytes(*argc), u32::from_le_bytes(*envc));
+    let sharec = u32::from_le_bytes(*sharec);
     let strings = rest.strip_suffix(&[0]).ok_or(ProtocolError::Malformed)?;
     let mut strings = strings.split(|byte| *byte == 0).map(<[u8]>::to_vec);
     // The counts come from the other side, so nothing is reserved for them.
@@ -270,19 +285,24 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         let at = at.ok_or(ProtocolError::Malformed)?;
         env.push((variable[..at].to_vec(), variable[at + 1..].to_vec()));
     }
+    let shares: Vec<Vec<u8>> = strings.by_ref().take(sharec as usize).collect();
     let directory = strings.next().ok_or(ProtocolError::Malformed)?;
     let prompt = strings.next();
-    let complete = argv.len() == argc as usize && env.len() == envc as usize;
+    let complete = argv.len() == argc as usize
+        && env.len() == envc as usize
+        && shares.len() == sharec as usize;
     if !complete || argv.is_empty() || strings.next().is_some() {
         return Err(ProtocolError::Malformed);
     }
-    if env.iter().any(|(key, _)| !is_key(key)) {
+    if env.iter().any(|(key, _)| !is_key(key)) || shares.iter().any(|path| !path.starts_with(b"/"))
+    {
         return Err(ProtocolError::Malformed);
     }
     Ok(Start {
         argv,
         env,
         directory,
+        shares,
         prompt,
         terminal,
     })

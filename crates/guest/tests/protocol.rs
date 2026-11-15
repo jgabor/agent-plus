@@ -46,6 +46,7 @@ fn start(prompt: Option<&[u8]>) -> ToGuest {
             (b"EQUALS".to_vec(), b"a=b".to_vec()),
         ],
         directory: b"/home/agent".to_vec(),
+        shares: vec![b"/srv/notes".to_vec(), b"/home/agent/work".to_vec()],
         prompt: prompt.map(<[u8]>::to_vec),
         terminal: None,
     })
@@ -174,12 +175,13 @@ fn the_format_is_a_little_endian_length_a_tag_and_a_payload() {
 }
 
 #[test]
-fn a_start_counts_its_arguments_and_variables_and_ends_each_string_with_a_nul() {
+fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a_nul() {
     let mut wire = Vec::new();
     ToGuest::Start(Start {
         argv: vec![b"h".to_vec()],
         env: vec![(b"K".to_vec(), b"v".to_vec())],
         directory: b"/d".to_vec(),
+        shares: vec![b"/s".to_vec()],
         prompt: Some(b"p".to_vec()),
         terminal: None,
     })
@@ -188,7 +190,8 @@ fn a_start_counts_its_arguments_and_variables_and_ends_each_string_with_a_nul() 
     let payload = [
         &1u32.to_le_bytes()[..],
         &1u32.to_le_bytes(),
-        b"h\0K=v\0/d\0p\0",
+        &1u32.to_le_bytes(),
+        b"h\0K=v\0/s\0/d\0p\0",
     ]
     .concat();
     assert_eq!(wire, frame(&[&[START][..], &payload].concat()));
@@ -200,6 +203,7 @@ fn a_start_counts_its_arguments_and_variables_and_ends_each_string_with_a_nul() 
             argv: vec![b"h".to_vec()],
             env: vec![(b"K".to_vec(), b"v".to_vec())],
             directory: b"/d".to_vec(),
+            shares: vec![b"/s".to_vec()],
             prompt: Some(b"p".to_vec()),
             terminal: None,
         }),
@@ -229,6 +233,7 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         argv: vec![b"h".to_vec()],
         env: Vec::new(),
         directory: b"/".to_vec(),
+        shares: Vec::new(),
         prompt: None,
         terminal: None,
     };
@@ -255,6 +260,14 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         },
         Start {
             directory: b"/\0".to_vec(),
+            ..base.clone()
+        },
+        Start {
+            shares: vec![b"/s\0".to_vec()],
+            ..base.clone()
+        },
+        Start {
+            shares: vec![b"s".to_vec()],
             ..base.clone()
         },
         Start {

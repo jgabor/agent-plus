@@ -3,8 +3,8 @@
 //!
 //! The process that runs the guest can't open a host file, so it relays the
 //! guest's FUSE requests here, over a socket made before either process is
-//! confined. This process opens each share's root once, then confines
-//! itself: it reaches files only beneath those roots, follows no symlink,
+//! confined. This process inherits each share's root, opened by the process
+//! that starts it, then confines itself: it reaches files only beneath those roots, follows no symlink,
 //! can't start a process, refuses every write to an `ro` share, and in an
 //! `rw` share refuses the writes [`server`] protects against. It writes a
 //! copy-on-write share's changes beneath that share's pending directory,
@@ -18,10 +18,10 @@ mod sys;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 pub use server::{Mode, Server};
@@ -32,6 +32,7 @@ const READ_ONLY: &str = "ro";
 const READ_WRITE: &str = "rw";
 const COPY_ON_WRITE: &str = "cow";
 const STDIN: i32 = 0;
+const STDERR: i32 = 2;
 
 /// A share server that has started, and the VMM's end of its socket.
 pub struct Started {
@@ -40,31 +41,59 @@ pub struct Started {
 }
 
 /// Starts `program`, a build of `ap`, as the share server for `roots`, in
-/// share order. Each root must be a directory, and so must a copy-on-write
-/// share's pending directory, which must be empty.
-pub fn start(program: &Path, roots: &[(PathBuf, Mode<PathBuf>)]) -> io::Result<Started> {
+/// share order. Each root is a directory that the caller opened, and so is
+/// a copy-on-write share's pending directory, which must be empty. The
+/// server serves what the caller checked, and never opens a path itself.
+pub fn start(program: &Path, roots: &[(BorrowedFd, Mode<BorrowedFd>)]) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
+    // Each root reaches the server as a descriptor it inherits, numbered in
+    // its arguments. The copies are made just for it, and closed once it
+    // has started.
+    let mut inherited = Vec::new();
+    for (root, mode) in roots {
+        inherited.push(inheritable(*root)?);
+        if let Mode::CopyOnWrite(pending) = mode {
+            inherited.push(inheritable(*pending)?);
+        }
+    }
+    let mut numbers = inherited.iter().map(|fd| fd.as_raw_fd().to_string());
     let mut command = Command::new(program);
     command.arg0(PROGRAM);
-    for (root, mode) in roots {
+    for (_, mode) in roots {
+        let mut next = || numbers.next().unwrap_or_default();
         match mode {
-            Mode::ReadOnly => command.arg(READ_ONLY).arg(root),
-            Mode::ReadWrite => command.arg(READ_WRITE).arg(root),
-            Mode::CopyOnWrite(pending) => command.arg(COPY_ON_WRITE).arg(root).arg(pending),
+            Mode::ReadOnly => command.arg(READ_ONLY).arg(next()),
+            Mode::ReadWrite => command.arg(READ_WRITE).arg(next()),
+            Mode::CopyOnWrite(_) => command.arg(COPY_ON_WRITE).arg(next()).arg(next()),
         };
     }
     let process = command
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null())
         .spawn()?;
+    drop(inherited);
     Ok(Started {
         process,
         socket: OwnedFd::from(mine),
     })
 }
 
-/// The share server's process: `args` are a mode and a root for each
-/// share, and a copy-on-write share's pending directory after its root. It serves requests from its standard input, a socket, until the
+/// A copy of `fd` that a program this process starts inherits, numbered
+/// past standard error. Make it just before the program starts, and drop
+/// it just after, so no other program inherits it.
+pub fn inheritable(fd: BorrowedFd) -> io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD` takes an open descriptor and returns a new one.
+    let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, STDERR + 1) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(copy) })
+}
+
+/// The share server's process: `args` are a mode and the number of an
+/// inherited descriptor of a root directory for each share, and for a
+/// copy-on-write share the number of its pending directory's after it. It serves requests from its standard input, a socket, until the
 /// VMM hangs up, and returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
     match run(args) {
@@ -92,24 +121,45 @@ fn run(args: &[OsString]) -> io::Result<()> {
 }
 
 fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
-    let usage =
-        || io::Error::other("usage: ap-share-server ((ro | rw) root | cow root pending)...");
-    let open = |path: &OsString| {
-        File::open(path).map(OwnedFd::from).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("can't open {}: {error}", Path::new(path).display()),
-            )
-        })
+    let usage = || {
+        io::Error::other(
+            "usage: ap-share-server ((ro | rw) descriptor | cow descriptor descriptor)...",
+        )
+    };
+    let mut taken: Vec<i32> = Vec::new();
+    let mut take = |arg: Option<&OsString>| -> io::Result<OwnedFd> {
+        let fd = (arg.and_then(|arg| arg.to_str()))
+            .and_then(|fd| fd.parse::<i32>().ok())
+            .filter(|fd| *fd > STDERR)
+            .ok_or_else(usage)?;
+        // A descriptor named twice would be owned twice.
+        if taken.contains(&fd) {
+            return Err(usage());
+        }
+        // SAFETY: this call takes and returns plain integers.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        taken.push(fd);
+        // SAFETY: the descriptor is open, `start` passed it for this
+        // process alone, and nothing else here owns it.
+        let directory = unsafe { OwnedFd::from_raw_fd(fd) };
+        let stat = sys::fstat(directory.as_fd())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(io::Error::other(format!(
+                "descriptor {fd} isn't a directory"
+            )));
+        }
+        Ok(directory)
     };
     let mut roots = Vec::new();
     let mut args = args.iter();
     while let Some(mode) = args.next() {
-        let root = open(args.next().ok_or_else(usage)?)?;
+        let root = take(args.next())?;
         let mode = match mode.to_str() {
             Some(READ_ONLY) => Mode::ReadOnly,
             Some(READ_WRITE) => Mode::ReadWrite,
-            Some(COPY_ON_WRITE) => Mode::CopyOnWrite(open(args.next().ok_or_else(usage)?)?),
+            Some(COPY_ON_WRITE) => Mode::CopyOnWrite(take(args.next())?),
             _ => return Err(usage()),
         };
         roots.push((root, mode));

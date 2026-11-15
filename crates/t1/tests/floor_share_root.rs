@@ -18,6 +18,7 @@ use share::Mode;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
+use std::os::fd::AsFd;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
@@ -73,7 +74,9 @@ fn share_owner_process() {
     let mut log = File::create(base.join("log")).unwrap();
     // The VMM's end of the socket closes with the machine, and the share
     // server ends on its own.
-    let server = share::start(&ap, &[(base.join("root"), Mode::ReadOnly)]).unwrap();
+    let root = File::open(base.join("root")).unwrap();
+    let server = share::start(&ap, &[(root.as_fd(), Mode::ReadOnly)]).unwrap();
+    drop(root);
     let files = [Entry::File {
         path: "share-probe",
         mode: 0o755,

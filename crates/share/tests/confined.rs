@@ -8,8 +8,8 @@ mod guest;
 use guest::*;
 use std::env;
 use std::ffi::OsString;
-use std::fs;
-use std::os::fd::OwnedFd;
+use std::fs::{self, File};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
 
@@ -45,7 +45,17 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     let tree = Tree::new("confined-rw");
     let other = Tree::new("confined-ro");
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let args = format!("rw\n{}\nro\n{}", tree.root.display(), other.root.display());
+    // Each root reaches the server as `share::start` passes it: a
+    // descriptor it inherits, numbered in its arguments.
+    let roots = [&tree.root, &other.root].map(|root| File::open(root).unwrap());
+    let inherited = roots
+        .each_ref()
+        .map(|root| share::inheritable(root.as_fd()).unwrap());
+    let args = format!(
+        "rw\n{}\nro\n{}",
+        inherited[0].as_raw_fd(),
+        inherited[1].as_raw_fd()
+    );
     let mut server = Command::new(env::current_exe().unwrap())
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args)
@@ -54,6 +64,7 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
+    drop(inherited);
     let mut guest = Guest::over(OwnedFd::from(mine));
     let root = tree.root.clone();
 
@@ -127,7 +138,15 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
     let pending = tree.base.join("pending");
     fs::create_dir(&pending).unwrap();
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let args = format!("cow\n{}\n{}", tree.root.display(), pending.display());
+    let dirs = [&tree.root, &pending].map(|dir| File::open(dir).unwrap());
+    let inherited = dirs
+        .each_ref()
+        .map(|dir| share::inheritable(dir.as_fd()).unwrap());
+    let args = format!(
+        "cow\n{}\n{}",
+        inherited[0].as_raw_fd(),
+        inherited[1].as_raw_fd()
+    );
     let mut server = Command::new(env::current_exe().unwrap())
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args)
@@ -136,6 +155,7 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
         .stdout(Stdio::null())
         .spawn()
         .unwrap();
+    drop(inherited);
     let mut guest = Guest::over(OwnedFd::from(mine));
 
     guest.overwrite("hello.txt", b"from the agent").unwrap();

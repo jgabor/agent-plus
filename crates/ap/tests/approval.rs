@@ -400,6 +400,10 @@ const SHARED: &str = "AGENT claude\nOS minimal\nNETWORK -\nSHARE ./data\n";
 /// What a run says once its shares pass their checks.
 const SHARES_CHECKED: &str = "`SHARE` is not built yet";
 
+/// What a run with `ro` and `rw` shares says once they pass their checks,
+/// when it reads the stand-in for the `OS minimal` layer.
+const PAST_CHECKS: &str = "can't read the layer for OS minimal";
+
 // spec(SHARE): If it now resolves somewhere you haven't approved, the run asks for approval again (see [Grants](#grants)).
 // spec(Grants): If a share now resolves somewhere you haven't approved, for example because `data` became a symlink to `~/.ssh`, the run asks again.
 // spec(SHARE): A `<src>` outside the build context, and any `rw` share, is a [grant](#grants).
@@ -480,11 +484,7 @@ fn an_rw_share_that_now_resolves_elsewhere_asks_again_at_run() {
     assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
     let run = ["run", "notes", "-p", "hi"];
     let output = scratch.ap(&dir, &run);
-    assert!(
-        stderr(&output).contains(SHARES_CHECKED),
-        "{}",
-        stderr(&output)
-    );
+    assert!(stderr(&output).contains(PAST_CHECKS), "{}", stderr(&output));
 
     // Inside the build context, an `rw` share is a grant all the same.
     fs::remove_dir(dir.join("out")).unwrap();

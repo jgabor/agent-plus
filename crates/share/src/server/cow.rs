@@ -156,6 +156,8 @@ pub(super) struct Cow {
     pending: OwnedFd,
     tree: OwnedFd,
     records: OwnedFd,
+    /// How long `records` is, so a record that fails half-written goes.
+    recorded: std::cell::Cell<u64>,
     /// What the agent made of each path it changed.
     entries: BTreeMap<Vec<u8>, Entry>,
     /// The paths with a `BASE` record.
@@ -361,6 +363,7 @@ impl Cow {
             pending,
             tree,
             records,
+            recorded: std::cell::Cell::new(0),
             entries: BTreeMap::new(),
             based: BTreeSet::new(),
             nodes: BTreeMap::from([(
@@ -467,11 +470,17 @@ impl Cow {
     fn record(&self, mut line: Vec<u8>) -> Result<(), i32> {
         line.push(b'\n');
         // The file is open to append, so this lands at its end.
-        let len = sys::pwrite(self.records.as_fd(), &line, 0).map_err(errno)?;
-        match len == line.len() {
-            true => Ok(()),
-            false => Err(libc::EIO),
+        let written = sys::pwrite(self.records.as_fd(), &line, 0);
+        if let Ok(len) = written
+            && len == line.len()
+        {
+            self.recorded.set(self.recorded.get() + len as u64);
+            return Ok(());
         }
+        // A record is a whole line or none, so the next one starts on a line
+        // of its own.
+        let _ = sys::ftruncate(self.records.as_fd(), self.recorded.get());
+        Err(written.map_or_else(errno, |_| libc::EIO))
     }
 
     /// Records that `path` is now `entry`.
@@ -1205,8 +1214,9 @@ impl Cow {
     }
 
     /// `SETATTR` for a node that is gone, through the agent's copy that a
-    /// handle holds open. Its mode has no record left to change.
-    fn setattr_open(&self, node: u64, body: &[u8]) -> Answer {
+    /// handle holds open. Its mode has no record left to change, so the
+    /// handle keeps it.
+    fn setattr_open(&mut self, node: u64, body: &[u8]) -> Answer {
         let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
         let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
         let valid = word(0)?;
@@ -1216,7 +1226,7 @@ impl Cow {
             node: open,
             mode,
             lower: false,
-        }) = self.handles.get(&handle)
+        }) = self.handles.get_mut(&handle)
         else {
             return Err(libc::ENOENT);
         };
@@ -1225,6 +1235,9 @@ impl Cow {
         }
         if valid & FATTR_SIZE != 0 {
             sys::ftruncate(fd.as_fd(), field(16)?).map_err(errno)?;
+        }
+        if valid & FATTR_MODE != 0 {
+            *mode = libc::S_IFREG | word(68)? & PERMISSIONS;
         }
         let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
         if valid & times != 0 {

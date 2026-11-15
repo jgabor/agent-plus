@@ -517,6 +517,16 @@ fn a_file_the_agent_removed_still_changes_through_its_handle() {
     body.resize(88, 0);
     assert_eq!(guest.call(SETATTR, file, &body).0, 0);
     assert_eq!(guest.read(READ, handle, 0, 64), (0, b"temp".to_vec()));
+    let mut body = (FATTR_MODE | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(handle.to_le_bytes());
+    body.resize(68, 0);
+    body.extend(0o600u32.to_le_bytes());
+    body.resize(88, 0);
+    let (error, attr) = guest.call(SETATTR, file, &body);
+    assert_eq!(error, 0);
+    let mode = u32::from_le_bytes(attr[16 + 60..16 + 64].try_into().unwrap());
+    assert_eq!(mode, S_IFREG | 0o600);
     // Your file, open for reading, never changes through a handle.
     let dir = guest.walk("dir").unwrap();
     let nested = guest.walk("dir/nested.txt").unwrap();

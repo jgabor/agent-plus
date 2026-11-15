@@ -146,10 +146,12 @@ impl Layers {
             ));
         }
         file.sync_all()?;
+        // Opened before it has its name, which another run's cleanup may
+        // remove as soon as it does.
+        let copy = File::open(&partial.0)?;
         // Another run may have finished first. Its copy holds the same
         // bytes, so replacing it is harmless.
         fs::rename(&partial.0, &path)?;
-        let copy = File::open(&path)?;
         // Freeing removes the layer, then its copy. A layer freed while this
         // made the copy is gone by now, so the copy goes too, and this run
         // keeps reading what it opened.

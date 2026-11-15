@@ -6,8 +6,10 @@
 //! confined. This process opens each share's root once, then confines
 //! itself: it reaches files only beneath those roots, follows no symlink,
 //! can't start a process, refuses every write to an `ro` share, and in an
-//! `rw` share refuses the writes [`server`] protects against. The
-//! frames on the socket are the ones [`vmm::fs`] describes.
+//! `rw` share refuses the writes [`server`] protects against. It writes a
+//! copy-on-write share's changes beneath that share's pending directory,
+//! and reads the share's root alone. The frames on the socket are the ones
+//! [`vmm::fs`] describes.
 
 mod landlock;
 mod server;
@@ -28,6 +30,7 @@ pub use server::{Mode, Server};
 pub const PROGRAM: &str = "ap-share-server";
 const READ_ONLY: &str = "ro";
 const READ_WRITE: &str = "rw";
+const COPY_ON_WRITE: &str = "cow";
 const STDIN: i32 = 0;
 
 /// A share server that has started, and the VMM's end of its socket.
@@ -37,17 +40,18 @@ pub struct Started {
 }
 
 /// Starts `program`, a build of `ap`, as the share server for `roots`, in
-/// share order. Each root must be a directory.
-pub fn start(program: &Path, roots: &[(PathBuf, Mode)]) -> io::Result<Started> {
+/// share order. Each root must be a directory, and so must a copy-on-write
+/// share's pending directory, which must be empty.
+pub fn start(program: &Path, roots: &[(PathBuf, Mode<PathBuf>)]) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     let mut command = Command::new(program);
     command.arg0(PROGRAM);
     for (root, mode) in roots {
-        let mode = match mode {
-            Mode::ReadOnly => READ_ONLY,
-            Mode::ReadWrite => READ_WRITE,
+        match mode {
+            Mode::ReadOnly => command.arg(READ_ONLY).arg(root),
+            Mode::ReadWrite => command.arg(READ_WRITE).arg(root),
+            Mode::CopyOnWrite(pending) => command.arg(COPY_ON_WRITE).arg(root).arg(pending),
         };
-        command.arg(mode).arg(root);
     }
     let process = command
         .stdin(OwnedFd::from(theirs))
@@ -60,7 +64,7 @@ pub fn start(program: &Path, roots: &[(PathBuf, Mode)]) -> io::Result<Started> {
 }
 
 /// The share server's process: `args` are a mode and a root for each
-/// share. It serves requests from its standard input, a socket, until the
+/// share, and a copy-on-write share's pending directory after its root. It serves requests from its standard input, a socket, until the
 /// VMM hangs up, and returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
     match run(args) {
@@ -75,17 +79,7 @@ pub fn main(args: &[OsString]) -> u8 {
 fn run(args: &[OsString]) -> io::Result<()> {
     let mut server = Server::new(open_roots(args)?)?;
     raise_descriptor_limit();
-    let access: Vec<_> = server
-        .roots()
-        .into_iter()
-        .map(|(root, mode)| {
-            let access = match mode {
-                Mode::ReadOnly => landlock::Access::Read,
-                Mode::ReadWrite => landlock::Access::ReadWrite,
-            };
-            (root, access)
-        })
-        .collect();
+    let access = server.access();
     landlock::restrict(&access)?;
     // SAFETY: standard input is the socket `start` passed, and nothing else
     // in this process owns it.
@@ -98,28 +92,32 @@ fn run(args: &[OsString]) -> io::Result<()> {
 }
 
 fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
-    let usage = || io::Error::other("usage: ap-share-server ((ro | rw) root)...");
-    if args.is_empty() || !args.len().is_multiple_of(2) {
+    let usage =
+        || io::Error::other("usage: ap-share-server ((ro | rw) root | cow root pending)...");
+    let open = |path: &OsString| {
+        File::open(path).map(OwnedFd::from).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("can't open {}: {error}", Path::new(path).display()),
+            )
+        })
+    };
+    let mut roots = Vec::new();
+    let mut args = args.iter();
+    while let Some(mode) = args.next() {
+        let root = open(args.next().ok_or_else(usage)?)?;
+        let mode = match mode.to_str() {
+            Some(READ_ONLY) => Mode::ReadOnly,
+            Some(READ_WRITE) => Mode::ReadWrite,
+            Some(COPY_ON_WRITE) => Mode::CopyOnWrite(open(args.next().ok_or_else(usage)?)?),
+            _ => return Err(usage()),
+        };
+        roots.push((root, mode));
+    }
+    if roots.is_empty() {
         return Err(usage());
     }
-    args.as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| {
-            let mode = match pair[0].to_str() {
-                Some(READ_ONLY) => Mode::ReadOnly,
-                Some(READ_WRITE) => Mode::ReadWrite,
-                _ => return Err(usage()),
-            };
-            let root = File::open(&pair[1]).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("can't open {}: {error}", Path::new(&pair[1]).display()),
-                )
-            })?;
-            Ok((OwnedFd::from(root), mode))
-        })
-        .collect()
+    Ok(roots)
 }
 
 /// Each file the guest looks up holds a descriptor, so the server may hold

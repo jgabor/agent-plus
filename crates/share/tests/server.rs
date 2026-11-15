@@ -593,23 +593,6 @@ fn file_locks_pass_through_to_the_host() {
     }
 }
 
-/// Whether the host can't take a lock of `kind` on the whole file now.
-fn host_locked(path: &Path, kind: i16) -> bool {
-    let file = File::options().read(true).write(true).open(path).unwrap();
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = kind;
-    // SAFETY: `lock` is a `struct flock`, which outlives the call.
-    let got = unsafe {
-        libc::fcntl(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            libc::F_OFD_GETLK,
-            &mut lock,
-        )
-    };
-    assert_eq!(got, 0);
-    lock.l_type != libc::F_UNLCK as i16
-}
-
 /// Takes a lock of `kind` on the whole file, without waiting.
 fn host_lock(file: &File, kind: i16) -> bool {
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };

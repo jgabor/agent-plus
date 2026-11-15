@@ -1,0 +1,1506 @@
+//! A copy-on-write share, which never writes the host's files.
+//!
+//! The guest sees your file wherever the agent wrote none, read live, and
+//! the agent's own copy everywhere else. Its copies live in the share's
+//! pending directory, which holds two things:
+//!
+//! - `tree`, the regular files and directories the agent changed or made,
+//!   each at its path, readable only by you. A symlink or a special file the
+//!   agent made has an empty regular file there, so nothing in it is a
+//!   symlink or a device.
+//! - `records`, a line for each change, in the Agentfile's line syntax, read
+//!   in order. Each line but `BASE` sets what its path is now, and `DELETE`
+//!   removes a path with everything beneath it:
+//!
+//!   ```text
+//!   BASE "src/main.rs" 1234 210 1794567729.123456789 1794567729.123456789
+//!   FILE "src/main.rs" 644
+//!   DIR "src/new" 755
+//!   DIR "build" 755 opaque
+//!   SYMLINK "latest" "build/out"
+//!   FIFO "pipe" 644
+//!   CHAR "null" 666 1 3
+//!   DELETE "notes.txt"
+//!   ```
+//!
+//!   `BASE` comes once for each path, before the agent first changes it,
+//!   and holds what your file was then: its inode, size, modification time,
+//!   and change time, or `none`. A change on your side since then moves the
+//!   change time, which no tool sets. An `opaque` directory hides what you
+//!   have at its path. A path is quoted, with `\"`, `\\`, and `\xNN` for a
+//!   control character or a byte that isn't UTF-8.
+//!
+//! A guest's node is a path. Each request resolves it again, one layer at a
+//! time, beneath the root or the tree, following no symlink. A directory
+//! that has your files beneath it can't be renamed, as in overlayfs, so a
+//! tool copies it, and a hard link isn't made, so a tool copies the file.
+
+use std::collections::BTreeSet;
+
+use super::*;
+
+const TREE: &CStr = c"tree";
+const RECORDS: &CStr = c"records";
+/// What a file and a directory in the pending directory allow.
+const FILE_MODE: u32 = 0o600;
+const DIR_MODE: u32 = 0o700;
+const PERMISSIONS: u32 = 0o7777;
+/// `FUSE_GETATTR_FH`: the guest asks about the file a handle has open.
+const GETATTR_FH: u32 = 1;
+const PATH_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW;
+const READ_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
+/// What the agent made of a path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Entry {
+    File {
+        mode: u32,
+    },
+    Dir {
+        mode: u32,
+        opaque: bool,
+    },
+    Symlink {
+        target: Vec<u8>,
+    },
+    /// A FIFO, a socket, or a device: its mode with its kind, and the
+    /// device, as the guest encodes it.
+    Special {
+        mode: u32,
+        rdev: u32,
+    },
+    Deleted,
+}
+
+impl Entry {
+    /// The mode the guest sees, with its kind.
+    fn mode(&self) -> u32 {
+        match self {
+            Entry::File { mode } => libc::S_IFREG | mode,
+            Entry::Dir { mode, .. } => libc::S_IFDIR | mode,
+            Entry::Symlink { .. } => libc::S_IFLNK | 0o777,
+            Entry::Special { mode, .. } => *mode,
+            Entry::Deleted => 0,
+        }
+    }
+}
+
+/// A path as the guest sees it now: the agent's entry, its copy in the
+/// tree, and your file, each opened with `O_PATH` where it shows.
+struct View {
+    entry: Option<Entry>,
+    upper: Option<OwnedFd>,
+    lower: Option<OwnedFd>,
+}
+
+impl View {
+    /// The attributes the guest sees, before the inode is the node's.
+    fn stat(&self) -> Result<libc::stat, i32> {
+        let source = match (&self.entry, &self.lower, &self.upper) {
+            (None, Some(lower), _) => lower,
+            (_, _, Some(upper)) => upper,
+            _ => return Err(libc::ENOENT),
+        };
+        let mut stat = sys::fstat(source.as_fd()).map_err(errno)?;
+        if let Some(entry) = &self.entry {
+            stat.st_mode = entry.mode();
+            match entry {
+                Entry::Symlink { target } => {
+                    stat.st_size = target.len() as i64;
+                    stat.st_blocks = 0;
+                }
+                Entry::Special { rdev, .. } => {
+                    stat.st_rdev = u64::from(*rdev);
+                    stat.st_size = 0;
+                }
+                _ => {}
+            }
+        }
+        Ok(stat)
+    }
+
+    fn is_dir(&self) -> Result<bool, i32> {
+        Ok(is(self.stat()?.st_mode, libc::S_IFDIR))
+    }
+}
+
+/// A node the guest holds: its path, or none once it is gone.
+struct Node {
+    path: Option<Vec<u8>>,
+    lookups: u64,
+}
+
+/// One entry of a directory listing.
+struct Dirent {
+    ino: u64,
+    kind: u32,
+    name: Vec<u8>,
+}
+
+enum Handle {
+    /// An open file: the agent's copy, or with `lower`, yours, which is
+    /// open for reading alone. `mode` is what the guest saw when it opened
+    /// it.
+    File {
+        fd: OwnedFd,
+        node: u64,
+        mode: u32,
+        lower: bool,
+        /// Your file, which this handle had open before the agent's copy
+        /// was made, kept so a `flock` on it holds.
+        kept: Option<OwnedFd>,
+    },
+    /// An open directory, listed when it opened.
+    Dir { entries: Vec<Dirent> },
+}
+
+pub(super) struct Cow {
+    root: OwnedFd,
+    pending: OwnedFd,
+    tree: OwnedFd,
+    records: OwnedFd,
+    /// How long `records` is, so a record that fails half-written goes.
+    recorded: std::cell::Cell<u64>,
+    /// What the agent made of each path it changed.
+    entries: BTreeMap<Vec<u8>, Entry>,
+    /// The paths with a `BASE` record.
+    based: BTreeSet<Vec<u8>>,
+    nodes: BTreeMap<u64, Node>,
+    /// The node of each path the guest holds.
+    paths: BTreeMap<Vec<u8>, u64>,
+    handles: BTreeMap<u64, Handle>,
+    /// The file that holds each guest lock owner's POSIX locks, by node and
+    /// owner.
+    locks: BTreeMap<(u64, u64), OwnedFd>,
+    /// Lock files on your file, for nodes that have the agent's copy now,
+    /// kept so their locks hold until the guest lets them go.
+    held: Vec<((u64, u64), OwnedFd)>,
+    next_node: u64,
+    next_handle: u64,
+}
+
+fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    match dir.is_empty() {
+        true => name.to_vec(),
+        false => [dir, b"/", name].concat(),
+    }
+}
+
+/// A path to open from a descriptor: `.` for the root.
+fn c(path: &[u8]) -> CString {
+    match path.is_empty() {
+        true => c".".to_owned(),
+        // Names come from `entry_name`, which holds no NUL.
+        false => CString::new(path).unwrap_or_default(),
+    }
+}
+
+/// The directory a path is in, and its name there.
+fn split(path: &[u8]) -> (&[u8], &[u8]) {
+    match path.iter().rposition(|&byte| byte == b'/') {
+        Some(at) => (&path[..at], &path[at + 1..]),
+        None => (&[], path),
+    }
+}
+
+/// Each directory above a path, from the root down.
+fn parents(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let ends = path.iter().enumerate().filter(|(_, byte)| **byte == b'/');
+    let ends = ends.map(|(at, _)| at);
+    (!path.is_empty())
+        .then_some(0)
+        .into_iter()
+        .chain(ends)
+        .map(|end| &path[..end])
+}
+
+/// Whether `path` is beneath `dir`.
+fn beneath(path: &[u8], dir: &[u8]) -> bool {
+    match dir.is_empty() {
+        true => !path.is_empty(),
+        false => path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/',
+    }
+}
+
+fn quote(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.push(b' ');
+    out.push(b'"');
+    for chunk in bytes.utf8_chunks() {
+        for c in chunk.valid().chars() {
+            match c {
+                '"' => out.extend(b"\\\""),
+                '\\' => out.extend(b"\\\\"),
+                c if c.is_ascii_control() => out.extend(format!("\\x{:02x}", c as u8).bytes()),
+                c => out.extend(c.encode_utf8(&mut [0; 4]).bytes()),
+            }
+        }
+        for byte in chunk.invalid() {
+            out.extend(format!("\\x{byte:02x}").bytes());
+        }
+    }
+    out.push(b'"');
+}
+
+/// A device as the guest's kernel encodes it, from the host's `dev_t`.
+fn encode(rdev: u64) -> u32 {
+    let (major, minor) = (libc::major(rdev), libc::minor(rdev));
+    (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)
+}
+
+/// The record that sets `path` to `entry`.
+fn line(path: &[u8], entry: &Entry) -> Vec<u8> {
+    let word = match entry {
+        Entry::File { .. } => "FILE",
+        Entry::Dir { .. } => "DIR",
+        Entry::Symlink { .. } => "SYMLINK",
+        Entry::Special { mode, .. } => match mode & libc::S_IFMT {
+            libc::S_IFIFO => "FIFO",
+            libc::S_IFSOCK => "SOCKET",
+            libc::S_IFBLK => "BLOCK",
+            _ => "CHAR",
+        },
+        Entry::Deleted => "DELETE",
+    };
+    let mut out = word.as_bytes().to_vec();
+    quote(&mut out, path);
+    match entry {
+        Entry::File { mode } => out.extend(format!(" {mode:o}").bytes()),
+        Entry::Dir { mode, opaque } => {
+            out.extend(format!(" {mode:o}").bytes());
+            if *opaque {
+                out.extend(b" opaque");
+            }
+        }
+        Entry::Symlink { target } => quote(&mut out, target),
+        Entry::Special { mode, rdev } => {
+            out.extend(format!(" {:o}", mode & PERMISSIONS).bytes());
+            if is(*mode, libc::S_IFCHR) || is(*mode, libc::S_IFBLK) {
+                let major = (rdev >> 8) & 0xfff;
+                let minor = (rdev & 0xff) | ((rdev >> 12) & 0xfff00);
+                out.extend(format!(" {major} {minor}").bytes());
+            }
+        }
+        Entry::Deleted => {}
+    }
+    out
+}
+
+/// The `BASE` record of `path`, from your file's state, if you have one.
+fn base_line(path: &[u8], stat: Option<&libc::stat>) -> Vec<u8> {
+    let mut out = b"BASE".to_vec();
+    quote(&mut out, path);
+    match stat {
+        None => out.extend(b" none"),
+        Some(stat) => out.extend(
+            format!(
+                " {} {} {}.{:09} {}.{:09}",
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime,
+                stat.st_mtime_nsec,
+                stat.st_ctime,
+                stat.st_ctime_nsec
+            )
+            .bytes(),
+        ),
+    }
+    out
+}
+
+/// The entries of the directory `fd` is, but `.` and `..`: each name, its
+/// kind as `getdents64` gives it, and its inode.
+fn names(fd: BorrowedFd) -> Result<Vec<(Vec<u8>, u8, u64)>, i32> {
+    let dir = sys::open_beneath(fd, c".", libc::O_RDONLY | libc::O_DIRECTORY).map_err(errno)?;
+    let mut names = Vec::new();
+    let mut raw = vec![0; MAX_READ];
+    let mut offset = 0;
+    loop {
+        let len = sys::read_directory(dir.as_fd(), &mut raw, offset).map_err(errno)?;
+        if len == 0 {
+            return Ok(names);
+        }
+        let mut at = 0;
+        // `struct linux_dirent64`: inode, offset, record length, type, name.
+        while at + 19 < len {
+            let record = usize::from(u16::from_le_bytes([raw[at + 16], raw[at + 17]]));
+            let name = raw
+                .get(at + 19..at + record)
+                .and_then(|bytes| CStr::from_bytes_until_nul(bytes).ok())
+                .ok_or(libc::EIO)?;
+            let ino = u64_at(&raw, at).ok_or(libc::EIO)?;
+            offset = u64_at(&raw, at + 8).ok_or(libc::EIO)?;
+            if !matches!(name.to_bytes(), b"." | b"..") {
+                names.push((name.to_bytes().to_vec(), raw[at + 18], ino));
+            }
+            at += record.max(1);
+        }
+    }
+}
+
+fn set_times(fd: BorrowedFd, stat: &libc::stat) -> Result<(), i32> {
+    let times = [
+        libc::timespec {
+            tv_sec: stat.st_atime,
+            tv_nsec: stat.st_atime_nsec,
+        },
+        libc::timespec {
+            tv_sec: stat.st_mtime,
+            tv_nsec: stat.st_mtime_nsec,
+        },
+    ];
+    sys::futimens(fd, &times).map_err(errno)
+}
+
+impl Cow {
+    /// A share of `root` that keeps its changes in `pending`, which must be
+    /// empty, so a run never takes over another's changes.
+    pub(super) fn new(root: OwnedFd, pending: OwnedFd) -> io::Result<Self> {
+        for fd in [&root, &pending] {
+            if !is(sys::fstat(fd.as_fd())?.st_mode, libc::S_IFDIR) {
+                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+        }
+        sys::mkdirat(pending.as_fd(), TREE, DIR_MODE)?;
+        let tree = sys::open_beneath(pending.as_fd(), TREE, libc::O_PATH | libc::O_DIRECTORY)?;
+        let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_EXCL;
+        let records = sys::create_beneath(pending.as_fd(), RECORDS, flags, FILE_MODE)?;
+        Ok(Self {
+            root,
+            pending,
+            tree,
+            records,
+            recorded: std::cell::Cell::new(0),
+            entries: BTreeMap::new(),
+            based: BTreeSet::new(),
+            nodes: BTreeMap::from([(
+                ROOT,
+                Node {
+                    path: Some(Vec::new()),
+                    lookups: 1,
+                },
+            )]),
+            paths: BTreeMap::from([(Vec::new(), ROOT)]),
+            handles: BTreeMap::new(),
+            locks: BTreeMap::new(),
+            held: Vec::new(),
+            next_node: ROOT + 1,
+            next_handle: 1,
+        })
+    }
+
+    /// The share's root, and its pending directory.
+    pub(super) fn directories(&self) -> (BorrowedFd<'_>, BorrowedFd<'_>) {
+        (self.root.as_fd(), self.pending.as_fd())
+    }
+
+    fn open_lower(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
+        sys::open_beneath(self.root.as_fd(), &c(path), flags).map_err(errno)
+    }
+
+    fn open_upper(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
+        sys::open_beneath(self.tree.as_fd(), &c(path), flags).map_err(errno)
+    }
+
+    /// What the guest sees at `path`.
+    fn view(&self, path: &[u8]) -> Result<View, i32> {
+        let mut hidden = false;
+        for parent in parents(path) {
+            match self.entries.get(parent) {
+                None => {}
+                Some(Entry::Dir { opaque, .. }) => hidden |= opaque,
+                Some(Entry::Deleted) => return Err(libc::ENOENT),
+                Some(_) => return Err(libc::ENOTDIR),
+            }
+        }
+        match self.entries.get(path) {
+            Some(Entry::Deleted) => Err(libc::ENOENT),
+            Some(entry) => {
+                let upper = self.open_upper(path, PATH_FLAGS)?;
+                let lower = match entry {
+                    Entry::Dir { opaque: false, .. } if !hidden => self.lower_dir(path),
+                    _ => None,
+                };
+                Ok(View {
+                    entry: Some(entry.clone()),
+                    upper: Some(upper),
+                    lower,
+                })
+            }
+            None => {
+                // A directory is in the tree with no entry only to hold what
+                // the agent changed beneath it.
+                let upper = self.open_upper(path, PATH_FLAGS).ok().filter(|fd| {
+                    sys::fstat(fd.as_fd()).is_ok_and(|stat| is(stat.st_mode, libc::S_IFDIR))
+                });
+                let lower = match (hidden, &upper) {
+                    (true, _) => None,
+                    (false, None) => Some(self.open_lower(path, PATH_FLAGS)?),
+                    (false, Some(_)) => self.lower_dir(path),
+                };
+                if upper.is_none() && lower.is_none() {
+                    return Err(libc::ENOENT);
+                }
+                Ok(View {
+                    entry: None,
+                    upper,
+                    lower,
+                })
+            }
+        }
+    }
+
+    /// Your directory at `path`, if you have one.
+    fn lower_dir(&self, path: &[u8]) -> Option<OwnedFd> {
+        self.open_lower(path, PATH_FLAGS)
+            .ok()
+            .filter(|fd| sys::fstat(fd.as_fd()).is_ok_and(|stat| is(stat.st_mode, libc::S_IFDIR)))
+    }
+
+    fn path(&self, node: u64) -> Result<Vec<u8>, i32> {
+        self.nodes
+            .get(&node)
+            .ok_or(libc::ESTALE)?
+            .path
+            .clone()
+            .ok_or(libc::ENOENT)
+    }
+
+    /// The path of a directory node.
+    fn directory(&self, node: u64) -> Result<Vec<u8>, i32> {
+        let path = self.path(node)?;
+        match self.view(&path)?.is_dir()? {
+            true => Ok(path),
+            false => Err(libc::ENOTDIR),
+        }
+    }
+
+    fn record(&self, mut line: Vec<u8>) -> Result<(), i32> {
+        line.push(b'\n');
+        // The file is open to append, so this lands at its end.
+        let written = sys::pwrite(self.records.as_fd(), &line, 0);
+        if let Ok(len) = written
+            && len == line.len()
+        {
+            self.recorded.set(self.recorded.get() + len as u64);
+            return Ok(());
+        }
+        // A record is a whole line or none, so the next one starts on a line
+        // of its own.
+        let _ = sys::ftruncate(self.records.as_fd(), self.recorded.get());
+        Err(written.map_or_else(errno, |_| libc::EIO))
+    }
+
+    /// Records that `path` is now `entry`.
+    fn set(&mut self, path: &[u8], entry: Entry) -> Result<(), i32> {
+        self.record(line(path, &entry))?;
+        self.entries.insert(path.to_vec(), entry);
+        Ok(())
+    }
+
+    /// Records that `path`, just made in the tree, is `entry`, or removes it
+    /// from the tree again, so a path is in the tree only with its record.
+    fn keep(&mut self, path: &[u8], entry: Entry) -> Result<(), i32> {
+        let flags = match entry {
+            Entry::Dir { .. } => libc::AT_REMOVEDIR,
+            _ => 0,
+        };
+        self.set(path, entry).inspect_err(|_| {
+            let _ = self.unlink_upper(path, flags);
+        })
+    }
+
+    /// Records your file at `path` as it is before the agent's first change
+    /// there. `stat` is your file's, if the caller has it.
+    fn base(&mut self, path: &[u8], stat: Option<&libc::stat>) -> Result<(), i32> {
+        if self.based.contains(path) {
+            return Ok(());
+        }
+        let found;
+        let stat = match stat {
+            Some(stat) => Some(stat),
+            None => {
+                found = self
+                    .open_lower(path, PATH_FLAGS)
+                    .ok()
+                    .and_then(|fd| sys::fstat(fd.as_fd()).ok());
+                found.as_ref()
+            }
+        };
+        self.record(base_line(path, stat))?;
+        self.based.insert(path.to_vec());
+        Ok(())
+    }
+
+    /// Makes `path`'s directory in the tree.
+    fn mkdir_upper(&self, path: &[u8]) -> Result<(), i32> {
+        let (dir, name) = split(path);
+        let dir = self.open_upper(dir, libc::O_PATH | libc::O_DIRECTORY)?;
+        sys::mkdirat(dir.as_fd(), &c(name), DIR_MODE).map_err(errno)
+    }
+
+    /// Makes `path` a regular file in the tree, open with `flags`.
+    fn create_upper(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
+        let flags = flags | libc::O_EXCL | libc::O_NOFOLLOW;
+        sys::create_beneath(self.tree.as_fd(), &c(path), flags, FILE_MODE).map_err(errno)
+    }
+
+    /// Makes each directory above `path` in the tree.
+    fn make_parents(&self, path: &[u8]) -> Result<(), i32> {
+        for parent in parents(path).skip(1) {
+            match self.open_upper(parent, PATH_FLAGS) {
+                Ok(_) => {}
+                Err(libc::ENOENT) => self.mkdir_upper(parent)?,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives `path` the agent's own copy of your file, if it has none yet.
+    fn copy_up(&mut self, path: &[u8]) -> Result<(), i32> {
+        let view = self.view(path)?;
+        if view.entry.is_some() {
+            return Ok(());
+        }
+        self.make_parents(path)?;
+        let Some(lower) = &view.lower else {
+            // A directory in the tree that you have since removed.
+            self.base(path, None)?;
+            let entry = Entry::Dir {
+                mode: 0o755,
+                opaque: false,
+            };
+            return self.set(path, entry);
+        };
+        let stat = sys::fstat(lower.as_fd()).map_err(errno)?;
+        self.base(path, Some(&stat))?;
+        let mode = stat.st_mode & PERMISSIONS;
+        let entry = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => {
+                if view.upper.is_none() {
+                    self.mkdir_upper(path)?;
+                }
+                let dir = self.open_upper(path, libc::O_RDONLY | libc::O_DIRECTORY)?;
+                set_times(dir.as_fd(), &stat)?;
+                Entry::Dir {
+                    mode,
+                    opaque: false,
+                }
+            }
+            kind => {
+                let copy = self.create_upper(path, libc::O_WRONLY)?;
+                let made = (|| {
+                    let entry = match kind {
+                        libc::S_IFREG => {
+                            self.copy_file(path, &stat, copy.as_fd())?;
+                            Entry::File { mode }
+                        }
+                        libc::S_IFLNK => Entry::Symlink {
+                            target: sys::readlink(lower.as_fd()).map_err(errno)?,
+                        },
+                        _ => Entry::Special {
+                            mode: stat.st_mode,
+                            rdev: encode(stat.st_rdev),
+                        },
+                    };
+                    set_times(copy.as_fd(), &stat)?;
+                    Ok(entry)
+                })();
+                match made {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        // A copy with no entry would read as a directory.
+                        let _ = self.unlink_upper(path, 0);
+                        return Err(error);
+                    }
+                }
+            }
+        };
+        if !matches!(entry, Entry::Dir { .. }) {
+            self.keep(path, entry)?;
+        } else {
+            self.set(path, entry)?;
+        }
+        // What the guest has open of your file reads the copy from now on,
+        // and its POSIX locks are taken there. The locks it holds on your
+        // file hold until it lets them go.
+        let node = self.paths.get(path).copied();
+        let moved: Vec<_> = self
+            .locks
+            .keys()
+            .filter(|(locked, _)| Some(*locked) == node)
+            .copied()
+            .collect();
+        for key in moved {
+            if let Some(fd) = self.locks.remove(&key) {
+                self.held.push((key, fd));
+            }
+        }
+        let readers: Vec<_> = self
+            .handles
+            .iter()
+            .filter(|(_, handle)| matches!(handle, Handle::File { node: open, lower: true, .. } if Some(*open) == node))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in readers {
+            let fd = self.open_upper(path, READ_FLAGS)?;
+            if let Some(Handle::File {
+                fd: old,
+                lower,
+                kept,
+                ..
+            }) = self.handles.get_mut(&id)
+            {
+                *kept = Some(std::mem::replace(old, fd));
+                *lower = false;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes `path` from the tree.
+    fn unlink_upper(&self, path: &[u8], flags: i32) -> Result<(), i32> {
+        let (dir, name) = split(path);
+        let dir = self.open_upper(dir, libc::O_PATH | libc::O_DIRECTORY)?;
+        sys::unlinkat(dir.as_fd(), &c(name), flags).map_err(errno)
+    }
+
+    /// Copies your file at `path`, which `stat` describes, to `copy`.
+    fn copy_file(&self, path: &[u8], stat: &libc::stat, copy: BorrowedFd) -> Result<(), i32> {
+        let from = self.open_lower(path, READ_FLAGS)?;
+        let found = sys::fstat(from.as_fd()).map_err(errno)?;
+        if (found.st_dev, found.st_ino) != (stat.st_dev, stat.st_ino) {
+            return Err(libc::ESTALE);
+        }
+        let mut buffer = vec![0; MAX_READ];
+        let mut offset = 0;
+        loop {
+            let len = sys::pread(from.as_fd(), &mut buffer, offset).map_err(errno)?;
+            if len == 0 {
+                return Ok(());
+            }
+            let mut done = 0;
+            while done < len {
+                done +=
+                    sys::pwrite(copy, &buffer[done..len], offset + done as u64).map_err(errno)?;
+            }
+            offset += len as u64;
+        }
+    }
+
+    /// The attributes of `node`, which `view` shows.
+    fn attributes(&self, node: u64, view: &View) -> Result<libc::stat, i32> {
+        let mut stat = view.stat()?;
+        stat.st_ino = node;
+        Ok(stat)
+    }
+
+    /// Gives the guest a node for `path`, and answers with its entry.
+    fn remember(&mut self, path: Vec<u8>) -> Answer {
+        let view = self.view(&path)?;
+        let node = match self.paths.get(&path) {
+            Some(&node) => {
+                let found = self.nodes.get_mut(&node).ok_or(libc::EIO)?;
+                found.lookups = found.lookups.saturating_add(1);
+                node
+            }
+            None => {
+                let node = self.next_node;
+                self.next_node += 1;
+                self.paths.insert(path.clone(), node);
+                self.nodes.insert(
+                    node,
+                    Node {
+                        path: Some(path),
+                        lookups: 1,
+                    },
+                );
+                node
+            }
+        };
+        Ok(entry(node, &self.attributes(node, &view)?))
+    }
+
+    fn lookup(&mut self, parent: u64, body: &[u8]) -> Answer {
+        let name = entry_name(body)?;
+        let dir = self.directory(parent)?;
+        self.remember(join(&dir, name.as_bytes()))
+    }
+
+    fn forget(&mut self, node: u64, count: u64) {
+        if node == ROOT {
+            return;
+        }
+        let Some(found) = self.nodes.get_mut(&node) else {
+            return;
+        };
+        found.lookups = found.lookups.saturating_sub(count);
+        if found.lookups == 0 {
+            if let Some(path) = &found.path {
+                self.paths.remove(path);
+            }
+            self.nodes.remove(&node);
+            self.locks.retain(|(locked, _), _| *locked != node);
+            self.held.retain(|((locked, _), _)| *locked != node);
+        }
+    }
+
+    /// `struct fuse_getattr_in`. A node that is gone still has the file a
+    /// handle holds open.
+    fn getattr(&self, node: u64, body: &[u8]) -> Answer {
+        match self.path(node) {
+            Ok(path) => Ok(attr_out(&self.attributes(node, &self.view(&path)?)?)),
+            Err(libc::ENOENT) if u32_at(body, 0).ok_or(libc::EINVAL)? & GETATTR_FH != 0 => {
+                let Some(Handle::File { fd, mode, .. }) =
+                    self.handles.get(&u64_at(body, 8).ok_or(libc::EINVAL)?)
+                else {
+                    return Err(libc::ENOENT);
+                };
+                let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
+                stat.st_mode = *mode;
+                stat.st_ino = node;
+                Ok(attr_out(&stat))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn add_handle(&mut self, handle: Handle) -> u64 {
+        let id = self.next_handle;
+        self.next_handle += 1;
+        self.handles.insert(id, handle);
+        id
+    }
+
+    fn file(&self, body: &[u8]) -> Result<(&OwnedFd, u64), i32> {
+        let handle = u64_at(body, 0).ok_or(libc::EINVAL)?;
+        match self.handles.get(&handle) {
+            Some(Handle::File { fd, node, .. }) => Ok((fd, *node)),
+            Some(Handle::Dir { .. }) => Err(libc::EISDIR),
+            None => Err(libc::EBADF),
+        }
+    }
+
+    /// Opens the file at `path` as `node`, with the guest's `flags`. A write
+    /// opens the agent's copy, which it makes first.
+    fn open_path(&mut self, node: u64, path: &[u8], flags: i32) -> Result<u64, i32> {
+        let view = self.view(path)?;
+        let mode = view.stat()?.st_mode;
+        if !is(mode, libc::S_IFREG) {
+            return Err(libc::EINVAL);
+        }
+        let lower = !writes(flags) && view.entry.is_none();
+        let fd = if writes(flags) {
+            self.copy_up(path)?;
+            let fd = self.open_upper(path, open_flags(flags) & !libc::O_TRUNC)?;
+            if flags & libc::O_TRUNC != 0 {
+                sys::ftruncate(fd.as_fd(), 0).map_err(errno)?;
+            }
+            fd
+        } else if lower {
+            self.open_lower(path, open_flags(flags))?
+        } else {
+            self.open_upper(path, open_flags(flags))?
+        };
+        Ok(self.add_handle(Handle::File {
+            fd,
+            node,
+            mode,
+            lower,
+            kept: None,
+        }))
+    }
+
+    fn open(&mut self, node: u64, body: &[u8]) -> Answer {
+        let flags = u32_at(body, 0).ok_or(libc::EINVAL)? as i32;
+        let path = self.path(node)?;
+        Ok(open_out(self.open_path(node, &path, flags)?))
+    }
+
+    /// What the guest lists in the directory at `path`, which `view` shows:
+    /// the agent's entries, and yours where it has none.
+    fn listing(&self, path: &[u8], view: &View) -> Result<Vec<Dirent>, i32> {
+        let mut listed = BTreeMap::new();
+        let ino = |name: &[u8], host: u64| {
+            self.paths
+                .get(&join(path, name))
+                .copied()
+                .unwrap_or(1 << 63 | host)
+        };
+        if let Some(upper) = &view.upper {
+            for (name, _, host) in names(upper.as_fd())? {
+                let kind = match self.entries.get(&join(path, &name)) {
+                    Some(Entry::Deleted) => continue,
+                    Some(entry) => entry.mode() >> 12,
+                    None => libc::S_IFDIR >> 12,
+                };
+                let ino = ino(&name, host);
+                listed.insert(name.clone(), Dirent { ino, kind, name });
+            }
+        }
+        if let Some(lower) = &view.lower {
+            for (name, kind, host) in names(lower.as_fd())? {
+                if listed.contains_key(&name) || self.entries.contains_key(&join(path, &name)) {
+                    continue;
+                }
+                let ino = ino(&name, host);
+                let kind = u32::from(kind);
+                listed.insert(name.clone(), Dirent { ino, kind, name });
+            }
+        }
+        Ok(listed.into_values().collect())
+    }
+
+    fn opendir(&mut self, node: u64) -> Answer {
+        let path = self.path(node)?;
+        let view = self.view(&path)?;
+        if !view.is_dir()? {
+            return Err(libc::ENOTDIR);
+        }
+        let dot = |name: &[u8]| Dirent {
+            ino: node,
+            kind: libc::S_IFDIR >> 12,
+            name: name.to_vec(),
+        };
+        let mut entries = vec![dot(b"."), dot(b"..")];
+        entries.extend(self.listing(&path, &view)?);
+        Ok(open_out(self.add_handle(Handle::Dir { entries })))
+    }
+
+    /// Lists a directory as `struct fuse_dirent`s, from the offset the last
+    /// listing ended at, as many as fit in the size the guest asks for.
+    fn readdir(&self, body: &[u8]) -> Answer {
+        let handle = u64_at(body, 0).ok_or(libc::EINVAL)?;
+        let Some(Handle::Dir { entries }) = self.handles.get(&handle) else {
+            return Err(libc::EBADF);
+        };
+        let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let size = (u32_at(body, 16).ok_or(libc::EINVAL)? as usize).min(MAX_READ);
+        let mut out = Vec::new();
+        let start = usize::try_from(offset).unwrap_or(usize::MAX);
+        for (at, dirent) in entries.iter().enumerate().skip(start) {
+            if out.len() + (24 + dirent.name.len()).next_multiple_of(8) > size {
+                break;
+            }
+            out.extend(dirent.ino.to_le_bytes());
+            out.extend((at as u64 + 1).to_le_bytes());
+            out.extend((dirent.name.len() as u32).to_le_bytes());
+            out.extend(dirent.kind.to_le_bytes());
+            out.extend(&dirent.name);
+            out.resize(out.len().next_multiple_of(8), 0);
+        }
+        Ok(out)
+    }
+
+    fn readlink(&self, node: u64) -> Answer {
+        let view = self.view(&self.path(node)?)?;
+        match (&view.entry, &view.lower) {
+            (Some(Entry::Symlink { target }), _) => Ok(target.clone()),
+            (None, Some(lower)) if is(view.stat()?.st_mode, libc::S_IFLNK) => {
+                sys::readlink(lower.as_fd()).map_err(errno)
+            }
+            _ => Err(libc::EINVAL),
+        }
+    }
+
+    /// The path for a new entry `name` in the directory `parent`, which the
+    /// guest has nothing at, with the tree's directories above it made, and
+    /// your file there recorded.
+    fn fresh(&mut self, parent: u64, name: &CStr) -> Result<Vec<u8>, i32> {
+        let path = join(&self.directory(parent)?, name.to_bytes());
+        match self.view(&path) {
+            Ok(_) => return Err(libc::EEXIST),
+            Err(libc::ENOENT) => {}
+            Err(error) => return Err(error),
+        }
+        self.make_parents(&path)?;
+        self.base(&path, None)?;
+        Ok(path)
+    }
+
+    /// `struct fuse_create_in`, then the name. Answers with the entry and
+    /// the open file.
+    fn create(&mut self, parent: u64, body: &[u8]) -> Answer {
+        let flags = u32_at(body, 0).ok_or(libc::EINVAL)? as i32;
+        let mode = u32_at(body, 4).ok_or(libc::EINVAL)?;
+        let umask = u32_at(body, 8).ok_or(libc::EINVAL)?;
+        let name = entry_name(body.get(16..).ok_or(libc::EINVAL)?)?;
+        let path = join(&self.directory(parent)?, name.as_bytes());
+        let exists = match self.view(&path) {
+            Ok(_) => true,
+            Err(libc::ENOENT) => false,
+            Err(error) => return Err(error),
+        };
+        if exists && flags & libc::O_EXCL != 0 {
+            return Err(libc::EEXIST);
+        }
+        if !exists {
+            self.fresh(parent, &name)?;
+            let fd = self.create_upper(&path, open_flags(flags) & !libc::O_TRUNC)?;
+            let mode = mode & !umask & PERMISSIONS;
+            self.keep(&path, Entry::File { mode })?;
+            let mut out = self.remember(path)?;
+            let node = u64_at(&out, 0).ok_or(libc::EIO)?;
+            let mode = libc::S_IFREG | mode;
+            let handle = Handle::File {
+                fd,
+                node,
+                mode,
+                lower: false,
+                kept: None,
+            };
+            out.extend(open_out(self.add_handle(handle)));
+            return Ok(out);
+        }
+        let mut out = self.remember(path.clone())?;
+        let node = u64_at(&out, 0).ok_or(libc::EIO)?;
+        match self.open_path(node, &path, flags) {
+            Ok(handle) => {
+                out.extend(open_out(handle));
+                Ok(out)
+            }
+            Err(error) => {
+                self.forget(node, 1);
+                Err(error)
+            }
+        }
+    }
+
+    /// `struct fuse_mkdir_in`, then the name.
+    fn mkdir(&mut self, parent: u64, body: &[u8]) -> Answer {
+        let mode = u32_at(body, 0).ok_or(libc::EINVAL)?;
+        let umask = u32_at(body, 4).ok_or(libc::EINVAL)?;
+        let name = entry_name(body.get(8..).ok_or(libc::EINVAL)?)?;
+        let path = self.fresh(parent, &name)?;
+        self.mkdir_upper(&path)?;
+        // What you have at this path stays out of the agent's directory.
+        let opaque = self.open_lower(&path, PATH_FLAGS).is_ok();
+        let mode = mode & !umask & PERMISSIONS;
+        self.keep(&path, Entry::Dir { mode, opaque })?;
+        self.remember(path)
+    }
+
+    /// Makes `entry`, a symlink or a special file, at `name` in `parent`,
+    /// with an empty file in the tree to hold its attributes.
+    fn make(&mut self, parent: u64, name: &CStr, entry: Entry) -> Answer {
+        let path = self.fresh(parent, name)?;
+        self.create_upper(&path, libc::O_WRONLY)?;
+        self.keep(&path, entry)?;
+        self.remember(path)
+    }
+
+    /// The name, then the symlink's target, which only the guest resolves.
+    fn symlink(&mut self, parent: u64, body: &[u8]) -> Answer {
+        let name = entry_name(body)?;
+        let rest = body.get(name.as_bytes().len() + 1..).ok_or(libc::EINVAL)?;
+        let target = CStr::from_bytes_until_nul(rest).map_err(|_| libc::EINVAL)?;
+        if target.is_empty() {
+            return Err(libc::ENOENT);
+        }
+        let target = target.to_bytes().to_vec();
+        self.make(parent, &name, Entry::Symlink { target })
+    }
+
+    /// `struct fuse_mknod_in`, then the name.
+    fn mknod(&mut self, parent: u64, body: &[u8]) -> Answer {
+        let mode = u32_at(body, 0).ok_or(libc::EINVAL)?;
+        let rdev = u32_at(body, 4).ok_or(libc::EINVAL)?;
+        let umask = u32_at(body, 8).ok_or(libc::EINVAL)?;
+        let name = entry_name(body.get(16..).ok_or(libc::EINVAL)?)?;
+        let permissions = mode & !umask & PERMISSIONS;
+        let entry = match mode & libc::S_IFMT {
+            libc::S_IFREG => Entry::File { mode: permissions },
+            kind @ (libc::S_IFIFO | libc::S_IFSOCK | libc::S_IFCHR | libc::S_IFBLK) => {
+                let rdev = match kind {
+                    libc::S_IFCHR | libc::S_IFBLK => rdev,
+                    _ => 0,
+                };
+                Entry::Special {
+                    mode: kind | permissions,
+                    rdev,
+                }
+            }
+            _ => return Err(libc::EINVAL),
+        };
+        self.make(parent, &name, entry)
+    }
+
+    /// Takes every entry beneath `path` away, and returns each one that
+    /// isn't a deletion, by what follows `path` in its own path.
+    fn take_beneath(&mut self, path: &[u8]) -> Vec<(Vec<u8>, Entry)> {
+        let found: Vec<_> = self
+            .entries
+            .keys()
+            .filter(|key| beneath(key, path))
+            .cloned()
+            .collect();
+        found
+            .into_iter()
+            .filter_map(|key| {
+                let entry = self.entries.remove(&key)?;
+                (entry != Entry::Deleted).then(|| (key[path.len()..].to_vec(), entry))
+            })
+            .collect()
+    }
+
+    /// Takes the nodes at `path` and beneath it away from their paths, and
+    /// with `to`, gives each the same place beneath `to`.
+    fn move_nodes(&mut self, path: &[u8], to: Option<&[u8]>) {
+        let found: Vec<_> = self
+            .paths
+            .keys()
+            .filter(|key| *key == path || beneath(key, path))
+            .cloned()
+            .collect();
+        for key in found {
+            let Some(node) = self.paths.remove(&key) else {
+                continue;
+            };
+            let moved = to.map(|to| [to, &key[path.len()..]].concat());
+            if let Some(moved) = &moved {
+                self.paths.insert(moved.clone(), node);
+            }
+            if let Some(found) = self.nodes.get_mut(&node) {
+                found.path = moved;
+            }
+        }
+    }
+
+    /// `UNLINK` or `RMDIR`: the name.
+    fn remove(&mut self, parent: u64, body: &[u8], dir: bool) -> Answer {
+        let name = entry_name(body)?;
+        let path = join(&self.directory(parent)?, name.as_bytes());
+        let view = self.view(&path)?;
+        match (dir, view.is_dir()?) {
+            (true, false) => return Err(libc::ENOTDIR),
+            (false, true) => return Err(libc::EISDIR),
+            (true, true) if !self.listing(&path, &view)?.is_empty() => {
+                return Err(libc::ENOTEMPTY);
+            }
+            _ => {}
+        }
+        self.base(&path, None)?;
+        if view.upper.is_some() {
+            self.unlink_upper(&path, if dir { libc::AT_REMOVEDIR } else { 0 })?;
+        }
+        self.take_beneath(&path);
+        self.set(&path, Entry::Deleted)?;
+        self.move_nodes(&path, None);
+        Ok(Vec::new())
+    }
+
+    /// `struct fuse_rename_in`, or with `with_flags`, `struct
+    /// fuse_rename2_in`, then the old name and the new one.
+    fn rename(&mut self, parent: u64, body: &[u8], with_flags: bool) -> Answer {
+        let to = u64_at(body, 0).ok_or(libc::EINVAL)?;
+        let (flags, names) = match with_flags {
+            true => (u32_at(body, 8).ok_or(libc::EINVAL)?, body.get(16..)),
+            false => (0, body.get(8..)),
+        };
+        if flags & !libc::RENAME_NOREPLACE != 0 {
+            return Err(libc::EINVAL);
+        }
+        let (old, new) = two_names(names.ok_or(libc::EINVAL)?)?;
+        let from = join(&self.directory(parent)?, old.as_bytes());
+        let into = join(&self.directory(to)?, new.as_bytes());
+        let source = self.view(&from)?;
+        let source_dir = source.is_dir()?;
+        let target = match self.view(&into) {
+            Ok(view) => Some(view),
+            Err(libc::ENOENT) => None,
+            Err(error) => return Err(error),
+        };
+        if from == into {
+            return Ok(Vec::new());
+        }
+        if beneath(&into, &from) {
+            return Err(libc::EINVAL);
+        }
+        if let Some(target) = &target {
+            if flags & libc::RENAME_NOREPLACE != 0 {
+                return Err(libc::EEXIST);
+            }
+            match (source_dir, target.is_dir()?) {
+                (true, false) => return Err(libc::ENOTDIR),
+                (false, true) => return Err(libc::EISDIR),
+                (true, true) if !self.listing(&into, target)?.is_empty() => {
+                    return Err(libc::ENOTEMPTY);
+                }
+                _ => {}
+            }
+        }
+        if source_dir && source.lower.is_some() {
+            return Err(libc::EXDEV);
+        }
+        self.copy_up(&from)?;
+        self.make_parents(&into)?;
+        self.base(&into, None)?;
+        let target_upper = target.as_ref().is_some_and(|target| target.upper.is_some());
+        let (from_dir, from_name) = split(&from);
+        let (into_dir, into_name) = split(&into);
+        let flags = libc::O_PATH | libc::O_DIRECTORY;
+        let from_dir = self.open_upper(from_dir, flags)?;
+        let into_dir = self.open_upper(into_dir, flags)?;
+        if target_upper && source_dir {
+            // It is empty, as the guest sees it, so it is empty in the tree.
+            sys::unlinkat(into_dir.as_fd(), &c(into_name), libc::AT_REMOVEDIR).map_err(errno)?;
+        }
+        sys::renameat2(
+            from_dir.as_fd(),
+            &c(from_name),
+            into_dir.as_fd(),
+            &c(into_name),
+            0,
+        )
+        .map_err(errno)?;
+        let moved = self.take_beneath(&from);
+        let replaced = target.is_some() || self.entries.keys().any(|key| beneath(key, &into));
+        self.take_beneath(&into);
+        if replaced {
+            // Read in order, the records drop what was there first.
+            self.record(line(&into, &Entry::Deleted))?;
+        }
+        let mut entry = self.entries.remove(&from).ok_or(libc::EIO)?;
+        if let Entry::Dir { opaque, .. } = &mut entry {
+            *opaque = self.open_lower(&into, PATH_FLAGS).is_ok();
+        }
+        self.set(&into, entry)?;
+        for (rest, entry) in moved {
+            let path = [&into[..], &rest].concat();
+            self.base(&path, None)?;
+            self.set(&path, entry)?;
+        }
+        self.set(&from, Entry::Deleted)?;
+        self.move_nodes(&into, None);
+        self.move_nodes(&from, Some(&into));
+        Ok(Vec::new())
+    }
+
+    /// `struct fuse_write_in`, then the data. Your file is open for reading
+    /// alone, so a write to it fails.
+    fn write(&self, body: &[u8]) -> Answer {
+        let (fd, _) = self.file(body)?;
+        let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let size = u32_at(body, 16).ok_or(libc::EINVAL)? as usize;
+        let data = body.get(40..40 + size).ok_or(libc::EINVAL)?;
+        let len = sys::pwrite(fd.as_fd(), data, offset).map_err(errno)?;
+        let mut out = (len as u32).to_le_bytes().to_vec();
+        out.extend([0; 4]);
+        Ok(out)
+    }
+
+    fn read(&self, body: &[u8]) -> Answer {
+        let (fd, _) = self.file(body)?;
+        let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let size = u32_at(body, 16).ok_or(libc::EINVAL)? as usize;
+        let mut data = vec![0; size.min(MAX_READ)];
+        let len = sys::pread(fd.as_fd(), &mut data, offset).map_err(errno)?;
+        data.truncate(len);
+        Ok(data)
+    }
+
+    /// `struct fuse_setattr_in`. Each change is to the agent's copy. Owners
+    /// don't change, because the agent's aren't the host's, and a mode is a
+    /// record.
+    fn setattr(&mut self, node: u64, body: &[u8]) -> Answer {
+        let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
+        let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
+        let valid = word(0)?;
+        if valid & (FATTR_UID | FATTR_GID) != 0 {
+            return Err(libc::EPERM);
+        }
+        let path = match self.path(node) {
+            Err(libc::ENOENT) if valid & FATTR_FH != 0 => return self.setattr_open(node, body),
+            path => path?,
+        };
+        self.copy_up(&path)?;
+        let entry = self.view(&path)?.entry.ok_or(libc::EIO)?;
+        let dir = matches!(entry, Entry::Dir { .. });
+        if valid & FATTR_SIZE != 0 {
+            if dir {
+                return Err(libc::EISDIR);
+            }
+            if !matches!(entry, Entry::File { .. }) {
+                return Err(libc::EINVAL);
+            }
+            let fd =
+                self.open_upper(&path, libc::O_WRONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
+            sys::ftruncate(fd.as_fd(), field(16)?).map_err(errno)?;
+        }
+        if valid & FATTR_MODE != 0 {
+            let new = word(68)? & PERMISSIONS;
+            let changed = match entry {
+                Entry::File { .. } => Some(Entry::File { mode: new }),
+                Entry::Dir { opaque, .. } => Some(Entry::Dir { mode: new, opaque }),
+                Entry::Special { mode, rdev } => Some(Entry::Special {
+                    mode: mode & libc::S_IFMT | new,
+                    rdev,
+                }),
+                _ => None,
+            };
+            if let Some(changed) = changed {
+                self.set(&path, changed.clone())?;
+                if let Entry::File { mode } = changed {
+                    self.set_handle_modes(node, libc::S_IFREG | mode);
+                }
+            }
+        }
+        let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
+        if valid & times != 0 {
+            let flags = match dir {
+                true => libc::O_RDONLY | libc::O_DIRECTORY,
+                false => READ_FLAGS,
+            };
+            let fd = self.open_upper(&path, flags)?;
+            let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
+            let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
+            sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
+        }
+        Ok(attr_out(&self.attributes(node, &self.view(&path)?)?))
+    }
+
+    /// `SETATTR` for a node that is gone, through the agent's copy that a
+    /// handle holds open. Its mode has no record left to change, so the
+    /// handle keeps it.
+    fn setattr_open(&mut self, node: u64, body: &[u8]) -> Answer {
+        let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
+        let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
+        let valid = word(0)?;
+        let handle = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let Some(Handle::File {
+            fd,
+            node: open,
+            lower: false,
+            ..
+        }) = self.handles.get(&handle)
+        else {
+            return Err(libc::ENOENT);
+        };
+        if *open != node {
+            return Err(libc::EBADF);
+        }
+        if valid & FATTR_SIZE != 0 {
+            sys::ftruncate(fd.as_fd(), field(16)?).map_err(errno)?;
+        }
+        let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
+        if valid & times != 0 {
+            let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
+            let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
+            sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
+        }
+        let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
+        stat.st_ino = node;
+        if valid & FATTR_MODE != 0 {
+            self.set_handle_modes(node, libc::S_IFREG | word(68)? & PERMISSIONS);
+        }
+        let Some(Handle::File { mode, .. }) = self.handles.get(&handle) else {
+            return Err(libc::EIO);
+        };
+        stat.st_mode = *mode;
+        Ok(attr_out(&stat))
+    }
+
+    /// Gives each handle the guest has open on `node` the mode `mode`, for
+    /// when its node is gone.
+    fn set_handle_modes(&mut self, node: u64, mode: u32) {
+        for handle in self.handles.values_mut() {
+            if let Handle::File {
+                node: open,
+                mode: old,
+                ..
+            } = handle
+                && *open == node
+            {
+                *old = mode;
+            }
+        }
+    }
+
+    /// `struct fuse_fallocate_in`.
+    fn fallocate(&self, body: &[u8]) -> Answer {
+        let (fd, _) = self.file(body)?;
+        let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let len = u64_at(body, 16).ok_or(libc::EINVAL)?;
+        let mode = u32_at(body, 24).ok_or(libc::EINVAL)? as i32;
+        sys::fallocate(fd.as_fd(), mode, offset, len).map_err(errno)?;
+        Ok(Vec::new())
+    }
+
+    /// `struct fuse_fsync_in`.
+    fn fsync(&self, body: &[u8]) -> Answer {
+        let data_only = u32_at(body, 8).ok_or(libc::EINVAL)? & 1 != 0;
+        match self.file(body) {
+            Ok((fd, _)) => sys::fsync(fd.as_fd(), data_only).map_err(errno)?,
+            Err(libc::EISDIR) => {}
+            Err(error) => return Err(error),
+        }
+        Ok(Vec::new())
+    }
+
+    /// The file that holds `owner`'s POSIX locks on `node`, opened the first
+    /// time the owner locks it: the agent's copy, open for writing, or your
+    /// file, open for reading.
+    fn lock_file(&mut self, node: u64, owner: u64) -> Result<BorrowedFd<'_>, i32> {
+        if !self.locks.contains_key(&(node, owner)) {
+            let path = self.path(node)?;
+            let view = self.view(&path)?;
+            if !is(view.stat()?.st_mode, libc::S_IFREG) {
+                return Err(libc::EINVAL);
+            }
+            let fd = match view.entry {
+                Some(_) => {
+                    let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+                    self.open_upper(&path, flags)?
+                }
+                None => self.open_lower(&path, READ_FLAGS)?,
+            };
+            self.locks.insert((node, owner), fd);
+        }
+        self.locks
+            .get(&(node, owner))
+            .map(AsFd::as_fd)
+            .ok_or(libc::EIO)
+    }
+
+    /// `struct fuse_lk_in`: the handle, the owner, the lock, and its flags.
+    fn setlk(&mut self, body: &[u8], wait: bool) -> Answer {
+        let (fd, node) = self.file(body)?;
+        let owner = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let flags = u32_at(body, 40).ok_or(libc::EINVAL)?;
+        let mut lock = lock_of(body)?;
+        if flags & LK_FLOCK != 0 {
+            let operation = match i32::from(lock.l_type) {
+                libc::F_RDLCK => libc::LOCK_SH,
+                libc::F_WRLCK => libc::LOCK_EX,
+                _ => libc::LOCK_UN,
+            };
+            sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(|error| busy(error, wait))?;
+            return Ok(Vec::new());
+        }
+        let fd = self.lock_file(node, owner)?;
+        sys::ofd_lock(fd, libc::F_OFD_SETLK, &mut lock).map_err(|error| busy(error, wait))?;
+        Ok(Vec::new())
+    }
+
+    /// Answers with `struct fuse_lk_out`: a lock that stands in the way, or
+    /// none.
+    fn getlk(&mut self, body: &[u8]) -> Answer {
+        let (_, node) = self.file(body)?;
+        let owner = u64_at(body, 8).ok_or(libc::EINVAL)?;
+        let mut lock = lock_of(body)?;
+        let fd = self.lock_file(node, owner)?;
+        sys::ofd_lock(fd, libc::F_OFD_GETLK, &mut lock).map_err(errno)?;
+        let end = match lock.l_len {
+            0 => i64::MAX,
+            len => lock.l_start + len - 1,
+        };
+        let mut out = (lock.l_start as u64).to_le_bytes().to_vec();
+        out.extend((end as u64).to_le_bytes());
+        out.extend(u32::from(lock.l_type as u16).to_le_bytes());
+        out.extend(0u32.to_le_bytes());
+        Ok(out)
+    }
+
+    /// `struct fuse_flush_in`: the guest closed a file, so its owner's POSIX
+    /// locks on it go, as POSIX says.
+    fn flush(&mut self, body: &[u8]) -> Answer {
+        let (_, node) = self.file(body)?;
+        let owner = u64_at(body, 16).ok_or(libc::EINVAL)?;
+        self.locks.remove(&(node, owner));
+        self.held.retain(|(key, _)| *key != (node, owner));
+        Ok(Vec::new())
+    }
+
+    fn statfs(&self) -> Answer {
+        statfs(self.root.as_fd())
+    }
+}
+
+/// The answer to a request, or `None` for one that gets no answer.
+pub(super) fn dispatch(share: &mut Cow, request: &Request) -> Option<Answer> {
+    let Request { node, body, .. } = *request;
+    Some(match request.opcode {
+        INIT => init(body),
+        LOOKUP => share.lookup(node, body),
+        GETATTR => share.getattr(node, body),
+        SETATTR => share.setattr(node, body),
+        READLINK => share.readlink(node),
+        SYMLINK => share.symlink(node, body),
+        MKNOD => share.mknod(node, body),
+        MKDIR => share.mkdir(node, body),
+        UNLINK => share.remove(node, body, false),
+        RMDIR => share.remove(node, body, true),
+        RENAME => share.rename(node, body, false),
+        RENAME2 => share.rename(node, body, true),
+        LINK => Err(libc::EXDEV),
+        OPEN => share.open(node, body),
+        READ => share.read(body),
+        WRITE => share.write(body),
+        CREATE => share.create(node, body),
+        FALLOCATE => share.fallocate(body),
+        RELEASE | RELEASEDIR => {
+            if let Some(handle) = u64_at(body, 0) {
+                share.handles.remove(&handle);
+            }
+            Ok(Vec::new())
+        }
+        OPENDIR => share.opendir(node),
+        READDIR => share.readdir(body),
+        STATFS => share.statfs(),
+        FSYNC | FSYNCDIR => share.fsync(body),
+        FLUSH => share.flush(body),
+        GETLK => share.getlk(body),
+        SETLK => share.setlk(body, false),
+        SETLKW => share.setlk(body, true),
+        DESTROY => Ok(Vec::new()),
+        FORGET => {
+            share.forget(node, u64_at(body, 0).unwrap_or(0));
+            return None;
+        }
+        BATCH_FORGET => {
+            let count = u32_at(body, 0).unwrap_or(0) as usize;
+            let forgets = body.get(8..).unwrap_or(&[]).as_chunks::<16>().0;
+            for one in forgets.iter().take(count) {
+                let (Some(node), Some(lookups)) = (u64_at(one, 0), u64_at(one, 8)) else {
+                    break;
+                };
+                share.forget(node, lookups);
+            }
+            return None;
+        }
+        INTERRUPT => return None,
+        _ => Err(libc::ENOSYS),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_s_parents_run_from_the_root_down() {
+        let all: Vec<_> = parents(b"a/b/c").collect();
+        assert_eq!(all, [&b""[..], b"a", b"a/b"]);
+        assert_eq!(parents(b"a").collect::<Vec<_>>(), [&b""[..]]);
+        assert_eq!(parents(b"").count(), 0);
+        assert_eq!(split(b"a/b/c"), (&b"a/b"[..], &b"c"[..]));
+        assert_eq!(split(b"c"), (&b""[..], &b"c"[..]));
+        assert!(beneath(b"a/b", b"a"));
+        assert!(beneath(b"a", b""));
+        assert!(!beneath(b"ab", b"a"));
+        assert!(!beneath(b"a", b"a"));
+        assert!(!beneath(b"", b""));
+    }
+
+    #[test]
+    fn a_device_reaches_a_record_as_its_major_and_minor() {
+        let null = libc::makedev(1, 3);
+        let big = libc::makedev(300, 70_000);
+        let entry = |rdev| Entry::Special {
+            mode: libc::S_IFCHR | 0o600,
+            rdev: encode(rdev),
+        };
+        assert_eq!(line(b"null", &entry(null)), b"CHAR \"null\" 600 1 3");
+        assert_eq!(line(b"big", &entry(big)), b"CHAR \"big\" 600 300 70000");
+    }
+}

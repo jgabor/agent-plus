@@ -74,6 +74,7 @@ const AUTO_INVAL_DATA: u32 = 1 << 12;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     ReadOnly,
+    ReadWrite,
 }
 
 /// A host file the guest has looked up.

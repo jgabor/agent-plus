@@ -5,14 +5,15 @@
 //! guest's FUSE requests here, over a socket made before either process is
 //! confined. This process opens each share's root once, then confines
 //! itself: it reaches files only beneath those roots, follows no symlink,
-//! can't start a process, and refuses every write to an `ro` share. The
+//! can't start a process, refuses every write to an `ro` share, and in an
+//! `rw` share refuses the writes [`server`] protects against. The
 //! frames on the socket are the ones [`vmm::fs`] describes.
 
 mod landlock;
 mod server;
 mod sys;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -26,6 +27,7 @@ pub use server::{Mode, Server};
 /// The `argv[0]` that `ap` starts the share server with.
 pub const PROGRAM: &str = "ap-share-server";
 const READ_ONLY: &str = "ro";
+const READ_WRITE: &str = "rw";
 const STDIN: i32 = 0;
 
 /// A share server that has started, and the VMM's end of its socket.
@@ -40,8 +42,12 @@ pub fn start(program: &Path, roots: &[(PathBuf, Mode)]) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     let mut command = Command::new(program);
     command.arg0(PROGRAM);
-    for (root, Mode::ReadOnly) in roots {
-        command.arg(READ_ONLY).arg(root);
+    for (root, mode) in roots {
+        let mode = match mode {
+            Mode::ReadOnly => READ_ONLY,
+            Mode::ReadWrite => READ_WRITE,
+        };
+        command.arg(mode).arg(root);
     }
     let process = command
         .stdin(OwnedFd::from(theirs))
@@ -71,7 +77,13 @@ fn run(args: &[OsString]) -> io::Result<()> {
     raise_descriptor_limit();
     let access: Vec<_> = roots
         .iter()
-        .map(|(root, Mode::ReadOnly)| (root.as_fd(), landlock::Access::Read))
+        .map(|(root, mode)| {
+            let access = match mode {
+                Mode::ReadOnly => landlock::Access::Read,
+                Mode::ReadWrite => landlock::Access::ReadWrite,
+            };
+            (root.as_fd(), access)
+        })
         .collect();
     landlock::restrict(&access)?;
     // SAFETY: standard input is the socket `start` passed, and nothing else
@@ -82,7 +94,7 @@ fn run(args: &[OsString]) -> io::Result<()> {
 }
 
 fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
-    let usage = || io::Error::other("usage: ap-share-server (ro root)...");
+    let usage = || io::Error::other("usage: ap-share-server ((ro | rw) root)...");
     if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err(usage());
     }
@@ -90,16 +102,18 @@ fn open_roots(args: &[OsString]) -> io::Result<Vec<(OwnedFd, Mode)>> {
         .0
         .iter()
         .map(|pair| {
-            if pair[0] != OsStr::new(READ_ONLY) {
-                return Err(usage());
-            }
+            let mode = match pair[0].to_str() {
+                Some(READ_ONLY) => Mode::ReadOnly,
+                Some(READ_WRITE) => Mode::ReadWrite,
+                _ => return Err(usage()),
+            };
             let root = File::open(&pair[1]).map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!("can't open {}: {error}", Path::new(&pair[1]).display()),
                 )
             })?;
-            Ok((OwnedFd::from(root), Mode::ReadOnly))
+            Ok((OwnedFd::from(root), mode))
         })
         .collect()
 }

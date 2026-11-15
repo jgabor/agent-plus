@@ -1400,6 +1400,9 @@ How it works:
   git doesn't work inside the guest, and `ap apply` applies files rather
   than a branch. Share the main working tree if the agent needs git.
 - File locks pass through to the host.
+- A lock that would wait for another holder fails at once with an
+  `Operation not supported` error, because the agent's machine waits for
+  each answer from your host.
 
 In `rw` shares, the files your host acts on are read-only to the agent.
 
@@ -1413,11 +1416,16 @@ In `rw` shares, the files your host acts on are read-only to the agent.
   configured commands on your host: `config`, `config.worktree`,
   `commondir`, `gitdir`, and `hooks/`.
 - Names match case-insensitively, as they do on macOS filesystems.
+- A change these rules refuse fails with an `Operation not permitted`
+  error.
 
 Anything else the agent changes in an `rw` share, it changes for real,
 including files your tools run later, such as build scripts and hooks kept
 in the working tree. [`PERMISSIONS`](#permissions) can protect specific
 files.
+
+The agent can't make a device, a FIFO, or a socket in an `rw` share, change
+a file's owner, or set an extended attribute.
 
 **Bringing changes back.** Unapplied copy-on-write changes are kept per run,
 and they survive the end of the run until you apply or discard them. The

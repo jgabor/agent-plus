@@ -267,7 +267,6 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
         0o600
     );
     assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
-    assert_eq!(guest.setattr(file, FATTR_UID, 0, 0), EPERM);
 
     let made = guest.mkdir(1, b"made").unwrap();
     assert!(root.join("made").is_dir());
@@ -300,11 +299,6 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
     assert_eq!(guest.remove(UNLINK, made, b"moved.txt"), 0);
     assert_eq!(guest.remove(RMDIR, 1, b"made"), 0);
     assert!(!root.join("made").exists());
-    // A device can't be made.
-    let mut body = (0o020_000u32 | 0o644).to_le_bytes().to_vec();
-    body.extend([0; 12]);
-    body.extend(named(b"device"));
-    assert_eq!(guest.call(MKNOD, 1, &body).0, EPERM);
     assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
 }
 
@@ -333,6 +327,7 @@ fn a_write_never_reaches_outside_a_read_write_share() {
 
 // spec(SHARE): In `rw` shares, the files your host acts on are read-only to the agent.
 // spec(SHARE): An entry named `Agentfile` or `Agentfile.lock` can't be created, changed, removed, or renamed, so an agent can't change what a later build does.
+// spec(SHARE): A change these rules refuse fails with an `Operation not permitted` error.
 #[test]
 fn an_agentfile_can_t_be_created_changed_removed_or_renamed() {
     let tree = protected_tree("agentfile");
@@ -533,6 +528,7 @@ fn protected_names_match_without_regard_to_case() {
 }
 
 // spec(SHARE): File locks pass through to the host.
+// spec(SHARE): A lock that would wait for another holder fails at once with an `Operation not supported` error, because the agent's machine waits for each answer from your host.
 #[test]
 fn file_locks_pass_through_to_the_host() {
     for mode in [Mode::ReadWrite, Mode::ReadOnly] {
@@ -661,4 +657,35 @@ fn a_fixed_file_stays_fixed_by_another_name() {
     assert_eq!(guest.create(1, b"alias", O_TRUNC), Err(EPERM));
     assert_eq!(guest.overwrite("alias", b"agent"), Err(EPERM));
     assert_eq!(fs::read(tree.root.join("Agentfile")).unwrap(), b"host");
+}
+
+// spec(SHARE): The agent can't make a device, a FIFO, or a socket in an `rw` share, change a file's owner, or set an extended attribute.
+#[test]
+fn an_rw_share_makes_no_special_file_and_changes_no_owner() {
+    let tree = Tree::new("special");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    for (kind, name) in [
+        (0o020_000u32, &b"char"[..]),
+        (0o060_000, b"block"),
+        (0o010_000, b"fifo"),
+        (0o140_000, b"socket"),
+        (0o100_000, b"regular"),
+    ] {
+        let mut body = (kind | 0o644).to_le_bytes().to_vec();
+        body.extend([0; 12]);
+        body.extend(named(name));
+        assert_eq!(guest.call(MKNOD, 1, &body).0, EPERM, "{kind:o}");
+        assert!(fs::symlink_metadata(tree.root.join(std::str::from_utf8(name).unwrap())).is_err());
+    }
+    let file = guest.walk("hello.txt").unwrap();
+    for owner in [FATTR_UID, 4] {
+        assert_eq!(guest.setattr(file, owner, 0, 0), EPERM);
+    }
+    let setxattr = 21;
+    let mut body = 4u32.to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(named(b"user.agent"));
+    body.extend(b"data");
+    assert_eq!(guest.call(setxattr, file, &body).0, ENOSYS);
+    assert_eq!(guest.call(24, file, &named(b"user.agent")).0, ENOSYS);
 }

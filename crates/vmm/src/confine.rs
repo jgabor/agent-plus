@@ -4,10 +4,13 @@
 //!
 //! What is left can't start a process or a program, or reach a host file:
 //! every call that takes a path is missing, and memory can be mapped only
-//! anonymously, so a file left open can't be read either. The one exception
-//! is a descriptor the caller names, which may be read and nothing else. Calls that could
-//! reach past this process are narrowed by their arguments, as the kernel
-//! reads them.
+//! anonymously, so a file left open can't be read either. The exceptions are
+//! the descriptors the caller names, which may be read and nothing else.
+//! Calls that could reach past this process are narrowed by their arguments,
+//! as the kernel reads them.
+//!
+//! The share server, which reaches a run's shared files for its guest, has a
+//! filter of its own, in [`confine_share_server`].
 
 use std::ffi::{c_int, c_long, c_ulong};
 use std::io;
@@ -65,6 +68,15 @@ const TKILL: u32 = 200;
 const FUTEX: u32 = 202;
 const SCHED_GETAFFINITY: u32 = 204;
 const CLOCK_GETTIME: u32 = 228;
+const FSTAT: u32 = 5;
+const LSEEK: u32 = 8;
+const PREAD64: u32 = 17;
+const FSTATFS: u32 = 138;
+const GETDENTS64: u32 = 217;
+const READLINKAT: u32 = 267;
+const OPENAT2: u32 = 437;
+const AT_FDCWD: u32 = -100_i32 as u32;
+const STDERR: u32 = 2;
 const EXIT_GROUP: u32 = 231;
 const TGKILL: u32 = 234;
 const SET_ROBUST_LIST: u32 = 273;
@@ -112,15 +124,17 @@ enum Rule {
     AllowIf(u32, u32, Vec<u32>),
     /// Allowed when the argument at this index has every bit of the mask.
     AllowIfSet(u32, u32, u32),
+    /// Allowed unless the argument at this index is this value.
+    AllowUnless(u32, u32, u32),
     /// Answered with this error, without running it.
     Refuse(u32, u32),
 }
 
 /// The calls that the VMM, its watchdog, and the output relay make while a
 /// guest runs, on glibc and musl. `pid` and `tid` are this process's and the
-/// vCPU thread's, the only targets the watchdog signals. `readable` is the
-/// one descriptor that may be read, if any.
-fn rules(pid: u32, tid: u32, readable: Option<RawFd>) -> Vec<Rule> {
+/// vCPU thread's, the only targets the watchdog signals. `readable` are the
+/// descriptors that may be read.
+fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
     use Rule::{Allow, AllowIf, AllowIfSet, Refuse};
     let mut rules = vec![
         AllowIf(IOCTL, 1, vec![KVM_RUN as u32, KVM_IRQ_LINE as u32]),
@@ -155,10 +169,50 @@ fn rules(pid: u32, tid: u32, readable: Option<RawFd>) -> Vec<Rule> {
         Allow(EXIT),
         Allow(EXIT_GROUP),
     ];
-    if let Some(fd) = readable {
-        rules.push(AllowIf(READ, 0, vec![fd as u32]));
+    if !readable.is_empty() {
+        rules.push(AllowIf(
+            READ,
+            0,
+            readable.iter().map(|fd| *fd as u32).collect(),
+        ));
     }
     rules
+}
+
+/// The calls the share server makes once it has opened each share's root.
+/// It has one thread, so it starts none, and it reads requests from
+/// `socket` alone. It opens a file only relative to a descriptor it holds,
+/// and the opening code asks the kernel to stay beneath it and follow no
+/// symlink. A filter can't read those flags, so Landlock holds the server
+/// to the roots too, where the kernel has it.
+fn share_server_rules(socket: RawFd) -> Vec<Rule> {
+    use Rule::{Allow, AllowIf, AllowIfSet, AllowUnless};
+    vec![
+        AllowIf(READ, 0, vec![socket as u32]),
+        AllowIf(WRITE, 0, vec![socket as u32, STDERR]),
+        AllowUnless(OPENAT2, 0, AT_FDCWD),
+        AllowUnless(READLINKAT, 0, AT_FDCWD),
+        Allow(PREAD64),
+        Allow(GETDENTS64),
+        Allow(LSEEK),
+        Allow(FSTAT),
+        Allow(FSTATFS),
+        Allow(CLOSE),
+        // Rust checks a descriptor this way before it closes it.
+        AllowIf(FCNTL, 1, vec![F_GETFD]),
+        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
+        Allow(MUNMAP),
+        Allow(MREMAP),
+        Allow(MADVISE),
+        Allow(BRK),
+        Allow(FUTEX),
+        Allow(RT_SIGPROCMASK),
+        Allow(RT_SIGACTION),
+        Allow(RT_SIGRETURN),
+        Allow(SIGALTSTACK),
+        Allow(EXIT),
+        Allow(EXIT_GROUP),
+    ]
 }
 
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
@@ -189,6 +243,10 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
                 *number,
                 vec![load(*index), op(JUMP_SET, 0, 1, *mask), allow, kill],
             ),
+            Rule::AllowUnless(number, index, value) => (
+                *number,
+                vec![load(*index), op(JUMP_EQUAL, 0, 1, *value), kill, allow],
+            ),
         };
         program.push(op(JUMP_EQUAL, 0, body.len() as u8, number));
         program.extend(body);
@@ -200,12 +258,23 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
 /// Confines every thread of this process, for the rest of its life. Call it
 /// from the thread that will run the vCPU, once the VM is set up, because the
 /// watchdog may signal only that thread, and no file can be opened after.
-/// Only `readable` may be read, if it is given.
-pub fn confine(readable: Option<RawFd>) -> io::Result<()> {
+/// Only the descriptors in `readable` may be read.
+pub fn confine(readable: &[RawFd]) -> io::Result<()> {
     let pid = std::process::id();
     // SAFETY: gettid takes no arguments and can't fail.
     let tid = unsafe { syscall(GETTID as c_long) } as u32;
-    let instructions = compile(&rules(pid, tid, readable));
+    install(&rules(pid, tid, readable))
+}
+
+/// Confines the share server, which has one thread, for the rest of its
+/// life. Call it once every share's root is open. Requests come from
+/// `socket`, and answers go back on it.
+pub fn confine_share_server(socket: RawFd) -> io::Result<()> {
+    install(&share_server_rules(socket))
+}
+
+fn install(rules: &[Rule]) -> io::Result<()> {
+    let instructions = compile(rules);
     let program = Program {
         len: instructions.len() as u16,
         instructions: instructions.as_ptr(),
@@ -261,11 +330,15 @@ mod tests {
     /// Runs the program the way the kernel does, on `struct seccomp_data`
     /// with the low halves of the arguments.
     fn run(arch: u32, number: u32, args: [u32; 6]) -> u32 {
-        run_reading(None, arch, number, args)
+        run_reading(&[], arch, number, args)
     }
 
-    fn run_reading(readable: Option<RawFd>, arch: u32, number: u32, args: [u32; 6]) -> u32 {
-        let program = compile(&rules(PID, TID, readable));
+    fn run_reading(readable: &[RawFd], arch: u32, number: u32, args: [u32; 6]) -> u32 {
+        run_rules(&rules(PID, TID, readable), arch, number, args)
+    }
+
+    fn run_rules(rules: &[Rule], arch: u32, number: u32, args: [u32; 6]) -> u32 {
+        let program = compile(rules);
         let mut accumulator = 0;
         let mut pc = 0;
         loop {
@@ -356,10 +429,68 @@ mod tests {
     #[test]
     fn only_the_named_descriptor_can_be_read() {
         assert_eq!(call(READ, [0, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        let reading = |fd| run_reading(Some(7), AUDIT_ARCH_X86_64, READ, [fd, 0, 0, 0, 0, 0]);
+        let reading = |fd| run_reading(&[7, 9], AUDIT_ARCH_X86_64, READ, [fd, 0, 0, 0, 0, 0]);
         assert_eq!(reading(7), RET_ALLOW);
+        assert_eq!(reading(9), RET_ALLOW);
         assert_eq!(reading(0), RET_KILL_PROCESS);
         assert_eq!(reading(8), RET_KILL_PROCESS);
+    }
+
+    const SOCKET: u32 = 5;
+
+    fn share_call(number: u32, args: [u32; 6]) -> u32 {
+        run_rules(
+            &share_server_rules(SOCKET as RawFd),
+            AUDIT_ARCH_X86_64,
+            number,
+            args,
+        )
+    }
+
+    #[test]
+    fn the_share_server_reads_files_beneath_what_it_holds() {
+        for number in [PREAD64, GETDENTS64, LSEEK, FSTAT, FSTATFS, CLOSE] {
+            assert_eq!(
+                share_call(number, [4, 0, 0, 0, 0, 0]),
+                RET_ALLOW,
+                "{number}"
+            );
+        }
+        assert_eq!(share_call(FCNTL, [4, F_GETFD, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(share_call(OPENAT2, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(share_call(READLINKAT, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(share_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(share_call(WRITE, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(share_call(WRITE, [STDERR, 0, 0, 0, 0, 0]), RET_ALLOW);
+    }
+
+    #[test]
+    fn the_share_server_can_t_open_by_path_start_anything_or_write_a_file() {
+        for number in [OPENAT, 2, FORK, VFORK, EXECVE, EXECVEAT, CLONE, CLONE3] {
+            assert_eq!(share_call(number, [0; 6]), RET_KILL_PROCESS, "{number}");
+        }
+        assert_eq!(
+            share_call(OPENAT2, [AT_FDCWD, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(READLINKAT, [AT_FDCWD, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(share_call(READ, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(share_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            share_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(IOCTL, [0, TIOCSTI, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            share_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
     }
 
     #[test]

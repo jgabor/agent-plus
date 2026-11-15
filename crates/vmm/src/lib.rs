@@ -4,6 +4,7 @@
 pub mod block;
 pub mod boot;
 pub mod confine;
+pub mod fs;
 pub mod initramfs;
 pub mod serial;
 pub mod virtio;

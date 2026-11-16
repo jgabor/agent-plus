@@ -72,6 +72,7 @@ name = "fuzz"
 version = "0.0.0"
 dependencies = [
  "agentfile",
+ "ap",
  "git",
  "miniz_oxide",
  "share",

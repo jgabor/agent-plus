@@ -9,6 +9,8 @@ use ap::boot;
 
 mod commands {
     pub mod build;
+    pub mod diff;
+    pub mod discard;
     pub mod exec;
     pub mod fmt;
     pub mod init;
@@ -33,6 +35,8 @@ const USAGE: &str = "usage: ap --version
        ap logs run
        ap exec run command [arg...]
        ap stop run
+       ap diff agent|run
+       ap discard agent|run
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 
@@ -128,6 +132,16 @@ fn main() -> ExitCode {
         && let Some(name) = commands::stop::parse(&args[1..])
     {
         return ExitCode::from(commands::stop::run(&name));
+    }
+    if args.first().is_some_and(|command| command == "diff")
+        && let Some(name) = commands::diff::parse(&args[1..])
+    {
+        return ExitCode::from(commands::diff::run(&name));
+    }
+    if args.first().is_some_and(|command| command == "discard")
+        && let Some(name) = commands::diff::parse(&args[1..])
+    {
+        return ExitCode::from(commands::discard::run(&name));
     }
     if args.first().is_some_and(|command| command == "boot")
         && let Some((timeout, command)) = parse_boot(&args[1..])

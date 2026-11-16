@@ -12,8 +12,10 @@ pub mod gitignore;
 pub mod json;
 pub mod lock;
 pub mod paths;
+pub mod pending;
 pub mod runs;
 pub mod store;
+pub mod unified;
 
 /// A running guest. The real implementation is the VMM, and lanes that need
 /// a guest before it exists build against `fake-vm`.

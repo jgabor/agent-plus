@@ -18,15 +18,40 @@
 //! A run's log is kept apart from its record, under `logs` with the run's
 //! name, and only `ap run` writes it. The changes a run's agent made to its
 //! copy-on-write shares wait under `pending` with the run's name, until you
-//! apply or discard them.
+//! apply or discard them. That directory holds one directory for each
+//! copy-on-write share, numbered from 1 in share order:
+//!
+//! ```text
+//! pending/k3x9q2mf/1/root      the share's directory on your host
+//! pending/k3x9q2mf/1/tree      what the share server keeps, as
+//! pending/k3x9q2mf/1/records   `share` says
+//! ```
+//!
+//! `root` holds the directory's absolute path, as bytes, with no newline.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
+use std::os::unix::ffi::OsStringExt;
+
 use crate::agents::valid_name;
 use crate::layers::{create_partial, sync_up_from};
+
+/// In a share's pending directory, the file that names its root.
+const ROOT: &str = "root";
+/// In a share's pending directory, the share server's record of changes.
+const RECORDS: &str = "records";
+
+/// A copy-on-write share of a run, as its pending directory keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingShare {
+    /// The share's directory on your host.
+    pub root: PathBuf,
+    /// The directory that holds `tree` and `records`.
+    pub dir: PathBuf,
+}
 
 /// The characters of a run's name.
 pub const NAME_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
@@ -222,6 +247,93 @@ impl Runs {
         let dir = self.pending.join(name);
         builder.create(&dir)?;
         Ok(dir)
+    }
+
+    /// Adds a directory for the next copy-on-write share of the run with this
+    /// name, beneath the one [`Runs::create_pending`] made, and records that
+    /// the share's directory on your host is `root`. The share server keeps
+    /// the share's changes in the directory it returns.
+    pub fn create_pending_share(&self, name: &str, root: &Path) -> io::Result<PathBuf> {
+        check_run_name(name)?;
+        let dir = self.pending.join(name);
+        let mut builder = fs::DirBuilder::new();
+        builder.mode(0o700);
+        let share = (1..)
+            .map(|number: u32| dir.join(number.to_string()))
+            .find(|share| !share.exists())
+            .unwrap_or_default();
+        builder.create(&share)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(share.join(ROOT))?;
+        file.write_all(root.as_os_str().as_encoded_bytes())?;
+        Ok(share)
+    }
+
+    /// The names of the runs whose pending directory is in the store, in no
+    /// order. A run's record may be gone.
+    pub fn list_pending(&self) -> io::Result<Vec<String>> {
+        let entries = match fs::read_dir(&self.pending) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            if let Some(name) = entry?
+                .file_name()
+                .to_str()
+                .filter(|name| valid_run_name(name))
+            {
+                names.push(name.to_owned());
+            }
+        }
+        Ok(names)
+    }
+
+    /// The copy-on-write shares of the run with this name, in share order:
+    /// each one's directory on your host, and the directory that keeps its
+    /// changes. A run with no pending directory has none.
+    pub fn pending_shares(&self, name: &str) -> io::Result<Vec<PendingShare>> {
+        check_run_name(name)?;
+        let dir = self.pending.join(name);
+        let mut shares = Vec::new();
+        for number in 1.. {
+            let share = dir.join(number.to_string());
+            let root = match fs::read(share.join(ROOT)) {
+                Ok(root) => PathBuf::from(std::ffi::OsString::from_vec(root)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error),
+            };
+            shares.push(PendingShare { root, dir: share });
+        }
+        Ok(shares)
+    }
+
+    /// Whether the run with this name has pending changes: whether the share
+    /// server recorded a change in any of its copy-on-write shares.
+    pub fn has_pending(&self, name: &str) -> io::Result<bool> {
+        for share in self.pending_shares(name)? {
+            match fs::metadata(share.dir.join(RECORDS)) {
+                Ok(metadata) if metadata.len() > 0 => return Ok(true),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Throws away the pending changes of the run with this name, if it has
+    /// any.
+    pub fn discard(&self, name: &str) -> io::Result<()> {
+        check_run_name(name)?;
+        match fs::remove_dir_all(self.pending.join(name)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
     }
 
     /// Removes the run with this name and its log. The log goes first, so a

@@ -70,9 +70,33 @@ Draft model: `claude-fable-5-2`, at effort `high`
    milestone. If none are, say so and stop. The milestone's failing steps come
    first, in journey order, then the budgets and promises that the parent's
    goal names.
-8. File at most 3 minus the larger of the sum from step 4 and the count from
-   step 6, each as a sub-issue of the parent, with `gh issue create --parent
-   <parent>`. Follow Issues in AGENTS.md:
+8. For each gap you chose, look for an open issue that already covers it,
+   among those with no parent and no label that says who acts next:
+
+   ```sh
+   gh issue list --state open --limit 1000 --json number,title,labels,parent \
+     --jq '.[] | select(.parent == null) | select([.labels[].name] | any(
+     startswith("auto:") or . == "answer-needed" or . == "land-needed") |
+     not) | "\(.number) \(.title)"'
+   ```
+
+   Read each likely one. Adopt it, in place of filing, only if its goal is
+   that gap, and its `Definition of done` names checks, not a decision of the
+   owner's. If it has a comment from the owner that defers it, adopt it only
+   once what that comment waits for has happened. To adopt it:
+
+   ```sh
+   gh api -X POST 'repos/{owner}/{repo}/issues/<parent>/sub_issues' \
+     -F sub_issue_id="$(gh api 'repos/{owner}/{repo}/issues/<n>' --jq .id)"
+   gh issue edit <n> --add-label <the parent's auto:* label>
+   ```
+
+   Then edit its body where it is out of date, so that `Touches` names real
+   paths and `Blocked by` names what it needs first. Never adopt an issue
+   outside the parent's goal and milestone.
+9. File or adopt at most 3 minus the larger of the sum from step 4 and the
+   count from step 6. File each new one as a sub-issue of the parent, with
+   `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
    - One issue is one problem and one PR.
    - `Definition of done` names the journey step, the budget, or the exact SPEC
      sentences that prove it.
@@ -84,4 +108,5 @@ Draft model: `claude-fable-5-2`, at effort `high`
    - End with `Blocked by #<n>.` when one issue needs another first.
    - Add the parent's `auto:*` label, whatever paths the work will touch.
      `merge` decides from the diff whether the PR waits for the owner.
-9. List the drafts and the issues you filed, then stop.
+10. List the drafts, the issues you filed, and the issues you adopted, then
+    stop.

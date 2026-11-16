@@ -192,7 +192,7 @@ fn build(args: &Args) -> Result<(), String> {
             .collect();
         lines.join("\n")
     };
-    let instructions = agentfile::parse(&source).map_err(report)?;
+    let instructions = agentfile::parse_for(&source, ap::adapter::reserved).map_err(report)?;
     let mut lock = read_lock(&path.with_extension("lock"), &context)?;
     let cache = lock::cache(
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
@@ -545,10 +545,6 @@ fn plan(
     let sources = take(&mut errors, Sources::read(instructions));
     let files = take(&mut errors, Files::read(instructions));
     take(&mut errors, Secrets::read(instructions));
-    if let Some(settings) = &settings {
-        let reserved = ap::adapter::reserved(settings.agent.harness);
-        errors.extend(agentfile::reserved(instructions, &reserved));
-    }
     take(&mut errors, Network::read(instructions));
     take(&mut errors, Policy::read(instructions));
     let guest = take(&mut errors, GuestPath::read(instructions, dir_name));

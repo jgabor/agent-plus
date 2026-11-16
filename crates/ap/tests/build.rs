@@ -1791,3 +1791,20 @@ fn a_secret_cannot_bind_a_harness_host_or_use_a_sign_in_name() {
     }
     assert!(scratch.agents().list().unwrap().is_empty());
 }
+
+// spec(Overview): `ap build` reports every error it can find in the Agentfile itself.
+#[test]
+fn a_reserved_name_is_reported_with_other_errors() {
+    let scratch = Scratch::new("reserved-with-others");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nENV ANTHROPIC_API_KEY x\nNOPE x\n",
+    );
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    let lines: Vec<&str> = message.lines().collect();
+    assert_eq!(lines.len(), 2, "{message}");
+    assert!(lines[0].starts_with("Agentfile:3: "), "{message}");
+    assert!(lines[1].starts_with("Agentfile:4: "), "{message}");
+}

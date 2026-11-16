@@ -135,6 +135,15 @@ impl std::error::Error for Error {}
 /// Reads a whole Agentfile. It returns every instruction, or every error it
 /// found, in line order.
 pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
+    parse_for(source, |_| Reserved::default())
+}
+
+/// Reads a whole Agentfile as [`parse`] does, and also checks it against
+/// what `adapter` keeps for its harness, as [`reserved`] does.
+pub fn parse_for<'a>(
+    source: &str,
+    adapter: impl Fn(Harness) -> Reserved<'a>,
+) -> Result<Vec<Instruction>, Vec<Error>> {
     let source = source.replace("\r\n", "\n").replace('\r', "\n");
     let mut instructions = Vec::new();
     let mut errors = Vec::new();
@@ -210,6 +219,14 @@ pub fn parse(source: &str) -> Result<Vec<Instruction>, Vec<Error>> {
     }
     errors.extend(secrets::check_together(&instructions));
     errors.extend(network::check_together(&instructions));
+    let harness = instructions
+        .iter()
+        .find(|instruction| instruction.name == "AGENT")
+        .and_then(|instruction| instruction.arguments.first())
+        .and_then(|value| settings::agent(value).ok());
+    if let Some(agent) = harness {
+        errors.extend(reserved(&instructions, &adapter(agent.harness)));
+    }
     if !seen.contains_key("AGENT") {
         errors.push(Error {
             line: first_line.unwrap_or(1),

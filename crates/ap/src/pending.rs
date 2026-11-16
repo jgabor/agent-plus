@@ -15,6 +15,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::gitignore::Gitignore;
 use crate::unified;
@@ -267,10 +268,13 @@ fn beneath(path: &[u8], dir: &[u8]) -> bool {
     path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
 }
 
-/// How many times `ap diff` reads a share again when a file its records
+/// How long `ap diff` keeps reading a share again when a file its records
 /// name has gone from the tree, or is no longer a file, as happens while
-/// the agent moves it.
-const ATTEMPTS: usize = 20;
+/// the agent moves it, and how long it waits between reads. The share
+/// server changes the tree, then the records, and can be held up between
+/// the two on a busy machine.
+const PATIENCE: Duration = Duration::from_secs(2);
+const PAUSE: Duration = Duration::from_millis(1);
 
 /// `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, from
 /// `<linux/openat2.h>`.
@@ -479,14 +483,18 @@ impl Share<'_> {
     /// While the run is active, the agent can move a file between reading
     /// the records and reading the file, so it reads the share again.
     pub fn diff(&self) -> io::Result<Shown> {
-        for _ in 0..ATTEMPTS {
+        let start = Instant::now();
+        loop {
             if let Some(shown) = self.attempt()? {
                 return Ok(shown);
             }
+            if start.elapsed() > PATIENCE {
+                return Err(io::Error::other(
+                    "the agent kept changing files while they were read, so try again",
+                ));
+            }
+            std::thread::sleep(PAUSE);
         }
-        Err(io::Error::other(
-            "the agent kept changing files while they were read, so try again",
-        ))
     }
 
     /// The share's changes, or `None` if a file its records name was gone.

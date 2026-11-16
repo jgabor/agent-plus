@@ -205,7 +205,9 @@ fn kernel_workspace(name: &str, body: &str) -> PathBuf {
     fs::create_dir_all(root.join("guest/kernel")).unwrap();
     fs::write(
         root.join("guest/kernel/pin.toml"),
-        format!("version = \"1\"\nurl = \"https://example.com/vmlinux\"\nsha256 = \"{KERNEL_DIGEST}\"\n"),
+        format!(
+            "version = \"1\"\nurl = \"https://example.com/vmlinux\"\nsha256 = \"{KERNEL_DIGEST}\"\n"
+        ),
     )
     .unwrap();
     let output = Command::new("git")

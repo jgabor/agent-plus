@@ -1104,7 +1104,11 @@ fn a_check_that_needs_a_short_path_fails_the_proof() {
     let output = repo.prepare();
     fs::remove_dir_all(&short).unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
-    assert!(stdout(&output).contains("fail tests"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("fail tests"),
+        "{}",
+        stdout(&output)
+    );
 }
 
 fn with_base(name: &str, proven: u32, passing: u32) -> Repo {

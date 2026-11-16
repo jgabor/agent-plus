@@ -1051,6 +1051,9 @@ mod tests {
         assert!(path.starts_with("/tmp"));
         let deep = format!("/{}", "d".repeat(200));
         let path = long(Path::new(&deep), "xtask-merge-0123456789abcdef-9");
-        assert_eq!(path, Path::new(&deep).join("xtask-merge-0123456789abcdef-9"));
+        assert_eq!(
+            path,
+            Path::new(&deep).join("xtask-merge-0123456789abcdef-9")
+        );
     }
 }

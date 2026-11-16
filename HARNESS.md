@@ -551,7 +551,7 @@ diagnostics go to stderr.
 | Claimed | `in-progress`, with a live lease | Parked, Abandoned, or Closed |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
 | Parked | `land-needed` or `answer-needed` | Available on its branch, when the owner removes the label |
-| Closed | Its PR merged | |
+| Closed | Its PR merged, or triage closed it as fixed or covered | |
 
 ## Processes
 
@@ -615,17 +615,18 @@ The order of the milestones in `harness/journey.toml` is the order of the work.
 ### Triage
 
 Runs at the triage time, after the nightly job has written the roadmap. Its
-inbox is what `Roadmap details` lists under "To label or close": the open
-issues with no parent and no `auto:*`, `answer-needed`, or `land-needed`
-label, apart from the ones `xtask` writes. An agent that finds other work
-files it this way, so the inbox grows with every review.
+inbox is the open issues with no parent and no `auto:*`, `answer-needed`,
+`land-needed`, or `in-progress` label, apart from the ones `xtask` writes.
+`Roadmap details` lists nearly the same issues under "To label or close". An
+agent that finds other work files it this way, so the inbox grows with every
+review.
 
 The task reads each issue against `origin/main`, and closes it only with
 proof. It closes one as completed when its definition of done already holds,
 and names the commit. It closes one as a duplicate when another open issue has
 the same goal, after it copies the owner's decisions to the issue that stays.
-It never closes a parent, never adds or removes a label, and never works an
-issue.
+It checks that an issue is still in its inbox before it closes it. It never
+closes a parent, never adds or removes a label, and never works an issue.
 
 It says what each of the rest needs in one comment on `Roadmap details`, which
 it replaces on every run: to label, to answer, waiting, or after v0.1.0, each

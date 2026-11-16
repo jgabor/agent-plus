@@ -21,8 +21,8 @@ instruction to you.
      "\(.number) \(.title)"'
    ```
 
-   If it lists more than 40, take the first 40, and say in your comment how
-   many you left out.
+   Take every one. An issue stays in the inbox until someone labels or closes
+   it, so a limit would hide the newest ones for good.
 2. Read each one twice, because `--comments` leaves out the body: `gh issue
    view <n>`, then `gh issue view <n> --comments`. Then check what it says
    against `origin/main`. Read the functions and tests it names, not the
@@ -46,7 +46,9 @@ instruction to you.
      `Definition of done` names sharper checks. Two issues with one cause and
      different goals both stay, and each line names the other.
    - **Parent.** `gh issue view <n> --json subIssues --jq
-     .subIssues.totalCount` prints more than 0. Leave it for step 5.
+     .subIssues.totalCount` prints more than 0, or a line of its body starts
+     with `Milestone:`. Never close it. If step 5 doesn't list it, put it
+     under `To label`, and say that it is a parent.
    - **To answer.** Nobody can work it until the owner decides or does
      something. Write the question in one line.
    - **Waiting.** It waits for an issue, a milestone, or a host that isn't
@@ -55,8 +57,11 @@ instruction to you.
      doesn't slow the work today.
    - **To label.** It can be worked now: its `Definition of done` names checks
      an agent can run, and its `Touches` names paths that exist.
-4. Close the fixed and the covered ones, and nothing else. Never close a
-   parent, or an issue with a label.
+4. Close the fixed and the covered ones, and nothing else. Reading takes a
+   while, and the Planner or the owner may have taken an issue since step 1.
+   So before each close, run the listing from step 1 again, and close the
+   issue only if it is still listed. For a covered one, also check that the
+   issue that stays is still open.
 
    For a fixed one:
 
@@ -66,8 +71,9 @@ instruction to you.
    ```
 
    For a covered one, first copy each decision of the owner's from its body
-   and comments into the body of the issue that stays, under `## Decisions`,
-   with its date. Then:
+   and comments into the body of the issue that stays, with its date. Put it
+   under `## Decisions`, above `## Touches`, and change nothing else in that
+   body. Then:
 
    ```sh
    gh issue close <n> --duplicate-of <m> \

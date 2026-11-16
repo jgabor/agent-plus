@@ -108,13 +108,15 @@ fn write(pending: &Path, path: &str, mode: u32, data: &[u8]) {
     record(pending, &format!("FILE \"{path}\" {mode:o}"));
 }
 
-/// Adds a line to a share's records.
+/// Adds a line to a share's records, in one append, as the share server
+/// does.
 fn record(pending: &Path, line: &str) {
-    let records = pending.join("records");
-    let mut text = fs::read_to_string(&records).unwrap();
-    text.push_str(line);
-    text.push('\n');
-    fs::write(records, text).unwrap();
+    use std::io::Write;
+    let mut records = fs::OpenOptions::new()
+        .append(true)
+        .open(pending.join("records"))
+        .unwrap();
+    records.write_all(format!("{line}\n").as_bytes()).unwrap();
 }
 
 /// The `BASE` line the share server writes for your file at `path`, as it
@@ -612,6 +614,7 @@ fn a_name_means_an_agent_first_then_a_run() {
 }
 
 // spec(SHARE): If several runs have pending changes, each command lists them and exits 1, without a prompt.
+// spec(SHARE): The list is newest first.
 #[test]
 fn several_runs_with_pending_changes_are_listed() {
     let scratch = Scratch::new("several");
@@ -672,4 +675,272 @@ fn discard_throws_the_changes_away_but_not_while_the_run_is_active() {
     // Your file is as it was.
     let yours = fs::read_to_string(scratch.share.join("kept.txt")).unwrap();
     assert_eq!(yours, "yours\n");
+}
+
+#[test]
+fn a_file_that_replaces_a_directory_shows_the_directory_s_files_deleted() {
+    let scratch = Scratch::new("replaced");
+    fs::create_dir(scratch.share.join("docs")).unwrap();
+    fs::write(scratch.share.join("docs/a"), "a\n").unwrap();
+    fs::write(scratch.share.join("notes"), "notes\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    // The agent removes `docs/a` and `docs`, and makes a file `docs`.
+    record(&pending, &base(&scratch.share, "docs/a"));
+    record(&pending, "DELETE \"docs/a\"");
+    record(&pending, &base(&scratch.share, "docs"));
+    record(&pending, "DELETE \"docs\"");
+    write(&pending, "docs", 0o644, b"now a file\n");
+    // And removes the file `notes`, and makes a directory there.
+    record(&pending, &base(&scratch.share, "notes"));
+    record(&pending, "DELETE \"notes\"");
+    fs::create_dir(pending.join("tree/notes")).unwrap();
+    record(&pending, "DIR \"notes\" 755");
+    write(&pending, "notes/b", 0o644, b"b\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let new = |name: &str, line: &str| {
+        format!(
+            "diff --git a/{name} b/{name}\nnew file mode 100644\n--- /dev/null\n+++ b/{name}\n@@ -0,0 +1 @@\n+{line}\n"
+        )
+    };
+    let deleted = |name: &str, line: &str| {
+        format!(
+            "diff --git a/{name} b/{name}\ndeleted file mode 100644\n--- a/{name}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{line}\n"
+        )
+    };
+    assert_eq!(
+        stdout(&output),
+        [
+            new("docs", "now a file"),
+            deleted("docs/a", "a"),
+            deleted("notes", "notes"),
+            new("notes/b", "b"),
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn your_files_are_never_read_through_a_symlink() {
+    let scratch = Scratch::new("through");
+    let outside = scratch.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("file"), "outside\n").unwrap();
+    symlink(&outside, scratch.share.join("docs")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, "DELETE \"docs\"");
+    fs::create_dir(pending.join("tree/docs")).unwrap();
+    record(&pending, "DIR \"docs\" 755");
+    write(&pending, "docs/file", 0o644, b"the agent's\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "delete symlink docs\n",
+            "diff --git a/docs/file b/docs/file\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/docs/file\n",
+            "@@ -0,0 +1 @@\n",
+            "+the agent's\n",
+        )
+    );
+}
+
+/// The share server's order for a rename: the tree first, then the
+/// records.
+#[test]
+fn diff_reads_an_active_run_while_its_agent_renames_files() {
+    let scratch = Scratch::new("renaming");
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "a", 0o644, b"x\n");
+    let _held = scratch.runs().hold(&run).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let renamer = {
+        let (pending, stop) = (pending.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let mut names = ("a", "b");
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let tree = pending.join("tree");
+                fs::rename(tree.join(names.0), tree.join(names.1)).unwrap();
+                record(&pending, &format!("FILE \"{}\" 644", names.1));
+                record(&pending, &format!("DELETE \"{}\"", names.0));
+                names = (names.1, names.0);
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        })
+    };
+
+    let outputs: Vec<Output> = (0..40).map(|_| scratch.ap(&["diff", &run])).collect();
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    renamer.join().unwrap();
+    for output in outputs {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(stdout(&output).ends_with("+x\n"), "{}", stdout(&output));
+    }
+}
+
+#[test]
+fn a_repository_s_files_you_changed_too_are_still_shown() {
+    let scratch = Scratch::new("repository-conflict");
+    fs::create_dir(scratch.share.join(".git")).unwrap();
+    fs::write(scratch.share.join("file"), "one\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(&scratch.share, "file"));
+    write(&pending, "file", 0o644, b"the agent's\n");
+    fs::write(scratch.share.join("file"), "two\n").unwrap();
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("-two\n+the agent's\n"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn a_file_you_add_to_a_directory_the_agent_deleted_is_skipped() {
+    let scratch = Scratch::new("added-to-deleted");
+    fs::create_dir(scratch.share.join("docs")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(&scratch.share, "docs"));
+    record(&pending, "DELETE \"docs\"");
+    fs::write(scratch.share.join("docs/yours"), "yours\n").unwrap();
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "skipped docs/yours: it changed on your side after the agent first changed it\n"
+    );
+}
+
+// spec(SHARE): A mode change line shows any change to a file's permission bits.
+#[test]
+fn any_change_of_permission_bits_is_a_mode_change() {
+    let scratch = Scratch::new("permissions");
+    fs::write(scratch.share.join("secret"), "s\n").unwrap();
+    fs::set_permissions(
+        scratch.share.join("secret"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "secret", 0o600, b"s\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "mode change 100644 => 100600 secret\n");
+}
+
+#[test]
+fn discard_fails_while_the_run_is_active_even_with_nothing_pending() {
+    let scratch = Scratch::new("active-empty");
+    let (run, _) = scratch.run("notes", 1);
+    let held = scratch.runs().hold(&run).unwrap();
+
+    let output = scratch.ap(&["discard", &run]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(scratch.store().join("pending").join(&run).exists());
+    drop(held);
+}
+
+// spec(SHARE): With nothing pending, `ap discard` does nothing and exits 0.
+#[test]
+fn discard_with_nothing_pending_does_nothing() {
+    let scratch = Scratch::new("discard-nothing");
+    scratch.agent("notes");
+    let (run, _) = scratch.run("notes", 1);
+
+    for name in ["notes", run.as_str()] {
+        let output = scratch.ap(&["discard", name]);
+
+        assert_eq!(output.status.code(), Some(0), "{name}: {}", stderr(&output));
+        assert_eq!(stdout(&output), "", "{name}");
+        assert_eq!(stderr(&output), "", "{name}");
+    }
+}
+
+#[test]
+fn a_symlink_shows_once_and_only_when_it_changed() {
+    let scratch = Scratch::new("symlinks");
+    symlink("target", scratch.share.join("same")).unwrap();
+    symlink("old", scratch.share.join("moved")).unwrap();
+    let outside = scratch.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    symlink(&outside, scratch.share.join("escape")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    for (name, target) in [("same", "target"), ("moved", "new"), ("via", "escape/data")] {
+        fs::write(pending.join("tree").join(name), "").unwrap();
+        record(&pending, &format!("SYMLINK \"{name}\" \"{target}\""));
+    }
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "symlink moved -> new\n",
+            "skipped via: it is a symlink whose target goes through a symlink\n",
+        )
+    );
+}
+
+// spec(SHARE): Your `.gitignore` files in the share decide which files are git-ignored, and ones the agent wrote don't.
+#[test]
+fn a_gitignore_the_agent_wrote_hides_nothing() {
+    let scratch = Scratch::new("gitignore");
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, ".gitignore", 0o644, b"*.txt\n");
+    write(&pending, "a.txt", 0o644, b"a\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("+++ b/.gitignore\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stdout(&output).contains("+++ b/a.txt\n"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+// spec(SHARE): A run has pending changes once its agent changes a file in a copy-on-write share, even if it changes the file back.
+#[test]
+fn a_change_the_agent_undid_is_still_pending() {
+    let scratch = Scratch::new("undone");
+    scratch.agent("notes");
+    fs::write(scratch.share.join("file"), "same\n").unwrap();
+    let (one, pending) = scratch.run("notes", 1);
+    write(&pending, "file", 0o644, b"same\n");
+    let (two, pending) = scratch.run("notes", 2);
+    write(&pending, "other", 0o644, b"x\n");
+
+    let output = scratch.ap(&["diff", "notes"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).ends_with(&format!("{two}\n{one}\n")),
+        "{}",
+        stderr(&output)
+    );
+    let output = scratch.ap(&["diff", &one]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
 }

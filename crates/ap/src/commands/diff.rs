@@ -61,9 +61,9 @@ fn diff(name: &str) -> Result<(), String> {
     }
 }
 
-/// The store's root, and the run that `name` means, if it has pending
-/// changes: an agent's single run with them, or else the run with that
-/// name. An agent with several fails, and lists them.
+/// The store's root, and the run that `name` means: an agent's single run
+/// with pending changes, if it has one, or else the run with that name. An
+/// agent with several fails, and lists them.
 pub fn resolve(name: &str) -> Result<(PathBuf, Option<String>), String> {
     let root = ap::store::default_root(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
@@ -84,12 +84,7 @@ pub fn resolve(name: &str) -> Result<(PathBuf, Option<String>), String> {
                     .any(|run| run == name));
         return match known {
             false => Err(format!("no agent or run is named {name}")),
-            true => Ok((
-                root,
-                runs.has_pending(name)
-                    .map_err(failed)?
-                    .then(|| name.to_owned()),
-            )),
+            true => Ok((root, Some(name.to_owned()))),
         };
     }
     let mut pending = Vec::new();

@@ -1466,6 +1466,7 @@ attributes, because those can run commands.
   - A binary file, a mode change, and a symlink each get one line instead.
     So does a file that `ap apply` would skip, other than a git-ignored one,
     and the line says why.
+    A mode change line shows any change to a file's permission bits.
   - For a share whose root holds a `.git` directory, the first line says how
     many commits the branch would carry.
   - Each path is relative to its share's root. When a run has more than one
@@ -1473,7 +1474,8 @@ attributes, because those can run commands.
     its root.
   - It uses no pager and no color.
   - It exits 0 whether or not anything changed.
-- `ap discard <agent | run>` throws the changes away.
+- `ap discard <agent | run>` throws the changes away. With nothing pending,
+  `ap discard` does nothing and exits 0.
 - `ap apply <agent | run>` brings them back.
   - When the share's root on your host holds a `.git` directory, the agent's
     commits, and the files it wrote but didn't commit, land as a new branch,
@@ -1505,6 +1507,8 @@ attributes, because those can run commands.
     stays inside the share. Special files are never applied.
   - Git-ignored files are neither shown nor applied. `ap diff` and
     `ap apply` report how many files they skipped, and why.
+    Your `.gitignore` files in the share decide which files are
+    git-ignored, and ones the agent wrote don't.
 - `ap apply` and `ap discard` fail while the run is active. After `ap apply`,
   the only changes still pending are files it couldn't apply, because they
   changed on your side too or a write failed, and `ap discard` removes them.
@@ -1516,7 +1520,9 @@ attributes, because those can run commands.
   never gives a run the name of an agent in the store.
 - With an agent name, `ap diff`, `ap apply`, and `ap discard` act on its
   single run with pending changes. If several runs have pending changes,
-  each command lists them and exits 1, without a prompt.
+  each command lists them and exits 1, without a prompt. The list is newest
+  first. A run has pending changes once its agent changes a file in a
+  copy-on-write share, even if it changes the file back.
 - `ap rm` and `ap reset` delete pending changes too, so they refuse while an
   agent has any, unless you pass `--force`.
 

@@ -8,10 +8,12 @@
 //! are now, and never follows a symlink of the agent's.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::ffi::CString;
+use std::fs::{self, File};
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 use crate::gitignore::Gitignore;
@@ -262,6 +264,154 @@ fn beneath(path: &[u8], dir: &[u8]) -> bool {
     path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
 }
 
+/// How many times `ap diff` reads a share again when a file its records
+/// name has gone from the tree, as it does while the agent renames it.
+const ATTEMPTS: usize = 20;
+
+/// `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`,
+/// from `<linux/openat2.h>`.
+const BENEATH: u64 = 0x08 | 0x04 | 0x02;
+
+/// `struct open_how`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// Your files in a share, each reached beneath the share's root and never
+/// through a symlink.
+struct Host {
+    root: Option<OwnedFd>,
+}
+
+impl Host {
+    fn new(root: &Path) -> io::Result<Host> {
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(root);
+        match opened {
+            Ok(file) => Ok(Host {
+                root: Some(file.into()),
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host { root: None }),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Opens `path` with `flags`, or `None` if you have nothing there that
+    /// a path with no symlink in it reaches.
+    fn open(&self, path: &[u8], flags: i32) -> io::Result<Option<OwnedFd>> {
+        let Some(root) = &self.root else {
+            return Ok(None);
+        };
+        let name = CString::new(path).map_err(io::Error::other)?;
+        let how = OpenHow {
+            flags: (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
+            mode: 0,
+            resolve: BENEATH,
+        };
+        // SAFETY: `name` is NUL-terminated and `how` is a `struct open_how`,
+        // both outliving the call, which returns a new descriptor or -1.
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                root.as_raw_fd(),
+                name.as_ptr(),
+                &raw const how,
+                size_of::<OpenHow>(),
+            )
+        };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP | libc::EXDEV) => Ok(None),
+                _ => Err(error),
+            };
+        }
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        Ok(Some(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
+    }
+
+    /// What you have at `path`, as itself if it is a symlink.
+    fn stat(&self, path: &[u8]) -> io::Result<Option<fs::Metadata>> {
+        match self.open(path, libc::O_PATH)? {
+            Some(fd) => Ok(Some(File::from(fd).metadata()?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Your file at `path` now.
+    fn yours(&self, path: &[u8]) -> io::Result<Yours> {
+        let Some(fd) = self.open(path, libc::O_PATH)? else {
+            return Ok(Yours::None);
+        };
+        let metadata = File::from(fd.try_clone()?).metadata()?;
+        if metadata.is_symlink() {
+            let mut target = vec![0; libc::PATH_MAX as usize];
+            // SAFETY: the empty name is NUL-terminated, and `target` has
+            // room for the length passed.
+            let len = unsafe {
+                libc::readlinkat(
+                    fd.as_raw_fd(),
+                    c"".as_ptr(),
+                    target.as_mut_ptr().cast(),
+                    target.len(),
+                )
+            };
+            if len < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            target.truncate(len as usize);
+            return Ok(Yours::Symlink(target));
+        }
+        if !metadata.is_file() {
+            return Ok(Yours::Other);
+        }
+        let Some(file) = self.open(path, libc::O_RDONLY | libc::O_NONBLOCK)? else {
+            return Ok(Yours::None);
+        };
+        let mut data = Vec::new();
+        io::Read::read_to_end(&mut File::from(file), &mut data)?;
+        Ok(Yours::File {
+            mode: metadata.mode(),
+            data,
+        })
+    }
+
+    /// The names in your directory at `path`, in order.
+    fn names(&self, path: &[u8]) -> io::Result<Vec<Vec<u8>>> {
+        let Some(dir) = self.open(path, libc::O_RDONLY | libc::O_DIRECTORY)? else {
+            return Ok(Vec::new());
+        };
+        // The descriptor is the directory, opened with no symlink followed.
+        let mut names = Vec::new();
+        for entry in fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
+            names.push(entry?.file_name().as_bytes().to_vec());
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Calls `found` with each of your files at or beneath `path` that
+    /// isn't a directory.
+    fn beneath(&self, path: &[u8], found: &mut dyn FnMut(Vec<u8>)) -> io::Result<()> {
+        let Some(metadata) = self.stat(path)? else {
+            return Ok(());
+        };
+        if !metadata.is_dir() {
+            found(path.to_vec());
+            return Ok(());
+        }
+        for name in self.names(path)? {
+            self.beneath(&[path, b"/", &name].concat(), found)?;
+        }
+        Ok(())
+    }
+}
+
 fn bytes_path(path: &[u8]) -> &Path {
     Path::new(std::ffi::OsStr::from_bytes(path))
 }
@@ -286,7 +436,8 @@ enum Theirs {
     Special(String),
 }
 
-/// A file's mode as git records it: executable by you or not.
+/// A file's mode as a git diff's header gives it: executable by you or
+/// not.
 fn git_mode(mode: u32) -> u32 {
     match mode & 0o100 {
         0 => REGULAR,
@@ -311,34 +462,53 @@ pub struct Shown {
 
 impl Share<'_> {
     /// The changes the agent made to this share, as `ap diff` prints them.
+    /// While the run is active, the agent can move a file between reading
+    /// the records and reading the file, so it reads the share again.
     pub fn diff(&self) -> io::Result<Shown> {
+        for _ in 0..ATTEMPTS {
+            if let Some(shown) = self.attempt()? {
+                return Ok(shown);
+            }
+        }
+        Err(io::Error::other(
+            "the agent kept changing files while they were read, so try again",
+        ))
+    }
+
+    /// The share's changes, or `None` if a file its records name was gone.
+    fn attempt(&self) -> io::Result<Option<Shown>> {
         let text = match fs::read(self.dir.join("records")) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
         let records = Records::read(&text).map_err(io::Error::other)?;
-        let ignore = match fs::symlink_metadata(self.root) {
-            Ok(metadata) if metadata.is_dir() => Gitignore::load(self.root)?,
+        let host = Host::new(self.root)?;
+        let ignore = match host.stat(b".")? {
+            Some(metadata) if metadata.is_dir() => Gitignore::load(self.root)?,
             _ => Gitignore::default(),
         };
-        let repository = fs::symlink_metadata(self.root.join(".git")).is_ok_and(|m| m.is_dir());
+        let repository = host.stat(b".git")?.is_some_and(|m| m.is_dir());
         let mut shown = Shown {
             text: Vec::new(),
             ignored: 0,
         };
-        for path in self.changed(&records)? {
+        for path in changed(&records, &host)? {
             let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
             // The repository's own history, which the branch carries.
             if repository && names[0] == b".git" {
                 continue;
             }
-            let yours = self.yours(&path)?;
             let theirs = match records.view(&path) {
-                View::Agent(Entry::File { mode }) => Theirs::File {
-                    mode: *mode,
-                    data: fs::read(self.dir.join("tree").join(bytes_path(&path)))?,
-                },
+                View::Agent(Entry::File { mode }) => {
+                    match fs::read(self.dir.join("tree").join(bytes_path(&path))) {
+                        Ok(data) => Theirs::File { mode: *mode, data },
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
                 View::Agent(Entry::Symlink { target }) => Theirs::Symlink(target.clone()),
                 View::Agent(Entry::Special { kind }) => Theirs::Special(kind.clone()),
                 _ => Theirs::None,
@@ -357,14 +527,16 @@ impl Share<'_> {
                 skip(out, "it is under .git");
                 continue;
             }
-            if self.changed_on_your_side(&records, &path)? {
+            // A branch import leaves your working tree as it is, so a file
+            // you changed too isn't skipped there.
+            if !repository && changed_on_your_side(&records, &host, &path)? {
                 skip(
                     out,
                     "it changed on your side after the agent first changed it",
                 );
                 continue;
             }
-            match theirs {
+            match &theirs {
                 Theirs::Special(kind) => {
                     let kind = kind.to_ascii_lowercase();
                     skip(
@@ -373,140 +545,133 @@ impl Share<'_> {
                     );
                     continue;
                 }
-                Theirs::Symlink(target) if !inside(&path, &target) => {
-                    skip(out, "it is a symlink whose target leaves the share");
-                    continue;
+                Theirs::Symlink(target) => {
+                    if let Some(why) = leaves(&records, &host, &path, target)? {
+                        skip(out, why);
+                        continue;
+                    }
                 }
                 _ => {}
             }
-            render(out, &path, yours, theirs);
+            render(out, &path, host.yours(&path)?, theirs);
         }
-        Ok(shown)
-    }
-
-    /// Every path whose file differs between yours and the agent's view, in
-    /// order.
-    fn changed(&self, records: &Records) -> io::Result<BTreeSet<Vec<u8>>> {
-        let mut paths = BTreeSet::new();
-        for (path, entry) in &records.entries {
-            match entry {
-                Entry::File { .. } | Entry::Symlink { .. } | Entry::Special { .. } => {
-                    if matches!(records.view(path), View::Agent(_)) {
-                        paths.insert(path.clone());
-                    }
-                }
-                Entry::Deleted | Entry::Dir { opaque: true, .. } => {
-                    self.yours_beneath(path, &mut |yours| {
-                        if matches!(records.view(&yours), View::Absent) {
-                            paths.insert(yours);
-                        }
-                    })?;
-                }
-                Entry::Dir { .. } => {}
-            }
-        }
-        Ok(paths)
-    }
-
-    /// Calls `found` with the path of each of your files at or beneath
-    /// `path` that isn't a directory, without following a symlink.
-    fn yours_beneath(&self, path: &[u8], found: &mut dyn FnMut(Vec<u8>)) -> io::Result<()> {
-        let host = self.root.join(bytes_path(path));
-        let metadata = match fs::symlink_metadata(&host) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if !metadata.is_dir() {
-            found(path.to_vec());
-            return Ok(());
-        }
-        let mut names = Vec::new();
-        for entry in fs::read_dir(&host)? {
-            names.push(entry?.file_name().as_bytes().to_vec());
-        }
-        names.sort();
-        for name in names {
-            self.yours_beneath(&[path, b"/", &name].concat(), found)?;
-        }
-        Ok(())
-    }
-
-    /// Your file at `path` now.
-    fn yours(&self, path: &[u8]) -> io::Result<Yours> {
-        let host = self.root.join(bytes_path(path));
-        let metadata = match fs::symlink_metadata(&host) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Yours::None),
-            Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => return Ok(Yours::None),
-            Err(error) => return Err(error),
-        };
-        Ok(if metadata.is_symlink() {
-            Yours::Symlink(fs::read_link(&host)?.as_os_str().as_bytes().to_vec())
-        } else if metadata.is_file() {
-            Yours::File {
-                mode: metadata.mode(),
-                data: fs::read(&host)?,
-            }
-        } else {
-            Yours::Other
-        })
-    }
-
-    /// Whether your file at `path` changed since the agent first changed
-    /// it, by the record the share server kept of it then.
-    fn changed_on_your_side(&self, records: &Records, path: &[u8]) -> io::Result<bool> {
-        let Some(base) = records.bases.get(path) else {
-            return Ok(false);
-        };
-        let now = match fs::symlink_metadata(self.root.join(bytes_path(path))) {
-            Ok(metadata) => Some(Base {
-                ino: metadata.ino(),
-                size: metadata.size(),
-                mtime: i128::from(metadata.mtime()) * 1_000_000_000
-                    + i128::from(metadata.mtime_nsec()),
-                ctime: i128::from(metadata.ctime()) * 1_000_000_000
-                    + i128::from(metadata.ctime_nsec()),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => None,
-            Err(error) => return Err(error),
-        };
-        Ok(now != *base)
+        Ok(Some(shown))
     }
 }
 
-/// Whether a symlink at `path` with this target stays inside the share,
-/// read as the guest would read it, with no symlink beneath it followed.
-fn inside(path: &[u8], target: &[u8]) -> bool {
-    if target.starts_with(b"/") || target.is_empty() {
-        return false;
+/// Every path whose file differs between yours and the agent's view, in
+/// order.
+fn changed(records: &Records, host: &Host) -> io::Result<BTreeSet<Vec<u8>>> {
+    let mut paths = BTreeSet::new();
+    for (path, entry) in &records.entries {
+        if let Entry::Dir { opaque: false, .. } = entry {
+            // A directory where you have a file replaces it.
+            if host.stat(path)?.is_some_and(|m| !m.is_dir()) {
+                paths.insert(path.clone());
+            }
+            continue;
+        }
+        if matches!(records.view(path), View::Agent(_)) {
+            paths.insert(path.clone());
+        }
+        // Whatever the agent put here hides what you have at and beneath
+        // it, unless it made a directory that shows yours.
+        host.beneath(path, &mut |yours| {
+            if !matches!(records.view(&yours), View::Yours) {
+                paths.insert(yours);
+            }
+        })?;
     }
-    let mut depth = path.split(|&byte| byte == b'/').count() - 1;
+    Ok(paths)
+}
+
+/// Whether your file at `path` changed since the agent first changed it,
+/// by the record the share server kept of it then. A file of yours that
+/// the agent removed with a directory goes by the directory's record.
+fn changed_on_your_side(records: &Records, host: &Host, path: &[u8]) -> io::Result<bool> {
+    let recorded = match records.bases.get(path) {
+        Some(base) => Some((path, base)),
+        None => parents(path)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find(|parent| {
+                matches!(
+                    records.entries.get(*parent),
+                    Some(Entry::Deleted | Entry::Dir { opaque: true, .. })
+                )
+            })
+            .and_then(|parent| Some((parent, records.bases.get(parent)?))),
+    };
+    let Some((path, base)) = recorded else {
+        return Ok(false);
+    };
+    let now = host.stat(path)?.map(|metadata| Base {
+        ino: metadata.ino(),
+        size: metadata.size(),
+        mtime: i128::from(metadata.mtime()) * 1_000_000_000 + i128::from(metadata.mtime_nsec()),
+        ctime: i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()),
+    });
+    Ok(now != *base)
+}
+
+/// Why a symlink at `path` with this target would leave the share, if it
+/// would. The target is read as your host would read it once applied, and
+/// a symlink on the way, yours or the agent's, could lead anywhere.
+fn leaves(
+    records: &Records,
+    host: &Host,
+    path: &[u8],
+    target: &[u8],
+) -> io::Result<Option<&'static str>> {
+    const OUTSIDE: Option<&str> = Some("it is a symlink whose target leaves the share");
+    const THROUGH: Option<&str> = Some("it is a symlink whose target goes through a symlink");
+    if target.starts_with(b"/") || target.is_empty() {
+        return Ok(OUTSIDE);
+    }
+    let mut at: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
+    at.pop();
     for name in target.split(|&byte| byte == b'/') {
         match name {
-            b"" | b"." => {}
-            b".." if depth == 0 => return false,
-            b".." => depth -= 1,
-            _ => depth += 1,
+            b"" | b"." => continue,
+            b".." => {
+                if at.pop().is_none() {
+                    return Ok(OUTSIDE);
+                }
+                continue;
+            }
+            _ => at.push(name),
+        }
+        let reached = at.join(&b'/');
+        let symlink = match records.view(&reached) {
+            View::Agent(entry) => matches!(entry, Entry::Symlink { .. }),
+            View::Yours => host.stat(&reached)?.is_some_and(|m| m.is_symlink()),
+            View::Absent => false,
+        };
+        if symlink {
+            return Ok(THROUGH);
         }
     }
-    true
+    Ok(None)
 }
 
 /// Prints one path's change: a unified diff for a text file, and one line
 /// for a binary file, a mode change, or a symlink.
 fn render(out: &mut Vec<u8>, path: &[u8], yours: Yours, theirs: Theirs) {
     let yours = match yours {
-        Yours::Symlink(target) => {
-            if !matches!(&theirs, Theirs::Symlink(new) if *new == target) {
-                out.extend(b"delete symlink ");
-                quote(out, b"", path);
-                out.push(b'\n');
+        Yours::Symlink(old) => {
+            match &theirs {
+                Theirs::Symlink(new) if *new == old => return,
+                Theirs::Symlink(_) => {}
+                _ => {
+                    out.extend(b"delete symlink ");
+                    quote(out, b"", path);
+                    out.push(b'\n');
+                }
             }
             None
         }
-        Yours::File { mode, data } => Some((git_mode(mode), data)),
+        Yours::File { mode, data } => Some((mode, data)),
         Yours::None | Yours::Other => None,
     };
     let theirs = match theirs {
@@ -518,23 +683,36 @@ fn render(out: &mut Vec<u8>, path: &[u8], yours: Yours, theirs: Theirs) {
             out.push(b'\n');
             None
         }
-        Theirs::File { mode, data } => Some((git_mode(mode), data)),
+        Theirs::File { mode, data } => Some((mode, data)),
         Theirs::None | Theirs::Special(_) => None,
     };
     let (old, new) = match (yours, theirs) {
         (None, None) => return,
         (Some((old_mode, old)), Some((new_mode, new))) => {
+            let (old_mode, new_mode) = (old_mode & 0o7777, new_mode & 0o7777);
             if old_mode != new_mode {
-                out.extend(format!("mode change {old_mode:o} => {new_mode:o} ").bytes());
+                let file = libc::S_IFREG;
+                let line = format!(
+                    "mode change {:o} => {:o} ",
+                    file | old_mode,
+                    file | new_mode
+                );
+                out.extend(line.bytes());
                 quote(out, b"", path);
                 out.push(b'\n');
             }
             if old == new {
                 return;
             }
-            (Some((old_mode, old)), Some((new_mode, new)))
+            (
+                Some((git_mode(old_mode), old)),
+                Some((git_mode(new_mode), new)),
+            )
         }
-        (old, new) => (old, new),
+        (old, new) => (
+            old.map(|(mode, data)| (git_mode(mode), data)),
+            new.map(|(mode, data)| (git_mode(mode), data)),
+        ),
     };
     let binary = |data: &[u8]| data[..data.len().min(BINARY_PROBE)].contains(&0);
     let empty = Vec::new();
@@ -707,6 +885,16 @@ mod tests {
 
     #[test]
     fn a_symlink_stays_inside_only_if_its_target_does() {
+        let mut records = Records::default();
+        records.entries.insert(
+            b"hop".to_vec(),
+            Entry::Symlink {
+                target: b"/".to_vec(),
+            },
+        );
+        let host = Host { root: None };
+        let inside =
+            |path: &[u8], target: &[u8]| leaves(&records, &host, path, target).unwrap().is_none();
         assert!(inside(b"latest", b"build/out"));
         assert!(inside(b"a/b/link", b"../../c"));
         assert!(inside(b"a/link", b"./x/../y"));
@@ -714,6 +902,9 @@ mod tests {
         assert!(!inside(b"link", b"/etc/passwd"));
         assert!(!inside(b"link", b".."));
         assert!(!inside(b"link", b""));
+        // Through the agent's own symlink, which could lead anywhere.
+        assert!(!inside(b"link", b"hop/etc"));
+        assert!(!inside(b"link", b"hop/../etc"));
     }
 
     #[test]

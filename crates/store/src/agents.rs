@@ -163,6 +163,15 @@ impl Agents {
         self.read(name)
     }
 
+    /// Whether the store has an agent with this name. A name no agent can
+    /// have, it doesn't.
+    pub(crate) fn has(&self, name: &str) -> io::Result<bool> {
+        if !valid_name(name) {
+            return Ok(false);
+        }
+        self.dir.join(name).try_exists()
+    }
+
     /// Every agent in the store, by name.
     pub fn list(&self) -> io::Result<Vec<Agent>> {
         let entries = match fs::read_dir(&self.dir) {

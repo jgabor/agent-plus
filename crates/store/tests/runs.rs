@@ -111,3 +111,34 @@ fn each_run_gets_a_pending_directory_of_its_own() {
     assert!(runs.create_pending(&other.name).is_ok());
     assert!(runs.create_pending("../escape").is_err());
 }
+
+// spec(SHARE): `ap` never gives a run the name of an agent in the store.
+#[test]
+fn a_run_never_takes_an_agent_s_name() {
+    let root = store_root("agent-name");
+    let agents = store::Agents::new(&root);
+    agents
+        .record(
+            &store::Agent {
+                name: "k3x9q2mf".to_owned(),
+                directory: "/work/k3x9q2mf".to_owned(),
+                agentfile: "/work/k3x9q2mf/Agentfile".to_owned(),
+                layers: Vec::new(),
+                kinds: Vec::new(),
+                declared: vec![store::Declared {
+                    name: "AGENT".to_owned(),
+                    arguments: vec!["claude".to_owned()],
+                }],
+            },
+            false,
+        )
+        .unwrap();
+    let runs = Runs::new(&root);
+    let mut picks = vec![Ok("a1b2c3d4".to_owned()), Ok("k3x9q2mf".to_owned())];
+    let run = runs
+        .create_with("notes", 1, || picks.pop().unwrap())
+        .unwrap();
+    assert!(picks.is_empty());
+    assert_eq!(run.name, "a1b2c3d4");
+    assert_eq!(runs.get("k3x9q2mf").unwrap(), None);
+}

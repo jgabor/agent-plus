@@ -10,16 +10,18 @@
 //! guest, and your terminal is put in raw mode for as long as the run lasts,
 //! so every key reaches the harness. Its resizes follow.
 //!
-//! An agent's `ro` and `rw` shares are checked again, then opened, and a
-//! share server serves those handles to the run. A file share is served
-//! from the directory that holds it, by its name. The guest mounts each
-//! at the place SPEC.md's Paths section gives it.
+//! An agent's shares are checked again, then opened, and a share server
+//! serves those handles to the run. A file share is served from the
+//! directory that holds it, by its name. A copy-on-write share's changes go
+//! to a directory of its own in the run's pending directory, which the run
+//! makes in the store and leaves there when it ends. The guest mounts each
+//! share at the place SPEC.md's Paths section gives it.
 //!
 //! Only an agent with `NETWORK -` runs. Everything else on #297's list of
 //! what isn't built yet fails with 125 and says so, before any VM starts.
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::fs::{DirBuilder, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
@@ -139,7 +141,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
     let started = start(args)
-        .and_then(|(root, layers, shares, start)| run_agent(&root, args, &layers, &shares, start));
+        .and_then(|(root, layers, shares, start)| run_agent(&root, args, &layers, shares, start));
     match started {
         Ok(status) => status,
         Err(error) => {
@@ -150,13 +152,12 @@ pub fn run(args: &Args) -> u8 {
 }
 
 /// Names the run, starts its processes, and relays its output, filtered,
-/// until it ends. `shares` are the opened roots of its shares, in share
-/// order.
+/// until it ends. `shares` are its shares, opened, in share order.
 fn run_agent(
     root: &Path,
     args: &Args,
     layers: &[LayerName],
-    shares: &[share::Root<File>],
+    shares: Vec<Opened>,
     start: Start,
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
@@ -166,6 +167,7 @@ fn run_agent(
     let run = runs
         .create(&args.agent.to_string_lossy(), started)
         .map_err(fail("can't record the run"))?;
+    let shares = keep_pending(&runs, &run.name, shares)?;
 
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), root);
     DirBuilder::new()
@@ -457,12 +459,51 @@ fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Re
     }
 }
 
-/// The roots of a run's shares, opened, in share order.
-type Roots = Vec<share::Root<File>>;
+/// A share of a run, opened: its root, as [`share::Root`] has it, and the
+/// path of the share's directory on your host.
+struct Opened {
+    directory: File,
+    file: Option<CString>,
+    mode: share::Mode<()>,
+    host: PathBuf,
+}
+
+/// The roots of a run's shares, in share order. Each copy-on-write share
+/// gets a directory of its own in the run's pending directory, which this
+/// makes first, if the run has one.
+fn keep_pending(
+    runs: &::store::Runs,
+    run: &str,
+    shares: Vec<Opened>,
+) -> Result<Vec<share::Root<File>>, Error> {
+    let kept = fail("can't keep the run's changes");
+    let mut made = false;
+    let mut roots = Vec::new();
+    for opened in shares {
+        let mode = match opened.mode {
+            share::Mode::ReadOnly => share::Mode::ReadOnly,
+            share::Mode::ReadWrite => share::Mode::ReadWrite,
+            share::Mode::CopyOnWrite(()) => {
+                if !made {
+                    runs.create_pending(run).map_err(&kept)?;
+                    made = true;
+                }
+                let dir = (runs.create_pending_share(run, &opened.host)).map_err(&kept)?;
+                share::Mode::CopyOnWrite(File::open(dir).map_err(&kept)?)
+            }
+        };
+        roots.push(share::Root {
+            directory: opened.directory,
+            file: opened.file,
+            mode,
+        });
+    }
+    Ok(roots)
+}
 
 /// Everything the run needs before its VM starts: the store's root, the
 /// agent's layers, its shares' roots, and how to start its harness.
-fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> {
+fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), Error> {
     let fail = |message: String| Error::Failed(message);
     if let Some(flag) = args.not_built {
         return Err(fail(format!("`ap run {flag}` is not built yet")));
@@ -524,11 +565,12 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> 
     for (share, (host, directory)) in files.share.iter().zip(&checked) {
         let shown = format!("`SHARE {}`", agentfile::print_argument(&share.source));
         let mode = match share.mode {
-            ShareMode::CopyOnWrite => {
+            ShareMode::CopyOnWrite if !directory => {
                 return Err(fail(format!(
-                    "{shown}: a copy-on-write `SHARE` is not built yet. Give it `ro` or `rw`"
+                    "{shown}: a copy-on-write file `SHARE` is not built yet. Give it `ro` or `rw`"
                 )));
             }
+            ShareMode::CopyOnWrite => share::Mode::CopyOnWrite(()),
             ShareMode::ReadOnly => share::Mode::ReadOnly,
             ShareMode::ReadWrite => share::Mode::ReadWrite,
         };
@@ -536,12 +578,18 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> 
         // The share server serves this handle, so a symlink swapped in
         // since the check fails the run instead of being followed. A file
         // is served from the directory that holds it, by its name.
-        roots.push(match directory {
-            true => share::Root::new(host.open().map_err(opened)?, mode),
+        let (directory, file) = match directory {
+            true => (host.open().map_err(opened)?, None),
             false => {
                 let (parent, name) = host.open_parent().map_err(opened)?;
-                share::Root::file(parent, name, mode)
+                (parent, Some(name))
             }
+        };
+        roots.push(Opened {
+            directory,
+            file,
+            mode,
+            host: host.path().to_owned(),
         });
     }
     let context_name = Path::new(&record.directory)
@@ -691,9 +739,9 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Roots, Start), Error> 
         env: env.into_iter().collect(),
         directory: directory.into_bytes(),
         shares: (shares.into_iter().zip(&roots))
-            .map(|(path, root)| GuestShare {
+            .map(|(path, opened)| GuestShare {
                 path: path.into_bytes(),
-                file: root.file.as_ref().map(|name| name.as_bytes().to_vec()),
+                file: (opened.file.as_ref()).map(|name| name.as_bytes().to_vec()),
             })
             .collect(),
         prompt: args.prompt.clone(),

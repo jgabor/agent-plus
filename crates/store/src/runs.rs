@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 
 use std::os::unix::ffi::OsStringExt;
 
-use crate::agents::valid_name;
+use crate::agents::{Agents, valid_name};
 use crate::layers::{create_partial, sync_up_from};
 
 /// In a share's pending directory, the file that names its root.
@@ -110,6 +110,7 @@ pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
 
 /// The runs in a store. Creating one touches nothing.
 pub struct Runs {
+    agents: Agents,
     dir: PathBuf,
     logs: PathBuf,
     pending: PathBuf,
@@ -119,6 +120,7 @@ impl Runs {
     /// The runs under the store root.
     pub fn new(root: impl AsRef<Path>) -> Self {
         Runs {
+            agents: Agents::new(&root),
             dir: root.as_ref().join("runs"),
             logs: root.as_ref().join("logs"),
             pending: root.as_ref().join("pending"),
@@ -126,8 +128,8 @@ impl Runs {
     }
 
     /// Records a new run of `agent`, which started at `started`, under a name
-    /// picked at random. It picks again if the store already has a run with
-    /// that name.
+    /// picked at random. It picks again if the store already has a run or an
+    /// agent with that name, so a name never means both.
     pub fn create(&self, agent: &str, started: u128) -> io::Result<Run> {
         self.create_with(agent, started, random_name)
     }
@@ -153,6 +155,9 @@ impl Runs {
         // the name already.
         let name = loop {
             let name = pick()?;
+            if self.agents.has(&name)? {
+                continue;
+            }
             match fs::hard_link(&partial.0, self.dir.join(&name)) {
                 Ok(()) => break name,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}

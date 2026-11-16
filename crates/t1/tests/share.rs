@@ -1,6 +1,6 @@
-//! `ap run` with `ro` and `rw` shares: a static `ap` builds an agent whose
-//! harness is the fake one, boots it with its shares mounted, and looks at
-//! them from inside the guest with `ap exec`.
+//! `ap run` with `ro`, `rw`, and copy-on-write shares: a static `ap` builds
+//! an agent whose harness is the fake one, boots it with its shares mounted,
+//! and looks at them from inside the guest with `ap exec`.
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
@@ -337,4 +337,69 @@ fn a_run_shows_a_shared_file_and_nothing_beside_it() {
     failed(&scratch.sh(name, "cat ~/work.txt"), "Stale file handle");
     let stopped = scratch.ap(&["stop", name]);
     assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+}
+
+// spec(SHARE): | copy-on-write (default) | Allowed; kept in the agent's overlay | Unchanged until `ap apply` |
+// spec(SHARE): Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
+// spec(SHARE): The next run starts from your current files, not from earlier unapplied changes.
+// spec(Run): Three things outlast it: the state that `AUTH login` and `PERSIST` keep (see [PERSIST](#persist)), unapplied copy-on-write changes in shares (see [SHARE](#share)), and the run's log (see [`ap logs`](#ap-logs)).
+#[test]
+fn a_copy_on_write_share_keeps_the_agent_s_changes_until_they_are_discarded() {
+    let scratch = Scratch::new("cow");
+    let dir = scratch.dir("cow");
+    let project = dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+    for name in ["keep", "change", "gone"] {
+        fs::write(project.join(format!("{name}.txt")), format!("{name}\n")).unwrap();
+    }
+    let yours = |name: &str| fs::read_to_string(project.join(name)).ok();
+    scratch.build("cow", "ENV FAKE_HARNESS_SLEEP 300\nSHARE ./project\n");
+
+    let (run, report, first) = scratch.start("cow");
+    let first = first.as_str();
+    assert!(
+        report.contains("\"directory\":\"/home/agent/project\""),
+        "{report}"
+    );
+    // The guest writes, changes, and deletes, and sees what it did.
+    printed(
+        &scratch.sh(
+            first,
+            "cd ~/project && echo new > new.txt && echo changed > change.txt && rm gone.txt && cat change.txt && ls",
+        ),
+        "changed\nchange.txt\nkeep.txt\nnew.txt\n",
+    );
+    // Your files stay as they were.
+    assert_eq!(yours("change.txt").as_deref(), Some("change\n"));
+    assert_eq!(yours("gone.txt").as_deref(), Some("gone\n"));
+    assert_eq!(yours("new.txt"), None);
+    let stopped = scratch.ap(&["stop", first]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+
+    // The changes outlast the run.
+    let diff = scratch.ap(&["diff", first]);
+    assert_eq!(diff.status.code(), Some(0), "{diff:?}");
+    let shown = String::from_utf8_lossy(&diff.stdout);
+    for line in ["-change", "+changed", "-gone", "+new"] {
+        assert!(shown.lines().any(|shown| shown == line), "{line}: {shown}");
+    }
+
+    // The next run starts from your files, not the first run's changes.
+    let (run, _, second) = scratch.start("cow");
+    assert_ne!(second, first);
+    printed(
+        &scratch.sh(&second, "cd ~/project && cat change.txt && ls"),
+        "change\nchange.txt\ngone.txt\nkeep.txt\n",
+    );
+    let stopped = scratch.ap(&["stop", &second]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+
+    // By the agent's name, `ap diff` finds the one run with changes.
+    let by_agent = scratch.ap(&["diff", "cow"]);
+    assert_eq!(by_agent.stdout, diff.stdout, "{by_agent:?}");
+    printed(&scratch.ap(&["discard", first]), "");
+    printed(&scratch.ap(&["diff", first]), "");
+    assert_eq!(yours("change.txt").as_deref(), Some("change\n"));
 }

@@ -32,6 +32,7 @@ impl Scratch {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join("apply")
             .join(name);
+        writable(&root);
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         let share = root.join(share);
@@ -122,6 +123,20 @@ impl Scratch {
             .collect();
         names.sort();
         names
+    }
+}
+
+/// Makes every directory at or beneath `path` one you can write in, so an
+/// earlier run of a test that left a read-only one can be removed.
+fn writable(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if metadata.is_dir() {
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
+        for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+            writable(&entry.path());
+        }
     }
 }
 
@@ -337,6 +352,37 @@ fn a_file_you_changed_too_is_reported_and_stays_pending() {
     assert_eq!(scratch.read("mine.txt"), "yours, again\n");
 }
 
+/// Only a file `ap apply` itself landed is exempt from the check, not one
+/// you changed to match the agent's, and not one it can't read.
+#[test]
+fn a_file_you_changed_to_the_agent_s_or_can_t_read_is_still_reported() {
+    let scratch = Scratch::new("conflict-same");
+    let share = &scratch.share;
+    fs::write(share.join("same"), "one\n").unwrap();
+    fs::write(share.join("locked"), "one\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    change(share, &pending, "same", 0o644, b"two\n");
+    change(share, &pending, "locked", 0o644, b"two\n");
+    write(&pending, "other", 0o644, b"other\n");
+    fs::write(share.join("same"), "two\n").unwrap();
+    fs::write(share.join("locked"), "yours\n").unwrap();
+    fs::set_permissions(share.join("locked"), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let output = scratch.ap(&["apply", &run]);
+
+    fs::set_permissions(share.join("locked"), fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped locked: it changed on your side after the agent first changed it\n",
+            "skipped same: it changed on your side after the agent first changed it\n",
+        )
+    );
+    assert_eq!(scratch.read("locked"), "yours\n");
+    assert_eq!(scratch.read("other"), "other\n");
+}
+
 // spec(SHARE): Nothing is ever applied under a path component that matches `.git` case-insensitively, in any repository, including nested ones.
 #[test]
 fn nothing_is_applied_under_git() {
@@ -497,8 +543,10 @@ fn a_directory_the_agent_made_read_only_still_gets_its_files() {
     let scratch = Scratch::new("sealed");
     let share = &scratch.share;
     let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(share, "sealed"));
     dir(&pending, "sealed", 0o555);
     write(&pending, "sealed/file", 0o640, b"in\n");
+    record(&pending, &base(share, "empty"));
     dir(&pending, "empty", 0o755);
 
     let output = scratch.ap(&["apply", &run]);
@@ -733,6 +781,38 @@ fn a_failed_write_leaves_your_file_as_it_was() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
+/// A write that fails in a directory the agent made read-only leaves the
+/// directory one you can write in, so a later `ap apply` lands the file and
+/// then gives the directory the agent's mode.
+#[test]
+fn a_failed_write_in_a_read_only_directory_lands_later() {
+    let scratch = Scratch::new("failed-sealed");
+    let share = &scratch.share;
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(share, "sealed"));
+    dir(&pending, "sealed", 0o555);
+    let large = vec![b'x'; 1 << 20];
+    write(&pending, "sealed/big", 0o644, &large);
+
+    let mut command = scratch.command(&["apply", &run]);
+    limit_file_size(&mut command, libc::SIG_IGN);
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "failed sealed/big: File too large (os error 27)\n"
+    );
+    assert_eq!(mode(&share.join("sealed")) & 0o200, 0o200);
+    let output = scratch.ap(&["apply", &run]);
+    let sealed = mode(&share.join("sealed"));
+    writable(share);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fs::read(share.join("sealed/big")).unwrap(), large);
+    assert_eq!(sealed, 0o555);
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
 /// An `ap apply` killed while it writes leaves your file as it was, and
 /// everything pending, so the next one lands it, and finds the file the
 /// first one landed already the agent's.
@@ -747,6 +827,11 @@ fn an_interrupted_write_leaves_your_file_as_it_was() {
     let large = vec![b'x'; 1 << 20];
     change(share, &pending, "a", 0o644, b"the agent's\n");
     change(share, &pending, "big", 0o644, &large);
+    // `b/file` lands before `big`, and `b` gets its mode only once the
+    // records are rewritten.
+    record(&pending, &base(share, "b"));
+    dir(&pending, "b", 0o555);
+    write(&pending, "b/file", 0o644, b"b\n");
 
     let mut command = scratch.command(&["apply", &run]);
     limit_file_size(&mut command, libc::SIG_DFL);
@@ -754,17 +839,22 @@ fn an_interrupted_write_leaves_your_file_as_it_was() {
 
     assert_eq!(output.status.signal(), Some(libc::SIGXFSZ));
     assert_eq!(scratch.read("a"), "the agent's\n");
+    assert_eq!(scratch.read("b/file"), "b\n");
     assert_eq!(scratch.read("big"), "yours\n");
     assert!(scratch.runs().has_pending(&run).unwrap());
     // What the killed write left beside your file was never your file.
     for name in scratch.names("") {
-        if name != "a" && name != "big" {
+        if name != "a" && name != "b" && name != "big" {
             fs::remove_file(share.join(name)).unwrap();
         }
     }
     let output = scratch.ap(&["apply", &run]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let sealed = mode(&share.join("b"));
+    writable(share);
     assert_eq!(stdout(&output), "");
     assert_eq!(fs::read(share.join("big")).unwrap(), large);
+    assert_eq!(scratch.read("b/file"), "b\n");
+    assert_eq!(sealed, 0o555);
     assert!(!scratch.store().join("pending").join(&run).exists());
 }

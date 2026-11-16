@@ -335,9 +335,6 @@ fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<
 /// through a symlink.
 struct Host {
     root: Option<OwnedFd>,
-    /// Each directory `ap apply` made, and the mode the agent gave it,
-    /// which it gets once what goes in it is written.
-    made: std::cell::RefCell<Vec<(Vec<u8>, u32)>>,
 }
 
 impl Host {
@@ -346,14 +343,8 @@ impl Host {
     fn new(root: &Path) -> io::Result<Host> {
         let name = CString::new(root.as_os_str().as_bytes()).map_err(io::Error::other)?;
         match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
-            Ok(root) => Ok(Host {
-                root: Some(root),
-                made: Default::default(),
-            }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host {
-                root: None,
-                made: Default::default(),
-            }),
+            Ok(root) => Ok(Host { root: Some(root) }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host { root: None }),
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(
                 "the share's directory is now reached through a symlink",
             )),
@@ -476,20 +467,18 @@ impl Host {
             let name = CString::new(name).map_err(io::Error::other)?;
             dir = match openat2(dir.as_raw_fd(), &name, flags, BENEATH) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    // You can write in it until what goes in it is written.
+                    // You can write in it until what goes in it is written,
+                    // and [`Host::seal`] gives it the agent's mode.
                     let mode = match records.view(at) {
-                        View::Agent(Entry::Dir { mode, .. }) => Some(*mode),
-                        _ => None,
+                        View::Agent(Entry::Dir { mode, .. }) => *mode | 0o700,
+                        _ => 0o755,
                     };
-                    let first = mode.map_or(0o755, |mode| mode | 0o700);
                     // SAFETY: `name` is NUL-terminated, and outlives the call.
-                    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), first) } < 0 {
+                    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) } < 0 {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             return Err(error);
                         }
-                    } else if let Some(mode) = mode {
-                        self.made.borrow_mut().push((at.to_vec(), mode));
                     }
                     openat2(dir.as_raw_fd(), &name, flags, BENEATH)?
                 }
@@ -557,14 +546,20 @@ impl Host {
     }
 
     /// Puts the agent's file at `path`, with this mode and the contents of
-    /// `from`, unless yours is the same already.
-    fn write_file(&self, records: &Records, path: &[u8], mode: u32, from: &Path) -> io::Result<()> {
+    /// `from`, unless yours is the same already, and says whether it did.
+    fn write_file(
+        &self,
+        records: &Records,
+        path: &[u8],
+        mode: u32,
+        from: &Path,
+    ) -> io::Result<bool> {
         let mut source = File::open(from)?;
         if let Yours::File { mode: yours, data } = self.yours(path)?
             && yours & 0o7777 == mode
             && fs::read(from)? == data
         {
-            return Ok(());
+            return Ok(false);
         }
         self.replace(records, path, |dir, temp| {
             let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW;
@@ -586,12 +581,14 @@ impl Host {
             io::copy(&mut source, &mut file)?;
             file.set_permissions(fs::Permissions::from_mode(mode))
         })
+        .map(|()| true)
     }
 
-    /// Puts the agent's symlink at `path`, unless yours is the same.
-    fn write_symlink(&self, records: &Records, path: &[u8], target: &[u8]) -> io::Result<()> {
+    /// Puts the agent's symlink at `path`, unless yours is the same, and
+    /// says whether it did.
+    fn write_symlink(&self, records: &Records, path: &[u8], target: &[u8]) -> io::Result<bool> {
         if matches!(self.yours(path)?, Yours::Symlink(yours) if yours == target) {
-            return Ok(());
+            return Ok(false);
         }
         let target = CString::new(target).map_err(io::Error::other)?;
         self.replace(records, path, |dir, temp| {
@@ -601,6 +598,7 @@ impl Host {
                 _ => Err(io::Error::last_os_error()),
             }
         })
+        .map(|()| true)
     }
 
     /// Puts what `make` makes at a new name beside `path` in its place, in
@@ -644,12 +642,23 @@ impl Host {
         made
     }
 
-    /// Gives each directory `ap apply` made the mode the agent gave it,
-    /// deepest first, once what goes in it is written.
-    fn seal(&self) {
-        for (path, mode) in self.made.take().into_iter().rev() {
-            if let Ok(Some(dir)) = self.dir(&path) {
-                let _ = File::from(dir).set_permissions(fs::Permissions::from_mode(mode));
+    /// Gives each directory the agent made where you had nothing the mode
+    /// the agent gave it, deepest first, once nothing beneath it stays
+    /// pending. Until then it stays one you can write in, and what stays
+    /// pending keeps its record.
+    fn seal(&self, records: &Records, kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>) {
+        for path in records.entries.keys().rev() {
+            let View::Agent(Entry::Dir { mode, .. }) = records.view(path) else {
+                continue;
+            };
+            if records.bases.get(path) != Some(&None)
+                || kept.keys().any(|other| beneath(other, path))
+                || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
+            {
+                continue;
+            }
+            if let Ok(Some(dir)) = self.dir(path) {
+                let _ = File::from(dir).set_permissions(fs::Permissions::from_mode(*mode));
             }
         }
     }
@@ -705,6 +714,12 @@ fn git_mode(mode: u32) -> u32 {
     }
 }
 
+/// In a share's pending directory, the share server's record of changes,
+/// and the journal of what an `ap apply` landed: a `BASE` record of each of
+/// your files once it landed it, until it rewrites the records.
+const RECORDS: &str = "records";
+const LANDED: &str = "landed";
+
 /// One copy-on-write share of a run, as `ap diff` reads it.
 pub struct Share<'a> {
     /// The share's directory on your host.
@@ -739,14 +754,21 @@ impl Share<'_> {
         }
     }
 
-    /// The share's changes, or `None` if a file its records name was gone.
-    fn attempt(&self) -> io::Result<Option<Shown>> {
-        let text = match fs::read(self.dir.join("records")) {
+    /// The share's records, or its journal, by its name in the share's
+    /// pending directory.
+    fn read(&self, name: &str) -> io::Result<Records> {
+        let text = match fs::read(self.dir.join(name)) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
-        let records = Records::read(&text).map_err(io::Error::other)?;
+        Records::read(&text).map_err(io::Error::other)
+    }
+
+    /// The share's changes, or `None` if a file its records name was gone.
+    fn attempt(&self) -> io::Result<Option<Shown>> {
+        let records = self.read(RECORDS)?;
+        let landed = self.read(LANDED)?.bases;
         let host = Host::new(self.root)?;
         let ignore = match host.stat(b".")? {
             Some(metadata) if metadata.is_dir() => Gitignore::load(self.root)?,
@@ -758,7 +780,7 @@ impl Share<'_> {
             ignored: 0,
         };
         for path in changed(&records, &host)? {
-            match verdict(&records, &host, &ignore, repository, self.dir, &path)? {
+            match verdict(&records, &landed, &host, &ignore, repository, &path)? {
                 Verdict::History => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
@@ -806,12 +828,8 @@ impl Share<'_> {
     /// target and renamed into place, so your file is either as it was or
     /// the agent's.
     pub fn apply(&self) -> io::Result<Applied> {
-        let text = match fs::read(self.dir.join("records")) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(error),
-        };
-        let records = Records::read(&text).map_err(io::Error::other)?;
+        let records = self.read(RECORDS)?;
+        let landed = self.read(LANDED)?.bases;
         let host = Host::new(self.root)?;
         if host.root.is_none() {
             return Err(io::Error::other("the share's directory is gone"));
@@ -828,7 +846,7 @@ impl Share<'_> {
         let mut kept = BTreeMap::new();
         let mut changes = Vec::new();
         for path in changed(&records, &host)? {
-            match verdict(&records, &host, &ignore, false, self.dir, &path)? {
+            match verdict(&records, &landed, &host, &ignore, false, &path)? {
                 Verdict::History => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
@@ -843,6 +861,13 @@ impl Share<'_> {
                 Verdict::Change => changes.push(path),
             }
         }
+        // Each file this lands, as it lands it, so that one stopped before
+        // it rewrites the records doesn't find them changed on your side.
+        let mut journal = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(self.dir.join(LANDED))?;
         // From here on, a failure keeps its one file pending, and nothing
         // stops the rest, so the records always say what stays.
         let mut failed = BTreeMap::new();
@@ -871,14 +896,23 @@ impl Share<'_> {
                 View::Agent(Entry::Symlink { target }) => {
                     host.write_symlink(&records, path, target)
                 }
-                View::Agent(Entry::Dir { .. }) => host.make_dir(&records, path).map(drop),
-                _ => Ok(()),
+                View::Agent(Entry::Dir { .. }) => host.make_dir(&records, path).map(|_| false),
+                _ => Ok(false),
             };
-            if let Err(error) = written {
-                failed.insert(path.clone(), error);
+            match written {
+                Ok(true) => {
+                    if let Ok(Some(now)) = host.stat(path) {
+                        let mut out = Vec::new();
+                        base_record(&mut out, path, Some(&Base::of(&now)));
+                        let _ = io::Write::write_all(&mut journal, &out);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    failed.insert(path.clone(), error);
+                }
             }
         }
-        host.seal();
         for (path, error) in failed {
             let why = match error.raw_os_error() {
                 Some(libc::ELOOP) => "a directory on its way is a symlink on your side".to_owned(),
@@ -891,6 +925,7 @@ impl Share<'_> {
             let now = host.stat(&path).ok().flatten();
             kept.insert(path, Some(now.as_ref().map(Base::of)));
         }
+        host.seal(&records, &kept);
         applied.text = report.into_values().flatten().collect();
         applied.pending = kept.len();
         self.keep(&records, &kept)?;
@@ -906,7 +941,24 @@ impl Share<'_> {
     ) -> io::Result<()> {
         let mut out = Vec::new();
         let mut files = BTreeSet::new();
+        let mut dirs = BTreeSet::new();
         for (path, base) in kept {
+            // The directories the agent made above it, so that a later
+            // `ap apply` makes them as the agent did.
+            for dir in parents(path) {
+                if let View::Agent(Entry::Dir { mode, .. }) = records.view(dir)
+                    && dirs.insert(dir)
+                {
+                    if let Some(base) = records.bases.get(dir) {
+                        base_record(&mut out, dir, base.as_ref());
+                    }
+                    let entry = Entry::Dir {
+                        mode: *mode,
+                        opaque: false,
+                    };
+                    entry_record(&mut out, dir, &entry);
+                }
+            }
             if let Some(base) = base {
                 base_record(&mut out, path, base.as_ref());
             }
@@ -919,7 +971,7 @@ impl Share<'_> {
             }
             entry_record(&mut out, path, &entry);
         }
-        let new = self.dir.join("records.new");
+        let new = self.dir.join(format!("{RECORDS}.new"));
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -928,7 +980,11 @@ impl Share<'_> {
             .open(&new)?;
         io::Write::write_all(&mut file, &out)?;
         file.sync_all()?;
-        fs::rename(&new, self.dir.join("records"))?;
+        fs::rename(&new, self.dir.join(RECORDS))?;
+        match fs::remove_file(self.dir.join(LANDED)) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
         match prune_tree(&self.dir.join("tree"), b"", &files) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
@@ -962,10 +1018,10 @@ enum Verdict {
 
 fn verdict(
     records: &Records,
+    landed: &BTreeMap<Vec<u8>, Option<Base>>,
     host: &Host,
     ignore: &Gitignore,
     repository: bool,
-    dir: &Path,
     path: &[u8],
 ) -> io::Result<Verdict> {
     let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
@@ -1002,7 +1058,7 @@ fn verdict(
     // changed too isn't skipped there.
     if !repository
         && changed_on_your_side(records, host, path)?
-        && !landed(records, host, dir, path)?
+        && !landed_by_apply(landed, host, path)?
     {
         return Ok(Verdict::Skipped {
             why: "it changed on your side after the agent first changed it".to_owned(),
@@ -1012,18 +1068,18 @@ fn verdict(
     Ok(Verdict::Change)
 }
 
-/// Whether your file at `path` is the agent's already, as after an
-/// `ap apply` that was stopped before it rewrote the records.
-fn landed(records: &Records, host: &Host, dir: &Path, path: &[u8]) -> io::Result<bool> {
-    Ok(match (records.view(path), host.yours(path)?) {
-        (View::Agent(Entry::File { mode }), Yours::File { mode: yours, data }) => {
-            yours & 0o7777 == *mode
-                && fs::read(dir.join("tree").join(bytes_path(path)))
-                    .is_ok_and(|theirs| theirs == data)
-        }
-        (View::Agent(Entry::Symlink { target }), Yours::Symlink(yours)) => *target == yours,
-        _ => false,
-    })
+/// Whether your file at `path` is one an earlier `ap apply` landed, with
+/// nothing changed since, by the journal it left when it was stopped before
+/// it rewrote the records.
+fn landed_by_apply(
+    landed: &BTreeMap<Vec<u8>, Option<Base>>,
+    host: &Host,
+    path: &[u8],
+) -> io::Result<bool> {
+    let Some(base) = landed.get(path) else {
+        return Ok(false);
+    };
+    Ok(host.stat(path)?.as_ref().map(Base::of) == *base)
 }
 
 /// Prints a line of the report for `path`: what happened to it, and why.
@@ -1503,10 +1559,7 @@ mod tests {
                 target: b"/".to_vec(),
             },
         );
-        let host = Host {
-            root: None,
-            made: Default::default(),
-        };
+        let host = Host { root: None };
         let inside =
             |path: &[u8], target: &[u8]| leaves(&records, &host, path, target).unwrap().is_none();
         assert!(inside(b"latest", b"build/out"));

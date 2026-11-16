@@ -404,7 +404,7 @@ fn a_copy_on_write_file_share_is_not_built_yet() {
     );
 }
 
-// spec(SHARE): Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
+// spec(SHARE): **Bringing changes back.** Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
 #[test]
 fn a_run_keeps_a_pending_directory_for_each_copy_on_write_share() {
     let scratch = Scratch::new("share-pending");

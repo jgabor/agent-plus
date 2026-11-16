@@ -340,7 +340,7 @@ fn a_run_shows_a_shared_file_and_nothing_beside_it() {
 }
 
 // spec(SHARE): | copy-on-write (default) | Allowed; kept in the agent's overlay | Unchanged until `ap apply` |
-// spec(SHARE): Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
+// spec(SHARE): **Bringing changes back.** Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
 // spec(SHARE): The next run starts from your current files, not from earlier unapplied changes.
 // spec(Run): Three things outlast it: the state that `AUTH login` and `PERSIST` keep (see [PERSIST](#persist)), unapplied copy-on-write changes in shares (see [SHARE](#share)), and the run's log (see [`ap logs`](#ap-logs)).
 #[test]

@@ -416,7 +416,144 @@ fn a_loose_ref_reads_only_as_git_reads_it() {
             let theirs = id(&String::from_utf8(out.stdout).unwrap());
             assert_eq!(ours.unwrap(), Some(theirs), "{contents:?}");
         } else {
-            assert!(matches!(ours, Err(Error::Corrupt(_))), "{contents:?}: {ours:?}");
+            assert!(
+                matches!(ours, Err(Error::Corrupt(_))),
+                "{contents:?}: {ours:?}"
+            );
         }
     }
+}
+
+/// `name` must resolve as `git rev-parse --verify` resolves it, and a name
+/// git refuses must be refused.
+fn assert_resolves_as_git(root: &Path, name: &str) {
+    let out = output(root, &["rev-parse", "--verify", "-q", name], b"");
+    let ours = Repository::at(root.join(".git")).resolve(name);
+    if out.status.success() {
+        let theirs = id(&String::from_utf8(out.stdout).unwrap());
+        assert_eq!(ours.unwrap(), Some(theirs), "{name}");
+    } else {
+        assert!(matches!(ours, Err(Error::Corrupt(_))), "{name}: {ours:?}");
+    }
+}
+
+#[test]
+fn a_symlinked_ref_reads_as_git_reads_it() {
+    let root = init("symlink");
+    commit(&root, "a", b"a\n");
+    run(
+        &root,
+        &[
+            "-c",
+            "core.preferSymlinkRefs=true",
+            "symbolic-ref",
+            "refs/heads/link",
+            "refs/heads/main",
+        ],
+    );
+    assert!(root.join(".git/refs/heads/link").is_symlink());
+    let repo = Repository::at(root.join(".git"));
+    assert_eq!(
+        repo.find_ref("refs/heads/link").unwrap(),
+        Some(Target::Symbolic("refs/heads/main".into()))
+    );
+    assert_resolves_as_git(&root, "refs/heads/link");
+    // `git for-each-ref` lists no symlink.
+    assert_refs_match(&root);
+}
+
+#[test]
+fn a_symbolic_ref_keeps_whitespace_that_is_not_ascii() {
+    let root = init("nbsp");
+    commit(&root, "a", b"a\n");
+    run(&root, &["branch", "utf"]);
+    commit(&root, "b", b"b\n");
+    run(&root, &["branch", "utf\u{a0}"]);
+    fs::write(
+        root.join(".git/refs/heads/alias"),
+        "ref: refs/heads/utf\u{a0}\n",
+    )
+    .unwrap();
+    assert_resolves_as_git(&root, "refs/heads/alias");
+}
+
+#[test]
+fn a_chain_of_symbolic_refs_is_followed_as_far_as_git_follows_it() {
+    for length in 1..=6 {
+        let root = init(&format!("chain-{length}"));
+        commit(&root, "a", b"a\n");
+        let mut next = "refs/heads/main".to_string();
+        for n in 0..length {
+            let name = format!("refs/heads/link{n}");
+            fs::write(root.join(".git").join(&name), format!("ref: {next}\n")).unwrap();
+            next = name;
+        }
+        assert_resolves_as_git(&root, &next);
+    }
+}
+
+#[test]
+fn a_packed_refs_file_git_refuses_is_refused() {
+    let root = init("bad-packed");
+    commit(&root, "a", b"a\n");
+    run(&root, &["pack-refs", "--all"]);
+    let good = fs::read_to_string(root.join(".git/packed-refs")).unwrap();
+    let hex = text(&root, &["rev-parse", "HEAD"]);
+    let hex = hex.trim();
+    for contents in [
+        good.trim_end().to_string(),
+        format!("^{hex}\n{good}"),
+        format!("{good}^{hex}\n^{hex}\n"),
+        format!("{good}{hex}refs/heads/x\n"),
+    ] {
+        fs::write(root.join(".git/packed-refs"), &contents).unwrap();
+        // With a `sorted` header, `git rev-parse` reads only the lines it
+        // needs. The crate reads the whole file, as `git for-each-ref` does.
+        let out = output(&root, &["for-each-ref"], b"");
+        let repo = Repository::at(root.join(".git"));
+        if out.status.success() {
+            assert_refs_match(&root);
+        } else {
+            assert!(matches!(repo.refs(), Err(Error::Corrupt(_))), "{contents}");
+            let main = repo.resolve("refs/heads/main");
+            assert!(matches!(main, Err(Error::Corrupt(_))), "{contents}");
+        }
+    }
+}
+
+#[test]
+fn a_broken_loose_ref_is_left_out_as_git_leaves_it_out() {
+    let root = init("broken");
+    commit(&root, "a", b"a\n");
+    run(&root, &["branch", "other"]);
+    fs::write(root.join(".git/refs/heads/broken"), "not a ref\n").unwrap();
+    assert_refs_match(&root);
+}
+
+#[test]
+fn a_ref_whose_name_is_not_utf8_leaves_the_others_readable() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let root = init("not-utf8");
+    commit(&root, "a", b"a\n");
+    let name = OsStr::from_bytes(b"refs/tags/x\xff");
+    let status = git(&root)
+        .arg("update-ref")
+        .arg(name)
+        .arg("HEAD")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let repo = Repository::at(root.join(".git"));
+    let names = |repo: &Repository| -> Vec<String> {
+        repo.refs()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+    assert_eq!(names(&repo), ["refs/heads/main"]);
+    run(&root, &["pack-refs", "--all"]);
+    assert_eq!(names(&repo), ["refs/heads/main"]);
+    assert_resolves_as_git(&root, "refs/heads/main");
 }

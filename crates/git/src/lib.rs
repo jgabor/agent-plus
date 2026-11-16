@@ -28,6 +28,10 @@ impl Id {
     }
 }
 
+fn hex_id(bytes: &[u8]) -> Option<Id> {
+    Id::from_hex(std::str::from_utf8(bytes).ok()?)
+}
+
 fn digit(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -178,8 +182,8 @@ impl Repository {
     /// from its loose file or else from `packed-refs`.
     pub fn find_ref(&self, name: &str) -> Result<Option<Target>, Error> {
         check_name(name)?;
-        if let Some(contents) = read(&self.git_dir.join(name))? {
-            return parse_loose_ref(name, &contents).map(Some);
+        if let Some(target) = self.loose_ref(name)? {
+            return Ok(Some(target));
         }
         Ok(self.packed_refs()?.remove(name).map(Target::Object))
     }
@@ -187,7 +191,7 @@ impl Repository {
     /// The object that `name` points at, through any symbolic refs.
     pub fn resolve(&self, name: &str) -> Result<Option<Id>, Error> {
         let mut name = name.to_string();
-        for _ in 0..=MAX_DEPTH {
+        for _ in 0..MAX_DEPTH {
             match self.find_ref(&name)? {
                 None => return Ok(None),
                 Some(Target::Object(id)) => return Ok(Some(id)),
@@ -199,7 +203,9 @@ impl Repository {
         )))
     }
 
-    /// Every ref under `refs/`, loose and packed, sorted by name.
+    /// Every ref under `refs/`, loose and packed, sorted by name. Like `git
+    /// for-each-ref`, it leaves out a loose ref it can't read. A ref whose
+    /// name isn't UTF-8 is left out too.
     pub fn refs(&self) -> Result<Vec<(String, Target)>, Error> {
         let mut refs: BTreeMap<String, Target> = self
             .packed_refs()?
@@ -208,16 +214,44 @@ impl Repository {
             .collect();
         let mut loose = Vec::new();
         self.loose_refs("refs", &mut loose)?;
-        for (name, contents) in loose {
-            let target = parse_loose_ref(&name, &contents)?;
-            refs.insert(name, target);
+        for name in loose {
+            match self.loose_ref(&name) {
+                Ok(Some(target)) => {
+                    refs.insert(name, target);
+                }
+                Ok(None) | Err(Error::Corrupt(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(refs.into_iter().collect())
     }
 
-    /// The name and contents of every loose ref under `dir`. A file whose
-    /// name git wouldn't take as a ref, such as a lock, isn't one.
-    fn loose_refs(&self, dir: &str, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), Error> {
+    /// The loose ref `name`, or `None` if it has no file. A symlink is a
+    /// symbolic ref, as git once wrote them, and must point under `refs/`.
+    fn loose_ref(&self, name: &str) -> Result<Option<Target>, Error> {
+        let path = self.git_dir.join(name);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        if metadata.is_symlink() {
+            let link = fs::read_link(&path)?;
+            let target = link
+                .to_str()
+                .filter(|target| check_name(target).is_ok() && *target != "HEAD")
+                .ok_or_else(|| corrupt(format!("{name} links outside refs/")))?;
+            return Ok(Some(Target::Symbolic(target.to_string())));
+        }
+        match read(&path)? {
+            Some(contents) => parse_loose_ref(name, &contents).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The name of every loose ref under `dir`. A file whose name git
+    /// wouldn't take as a ref, such as a lock, isn't one.
+    fn loose_refs(&self, dir: &str, out: &mut Vec<String>) -> Result<(), Error> {
         let entries = match fs::read_dir(self.git_dir.join(dir)) {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -231,31 +265,50 @@ impl Repository {
             let name = format!("{dir}/{file}");
             if entry.file_type()?.is_dir() {
                 self.loose_refs(&name, out)?;
-            } else if check_name(&name).is_ok() {
-                if let Some(contents) = read(&entry.path())? {
-                    out.push((name, contents));
-                }
+            } else if entry.file_type()?.is_file() && check_name(&name).is_ok() {
+                // Like `git for-each-ref`, it lists no symlink.
+                out.push(name);
             }
         }
         Ok(())
     }
 
-    /// The refs in `packed-refs`, by name.
+    /// The refs in `packed-refs`, by name. Like git, it refuses a last
+    /// line with no newline, and a `^` line that doesn't follow a ref.
     fn packed_refs(&self) -> Result<BTreeMap<String, Id>, Error> {
         let mut refs = BTreeMap::new();
         let Some(contents) = read(&self.git_dir.join("packed-refs"))? else {
             return Ok(refs);
         };
-        let text =
-            std::str::from_utf8(&contents).map_err(|_| corrupt("packed-refs isn't UTF-8"))?;
-        for line in text.lines() {
-            // A comment heads the file, and a `^` line peels the tag above it.
-            if line.starts_with('#') || line.starts_with('^') {
+        let Some(body) = contents.strip_suffix(b"\n") else {
+            return match contents.is_empty() {
+                true => Ok(refs),
+                false => Err(corrupt("packed-refs ends without a newline")),
+            };
+        };
+        // Whether the line before was a ref, which a `^` line may peel.
+        let mut after_ref = false;
+        for (n, line) in body.split(|&b| b == b'\n').enumerate() {
+            let bad = || corrupt(format!("packed-refs has a bad line {}", n + 1));
+            if n == 0 && line.starts_with(b"#") {
                 continue;
             }
-            let bad = || corrupt(format!("packed-refs has a bad line: {line:?}"));
-            let (hex, name) = line.split_once(' ').ok_or_else(bad)?;
-            let id = Id::from_hex(hex).ok_or_else(bad)?;
+            if let Some(peeled) = line.strip_prefix(b"^") {
+                if !after_ref || hex_id(peeled).is_none() {
+                    return Err(bad());
+                }
+                after_ref = false;
+                continue;
+            }
+            if line.len() < 41 || line[40] != b' ' {
+                return Err(bad());
+            }
+            let id = hex_id(&line[..40]).ok_or_else(bad)?;
+            after_ref = true;
+            // A name that isn't UTF-8 can't be asked for, so it is left out.
+            let Ok(name) = std::str::from_utf8(&line[41..]) else {
+                continue;
+            };
             check_name(name).map_err(|_| bad())?;
             refs.insert(name.to_string(), id);
         }
@@ -290,7 +343,7 @@ fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
     let bad = || corrupt(format!("{name} isn't a ref"));
     let text = std::str::from_utf8(contents).map_err(|_| bad())?;
     if let Some(target) = text.strip_prefix("ref:") {
-        let target = target.trim();
+        let target = target.trim_matches(|c: char| c.is_ascii_whitespace());
         check_name(target)?;
         return Ok(Target::Symbolic(target.to_string()));
     }

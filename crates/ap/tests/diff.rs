@@ -567,15 +567,15 @@ fn each_share_s_changes_start_with_a_line_that_names_it() {
 #[test]
 fn a_name_means_an_agent_first_then_a_run() {
     let scratch = Scratch::new("names");
-    scratch.agent("notes");
-    let (_, pending) = scratch.run("notes", 1);
-    write(&pending, "agent.txt", 0o644, b"notes\n");
-    // A run of another agent that has the agent's name, as a run made
-    // before the agent was built could.
+    // A run of another agent that has the agent's name, made before the
+    // agent was built.
     let runs = scratch.runs();
     let named = runs
         .create_with("other", 2, || Ok("notes".to_owned()))
         .unwrap();
+    scratch.agent("notes");
+    let (_, pending) = scratch.run("notes", 1);
+    write(&pending, "agent.txt", 0o644, b"notes\n");
     runs.create_pending(&named.name).unwrap();
     let pending = runs
         .create_pending_share(&named.name, &scratch.share)

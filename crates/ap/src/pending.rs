@@ -8,12 +8,12 @@
 //! are now, and never follows a symlink of the agent's.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
 use crate::gitignore::Gitignore;
@@ -265,12 +265,15 @@ fn beneath(path: &[u8], dir: &[u8]) -> bool {
 }
 
 /// How many times `ap diff` reads a share again when a file its records
-/// name has gone from the tree, as it does while the agent renames it.
+/// name has gone from the tree, or is no longer a file, as happens while
+/// the agent moves it.
 const ATTEMPTS: usize = 20;
 
-/// `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, and `RESOLVE_NO_MAGICLINKS`,
-/// from `<linux/openat2.h>`.
-const BENEATH: u64 = 0x08 | 0x04 | 0x02;
+/// `RESOLVE_NO_SYMLINKS` and `RESOLVE_NO_MAGICLINKS`, from
+/// `<linux/openat2.h>`.
+const NO_SYMLINKS: u64 = 0x04 | 0x02;
+/// Those, and `RESOLVE_BENEATH`.
+const BENEATH: u64 = NO_SYMLINKS | 0x08;
 
 /// `struct open_how`.
 #[repr(C)]
@@ -280,6 +283,32 @@ struct OpenHow {
     resolve: u64,
 }
 
+/// Opens `name` from `directory` with `openat2`, resolving it as `resolve`
+/// says.
+fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<OwnedFd> {
+    let how = OpenHow {
+        flags: (flags | libc::O_CLOEXEC) as u64,
+        mode: 0,
+        resolve,
+    };
+    // SAFETY: `name` is NUL-terminated and `how` is a `struct open_how`,
+    // both outliving the call, which returns a new descriptor or -1.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            directory,
+            name.as_ptr(),
+            &raw const how,
+            size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
 /// Your files in a share, each reached beneath the share's root and never
 /// through a symlink.
 struct Host {
@@ -287,16 +316,16 @@ struct Host {
 }
 
 impl Host {
+    /// Your files beneath `root`, which is reached with no symlink on the
+    /// way, as the run that recorded it found it.
     fn new(root: &Path) -> io::Result<Host> {
-        let opened = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY)
-            .open(root);
-        match opened {
-            Ok(file) => Ok(Host {
-                root: Some(file.into()),
-            }),
+        let name = CString::new(root.as_os_str().as_bytes()).map_err(io::Error::other)?;
+        match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
+            Ok(root) => Ok(Host { root: Some(root) }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host { root: None }),
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(
+                "the share's directory is now reached through a symlink",
+            )),
             Err(error) => Err(error),
         }
     }
@@ -308,31 +337,13 @@ impl Host {
             return Ok(None);
         };
         let name = CString::new(path).map_err(io::Error::other)?;
-        let how = OpenHow {
-            flags: (flags | libc::O_CLOEXEC | libc::O_NOFOLLOW) as u64,
-            mode: 0,
-            resolve: BENEATH,
-        };
-        // SAFETY: `name` is NUL-terminated and `how` is a `struct open_how`,
-        // both outliving the call, which returns a new descriptor or -1.
-        let fd = unsafe {
-            libc::syscall(
-                libc::SYS_openat2,
-                root.as_raw_fd(),
-                name.as_ptr(),
-                &raw const how,
-                size_of::<OpenHow>(),
-            )
-        };
-        if fd < 0 {
-            let error = io::Error::last_os_error();
-            return match error.raw_os_error() {
+        match openat2(root.as_raw_fd(), &name, flags | libc::O_NOFOLLOW, BENEATH) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(error) => match error.raw_os_error() {
                 Some(libc::ENOENT | libc::ENOTDIR | libc::ELOOP | libc::EXDEV) => Ok(None),
                 _ => Err(error),
-            };
+            },
         }
-        // SAFETY: the descriptor is new, and nothing else owns it.
-        Ok(Some(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
     }
 
     /// What you have at `path`, as itself if it is a symlink.
@@ -503,7 +514,13 @@ impl Share<'_> {
                 View::Agent(Entry::File { mode }) => {
                     match fs::read(self.dir.join("tree").join(bytes_path(&path))) {
                         Ok(data) => Theirs::File { mode: *mode, data },
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // The agent moved or replaced it since.
+                        Err(error)
+                            if matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOENT | libc::EISDIR | libc::ENOTDIR)
+                            ) =>
+                        {
                             return Ok(None);
                         }
                         Err(error) => return Err(error),
@@ -587,22 +604,12 @@ fn changed(records: &Records, host: &Host) -> io::Result<BTreeSet<Vec<u8>>> {
 
 /// Whether your file at `path` changed since the agent first changed it,
 /// by the record the share server kept of it then. A file of yours that
-/// the agent removed with a directory goes by the directory's record.
+/// the agent never changed itself, but removed with a directory above it,
+/// goes by the record of the nearest such directory.
 fn changed_on_your_side(records: &Records, host: &Host, path: &[u8]) -> io::Result<bool> {
-    let recorded = match records.bases.get(path) {
-        Some(base) => Some((path, base)),
-        None => parents(path)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .find(|parent| {
-                matches!(
-                    records.entries.get(*parent),
-                    Some(Entry::Deleted | Entry::Dir { opaque: true, .. })
-                )
-            })
-            .and_then(|parent| Some((parent, records.bases.get(parent)?))),
-    };
+    let mut recorded = parents(path).chain([path]).collect::<Vec<_>>();
+    recorded.reverse();
+    let recorded = (recorded.into_iter()).find_map(|path| Some((path, records.bases.get(path)?)));
     let Some((path, base)) = recorded else {
         return Ok(false);
     };

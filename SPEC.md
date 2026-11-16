@@ -1467,6 +1467,7 @@ attributes, because those can run commands.
     So does a file that `ap apply` would skip, other than a git-ignored one,
     and the line says why.
     A mode change line shows any change to a file's permission bits.
+    A directory gets no line of its own, as in `git diff`.
   - For a share whose root holds a `.git` directory, the first line says how
     many commits the branch would carry.
   - Each path is relative to its share's root. When a run has more than one
@@ -1508,7 +1509,8 @@ attributes, because those can run commands.
   - Git-ignored files are neither shown nor applied. `ap diff` and
     `ap apply` report how many files they skipped, and why.
     Your `.gitignore` files in the share decide which files are
-    git-ignored, and ones the agent wrote don't.
+    git-ignored, and ones the agent wrote don't. `ap diff` counts them
+    across every share.
 - `ap apply` and `ap discard` fail while the run is active. After `ap apply`,
   the only changes still pending are files it couldn't apply, because they
   changed on your side too or a write failed, and `ap discard` removes them.

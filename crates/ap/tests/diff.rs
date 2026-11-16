@@ -944,3 +944,127 @@ fn a_change_the_agent_undid_is_still_pending() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "");
 }
+
+#[test]
+fn a_file_you_add_beneath_nested_directories_the_agent_deleted_is_skipped() {
+    let scratch = Scratch::new("nested-deleted");
+    fs::create_dir_all(scratch.share.join("docs/deep")).unwrap();
+    fs::write(scratch.share.join("docs/deep/old"), "old\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    for path in ["docs/deep/old", "docs/deep", "docs"] {
+        record(&pending, &base(&scratch.share, path));
+        record(&pending, &format!("DELETE \"{path}\""));
+    }
+    fs::write(scratch.share.join("docs/deep/new"), "new\n").unwrap();
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped docs/deep/new: it changed on your side after the agent first changed it\n",
+            "diff --git a/docs/deep/old b/docs/deep/old\n",
+            "deleted file mode 100644\n",
+            "--- a/docs/deep/old\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-old\n",
+        )
+    );
+}
+
+/// The agent turns `a` from a file into a directory and back, in the
+/// share server's order: the tree first, then the records.
+#[test]
+fn diff_reads_an_active_run_while_its_agent_replaces_a_file_with_a_directory() {
+    let scratch = Scratch::new("replacing");
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "a", 0o644, b"x\n");
+    write(&pending, "b", 0o644, b"y\n");
+    let _held = scratch.runs().hold(&run).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let replacer = {
+        let (pending, stop) = (pending.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let a = pending.join("tree/a");
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                fs::remove_file(&a).unwrap();
+                fs::create_dir(&a).unwrap();
+                record(&pending, "DELETE \"a\"");
+                record(&pending, "DIR \"a\" 755");
+                std::thread::sleep(std::time::Duration::from_micros(200));
+                fs::remove_dir(&a).unwrap();
+                fs::write(&a, "x\n").unwrap();
+                record(&pending, "DELETE \"a\"");
+                record(&pending, "FILE \"a\" 644");
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        })
+    };
+
+    let outputs: Vec<Output> = (0..40).map(|_| scratch.ap(&["diff", &run])).collect();
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    replacer.join().unwrap();
+    for output in outputs {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert!(stdout(&output).ends_with("+y\n"), "{}", stdout(&output));
+    }
+}
+
+#[test]
+fn a_share_whose_directory_became_a_symlink_fails() {
+    let scratch = Scratch::new("root-symlink");
+    let root = scratch.root.join("project");
+    fs::create_dir(&root).unwrap();
+    let (run, pending) = scratch.run_sharing("notes", 1, &root);
+    write(&pending, "file", 0o644, b"the agent's\n");
+    let elsewhere = scratch.root.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("file"), "not yours to show\n").unwrap();
+    fs::remove_dir(&root).unwrap();
+    symlink(&elsewhere, &root).unwrap();
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "ap: run {run}: {}: the share's directory is now reached through a symlink\n",
+            root.display()
+        )
+    );
+}
+
+// spec(SHARE): A directory gets no line of its own, as in `git diff`.
+// spec(SHARE): `ap diff` counts them across every share.
+#[test]
+fn directories_get_no_line_and_ignored_files_count_across_shares() {
+    let scratch = Scratch::new("directories");
+    let other = scratch.root.join("other");
+    fs::create_dir(&other).unwrap();
+    fs::create_dir(scratch.share.join("kept")).unwrap();
+    let runs = scratch.runs();
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    for root in [&scratch.share, &other] {
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        let pending = runs.create_pending_share(&run, root).unwrap();
+        fs::create_dir(pending.join("tree")).unwrap();
+        fs::write(pending.join("records"), "").unwrap();
+        fs::create_dir(pending.join("tree/new")).unwrap();
+        record(&pending, "DIR \"new\" 700");
+        write(&pending, "out.log", 0o644, b"log\n");
+    }
+    let pending = runs.pending_shares(&run).unwrap()[0].dir.clone();
+    fs::create_dir(pending.join("tree/kept")).unwrap();
+    record(&pending, "DIR \"kept\" 700");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "skipped 2 git-ignored files\n");
+}

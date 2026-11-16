@@ -925,33 +925,41 @@ fn delta_header(base: usize, result: usize) -> Vec<u8> {
 fn a_planted_delta_reads_as_git_reads_it() {
     let base = id(&"a".repeat(40));
     let target = id(&"b".repeat(40));
-    let cases: Vec<Vec<u8>> = vec![
+    let small = b"hello world".to_vec();
+    // One byte more than the largest copy.
+    let large: Vec<u8> = (0..=0x10000u32).map(|i| (i % 251) as u8).collect();
+    let cases: Vec<(&[u8], Vec<u8>)> = vec![
         // Copy all 11 bytes of the base, then insert 3.
-        [delta_header(11, 14), vec![0x90, 11, 3], b"!!!".to_vec()].concat(),
-        // A copy of size 0 means 0x10000, more than the base holds.
-        [delta_header(11, 11), vec![0x80]].concat(),
+        (
+            &small,
+            [delta_header(11, 14), vec![0x90, 11, 3], b"!!!".to_vec()].concat(),
+        ),
+        // A copy of size 0 means 0x10000.
+        (
+            &large,
+            [delta_header(0x10001, 0x10000), vec![0x80]].concat(),
+        ),
+        // That is more than a small base holds.
+        (&small, [delta_header(11, 12), vec![0x80, 1, b'x']].concat()),
         // A copy past the end of the base.
-        [delta_header(11, 11), vec![0x91, 1, 11]].concat(),
+        (&small, [delta_header(11, 11), vec![0x91, 1, 11]].concat()),
         // An insert past the end of the delta.
-        [delta_header(11, 3), vec![3, b'x']].concat(),
+        (&small, [delta_header(11, 3), vec![3, b'x']].concat()),
         // The reserved opcode.
-        [delta_header(11, 1), vec![0, 1, b'x']].concat(),
+        (&small, [delta_header(11, 1), vec![0, 1, b'x']].concat()),
         // The wrong size of base.
-        [delta_header(10, 1), vec![1, b'x']].concat(),
+        (&small, [delta_header(10, 1), vec![1, b'x']].concat()),
         // A result shorter or longer than the header says.
-        [delta_header(11, 2), vec![1, b'x']].concat(),
-        [delta_header(11, 1), vec![2, b'x', b'y']].concat(),
+        (&small, [delta_header(11, 2), vec![1, b'x']].concat()),
+        (&small, [delta_header(11, 1), vec![2, b'x', b'y']].concat()),
         // Shorter than any delta git takes.
-        delta_header(0, 0),
+        (&small, delta_header(0, 0)),
     ];
-    for (n, delta) in cases.iter().enumerate() {
+    for (n, (data, delta)) in cases.iter().enumerate() {
         let root = init(&format!("delta-{n}"));
         plant_pack(
             &root,
-            &[
-                (base, whole(3, b"hello world")),
-                (target, ref_delta(&base, delta)),
-            ],
+            &[(base, whole(3, data)), (target, ref_delta(&base, delta))],
         );
         let hex = target.to_string();
         let theirs = output(&root, &["cat-file", "blob", &hex], b"");
@@ -984,6 +992,17 @@ fn a_planted_entry_git_refuses_is_refused() {
             one,
             [entry_header(3, 2), whole(3, b"x")[1..].to_vec()].concat(),
         )],
+        // A size in more bytes than git reads: 4 bits, and 8 groups of 7.
+        vec![(
+            one,
+            [
+                vec![0xb1],
+                vec![0x80; 8],
+                vec![0],
+                whole(3, b"x")[1..].to_vec(),
+            ]
+            .concat(),
+        )],
         // A base in no pack.
         vec![(one, ref_delta(&two, &delta))],
         // Two deltas, each the other's base.
@@ -1000,9 +1019,36 @@ fn a_planted_entry_git_refuses_is_refused() {
         let ours = Repository::at(root.join(".git")).object(&one);
         assert!(matches!(ours, Err(Error::Corrupt(_))), "{n}: {ours:?}");
         // A cycle of deltas is left to the crate alone.
-        if n != 4 {
+        if n != 5 {
             let theirs = output(&root, &["cat-file", "-p", &one.to_string()], b"");
             assert!(!theirs.status.success(), "{n}: git reads it");
+        }
+    }
+}
+
+#[test]
+fn an_index_with_more_64_bit_offsets_than_objects_is_refused() {
+    let one = id(&"a".repeat(40));
+    let two = id(&"b".repeat(40));
+    // Git takes at most one 64-bit offset fewer than there are objects.
+    for (n, entries, reads) in [
+        (0, vec![(one, whole(3, b"x"))], false),
+        (1, vec![(one, whole(3, b"x")), (two, whole(3, b"y"))], true),
+    ] {
+        let root = init(&format!("extra-offset-{n}"));
+        plant_pack(&root, &entries);
+        let idx = root.join(".git/objects/pack/pack-planted.idx");
+        let mut bytes = fs::read(&idx).unwrap();
+        let trailer = bytes.len() - 40;
+        bytes.splice(trailer..trailer, [0; 8]);
+        fs::write(&idx, bytes).unwrap();
+        let theirs = output(&root, &["cat-file", "blob", &one.to_string()], b"");
+        assert_eq!(theirs.status.success(), reads, "{n}: git");
+        let ours = Repository::at(root.join(".git")).object(&one);
+        match ours {
+            Ok(Some(object)) if reads => assert_eq!(object.data, theirs.stdout),
+            Err(Error::Corrupt(_)) if !reads => {}
+            other => panic!("{n}: {other:?}"),
         }
     }
 }

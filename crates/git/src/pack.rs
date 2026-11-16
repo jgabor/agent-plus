@@ -69,13 +69,14 @@ impl Pack {
             below = count;
         }
         let count = below;
-        // Each object has an id, a checksum, and an offset, and any of them
-        // may have a 64-bit offset too.
+        // Each object has an id, a checksum, and an offset, and as in git's
+        // `check_packed_git_idx`, all but one may have a 64-bit offset too.
         let least = count
             .checked_mul(28)
             .and_then(|tables| tables.checked_add(IDS + TRAILER))
             .ok_or_else(|| bad("is too large"))?;
-        if index.len() < least || (index.len() - least) % 8 != 0 {
+        let most = least + count.saturating_sub(1) * 8;
+        if index.len() < least || index.len() > most || (index.len() - least) % 8 != 0 {
             return Err(bad("has the wrong length"));
         }
         let len = file.metadata()?.len();
@@ -197,12 +198,13 @@ impl Pack {
         let mut size = u64::from(byte & 15);
         let mut shift = 4;
         while byte & 0x80 != 0 {
-            byte = bytes.next().ok_or_else(short)?;
-            let part = u64::from(byte & 0x7f);
-            if shift >= 64 || (part << shift) >> shift != part {
+            // As git's `unpack_object_header_buffer`, which stops before a
+            // group that might not fit.
+            if shift > 64 - 7 {
                 return Err(self.bad(format!("has too large an entry at {offset}")));
             }
-            size |= part << shift;
+            byte = bytes.next().ok_or_else(short)?;
+            size |= u64::from(byte & 0x7f) << shift;
             shift += 7;
         }
         let size = usize::try_from(size).map_err(|_| self.bad("has too large an entry"))?;
@@ -345,7 +347,7 @@ impl Pack {
 /// stops at the end of the delta, even in the middle of a size.
 fn delta_size(bytes: &mut impl Iterator<Item = u8>) -> Option<u64> {
     let mut size = 0;
-    let mut shift = 0;
+    let mut shift: u32 = 0;
     for byte in bytes {
         let part = u64::from(byte & 0x7f);
         if part != 0 && (shift >= 64 || (part << shift) >> shift != part) {
@@ -354,7 +356,7 @@ fn delta_size(bytes: &mut impl Iterator<Item = u8>) -> Option<u64> {
         if shift < 64 {
             size |= part << shift;
         }
-        shift += 7;
+        shift = shift.saturating_add(7);
         if byte & 0x80 == 0 {
             break;
         }
@@ -364,4 +366,16 @@ fn delta_size(bytes: &mut impl Iterator<Item = u8>) -> Option<u64> {
 
 fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_delta_size_of_many_empty_groups_is_zero() {
+        // More groups than a 32-bit count of shifts can hold.
+        let mut bytes = std::iter::repeat_n(0x80, 310_000_000).chain([0]);
+        assert_eq!(delta_size(&mut bytes), Some(0));
+    }
 }

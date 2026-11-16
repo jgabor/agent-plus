@@ -348,6 +348,23 @@ fn each_codex_mode_is_set_on_the_command_line() {
     golden_in("codex", "mode.txt", lines.as_bytes());
 }
 
+// spec(WORKDIR): A headless Codex run can start in a directory that isn't a git repository, such as `/home/agent`, because the adapter passes `codex exec --skip-git-repo-check`.
+#[test]
+fn a_headless_codex_run_skips_the_git_repository_check() {
+    for version in CODEX_VERSIONS {
+        for mode in MODES {
+            let headless = codex::arguments(version, None, None, mode, false);
+            assert_eq!(
+                headless[..2],
+                ["exec", "--skip-git-repo-check"],
+                "{version}"
+            );
+            let interactive = codex::arguments(version, None, None, mode, true);
+            assert!(!interactive.iter().any(|a| a == "--skip-git-repo-check"));
+        }
+    }
+}
+
 // spec(MODE): The default is `auto`.
 #[test]
 fn a_codex_agentfile_without_mode_starts_in_auto() {
@@ -358,6 +375,7 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
         arguments,
         [
             "exec",
+            "--skip-git-repo-check",
             "--approve-for-me",
             "-c",
             "sandbox_workspace_write.network_access=true"

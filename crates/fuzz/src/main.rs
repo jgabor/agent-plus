@@ -4,6 +4,7 @@
 
 use std::env;
 use std::fs::{self, File};
+use std::io::Write;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
 use std::panic;
@@ -442,7 +443,80 @@ fn git_input(input: &str) -> usize {
         (other, _) => panic!("{input:?}: {other:?}"),
     }
     fs::remove_file(&object).expect("the fuzz repository");
+    packed_input(root, input);
     accepted
+}
+
+/// Writes the input and two blobs like it, which git can store as deltas
+/// against it, packs them with each kind of delta, and reads each blob from
+/// the pack as `crates/git` and as `git` do.
+fn packed_input(root: &Path, input: &str) {
+    let reversed: String = input.chars().rev().collect();
+    let blobs = [
+        input.to_string(),
+        format!("{input}{input}"),
+        format!("{input}\n{reversed}"),
+    ];
+    let mut paths = Vec::new();
+    for (n, blob) in blobs.iter().enumerate() {
+        let path = root.join(format!("blob{n}"));
+        fs::write(&path, blob).expect("the fuzz repository");
+        paths.push(path.to_str().expect("a UTF-8 path").to_string());
+    }
+    let pack = root.join(".git/objects/pack");
+    for delta in ["--delta-base-offset", "--no-delta-base-offset"] {
+        let mut args = vec!["hash-object", "-w", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let ids = git_says(root, &args).expect("git hash-object");
+        let prefix = pack.join("pack");
+        let prefix = prefix.to_str().expect("a UTF-8 path");
+        let packed = git_fed(root, &["pack-objects", "-q", delta, prefix], &ids);
+        assert!(packed.is_some(), "git pack-objects");
+        // Git must read the pack too, not the loose copies.
+        for hex in ids.split(|&b| b == b'\n').filter(|hex| !hex.is_empty()) {
+            let hex = std::str::from_utf8(hex).expect("an id");
+            let loose = root.join(".git/objects").join(&hex[..2]).join(&hex[2..]);
+            let _ = fs::remove_file(loose);
+        }
+        let theirs = git_fed(root, &["cat-file", "--batch"], &ids).expect("git cat-file");
+        let repo = git::Repository::at(root.join(".git"));
+        let mut ours = Vec::new();
+        for hex in ids.split(|&b| b == b'\n').filter(|hex| !hex.is_empty()) {
+            let id = git::Id::from_hex(std::str::from_utf8(hex).expect("an id")).expect("an id");
+            match repo.packed_object(&id) {
+                Ok(Some(object)) => {
+                    let size = object.data.len();
+                    ours.extend(format!("{id} {} {size}\n", object.kind).into_bytes());
+                    ours.extend(object.data);
+                    ours.push(b'\n');
+                }
+                other => {
+                    panic!("crates/git reads {id} from a {delta} pack as {other:?}: {input:?}")
+                }
+            }
+        }
+        let show = String::from_utf8_lossy;
+        assert_eq!(show(&ours), show(&theirs), "crates/git, {delta}: {input:?}");
+        for entry in fs::read_dir(&pack).expect("the fuzz repository") {
+            fs::remove_file(entry.expect("the fuzz repository").path())
+                .expect("the fuzz repository");
+        }
+    }
+}
+
+/// What `git` prints when fed `input`, or `None` if it fails.
+fn git_fed(root: &Path, args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
+    let mut child = git(root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("git");
+    let mut stdin = child.stdin.take().expect("a pipe");
+    stdin.write_all(input).expect("git's stdin");
+    drop(stdin);
+    let out = child.wait_with_output().expect("git");
+    out.status.success().then_some(out.stdout)
 }
 
 /// The name in a line of a `git for-each-ref` listing.

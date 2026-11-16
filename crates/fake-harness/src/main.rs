@@ -2,7 +2,8 @@
 //! guest. It prints what it can see as one line of JSON, and exits.
 //!
 //! Four variables steer it, so an Agentfile's `ENV` lines can. After it
-//! reports, it creates the file that `FAKE_HARNESS_WRITE` names, waits as
+//! reports, it writes an empty file at each path that `FAKE_HARNESS_WRITE`
+//! names, separated by `:`, creating or emptying it in place. It waits as
 //! many seconds as `FAKE_HARNESS_SLEEP` says, and exits with the status in
 //! `FAKE_HARNESS_STATUS`, or 0. With `FAKE_HARNESS_IGNORE_TERM` set, it
 //! ignores `SIGTERM`.
@@ -77,14 +78,12 @@ fn main() -> ExitCode {
     if terminal {
         answer();
     }
-    if let Some(path) = env::var_os("FAKE_HARNESS_WRITE")
-        && let Err(e) = fs::write(&path, "")
-    {
-        eprintln!(
-            "fake-harness: couldn't write {}: {e}",
-            path.to_string_lossy()
-        );
-        return ExitCode::FAILURE;
+    let writes = env::var_os("FAKE_HARNESS_WRITE").unwrap_or_default();
+    for path in env::split_paths(&writes).filter(|path| !path.as_os_str().is_empty()) {
+        if let Err(e) = fs::write(&path, "") {
+            eprintln!("fake-harness: couldn't write {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
     }
     if let Ok(seconds) = env::var("FAKE_HARNESS_SLEEP") {
         let Ok(seconds) = seconds.parse() else {

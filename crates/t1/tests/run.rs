@@ -5,6 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
@@ -397,6 +398,77 @@ fn the_agent_can_write_in_the_directories_its_adapter_makes() {
     assert!(
         array(&report, "files").contains(&"\".claude/settings.json\""),
         "{report}"
+    );
+}
+
+/// Puts `./src` beside the Agentfile of agent `name`: a directory and a file
+/// that only their owner can read, as a checkout often has.
+fn private_source(scratch: &Scratch, name: &str) {
+    let src = scratch.root.join(name).join("src");
+    fs::create_dir_all(src.join("deep")).unwrap();
+    fs::write(src.join("private.txt"), "private").unwrap();
+    fs::write(src.join("deep/added.txt"), "added").unwrap();
+    for (path, mode) in [("", 0o700), ("deep", 0o700), ("private.txt", 0o600)] {
+        fs::set_permissions(src.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+// spec(Run): Everything the image puts in `/home/agent` belongs to `agent`.
+// spec(ADD): In the guest, what `ADD` copies belongs to the user `agent`, with its read, write, and execute bits from the host.
+#[test]
+fn the_harness_changes_what_add_and_its_adapter_put_in_the_home() {
+    let scratch = Scratch::new("owned");
+    let add = "ADD ./src ~/src\nWORKDIR ~/src\n";
+    private_source(&scratch, "edits");
+    scratch.build(
+        "edits",
+        &format!(
+            "AGENT claude:0.0.0\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_STATUS {STATUS}\n{add}\
+             ENV FAKE_HARNESS_WRITE deep/new.txt:private.txt:/home/agent/.claude/settings.json\n"
+        ),
+    );
+    // The run exits with the harness's status only if every write worked.
+    let report = scratch.run(&["edits", "-p", PROMPT]);
+    assert!(
+        report.contains("\"directory\":\"/home/agent/src\""),
+        "{report}"
+    );
+    assert_eq!(
+        array(&report, "files"),
+        ["\"deep/added.txt\"", "\"private.txt\""],
+        "{report}"
+    );
+
+    private_source(&scratch, "owners");
+    scratch.build(
+        "owners",
+        &fake(&format!(
+            "{add}ENV FAKE_HARNESS_SLEEP 300\nPROMPT {BUILT_PROMPT}\n"
+        )),
+    );
+    let (_run, name) = start_headless(&scratch, "owners");
+    let paths = [
+        "/home/agent/src",
+        "/home/agent/src/deep/added.txt",
+        "/home/agent/src/private.txt",
+        "/home/agent/.claude/settings.json",
+        "/home/agent/.claude.json",
+        "/etc/ap/prompt",
+        "/usr/local/bin/claude",
+        "/usr/bin/env",
+    ];
+    let mut args = vec!["stat", "-c", "%U:%G %a %n"];
+    args.extend(paths);
+    printed(
+        &scratch.exec(&name, &args, b""),
+        "agent:agent 700 /home/agent/src\n\
+         agent:agent 644 /home/agent/src/deep/added.txt\n\
+         agent:agent 600 /home/agent/src/private.txt\n\
+         agent:agent 644 /home/agent/.claude/settings.json\n\
+         agent:agent 644 /home/agent/.claude.json\n\
+         root:root 644 /etc/ap/prompt\n\
+         root:root 755 /usr/local/bin/claude\n\
+         root:root 755 /usr/bin/env\n",
     );
 }
 

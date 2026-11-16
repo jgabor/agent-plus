@@ -11,7 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use erofs::{Dir, Error, File, Node, Symlink};
+use erofs::{Dir, Error, File, Node, Owner, Symlink};
 
 const SUPER_OFFSET: usize = 1024;
 const MAGIC: u32 = 0xE0F5_E1E2;
@@ -102,6 +102,8 @@ struct Reader<'a> {
     meta: usize,
     seen: usize,
     cover: Cover,
+    /// Each inode's user and group id, by its path.
+    owners: BTreeMap<Vec<u8>, (u16, u16)>,
 }
 
 /// What the seeded trees exercised, so a change to the generator can't
@@ -121,6 +123,15 @@ impl Reader<'_> {
     }
 
     fn read_covering(img: &[u8]) -> (Tree, Cover) {
+        let (tree, cover, owners) = Self::read_all(img);
+        assert!(
+            owners.values().all(|owner| *owner == (0, 0)),
+            "root owns every inode: {owners:?}"
+        );
+        (tree, cover)
+    }
+
+    fn read_all(img: &[u8]) -> (Tree, Cover, BTreeMap<Vec<u8>, (u16, u16)>) {
         let sb = &img[SUPER_OFFSET..];
         assert_eq!(u32_at(sb, 0), MAGIC, "magic");
         let blkszbits = sb[12];
@@ -155,13 +166,14 @@ impl Reader<'_> {
             meta: u32_at(sb, 40) as usize * block,
             seen: 0,
             cover: Cover::default(),
+            owners: BTreeMap::new(),
         };
-        let tree = reader.inode(root, root, 0);
+        let tree = reader.inode(root, root, 0, Vec::new());
         assert_eq!(reader.seen, inos, "inos");
-        (tree, reader.cover)
+        (tree, reader.cover, reader.owners)
     }
 
-    fn inode(&mut self, nid: u64, parent: u64, depth: usize) -> Tree {
+    fn inode(&mut self, nid: u64, parent: u64, depth: usize, path: Vec<u8>) -> Tree {
         self.cover.deepest = self.cover.deepest.max(depth);
         self.seen += 1;
         let at = self.meta + nid as usize * 32;
@@ -176,8 +188,9 @@ impl Reader<'_> {
         let size = u32_at(i, 8) as usize;
         assert_eq!(u32_at(i, 12), 0, "mtime");
         let start = u32_at(i, 16);
-        assert_eq!(u16_at(i, 24), 0, "uid");
-        assert_eq!(u16_at(i, 26), 0, "gid");
+        self.owners
+            .insert(path.clone(), (u16_at(i, 24), u16_at(i, 26)));
+        assert_eq!(u32_at(i, 28), 0, "reserved");
         let data = if size == 0 {
             assert_eq!(start, NULL_ADDR, "an empty inode has no blocks");
             &[][..]
@@ -201,7 +214,7 @@ impl Reader<'_> {
             }
             S_IFDIR => {
                 self.cover.multi_block_dirs += usize::from(size > self.block);
-                let entries = self.dir(nid, parent, data, depth);
+                let entries = self.dir(nid, parent, data, depth, &path);
                 let subdirs = entries
                     .values()
                     .filter(|t| matches!(t, Tree::Dir(..)))
@@ -214,7 +227,14 @@ impl Reader<'_> {
     }
 
     /// Follows `erofs_readdir` and `erofs_fill_dentries`.
-    fn dir(&mut self, nid: u64, parent: u64, data: &[u8], depth: usize) -> BTreeMap<Vec<u8>, Tree> {
+    fn dir(
+        &mut self,
+        nid: u64,
+        parent: u64,
+        data: &[u8],
+        depth: usize,
+        path: &[u8],
+    ) -> BTreeMap<Vec<u8>, Tree> {
         let mut found = Vec::new();
         // Each block's bytes in use, and its first name's length.
         let mut packing = Vec::new();
@@ -275,7 +295,12 @@ impl Reader<'_> {
                 _ => {
                     assert!(!name.contains(&b'/') && !name.contains(&0));
                     self.cover.longest_name = self.cover.longest_name.max(name.len());
-                    let tree = self.inode(child, nid, depth + 1);
+                    let mut child_path = path.to_vec();
+                    if !child_path.is_empty() {
+                        child_path.push(b'/');
+                    }
+                    child_path.extend(&name);
+                    let tree = self.inode(child, nid, depth + 1, child_path);
                     let want = match tree {
                         Tree::Dir(..) => FT_DIR,
                         Tree::File(..) => FT_REG_FILE,
@@ -439,6 +464,54 @@ fn edge_cases_round_trip() {
 fn an_empty_root_round_trips() {
     let tree = Tree::Dir(0o755, BTreeMap::new());
     assert_eq!(Reader::read(&image(&tree)), tree);
+}
+
+#[test]
+fn each_inode_has_the_owner_its_path_is_given() {
+    let tree = Tree::Dir(
+        0o755,
+        BTreeMap::from([(
+            b"home".to_vec(),
+            Tree::Dir(
+                0o755,
+                BTreeMap::from([
+                    (b"file".to_vec(), Tree::File(0o600, b"data".to_vec())),
+                    (b"link".to_vec(), Tree::Symlink(0o777, b"file".to_vec())),
+                    (b"dir".to_vec(), Tree::Dir(0o700, BTreeMap::new())),
+                ]),
+            ),
+        )]),
+    );
+    let Node::Dir(root) = to_node(&tree) else {
+        panic!("the root is a directory");
+    };
+    let owner = |path: &[u8]| match path {
+        b"" => Owner { uid: 0, gid: 0 },
+        b"home" => Owner { uid: 7, gid: 0 },
+        b"home/file" => Owner {
+            uid: 1000,
+            gid: 1000,
+        },
+        b"home/link" => Owner { uid: 0, gid: 1000 },
+        b"home/dir" => Owner {
+            uid: u16::MAX,
+            gid: 2,
+        },
+        other => panic!("no owner asked for {other:?}"),
+    };
+    let mut img = Vec::new();
+    erofs::write_owned(root, &owner, &mut img).expect("write the image");
+    let (read, _, owners) = Reader::read_all(&img);
+    assert_eq!(read, tree);
+    let want = [
+        ("", (0, 0)),
+        ("home", (7, 0)),
+        ("home/file", (1000, 1000)),
+        ("home/link", (0, 1000)),
+        ("home/dir", (u16::MAX, 2)),
+    ];
+    let want = want.map(|(path, ids)| (path.as_bytes().to_vec(), ids));
+    assert_eq!(owners, BTreeMap::from(want));
 }
 
 #[test]

@@ -449,7 +449,8 @@ directory) and writes an image into the local store.
   [PERSIST](#persist)), unapplied copy-on-write changes in shares (see
   [SHARE](#share)), and the run's log (see [`ap logs`](#ap-logs)).
 - **User.** The agent runs as the non-root user `agent`, with
-  `HOME=/home/agent`.
+  `HOME=/home/agent`. Everything the image puts in `/home/agent` belongs to
+  `agent`.
 - **Updates.** Harness self-updates are disabled. The harness version
   changes only through the Agentfile and the lockfile.
 - **Sign-in.** When the guest asks to open a URL, `ap` opens only `https`
@@ -972,6 +973,9 @@ ADD ./prompts /opt/prompts
   lands.
 - The content is part of the image. Writes by the agent go to the run's
   overlay and disappear when the run ends, unless `PERSIST home` keeps them.
+- In the guest, what `ADD` copies belongs to the user `agent`, with its
+  read, write, and execute bits from the host. A directory that `ADD` makes
+  above it, outside `/home/agent`, belongs to root.
 - `<src>` itself is canonicalized like any host path, so a symlink you name
   is followed. Inside a directory, symlinks are copied as symlinks and
   never followed. Special files (devices, sockets, FIFOs) are skipped with

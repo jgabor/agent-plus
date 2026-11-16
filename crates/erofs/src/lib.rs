@@ -6,9 +6,10 @@
 //! directory to `u32::MAX` bytes, and an image to `u32::MAX` blocks of 4 KiB.
 //! Anything larger is refused before a byte is written.
 //!
-//! The image is a function of the tree alone. Entries are sorted by name, and
-//! every time, user id, and group id is zero. The tree has no inode numbers:
-//! an inode's place in the image is its order in a depth-first walk.
+//! The image is a function of the tree, and of the owners [`write_owned`]
+//! gives it. Entries are sorted by name, and every time is zero. The tree has
+//! no inode numbers: an inode's place in the image is its order in a
+//! depth-first walk.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -39,6 +40,17 @@ pub struct Symlink {
     /// Permission bits, up to `0o7777`.
     pub mode: u16,
     pub target: Vec<u8>,
+}
+
+/// Who owns an inode. A compact inode holds 16-bit ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub uid: u16,
+    pub gid: u16,
+}
+
+impl Owner {
+    pub const ROOT: Owner = Owner { uid: 0, gid: 0 };
 }
 
 /// Why an image wasn't written. Only `Content` and `Io` can happen after
@@ -134,16 +146,29 @@ enum Data {
 
 struct Inode {
     mode: u16,
+    owner: Owner,
     nlink: u16,
     size: u32,
     start: u32,
     data: Data,
 }
 
-/// Writes `root` and everything under it to `out` as an EROFS image.
+/// Writes `root` and everything under it to `out` as an EROFS image, with
+/// every inode owned by root.
 pub fn write(root: Dir, out: &mut dyn Write) -> Result<(), Error> {
+    write_owned(root, &|_| Owner::ROOT, out)
+}
+
+/// Writes `root` like [`write`], with each inode owned by whoever `owner`
+/// names for its path. A path is relative to the root, without a leading
+/// `/`, and the root's own is empty.
+pub fn write_owned(
+    root: Dir,
+    owner: &dyn Fn(&[u8]) -> Owner,
+    out: &mut dyn Write,
+) -> Result<(), Error> {
     let mut inodes = Vec::new();
-    plan_dir(root, Vec::new(), 0, &mut inodes)?;
+    plan_dir(root, Vec::new(), 0, owner, &mut inodes)?;
 
     let meta_blocks = (inodes.len() * INODE_SIZE).div_ceil(BLOCK) as u64;
     let mut next = u64::from(META_BLKADDR) + meta_blocks;
@@ -169,6 +194,8 @@ pub fn write(root: Dir, out: &mut dyn Write) -> Result<(), Error> {
         put32(slot, 16, inode.start);
         // Only for 32-bit stat. The kernel names an inode by its nid.
         put32(slot, 20, (index as u32).wrapping_add(1));
+        put16(slot, 24, inode.owner.uid);
+        put16(slot, 26, inode.owner.gid);
     }
     out.write_all(&meta)?;
 
@@ -197,12 +224,14 @@ fn plan_dir(
     dir: Dir,
     path: Vec<u8>,
     parent: usize,
+    owner: &dyn Fn(&[u8]) -> Owner,
     inodes: &mut Vec<Inode>,
 ) -> Result<usize, Error> {
     check_mode(dir.mode, &path)?;
     let me = inodes.len();
     inodes.push(Inode {
         mode: 0,
+        owner: Owner::ROOT,
         nlink: 0,
         size: 0,
         start: 0,
@@ -219,7 +248,7 @@ fn plan_dir(
         let entry = match node {
             Node::Dir(d) => {
                 subdirs += 1;
-                (plan_dir(d, child, me, inodes)?, FT_DIR)
+                (plan_dir(d, child, me, owner, inodes)?, FT_DIR)
             }
             Node::File(f) => {
                 check_mode(f.mode, &child)?;
@@ -229,6 +258,7 @@ fn plan_dir(
                 })?;
                 inodes.push(Inode {
                     mode: S_IFREG | f.mode,
+                    owner: owner(&child),
                     nlink: 1,
                     size,
                     start: 0,
@@ -255,6 +285,7 @@ fn plan_dir(
                 }
                 inodes.push(Inode {
                     mode: S_IFLNK | s.mode,
+                    owner: owner(&child),
                     nlink: 1,
                     size: s.target.len() as u32,
                     start: 0,
@@ -272,12 +303,14 @@ fn plan_dir(
         path: path.clone(),
         size: bytes.len() as u64,
     })?;
+    let me_owner = owner(&path);
     let nlink = u16::try_from(2 + subdirs).map_err(|_| Error::Invalid {
         path,
         reason: "a directory can't hold more than 65533 directories",
     })?;
     inodes[me] = Inode {
         mode: S_IFDIR | dir.mode,
+        owner: me_owner,
         nlink,
         size,
         start: 0,

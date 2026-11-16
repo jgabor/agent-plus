@@ -22,15 +22,34 @@ use crate::paths::HostPath;
 
 /// The mode of a directory the guest path needs above the content.
 const PARENT: u16 = 0o755;
-/// The permission bits a layer keeps. Every file in an image belongs to
-/// root, so a setuid bit would give root to whatever the host user wrote.
+/// The permission bits a layer keeps. A setuid or setgid bit would give the
+/// file's owner or group to whoever runs it, and a sticky bit isn't asked for.
 const PERMISSIONS: u16 = 0o777;
+
+/// The guest user `agent`, who owns what a layer puts in its home.
+pub const AGENT: erofs::Owner = erofs::Owner {
+    uid: guest::agent::ID as u16,
+    gid: guest::agent::ID as u16,
+};
+
+/// Who owns what a layer puts at `path`, which is relative to the root of
+/// the image: `agent` in its home, and root elsewhere.
+pub fn owner(path: &[u8]) -> erofs::Owner {
+    let home = guest::agent::HOME.trim_start_matches('/').as_bytes();
+    match path.strip_prefix(home) {
+        Some(rest) if rest.is_empty() || rest[0] == b'/' => AGENT,
+        _ => erofs::Owner::ROOT,
+    }
+}
 
 /// What one `ADD` puts in the image.
 pub struct Layer {
+    /// Where the content lands, relative to the root of the image.
+    content: Vec<u8>,
     /// The SHA-256 of the instruction, its arguments as written, the guest
-    /// path, and every name, mode, symlink target, and file hash it read,
-    /// in lowercase hex. Times and owners don't count.
+    /// path, every name, mode, symlink target, and file hash it read, and
+    /// the owner each entry gets, in lowercase hex. Times and owners on the
+    /// host don't count.
     pub key: String,
     /// One line for each special file that was skipped.
     pub warnings: Vec<String>,
@@ -63,6 +82,7 @@ impl Layer {
             warnings: Vec::new(),
         };
         let content = walk.top()?;
+        let content_at = names.join("/").into_bytes();
 
         let mut root = BTreeMap::new();
         if let Some(content) = content {
@@ -84,7 +104,7 @@ impl Layer {
             None => hash.update(&[0]),
         }
         field(&mut hash, guest.as_bytes());
-        manifest(&mut hash, &root);
+        manifest(&mut hash, &root, &mut Vec::new(), &content_at);
         hash.update(&(walk.ignores.len() as u64).to_le_bytes());
         for (dir, content) in &walk.ignores {
             field(&mut hash, dir);
@@ -93,6 +113,7 @@ impl Layer {
         let key = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
 
         Ok(Layer {
+            content: content_at,
             key,
             warnings: walk.warnings,
             root,
@@ -102,10 +123,14 @@ impl Layer {
     /// The layer as an uncompressed EROFS image.
     pub fn image(self) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
-        erofs::write(dir(PARENT, self.root), &mut out).map_err(|error| match error {
-            erofs::Error::Io(error) => error,
-            error => io::Error::new(io::ErrorKind::InvalidData, error.to_string()),
-        })?;
+        let content = self.content;
+        let owner = |path: &[u8]| entry_owner(&content, path);
+        erofs::write_owned(dir(PARENT, self.root), &owner, &mut out).map_err(
+            |error| match error {
+                erofs::Error::Io(error) => error,
+                error => io::Error::new(io::ErrorKind::InvalidData, error.to_string()),
+            },
+        )?;
         Ok(out)
     }
 }
@@ -132,21 +157,45 @@ fn dir(mode: u16, entries: BTreeMap<Vec<u8>, Entry>) -> erofs::Dir {
     erofs::Dir { mode, entries }
 }
 
+/// Who owns the entry at `path` in a layer whose content lands at
+/// `content`: `agent` for the content and what is in it, and as [`owner`]
+/// says for the directories above it.
+fn entry_owner(content: &[u8], path: &[u8]) -> erofs::Owner {
+    match path.strip_prefix(content) {
+        Some(rest) if rest.is_empty() || rest[0] == b'/' => AGENT,
+        _ => owner(path),
+    }
+}
+
 /// Adds a field that can't run into the next one.
 fn field(hash: &mut Sha256Context, bytes: &[u8]) {
     hash.update(&(bytes.len() as u64).to_le_bytes());
     hash.update(bytes);
 }
 
-fn manifest(hash: &mut Sha256Context, entries: &BTreeMap<Vec<u8>, Entry>) {
+/// Adds the entries of the directory at `path`, and who owns each.
+fn manifest(
+    hash: &mut Sha256Context,
+    entries: &BTreeMap<Vec<u8>, Entry>,
+    path: &mut Vec<u8>,
+    content: &[u8],
+) {
     hash.update(&(entries.len() as u64).to_le_bytes());
     for (name, entry) in entries {
         field(hash, name);
+        let len = path.len();
+        if !path.is_empty() {
+            path.push(b'/');
+        }
+        path.extend_from_slice(name);
+        let owner = entry_owner(content, path);
+        hash.update(&owner.uid.to_le_bytes());
+        hash.update(&owner.gid.to_le_bytes());
         match entry {
             Entry::Dir(mode, entries) => {
                 hash.update(b"d");
                 hash.update(&mode.to_le_bytes());
-                manifest(hash, entries);
+                manifest(hash, entries, path, content);
             }
             Entry::File(mode, data) => {
                 hash.update(b"f");
@@ -160,6 +209,7 @@ fn manifest(hash: &mut Sha256Context, entries: &BTreeMap<Vec<u8>, Entry>) {
                 field(hash, target);
             }
         }
+        path.truncate(len);
     }
 }
 

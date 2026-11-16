@@ -107,6 +107,15 @@ fn link(target: &str) -> Entry {
 
 /// Every path in the image, the root as `/`.
 fn contents(image: &[u8]) -> BTreeMap<String, Entry> {
+    read_image(image).0
+}
+
+/// The user and group id of every path in the image, the root as `/`.
+fn owners(image: &[u8]) -> BTreeMap<String, (u16, u16)> {
+    read_image(image).1
+}
+
+fn read_image(image: &[u8]) -> (BTreeMap<String, Entry>, BTreeMap<String, (u16, u16)>) {
     let sb = &image[1024..];
     assert_eq!(u32_at(sb, 0), 0xE0F5_E1E2, "magic");
     let reader = Reader {
@@ -115,8 +124,10 @@ fn contents(image: &[u8]) -> BTreeMap<String, Entry> {
         meta: u32_at(sb, 40) as usize * (1 << sb[12]),
     };
     let mut found = BTreeMap::new();
-    reader.inode(u64::from(u16_at(sb, 14)), "/".to_string(), &mut found);
-    found
+    let mut owners = BTreeMap::new();
+    let root = u64::from(u16_at(sb, 14));
+    reader.inode(root, "/".to_string(), &mut found, &mut owners);
+    (found, owners)
 }
 
 /// The paths below `/home/agent`.
@@ -149,9 +160,16 @@ struct Reader<'a> {
 }
 
 impl Reader<'_> {
-    fn inode(&self, nid: u64, path: String, found: &mut BTreeMap<String, Entry>) {
+    fn inode(
+        &self,
+        nid: u64,
+        path: String,
+        found: &mut BTreeMap<String, Entry>,
+        owners: &mut BTreeMap<String, (u16, u16)>,
+    ) {
         let at = self.meta + nid as usize * 32;
         let inode = &self.image[at..at + 32];
+        owners.insert(path.clone(), (u16_at(inode, 24), u16_at(inode, 26)));
         let mode = u16_at(inode, 4);
         let size = u32_at(inode, 8) as usize;
         let start = u32_at(inode, 16) as usize * self.block;
@@ -176,7 +194,7 @@ impl Reader<'_> {
                 };
                 found.insert(path, Entry::Dir(perm));
                 for (name, child) in self.dir(data) {
-                    self.inode(child, format!("{prefix}/{name}"), found);
+                    self.inode(child, format!("{prefix}/{name}"), found, owners);
                 }
             }
             other => panic!("unexpected file type {other:o}"),
@@ -245,6 +263,56 @@ fn setuid_setgid_and_sticky_bits_are_dropped() {
     assert_eq!(contents(&file_image)["/opt/tool"], file(0o755, "x"));
     let dir_image = s.read("./shared", "/opt/shared").image().unwrap();
     assert_eq!(contents(&dir_image)["/opt/shared"], Entry::Dir(0o777));
+}
+
+// spec(ADD): In the guest, what `ADD` copies belongs to the user `agent`, with its read, write, and execute bits from the host.
+// spec(ADD): A directory that `ADD` makes above it, outside `/home/agent`, belongs to root.
+#[test]
+fn the_content_belongs_to_agent_and_the_directories_above_it_to_root() {
+    let s = Scratch::new("owners");
+    write(&s.context.join("src/private.txt"), "private");
+    chmod(&s.context.join("src/private.txt"), 0o600);
+    write(&s.context.join("src/lib/a.txt"), "a");
+    chmod(&s.context.join("src/lib"), 0o700);
+    symlink("a.txt", s.context.join("src/lib/to-a")).unwrap();
+    write(&s.context.join("tool"), "x");
+
+    const ROOT: (u16, u16) = (0, 0);
+    const AGENT: (u16, u16) = (1000, 1000);
+    let image = s.read("./src", "/home/agent/work/src").image().unwrap();
+    assert_eq!(
+        contents(&image)["/home/agent/work/src/private.txt"],
+        file(0o600, "private")
+    );
+    let want = [
+        ("/", ROOT),
+        ("/home", ROOT),
+        // Under the home, the directories above the content are the
+        // agent's too, so it can make files beside it.
+        ("/home/agent", AGENT),
+        ("/home/agent/work", AGENT),
+        ("/home/agent/work/src", AGENT),
+        ("/home/agent/work/src/lib", AGENT),
+        ("/home/agent/work/src/lib/a.txt", AGENT),
+        ("/home/agent/work/src/lib/to-a", AGENT),
+        ("/home/agent/work/src/private.txt", AGENT),
+    ];
+    assert_eq!(
+        owners(&image),
+        BTreeMap::from(want.map(|(p, o)| (p.to_string(), o)))
+    );
+
+    let image = s.read("./tool", "/opt/tools/tool").image().unwrap();
+    let want = [
+        ("/", ROOT),
+        ("/opt", ROOT),
+        ("/opt/tools", ROOT),
+        ("/opt/tools/tool", AGENT),
+    ];
+    assert_eq!(
+        owners(&image),
+        BTreeMap::from(want.map(|(p, o)| (p.to_string(), o)))
+    );
 }
 
 // spec(ADD): Without `<dest>`, the [mirror rule](#paths) decides where the content lands.

@@ -95,7 +95,10 @@ impl Records {
         let mut words = Words { rest: line };
         let word = words.bare()?;
         let path = words.quoted()?;
-        if !valid_path(&path) {
+        // The share's root is `""`, which the agent can change but not
+        // remove or replace.
+        let root = path.is_empty() && matches!(word, b"BASE" | b"DIR");
+        if !root && !valid_path(&path) {
             return None;
         }
         let entry = match word {

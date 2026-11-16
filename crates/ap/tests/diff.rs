@@ -1096,3 +1096,23 @@ fn a_directory_the_agent_made_again_gets_no_line() {
         )
     );
 }
+
+/// The share server records the share's root as `""`, when the agent
+/// changes the root itself, as `chmod` on it does.
+#[test]
+fn a_change_to_the_share_s_own_directory_gets_no_line() {
+    let scratch = Scratch::new("root");
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(&scratch.share, ""));
+    record(&pending, "DIR \"\" 700");
+    write(&pending, "file", 0o644, b"x\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("diff --git a/file b/file\n"),
+        "{}",
+        stdout(&output)
+    );
+}

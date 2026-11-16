@@ -397,7 +397,7 @@ fn a_loose_ref_reads_only_as_git_reads_it() {
     let head = text(&root, &["rev-parse", "HEAD"]);
     let repo = Repository::at(root.join(".git"));
     for (n, contents) in [
-        format!("{}", head.trim()),
+        head.trim().to_string(),
         format!("{} trailing words\n", head.trim()),
         format!("{}x\n", head.trim()),
         format!("{}\n", &head[..39]),

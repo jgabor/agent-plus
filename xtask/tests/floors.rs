@@ -6,6 +6,8 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
 const LIB: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 const EMPTY_MAIN: &str = "fn main() {}\n";
 
@@ -36,6 +38,7 @@ fn workspace(name: &str, extra: &str, files: &[(&str, &str)]) -> PathBuf {
     let output = Command::new("cargo")
         .arg("generate-lockfile")
         .current_dir(&root)
+        .env("PATH", common::path(&[]))
         .env("CARGO_HOME", cargo_home())
         .output()
         .unwrap();
@@ -63,6 +66,7 @@ fn gate(root: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("gate")
         .current_dir(root)
+        .env("PATH", common::path(&[]))
         .env("CARGO_HOME", cargo_home())
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CC")
@@ -99,7 +103,7 @@ fn a_clean_workspace_passes_the_floors() {
 
 #[test]
 fn a_crate_that_builds_c_fails() {
-    for builder in ["cc", "cmake", "bindgen", "pkg-config"] {
+    common::each(&["cc", "cmake", "bindgen", "pkg-config"], |&builder| {
         let extra = format!(
             "\n[build-dependencies]\n{builder} = {{ path = \"../../vendor/{builder}\" }}\n"
         );
@@ -113,7 +117,7 @@ fn a_crate_that_builds_c_fails() {
             &[(&manifest_path, &manifest), (&lib_path, LIB)],
         );
         assert_floor_fails(&gate(&root), builder);
-    }
+    });
 }
 
 #[test]
@@ -209,10 +213,11 @@ fn a_malformed_audit_line_is_an_environment_error() {
 
 #[test]
 fn foreign_source_and_prebuilt_files_fail() {
-    for extension in [
+    let extensions = [
         "c", "C", "h", "cc", "cpp", "c++", "hxx", "m", "mm", "S", "s", "sx", "asm", "a", "o", "so",
         "so.1",
-    ] {
+    ];
+    common::each(&extensions, |extension| {
         let file = format!("vendor/dep/native/thing.{extension}");
         let name = format!("foreign-{extension}");
         let root = workspace(
@@ -225,7 +230,7 @@ fn foreign_source_and_prebuilt_files_fail() {
             ],
         );
         assert_floor_fails(&gate(&root), &format!("thing.{extension}"));
-    }
+    });
 }
 
 #[test]

@@ -101,15 +101,10 @@ impl Repo {
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = Command::new(program);
         command
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")
@@ -999,11 +994,7 @@ fn a_temp_directory_inside_the_checkout_is_a_problem() {
 #[test]
 fn a_commit_made_during_the_bench_gets_no_result() {
     let repo = Repo::new("moved", BUDGETS);
-    let real = Command::new("sh")
-        .args(["-c", "command -v cargo"])
-        .output()
-        .unwrap();
-    let real = stdout(&real);
+    let real = common::toolchain().join("cargo").display().to_string();
     common::write_tool(
         &repo.bin.join("cargo"),
         &format!(

@@ -87,7 +87,9 @@ const CLEAN: Recorded = Recorded {
 /// `ubuntu-latest` it leaves the job's descendants running. The job starts its
 /// own timer once it has a group, so the group always exists at the limit, and
 /// one kill reaches every process at once. Two kills could be split by the
-/// `wait` below waking between them.
+/// `wait` below waking between them. When `limit-waits` is a FIFO, the kill
+/// also waits for the job to open it, so a test can know what the job did
+/// first, however long it took to start.
 const SYSTEMD_RUN: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
 printf '%s\n' "$*" >> "$d/systemd-calls"
@@ -99,9 +101,9 @@ done
 shift
 [ -n "$limit" ] || exec "$@"
 exec 3<&0
-setsid sh -c 'limit="$1"; shift
-(sleep "$limit"; kill -KILL 0) </dev/null >/dev/null 2>&1 &
-exec "$@"' sh "$limit" "$@" <&3 3<&- &
+setsid sh -c 'limit="$1"; waits="$2"; shift 2
+(sleep "$limit"; if [ -p "$waits" ]; then cat "$waits"; fi; kill -KILL 0) </dev/null >/dev/null 2>&1 &
+exec "$@"' sh "$limit" "$d/limit-waits" "$@" <&3 3<&- &
 job=$!
 exec 3<&-
 wait "$job"
@@ -175,15 +177,10 @@ impl Repo {
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = Command::new(program);
         command
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env("CARGO_HOME", self.root.parent().unwrap().join("cargo-home"))
             // The nightly reads the paid checks' key from `HOME`, so a test
             // must never see the owner's. The toolchain stays where it is.
@@ -962,7 +959,8 @@ fn a_journey_level_with_the_ledger_passes() {
 }
 
 /// The fixture's step 2 spends. With the key, it runs and counts like any
-/// other step, and so does step 3, which needs it.
+/// other step, and so does step 3, which needs it. The key is a word that no
+/// path in the output holds, so finding it there means it leaked.
 #[test]
 fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
     let repo = Repo::with(
@@ -970,7 +968,7 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
         "fn main() {}\n",
         &[("harness/journey/ok.sh", KEY_SCRIPT)],
     );
-    repo.set_paid_key("sk-test\n");
+    repo.set_paid_key("sk-key-0xf7a1\n");
     repo.set_roadmap_issues("OPEN", "typed by hand", Some("typed by hand"));
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -979,11 +977,19 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
         "{}",
         stdout(&output)
     );
-    assert!(!stdout(&output).contains("sk-test"), "{}", stdout(&output));
-    assert!(!stderr(&output).contains("sk-test"), "{}", stderr(&output));
+    assert!(
+        !stdout(&output).contains("sk-key-0xf7a1"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        !stderr(&output).contains("sk-key-0xf7a1"),
+        "{}",
+        stderr(&output)
+    );
     // Only a step that spends gets the key.
     assert_eq!(repo.key_seen(1), "none");
-    assert_eq!(repo.key_seen(2), "sk-test");
+    assert_eq!(repo.key_seen(2), "sk-key-0xf7a1");
     assert_eq!(repo.key_seen(3), "none");
     let comment = repo.comment();
     assert!(
@@ -1026,7 +1032,7 @@ fn nightly_without_the_paid_checks_key_runs_no_spend_step() {
 #[test]
 fn a_passing_spend_step_does_not_hide_a_fall() {
     let repo = Repo::new("paid-hides-fall");
-    repo.set_paid_key("sk-test");
+    repo.set_paid_key("sk-key-0xf7a1");
     repo.merge(
         "Claims two (#9)",
         30,
@@ -1759,7 +1765,13 @@ fn a_long_list_of_survivors_is_cut_short() {
 fn mutation_stops_at_its_limit_and_keeps_what_it_found() {
     let repo = Repo::new("mutation-limit");
     fs::write(repo.bin.join("missed.txt"), MISSED).unwrap();
-    repo.set_mutants("cat \"$d/missed.txt\" > target/mutants/mutants.out/missed.txt\nsleep 30\n");
+    // The limit stops the job only once it has found a survivor.
+    let waits = repo.bin.join("limit-waits");
+    let made = Command::new("mkfifo").arg(&waits).status().unwrap();
+    assert!(made.success());
+    repo.set_mutants(
+        "cat \"$d/missed.txt\" > target/mutants/mutants.out/missed.txt\n: > \"$d/limit-waits\"\nsleep 30\n",
+    );
     repo.touch(&["ap"]);
     let started = Instant::now();
     let output = repo

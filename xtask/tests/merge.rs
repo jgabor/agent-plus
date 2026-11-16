@@ -202,6 +202,7 @@ fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
     assert_eq!(text.matches(from).count(), 1, "{file}: {from}");
     fs::write(&source, text.replace(from, to)).unwrap();
     let output = Command::new("cargo")
+        .env("PATH", common::path(&[]))
         .args(["build", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .arg("--target-dir")
@@ -360,11 +361,11 @@ maybe_kill before
 "#
         );
         for tool in ["git", "cargo"] {
-            let path = real(tool);
-            let built = if tool == "cargo" {
-                stand_in_build()
+            let (path, built) = if tool == "cargo" {
+                let cargo = common::toolchain().join("cargo");
+                (cargo.display().to_string(), stand_in_build())
             } else {
-                String::new()
+                (real(tool), String::new())
             };
             let script =
                 format!("{prelude}{built}'{path}' \"$@\"\ncode=$?\nmaybe_kill after\nexit $code\n");
@@ -444,15 +445,10 @@ exit $code
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = Command::new(program);
         command
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env("TMPDIR", &self.temp)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
@@ -1246,6 +1242,34 @@ fn a_change_that_raises_nothing_needs_a_hill_none_line() {
         assert_refused(&repo, &repo.merge(), "Hill: none");
         assert_eq!(last_post(&repo), "failure Failed: hill-line");
     }
+    // A count can come from `docs.txt`, so the proof ran to find out.
+    assert!(repo.calls().contains("cargo fmt --all"), "{}", repo.calls());
+}
+
+/// No count comes from these paths, so a change only to them can't raise one,
+/// and learns that it needs the line before the gate runs.
+#[test]
+fn a_change_no_count_comes_from_needs_a_hill_none_line_before_the_gate() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "no-hill-early",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[
+            ("AGENTS.md", "# Rules\n"),
+            ("HARNESS.md", "# Harness\n"),
+            ("harness/tasks/worker.md", "# Worker\n"),
+            (".github/workflows/x.yml", "# comment\n"),
+            ("xtask/tests/x.rs", "// a helper\n"),
+        ],
+    );
+    repo.set_pr(&Pr {
+        body: "Closes #7.\n",
+        ..Pr::default()
+    });
+    let output = repo.prepare();
+    assert_refused(&repo, &output, "Hill: none");
+    assert!(!repo.calls().contains("cargo fmt"), "{}", repo.calls());
+    assert_eq!(last_post(&repo), "failure Failed: hill-line");
 }
 
 #[test]
@@ -1651,10 +1675,13 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
             "#!/bin/sh\n'{kill}' \"$@\"\ncode=$?\nif [ \"$1\" = -KILL ] && [ ! -f '{bin}/slowed' ]; then : > '{bin}/slowed'; sleep 2; fi\nexit $code\n"
         ),
     );
+    // The hang outlasts the timeout by far, so the merge stops at the timeout
+    // wherever it is when that fires.
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .args(["merge", "9"])
         .env("HANG_ON", "cargo fmt")
+        .env("HANG_FOR", "60")
         .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
         .output()
         .unwrap();
@@ -1770,11 +1797,16 @@ fn assert_stray_stopped(repo: &Repo) {
 #[test]
 fn a_merge_past_its_timeout_stops_what_it_started() {
     let repo = Repo::new("timeout-stray");
+    // The stray starts before the merge takes the slot, which starts the
+    // timer, and the hang outlasts the timeout by far. So the timeout is what
+    // stops the merge, wherever the merge is when it fires.
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .args(["merge", "9"])
-        .env("RUN_ON", "cargo fmt")
-        .env("RUN_COMMAND", format!("{}; sleep 3", stray(&repo)))
+        .env("RUN_ON", "gh pr view")
+        .env("RUN_COMMAND", stray(&repo))
+        .env("HANG_ON", "cargo fmt")
+        .env("HANG_FOR", "60")
         .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
         // As a merge that a merge's own tests start inherits it.
         .env(

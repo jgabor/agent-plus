@@ -253,7 +253,7 @@ fn same_as_git(dir: &Path, case: usize, old: &[u8], new: &[u8]) {
 #[test]
 fn hunks_are_the_ones_git_prints() {
     let scratch = Scratch::new("oracle");
-    let mut random = Random(0x5eed_0f_a9);
+    let mut random = Random(0x5eed_0fa9);
     for case in 0..1500 {
         let old = text(&mut random, 30);
         let new = match random.below(8) {
@@ -270,7 +270,7 @@ fn hunks_are_the_ones_git_prints() {
 #[test]
 fn hunks_of_large_files_are_the_ones_git_prints() {
     let scratch = Scratch::new("oracle-large");
-    let mut random = Random(0xb16_f11e5);
+    let mut random = Random(0x0b16_f11e);
     for (case, lines) in [(0, 9_000), (1, 20_000), (2, 150_000)] {
         let old: Vec<Vec<u8>> = (0..lines)
             .map(|i| match random.below(3) {

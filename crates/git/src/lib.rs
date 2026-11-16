@@ -360,10 +360,11 @@ impl Repository {
                 rest = &peeled[41..];
             }
             // A name that isn't UTF-8 can't be asked for, so it is left out.
-            if let Ok(name) = std::str::from_utf8(name) {
-                if name.starts_with("refs/") && format_ok(name.as_bytes()) {
-                    refs.insert(name.to_string(), id);
-                }
+            if let Ok(name) = std::str::from_utf8(name)
+                && name.starts_with("refs/")
+                && format_ok(name.as_bytes())
+            {
+                refs.insert(name.to_string(), id);
             }
         }
         Ok(refs)

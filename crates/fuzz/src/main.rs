@@ -30,7 +30,7 @@ struct Target {
 }
 
 /// Network rules join this list when they exist.
-const TARGETS: [Target; 5] = [
+const TARGETS: [Target; 6] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -250,6 +250,31 @@ const TARGETS: [Target; 5] = [
             "@{",
         ],
     },
+    Target {
+        name: "diff",
+        check: |input| {
+            diff_input(input);
+        },
+        corpus: &[
+            "",
+            "a\nb\nc\n\x01a\nc\n",
+            "fn x() {\n    c\n}\n\n\x01fn x() {\n    c\n    d\n}\n\nend",
+            "\tif y {\n\n}\n\x01\tif y {\n\n\n}\n",
+        ],
+        words: &[
+            "\n",
+            "\x01",
+            "a\n",
+            "b\n",
+            "}\n",
+            "fn x() {\n",
+            "    c\n",
+            "\tif y {\n",
+            "   \n",
+            "\0",
+            "\r\n",
+        ],
+    },
 ];
 
 const DEVICE_MEMORY: usize = 1 << 16;
@@ -337,6 +362,68 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
 
 /// The blob `a\n`, which every ref in the git target's corpus names.
 const GIT_BLOB: &str = "78981922613b2afb6025042ff6bd878ac1994e85";
+
+/// Two texts for the diff target, each in a file of this process's own, so
+/// `git` reads them.
+fn diff_files() -> &'static (PathBuf, PathBuf) {
+    static FILES: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    FILES.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fuzz-diff")
+            .join(std::process::id().to_string());
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("the fuzz directory");
+        (root.join("old"), root.join("new"))
+    })
+}
+
+/// Diffs the text before the first `\x01` with the text after it, as `ap
+/// diff` and as `git diff --no-index` do, and panics where their hunks
+/// differ. Returns how many bytes of hunks there were.
+fn diff_input(input: &str) -> usize {
+    let (old, new) = input.split_once('\x01').unwrap_or((input, ""));
+    let (a, b) = diff_files();
+    fs::write(a, old).expect("the fuzz directory");
+    fs::write(b, new).expect("the fuzz directory");
+    let root = a.parent().expect("the fuzz directory");
+    let out = git(root)
+        .args([
+            "diff",
+            "--no-index",
+            "--no-color",
+            "--no-ext-diff",
+            "old",
+            "new",
+        ])
+        .output()
+        .expect("git");
+    let text = out.stdout;
+    // `ap diff` prints one line for a binary file, as git does, and has
+    // no hunks to compare.
+    let binary = |text: &str| text.as_bytes()[..text.len().min(8000)].contains(&0);
+    if binary(old) || binary(new) {
+        return 0;
+    }
+    let theirs = match text.windows(3).position(|window| window == b"\n@@") {
+        Some(at) => text[at + 1..].to_vec(),
+        None => Vec::new(),
+    };
+    same_hunks(
+        input,
+        &ap::unified::hunks(old.as_bytes(), new.as_bytes()),
+        &theirs,
+    );
+    theirs.len()
+}
+
+fn same_hunks(input: &str, ours: &[u8], theirs: &[u8]) {
+    assert!(
+        ours == theirs,
+        "ap diff's hunks differ from git's for {input:?}:\n{}\ngit's:\n{}",
+        String::from_utf8_lossy(ours),
+        String::from_utf8_lossy(theirs)
+    );
+}
 
 /// The name of the loose object the git target plants.
 const GIT_PLANTED: &str = "fe00000000000000000000000000000000000000";
@@ -1033,6 +1120,21 @@ mod tests {
     fn a_ref_git_reads_differently_is_found() {
         let id = git::Id::from_hex(GIT_BLOB).unwrap();
         same_ref("planted", Ok(Some(id)), None);
+    }
+
+    #[test]
+    fn the_diff_corpus_diffs_as_git_diffs() {
+        let corpus = TARGETS[5].corpus;
+        assert_eq!(diff_input(corpus[0]), 0);
+        for input in &corpus[1..] {
+            assert!(diff_input(input) > 0, "{input:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "differ from git's")]
+    fn a_hunk_git_prints_differently_is_found() {
+        same_hunks("planted", b"@@ -1 +1 @@\n-a\n+b\n", b"");
     }
 
     #[test]

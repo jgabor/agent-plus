@@ -520,6 +520,8 @@ fn diff_exits_0_when_nothing_changed() {
     assert_eq!(stderr(&output), "ap: no agent or run is named nobody\n");
 }
 
+// spec(SHARE): Each path is relative to its share's root.
+// spec(SHARE): When a run has more than one copy-on-write share, each share's changes start with a line that names its root.
 #[test]
 fn each_share_s_changes_start_with_a_line_that_names_it() {
     let scratch = Scratch::new("shares");

@@ -1468,6 +1468,9 @@ attributes, because those can run commands.
     and the line says why.
   - For a share whose root holds a `.git` directory, the first line says how
     many commits the branch would carry.
+  - Each path is relative to its share's root. When a run has more than one
+    copy-on-write share, each share's changes start with a line that names
+    its root.
   - It uses no pager and no color.
   - It exits 0 whether or not anything changed.
 - `ap discard <agent | run>` throws the changes away.

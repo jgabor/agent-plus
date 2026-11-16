@@ -13,7 +13,6 @@ use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
 
-use common::CLAUDE_HOSTS;
 use store::{Agents, Approvals};
 
 /// A test's own directory, with a home directory in it.
@@ -163,11 +162,6 @@ fn stderr(output: &Output) -> String {
 
 const NOTES: &str = "AGENT claude\nOS minimal\nADD ./data\nNETWORK -\nNETWORK +github.com\n";
 
-/// Each line of `text`, indented by two spaces as a prompt lists it.
-fn indented(text: &str) -> String {
-    text.lines().map(|line| format!("  {line}\n")).collect()
-}
-
 // spec(Grants): On the first `ap build` of an Agentfile, `ap` lists its grants and asks you to approve them.
 #[test]
 fn yes_on_a_terminal_builds_and_keeps_the_approval() {
@@ -176,10 +170,8 @@ fn yes_on_a_terminal_builds_and_keeps_the_approval() {
     let run = scratch.on_terminal(&dir, &["build"], "y\n");
     assert_eq!(run.code, Some(0), "{}", run.screen);
     assert!(
-        run.screen.contains(&format!(
-            "asks for these grants:\n  NETWORK -\n  NETWORK +github.com\n{}  POLICY +\n",
-            indented(CLAUDE_HOSTS)
-        )),
+        run.screen
+            .contains("asks for these grants:\n  AGENT claude\n  NETWORK -\n  NETWORK +github.com\n  POLICY +\n"),
         "{}",
         run.screen
     );
@@ -192,7 +184,7 @@ fn yes_on_a_terminal_builds_and_keeps_the_approval() {
     assert!(scratch.built("notes"));
     assert_eq!(
         scratch.approved(&dir).as_deref(),
-        Some(format!("NETWORK -\nNETWORK +github.com\n{CLAUDE_HOSTS}POLICY +\n").as_str())
+        Some("AGENT claude\nNETWORK -\nNETWORK +github.com\nPOLICY +\n")
     );
 }
 
@@ -271,18 +263,11 @@ fn a_wider_grant_asks_again_and_shows_only_the_change() {
 }
 
 // spec(Grants): any network change other than removing a `+` rule or adding a `-` rule, including a change in the harness hosts that stay allowed under `NETWORK -`
-// spec(NETWORK): `ap build` lists these hosts, and `ap inspect` shows them.
 #[test]
-fn another_harness_under_network_deny_asks_again() {
+fn another_harness_under_network_deny_asks_again_and_lists_its_hosts() {
     let scratch = Scratch::new("harness");
     let dir = scratch.project("notes", NOTES);
-    let run = scratch.on_terminal(&dir, &["build"], "y\n");
-    assert_eq!(run.code, Some(0), "{}", run.screen);
-    assert!(
-        run.screen.contains("  HOST api.anthropic.com\n"),
-        "{}",
-        run.screen
-    );
+    assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
     let codex = NOTES.replace("AGENT claude", "AGENT codex:0.169.0");
     fs::write(dir.join("Agentfile"), &codex).unwrap();
     common::pin_harness(&scratch.home, &dir);
@@ -290,8 +275,8 @@ fn another_harness_under_network_deny_asks_again() {
     assert_eq!(run.code, Some(1), "{}", run.screen);
     assert!(
         run.screen.contains(
-            "asks for more than you approved:\n  HOST api.openai.com\n  \
-             HOST auth.openai.com\n  HOST chatgpt.com\nApprove them? [y/N] "
+            "asks for more than you approved:\n  AGENT codex, which may reach \
+             api.openai.com, auth.openai.com, and chatgpt.com\nApprove them? [y/N] "
         ),
         "{}",
         run.screen
@@ -299,8 +284,9 @@ fn another_harness_under_network_deny_asks_again() {
     let run = scratch.on_terminal(&dir, &["build"], "y\n");
     assert_eq!(run.code, Some(0), "{}", run.screen);
     let inspect = scratch.ap(&dir, &["inspect", "--grants", "notes"]);
-    assert!(
-        stdout(&inspect).contains("HOST chatgpt.com\n"),
+    assert_eq!(
+        stdout(&inspect),
+        "AGENT codex\nNETWORK -\nNETWORK +github.com\nPOLICY +\n",
         "{}",
         stderr(&inspect)
     );
@@ -337,11 +323,8 @@ fn without_a_terminal_a_first_build_fails_and_lists_the_grants() {
     assert_eq!(stdout(&output), "");
     assert_eq!(
         stderr(&output),
-        format!(
-            "ap: Agentfile asks for these grants:\n  NETWORK -\n  NETWORK +github.com\n{}  POLICY +\n\
-             ap: approve them on a terminal, or with `--approve=<file>`\n",
-            indented(CLAUDE_HOSTS)
-        )
+        "ap: Agentfile asks for these grants:\n  AGENT claude\n  NETWORK -\n  NETWORK +github.com\n  POLICY +\n\
+         ap: approve them on a terminal, or with `--approve=<file>`\n"
     );
     assert!(!scratch.built("notes"));
     assert_eq!(scratch.approved(&dir), None);
@@ -354,7 +337,7 @@ fn approve_with_a_file_builds_or_lists_what_is_more() {
     let dir = scratch.project("notes", NOTES);
     let file = scratch.root.join("grants");
     let approve = format!("--approve={}", file.display());
-    fs::write(&file, format!("NETWORK -\n{CLAUDE_HOSTS}POLICY +\n")).unwrap();
+    fs::write(&file, "AGENT claude\nNETWORK -\nPOLICY +\n").unwrap();
     let output = scratch.ap(&dir, &["build", &approve]);
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
@@ -368,7 +351,7 @@ fn approve_with_a_file_builds_or_lists_what_is_more() {
 
     fs::write(
         &file,
-        format!("# CI\nNETWORK -\nNETWORK +github.com\n{CLAUDE_HOSTS}POLICY +\n"),
+        "# CI\nAGENT claude\nNETWORK -\nNETWORK +github.com\nPOLICY +\n",
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build", &approve]);

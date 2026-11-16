@@ -21,7 +21,7 @@ pub fn grants(
     instructions: &[Instruction],
     mut resolve: impl FnMut(&str) -> io::Result<HostPath>,
 ) -> Result<Grants, Vec<Error>> {
-    Grants::read(instructions, crate::adapter::reserved, |text| {
+    Grants::read(instructions, |text| {
         let host = resolve(text).map_err(|error| error.to_string())?;
         let path = host.path().to_str().ok_or_else(|| {
             format!(
@@ -65,7 +65,7 @@ pub fn approve(
     };
     if let Approver::File(file) = approver {
         let listed = listed(file)?;
-        let wider = grants.widening(&listed);
+        let wider = grants.widening(&listed, crate::adapter::reserved);
         if !wider.is_empty() {
             return Err(format!(
                 "ap: {shown} asks for more than {} approves:\n{}",
@@ -81,7 +81,7 @@ pub fn approve(
             indented(grants.to_string().lines().map(str::to_string))
         ),
         Some(old) => {
-            let wider = grants.widening(old);
+            let wider = grants.widening(old, crate::adapter::reserved);
             if wider.is_empty() {
                 return Ok(());
             }
@@ -121,7 +121,7 @@ pub fn approve_shares(
         paths,
         ..approved.clone()
     };
-    let wider = now.widening(&approved);
+    let wider = now.widening(&approved, crate::adapter::reserved);
     if wider.is_empty() {
         return Ok(());
     }

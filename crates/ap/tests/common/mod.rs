@@ -196,7 +196,3 @@ pub fn trusting_client() -> Client {
         .unwrap();
     Client::with_roots(roots)
 }
-
-/// The grants of Claude Code's hosts, which stay allowed under `NETWORK -`,
-/// as `ap inspect --grants` prints them.
-pub const CLAUDE_HOSTS: &str = "HOST api.anthropic.com\nHOST claude.ai\nHOST console.anthropic.com\nHOST platform.claude.com\n";

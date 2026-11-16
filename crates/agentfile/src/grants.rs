@@ -6,6 +6,7 @@
 //! reader, one grant per line:
 //!
 //! ```text
+//! AGENT claude
 //! PATH /home/me/notes
 //! PATH /home/me/project/out rw
 //! VARIABLE USER
@@ -14,7 +15,6 @@
 //! AUTH key
 //! NETWORK -
 //! NETWORK +github.com
-//! HOST api.anthropic.com
 //! POLICY -
 //! POLICY +reviewer
 //! ```
@@ -22,8 +22,13 @@
 //! In each argument, `\\` is a backslash, and `\u{<hex>}` is the character
 //! with that code. Printing uses `\u{<hex>}` for control characters,
 //! bidirectional controls, and whitespace other than a space, so a grant
-//! shows as it is. Git credentials aren't listed yet, because nothing is
-//! fetched.
+//! shows as it is.
+//!
+//! Under `NETWORK -`, `AGENT` names the harness, whose hosts stay allowed.
+//! It is the Agentfile's own line, without the version. The adapter knows
+//! the hosts, so they aren't listed.
+//!
+//! Git credentials aren't listed yet, because nothing is fetched.
 
 use std::fmt;
 use std::str::FromStr;
@@ -31,8 +36,9 @@ use std::str::FromStr;
 use crate::network::{self, Line};
 use crate::secrets::{self, name_length};
 use crate::{
-    Auth, Destination, Error, Files, Instruction, Mcp, Network, NetworkRule, Policy, Reserved,
-    Scheme, Secret, Secrets, Settings, ShareMode, Sign, Source, Sources, Text, read_argument,
+    Auth, Destination, Error, Files, Harness, Instruction, Mcp, Network, NetworkRule, Policy,
+    Reserved, Scheme, Secret, Secrets, Settings, ShareMode, Sign, Source, Sources, Text,
+    read_argument, settings,
 };
 
 /// Where a host path from an Agentfile really is, as the caller resolved it
@@ -59,6 +65,9 @@ pub struct PathGrant {
 /// duplicates, so two lists with the same grants are equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grants {
+    /// The harness, under `NETWORK -`, where its hosts stay allowed. Under
+    /// `NETWORK +` every host is allowed, so it is `None`.
+    pub harness: Option<Harness>,
     pub paths: Vec<PathGrant>,
     /// The host environment variables that `ENV` values read.
     pub variables: Vec<String>,
@@ -67,21 +76,15 @@ pub struct Grants {
     /// `AUTH key` or `AUTH token`. `AUTH login` isn't a grant.
     pub auth: Option<Auth>,
     pub network: Network,
-    /// The harness hosts that stay allowed under `NETWORK -`, from the
-    /// adapter. Under `NETWORK +` every host is allowed, so it is empty.
-    pub hosts: Vec<String>,
     pub policy: Policy,
 }
 
 impl Grants {
     /// Lists the grants of the instructions that [`crate::parse`] returned.
-    /// `adapter` says what the adapter keeps for a harness, which gives the
-    /// harness hosts. `resolve` takes a host path as written and says where
-    /// it really is. Its error becomes an error on the line that names the
-    /// path.
-    pub fn read<'a>(
+    /// `resolve` takes a host path as written and says where it really is.
+    /// Its error becomes an error on the line that names the path.
+    pub fn read(
         instructions: &[Instruction],
-        adapter: impl Fn(crate::Harness) -> Reserved<'a>,
         mut resolve: impl FnMut(&str) -> Result<Location, String>,
     ) -> Result<Grants, Vec<Error>> {
         let sources = Sources::read(instructions)?;
@@ -157,22 +160,18 @@ impl Grants {
             })
             .collect();
         let auth = secrets.auth.filter(|auth| *auth != Auth::Login);
-        let hosts = match network.default {
-            Sign::Deny => {
-                let harness = Settings::read(instructions)?.agent.harness;
-                let hosts = adapter(harness).hosts;
-                hosts.iter().map(|host| host.to_string()).collect()
-            }
-            Sign::Allow => Vec::new(),
+        let harness = match network.default {
+            Sign::Deny => Some(Settings::read(instructions)?.agent.harness),
+            Sign::Allow => None,
         };
         Ok(Grants {
+            harness,
             paths,
             variables,
             secrets: secrets.secrets,
             seals: secrets.seals,
             auth,
             network,
-            hosts,
             policy,
         }
         .sorted())
@@ -206,8 +205,6 @@ impl Grants {
         }
         self.network.rules.sort_by_cached_key(rule_text);
         self.network.rules.dedup();
-        self.hosts.sort();
-        self.hosts.dedup();
         self.policy.rules.sort_by_cached_key(agent_text);
         self.policy.rules.dedup();
         self
@@ -218,6 +215,12 @@ impl Grants {
 /// approved, by the list under SPEC.md's Grants section.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Widening {
+    /// A harness whose hosts stay allowed under `NETWORK -`, with the hosts
+    /// that the approved grants didn't allow.
+    Harness {
+        harness: Harness,
+        hosts: Vec<String>,
+    },
     /// A host path you haven't approved, including an approved path whose
     /// canonical location changed.
     Path(PathGrant),
@@ -242,9 +245,6 @@ pub enum Widening {
     Unblock(NetworkRule),
     /// The network default moves from `-` to `+`.
     Open,
-    /// A harness host that now stays allowed under `NETWORK -`, such as
-    /// after a change of harness.
-    HarnessHost(String),
     /// The `POLICY` default moves from `-` to `+`, so the agent may call
     /// every agent that no rule names.
     CallAny,
@@ -255,9 +255,31 @@ pub enum Widening {
 impl Grants {
     /// Lists how these grants are wider than `approved`, in the order the
     /// text form prints them. It is empty when they only narrow, or are the
-    /// same. Git credentials aren't compared yet.
-    pub fn widening(&self, approved: &Grants) -> Vec<Widening> {
+    /// same. `adapter` says what the adapter keeps for a harness, which
+    /// gives its hosts. Git credentials aren't compared yet.
+    pub fn widening<'a>(
+        &self,
+        approved: &Grants,
+        adapter: impl Fn(Harness) -> Reserved<'a>,
+    ) -> Vec<Widening> {
         let mut wider = Vec::new();
+        // Under an approved `NETWORK +`, every harness host was allowed.
+        if let Some(harness) = self.harness
+            && approved.network.default == Sign::Deny
+            && approved.harness != Some(harness)
+        {
+            let old = approved
+                .harness
+                .map(|old| adapter(old).hosts)
+                .unwrap_or(&[]);
+            let hosts: Vec<String> = (adapter(harness).hosts.iter())
+                .filter(|host| !old.contains(host))
+                .map(|host| host.to_string())
+                .collect();
+            if !hosts.is_empty() {
+                wider.push(Widening::Harness { harness, hosts });
+            }
+        }
         for path in &self.paths {
             match approved.paths.iter().find(|old| old.path == path.path) {
                 None => wider.push(Widening::Path(path.clone())),
@@ -321,15 +343,6 @@ impl Grants {
                 .filter(|rule| rule.sign == Sign::Deny && !now.contains(rule))
                 .map(|rule| Widening::Unblock(rule.clone())),
         );
-        // Under an approved `NETWORK +`, every harness host was allowed.
-        if approved.network.default == Sign::Deny {
-            wider.extend(
-                self.hosts
-                    .iter()
-                    .filter(|host| !approved.hosts.contains(host))
-                    .map(|host| Widening::HarnessHost(host.clone())),
-            );
-        }
         // Agents that no rule names follow the default, so only the default
         // and the named agents can change.
         if self.policy.default == Sign::Allow && approved.policy.default == Sign::Deny {
@@ -356,6 +369,20 @@ impl Grants {
 impl fmt::Display for Widening {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Widening::Harness { harness, hosts } => {
+                let hosts: Vec<String> = hosts.iter().map(|host| printed(host)).collect();
+                let list = match hosts.as_slice() {
+                    [one] => one.clone(),
+                    [first, second] => format!("{first} and {second}"),
+                    [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+                    [] => String::new(),
+                };
+                write!(
+                    f,
+                    "AGENT {}, which may reach {list}",
+                    harness_name(*harness)
+                )
+            }
             Widening::Path(path) if path.write => write!(f, "PATH {} rw", printed(&path.path)),
             Widening::Path(path) => write!(f, "PATH {}", printed(&path.path)),
             Widening::Write(path) => write!(f, "PATH {} rw, which was read-only", printed(path)),
@@ -397,7 +424,6 @@ impl fmt::Display for Widening {
                 write!(f, "NETWORK {} is gone", printed(&rule_text(rule)))
             }
             Widening::Open => write!(f, "NETWORK + replaces NETWORK -"),
-            Widening::HarnessHost(host) => write!(f, "HOST {}", printed(host)),
             Widening::CallAny => write!(f, "POLICY + replaces POLICY -"),
             Widening::Call(name) => write!(f, "may call {}", printed(name)),
         }
@@ -413,6 +439,9 @@ impl fmt::Display for Grants {
             }
             writeln!(f)
         };
+        if let Some(harness) = self.harness {
+            line("AGENT", &[harness_name(harness)])?;
+        }
         for path in &self.paths {
             match path.write {
                 true => line("PATH", &[&path.path, "rw"])?,
@@ -443,9 +472,6 @@ impl fmt::Display for Grants {
         for rule in &self.network.rules {
             line("NETWORK", &[&rule_text(rule)])?;
         }
-        for host in &self.hosts {
-            line("HOST", &[host])?;
-        }
         line("POLICY", &[sign(self.policy.default)])?;
         for rule in &self.policy.rules {
             line("POLICY", &[&agent_text(rule)])?;
@@ -462,6 +488,7 @@ impl FromStr for Grants {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut errors = Vec::new();
         let mut grants = Grants {
+            harness: None,
             paths: Vec::new(),
             variables: Vec::new(),
             secrets: Vec::new(),
@@ -471,7 +498,6 @@ impl FromStr for Grants {
                 default: Sign::Allow,
                 rules: Vec::new(),
             },
-            hosts: Vec::new(),
             policy: Policy {
                 default: Sign::Allow,
                 rules: Vec::new(),
@@ -532,6 +558,15 @@ impl Grants {
     ) -> Result<(), String> {
         let arguments = instruction.arguments.as_slice();
         match instruction.name.as_str() {
+            "AGENT" => {
+                if self.harness.is_some() {
+                    return Err("the grants already have an `AGENT` line".to_string());
+                }
+                match arguments {
+                    [agent] => self.harness = Some(settings::agent(agent)?.harness),
+                    _ => return Err("`AGENT` takes one harness".to_string()),
+                }
+            }
             "PATH" => {
                 let (path, write) = match arguments {
                     [path] => (path, false),
@@ -567,10 +602,6 @@ impl Grants {
                 Line::Bare(sign) => set_default("NETWORK", network_default, sign)?,
                 Line::Rule(rule) => self.network.rules.push(rule),
             },
-            "HOST" => match arguments {
-                [host] if !host.is_empty() => self.hosts.push(host.clone()),
-                _ => return Err("`HOST` takes one host".to_string()),
-            },
             "POLICY" => match network::line(instruction, network::agent_rule)? {
                 Line::Bare(sign) => set_default("POLICY", policy_default, sign)?,
                 Line::Rule(rule) => self.policy.rules.push(rule),
@@ -599,6 +630,14 @@ pub fn arguments(text: &str) -> Result<Vec<String>, String> {
         rest = after.trim_start();
     }
     Ok(arguments)
+}
+
+/// The harness as `AGENT` names it.
+fn harness_name(harness: Harness) -> &'static str {
+    match harness {
+        Harness::Claude => "claude",
+        Harness::Codex => "codex",
+    }
 }
 
 fn sign(sign: Sign) -> &'static str {

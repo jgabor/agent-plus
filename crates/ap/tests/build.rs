@@ -1730,6 +1730,7 @@ fn env_cannot_set_what_the_adapter_sets_or_a_sign_in_name() {
         ("claude", "NODE_EXTRA_CA_CERTS"),
         ("claude", "ANTHROPIC_API_KEY"),
         ("claude", "CLAUDE_CODE_OAUTH_TOKEN"),
+        ("claude", "ANTHROPIC_CUSTOM_HEADERS"),
         ("codex", "GIT_SSL_CAINFO"),
         ("codex", "OPENAI_API_KEY"),
         ("codex", "CODEX_API_KEY"),

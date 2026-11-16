@@ -43,9 +43,12 @@ pub const SET: &[&str] = &[EFFORT_VARIABLE, "DISABLE_AUTOUPDATER", "CLAUDE_CONFI
 
 /// The variables Claude Code reads for sign-in. Claude Code 2.1.325 picks its
 /// credential from these, in the code that names each source, and reads the
-/// refresh token to sign in from it.
+/// refresh token to sign in from it. It also sends the `Authorization` and
+/// `X-Api-Key` headers in `ANTHROPIC_CUSTOM_HEADERS` to its model, which
+/// signs it in as well.
 pub const SIGN_IN: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_CUSTOM_HEADERS",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
     "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",

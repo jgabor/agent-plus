@@ -2,7 +2,7 @@
 //! sees of the guest's root, one `name=value` line each, and leaves a file
 //! behind for the next boot to look for. It also does what a harness does to
 //! the root: it replaces a directory from a lower layer, runs a `#!` script,
-//! and watches for changes.
+//! and opens an inotify instance, as a file watcher does.
 
 use std::env;
 use std::ffi::c_int;

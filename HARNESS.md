@@ -558,11 +558,10 @@ diagnostics go to stderr.
 ### Scheduling
 
 The dispatcher, planner, triage, and nightly job are T3 Code scheduled tasks.
-Each is
-bound to its own thread, whose settings give it its model and full access,
-because no one is there to answer a prompt. Each run starts a fresh session, so
-no run depends on the context of an earlier one. A run moves its checkout to
-`origin/main`, then follows its brief in `harness/tasks/`.
+Each is bound to its own thread, whose settings give it its model and full
+access, because no one is there to answer a prompt. Each run starts a fresh
+session, so no run depends on the context of an earlier one. A run moves its
+checkout to `origin/main`, then follows its brief in `harness/tasks/`.
 
 ### Dispatch
 

@@ -40,18 +40,34 @@ fn image(root: Dir) -> Vec<u8> {
     image
 }
 
-/// The bottom layer has two files in `/etc`. The top one replaces one of them,
-/// and adds the program.
+/// The bottom layer has two files in `/etc`, and a directory for the probe to
+/// replace. The top one replaces one of the files, and adds the program and a
+/// script it runs.
 fn layers(probe: Vec<u8>) -> [Vec<u8>; 2] {
-    let bottom = dir(vec![(
-        "etc",
-        Node::Dir(dir(vec![
-            ("greeting", file(0o644, b"from the bottom layer".to_vec())),
-            ("kept", file(0o644, b"kept from the bottom layer".to_vec())),
-        ])),
-    )]);
+    let bottom = dir(vec![
+        (
+            "etc",
+            Node::Dir(dir(vec![
+                ("greeting", file(0o644, b"from the bottom layer".to_vec())),
+                ("kept", file(0o644, b"kept from the bottom layer".to_vec())),
+            ])),
+        ),
+        (
+            "srv",
+            Node::Dir(dir(vec![(
+                "replaced",
+                Node::Dir(dir(vec![("old", file(0o644, b"old".to_vec()))])),
+            )])),
+        ),
+    ]);
     let top = dir(vec![
-        ("bin", Node::Dir(dir(vec![("probe", file(0o755, probe))]))),
+        (
+            "bin",
+            Node::Dir(dir(vec![
+                ("probe", file(0o755, probe)),
+                ("script", file(0o755, b"#!/bin/probe\n".to_vec())),
+            ])),
+        ),
         (
             "etc",
             Node::Dir(dir(vec![(
@@ -131,6 +147,9 @@ fn the_guest_runs_from_its_layers_under_a_tmpfs_upper_layer() {
     assert_eq!(seen["exe"], "/bin/probe", "{seen:?}");
     assert_eq!(seen["found"], "false", "{seen:?}");
     assert_eq!(seen["wrote"], "true", "{seen:?}");
+    assert_eq!(seen["remade"], "true", "{seen:?}");
+    assert_eq!(seen["script"], "ran", "{seen:?}");
+    assert_eq!(seen["inotify"], "true", "{seen:?}");
 
     let again = boot_with(&init, &kernel, second);
     assert_eq!(

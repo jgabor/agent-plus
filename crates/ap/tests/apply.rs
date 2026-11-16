@@ -344,8 +344,12 @@ fn nothing_is_applied_under_git() {
     let share = &scratch.share;
     fs::create_dir_all(share.join("vendor/lib/.git")).unwrap();
     fs::write(share.join("vendor/lib/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::create_dir_all(share.join("old/lib/.git/refs/heads")).unwrap();
+    fs::write(share.join("old/lib/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
     let (run, pending) = scratch.run("notes", 1);
     change(share, &pending, "vendor/lib/.git/HEAD", 0o644, b"0000\n");
+    // The agent deletes a directory that holds a repository.
+    delete(share, &pending, "old");
     write(
         &pending,
         "vendor/lib/.git/hooks/pre-commit",
@@ -363,6 +367,7 @@ fn nothing_is_applied_under_git() {
     assert_eq!(
         stdout(&output),
         concat!(
+            "skipped old/lib/.git/HEAD: it is under .git\n",
             "skipped sub/.Git: it is under .git\n",
             "skipped vendor/lib/.GIT/config: it is under .git\n",
             "skipped vendor/lib/.git/HEAD: it is under .git\n",
@@ -376,6 +381,8 @@ fn nothing_is_applied_under_git() {
     assert_eq!(scratch.names("vendor/lib"), [".git"]);
     assert_eq!(scratch.names("vendor/lib/.git"), ["HEAD"]);
     assert!(!scratch.exists("sub/.Git"));
+    assert_eq!(scratch.names("old/lib/.git"), ["HEAD", "refs"]);
+    assert_eq!(scratch.names("old/lib/.git/refs"), ["heads"]);
     // Left out on purpose, so none of it stays pending.
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
@@ -452,6 +459,58 @@ fn symlinks_are_never_followed_and_special_files_never_applied() {
         "failed hop/file: a directory on its way is a symlink on your side\n"
     );
     assert_eq!(scratch.read("docs/file"), "not for outside\n");
+}
+
+/// A symlink to a file the agent replaced goes by the file you have, because
+/// that replacement may not land.
+#[test]
+fn a_symlink_to_a_change_that_doesn_t_land_goes_by_yours() {
+    let scratch = Scratch::new("symlink-skipped");
+    let share = &scratch.share;
+    let outside = scratch.root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(share.join("plain"), "plain\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    change(share, &pending, "plain", 0o644, b"the agent's\n");
+    link(&pending, "link", "plain");
+    // You make `plain` a symlink that leaves the share.
+    fs::remove_file(share.join("plain")).unwrap();
+    symlink(&outside, share.join("plain")).unwrap();
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped link: it is a symlink whose target goes through a symlink\n",
+            "skipped plain: it changed on your side after the agent first changed it\n",
+        )
+    );
+    assert_eq!(scratch.names(""), ["plain"]);
+}
+
+/// The agent made a directory, wrote in it, and then made it read-only.
+// spec(SHARE): `ap apply` makes a directory only to hold what it applies, and gives each file it writes and each directory it makes the permission bits the agent gave it.
+#[test]
+fn a_directory_the_agent_made_read_only_still_gets_its_files() {
+    let scratch = Scratch::new("sealed");
+    let share = &scratch.share;
+    let (run, pending) = scratch.run("notes", 1);
+    dir(&pending, "sealed", 0o555);
+    write(&pending, "sealed/file", 0o640, b"in\n");
+    dir(&pending, "empty", 0o755);
+
+    let output = scratch.ap(&["apply", &run]);
+
+    let sealed = mode(&share.join("sealed"));
+    fs::set_permissions(share.join("sealed"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(sealed, 0o555);
+    assert_eq!(scratch.read("sealed/file"), "in\n");
+    assert_eq!(mode(&share.join("sealed/file")), 0o640);
+    assert_eq!(scratch.names(""), ["sealed"]);
 }
 
 // spec(SHARE): Git-ignored files are neither shown nor applied.
@@ -675,15 +734,18 @@ fn a_failed_write_leaves_your_file_as_it_was() {
 }
 
 /// An `ap apply` killed while it writes leaves your file as it was, and
-/// everything pending, so the next one lands it.
+/// everything pending, so the next one lands it, and finds the file the
+/// first one landed already the agent's.
 #[test]
 fn an_interrupted_write_leaves_your_file_as_it_was() {
     use std::os::unix::process::ExitStatusExt;
     let scratch = Scratch::new("interrupted-write");
     let share = &scratch.share;
     fs::write(share.join("big"), "yours\n").unwrap();
+    fs::write(share.join("a"), "yours\n").unwrap();
     let (run, pending) = scratch.run("notes", 1);
     let large = vec![b'x'; 1 << 20];
+    change(share, &pending, "a", 0o644, b"the agent's\n");
     change(share, &pending, "big", 0o644, &large);
 
     let mut command = scratch.command(&["apply", &run]);
@@ -691,15 +753,18 @@ fn an_interrupted_write_leaves_your_file_as_it_was() {
     let output = command.output().unwrap();
 
     assert_eq!(output.status.signal(), Some(libc::SIGXFSZ));
+    assert_eq!(scratch.read("a"), "the agent's\n");
     assert_eq!(scratch.read("big"), "yours\n");
     assert!(scratch.runs().has_pending(&run).unwrap());
     // What the killed write left beside your file was never your file.
     for name in scratch.names("") {
-        if name != "big" {
+        if name != "a" && name != "big" {
             fs::remove_file(share.join(name)).unwrap();
         }
     }
     let output = scratch.ap(&["apply", &run]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
     assert_eq!(fs::read(share.join("big")).unwrap(), large);
+    assert!(!scratch.store().join("pending").join(&run).exists());
 }

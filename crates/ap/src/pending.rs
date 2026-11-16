@@ -335,6 +335,9 @@ fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<
 /// through a symlink.
 struct Host {
     root: Option<OwnedFd>,
+    /// Each directory `ap apply` made, and the mode the agent gave it,
+    /// which it gets once what goes in it is written.
+    made: std::cell::RefCell<Vec<(Vec<u8>, u32)>>,
 }
 
 impl Host {
@@ -343,8 +346,14 @@ impl Host {
     fn new(root: &Path) -> io::Result<Host> {
         let name = CString::new(root.as_os_str().as_bytes()).map_err(io::Error::other)?;
         match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
-            Ok(root) => Ok(Host { root: Some(root) }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host { root: None }),
+            Ok(root) => Ok(Host {
+                root: Some(root),
+                made: Default::default(),
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host {
+                root: None,
+                made: Default::default(),
+            }),
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(
                 "the share's directory is now reached through a symlink",
             )),
@@ -467,16 +476,20 @@ impl Host {
             let name = CString::new(name).map_err(io::Error::other)?;
             dir = match openat2(dir.as_raw_fd(), &name, flags, BENEATH) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // You can write in it until what goes in it is written.
                     let mode = match records.view(at) {
-                        View::Agent(Entry::Dir { mode, .. }) => *mode,
-                        _ => 0o755,
+                        View::Agent(Entry::Dir { mode, .. }) => Some(*mode),
+                        _ => None,
                     };
+                    let first = mode.map_or(0o755, |mode| mode | 0o700);
                     // SAFETY: `name` is NUL-terminated, and outlives the call.
-                    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) } < 0 {
+                    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), first) } < 0 {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             return Err(error);
                         }
+                    } else if let Some(mode) = mode {
+                        self.made.borrow_mut().push((at.to_vec(), mode));
                     }
                     openat2(dir.as_raw_fd(), &name, flags, BENEATH)?
                 }
@@ -520,8 +533,12 @@ impl Host {
     fn prune(&self, records: &Records, path: &[u8]) {
         // Beneath a directory the agent sees as yours, only paths it has
         // records of differ, and each of those is pruned on its own.
+        // Nothing is ever applied under `.git`, and that includes removing
+        // a repository's empty directories.
         let view = records.view(path);
+        let git = (path.split(|&byte| byte == b'/')).any(|name| name.eq_ignore_ascii_case(b".git"));
         if path.is_empty()
+            || git
             || matches!(view, View::Yours)
             || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
         {
@@ -625,6 +642,16 @@ impl Host {
             let _ = unlink(&dir, temp.as_bytes(), 0);
         }
         made
+    }
+
+    /// Gives each directory `ap apply` made the mode the agent gave it,
+    /// deepest first, once what goes in it is written.
+    fn seal(&self) {
+        for (path, mode) in self.made.take().into_iter().rev() {
+            if let Ok(Some(dir)) = self.dir(&path) {
+                let _ = File::from(dir).set_permissions(fs::Permissions::from_mode(mode));
+            }
+        }
     }
 }
 
@@ -731,7 +758,7 @@ impl Share<'_> {
             ignored: 0,
         };
         for path in changed(&records, &host)? {
-            match verdict(&records, &host, &ignore, repository, &path)? {
+            match verdict(&records, &host, &ignore, repository, self.dir, &path)? {
                 Verdict::History => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
@@ -801,7 +828,7 @@ impl Share<'_> {
         let mut kept = BTreeMap::new();
         let mut changes = Vec::new();
         for path in changed(&records, &host)? {
-            match verdict(&records, &host, &ignore, false, &path)? {
+            match verdict(&records, &host, &ignore, false, self.dir, &path)? {
                 Verdict::History => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
@@ -851,6 +878,7 @@ impl Share<'_> {
                 failed.insert(path.clone(), error);
             }
         }
+        host.seal();
         for (path, error) in failed {
             let why = match error.raw_os_error() {
                 Some(libc::ELOOP) => "a directory on its way is a symlink on your side".to_owned(),
@@ -937,6 +965,7 @@ fn verdict(
     host: &Host,
     ignore: &Gitignore,
     repository: bool,
+    dir: &Path,
     path: &[u8],
 ) -> io::Result<Verdict> {
     let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
@@ -971,13 +1000,30 @@ fn verdict(
     }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.
-    if !repository && changed_on_your_side(records, host, path)? {
+    if !repository
+        && changed_on_your_side(records, host, path)?
+        && !landed(records, host, dir, path)?
+    {
         return Ok(Verdict::Skipped {
             why: "it changed on your side after the agent first changed it".to_owned(),
             conflict: true,
         });
     }
     Ok(Verdict::Change)
+}
+
+/// Whether your file at `path` is the agent's already, as after an
+/// `ap apply` that was stopped before it rewrote the records.
+fn landed(records: &Records, host: &Host, dir: &Path, path: &[u8]) -> io::Result<bool> {
+    Ok(match (records.view(path), host.yours(path)?) {
+        (View::Agent(Entry::File { mode }), Yours::File { mode: yours, data }) => {
+            yours & 0o7777 == *mode
+                && fs::read(dir.join("tree").join(bytes_path(path)))
+                    .is_ok_and(|theirs| theirs == data)
+        }
+        (View::Agent(Entry::Symlink { target }), Yours::Symlink(yours)) => *target == yours,
+        _ => false,
+    })
 }
 
 /// Prints a line of the report for `path`: what happened to it, and why.
@@ -1131,7 +1177,9 @@ fn recorded_base<'a>(records: &'a Records, path: &'a [u8]) -> Option<(&'a [u8], 
 
 /// Why a symlink at `path` with this target would leave the share, if it
 /// would. The target is read as your host would read it once applied, and
-/// a symlink on the way, yours or the agent's, could lead anywhere.
+/// a symlink on the way, yours or the agent's, could lead anywhere. One of
+/// yours counts even where the agent changed it, because that change may
+/// be skipped.
 fn leaves(
     records: &Records,
     host: &Host,
@@ -1157,12 +1205,9 @@ fn leaves(
             _ => at.push(name),
         }
         let reached = at.join(&b'/');
-        let symlink = match records.view(&reached) {
-            View::Agent(entry) => matches!(entry, Entry::Symlink { .. }),
-            View::Yours => host.stat(&reached)?.is_some_and(|m| m.is_symlink()),
-            View::Absent => false,
-        };
-        if symlink {
+        // Yours counts too, because the agent's change there may not land.
+        let agent = matches!(records.view(&reached), View::Agent(Entry::Symlink { .. }));
+        if agent || host.stat(&reached)?.is_some_and(|m| m.is_symlink()) {
             return Ok(THROUGH);
         }
     }
@@ -1458,7 +1503,10 @@ mod tests {
                 target: b"/".to_vec(),
             },
         );
-        let host = Host { root: None };
+        let host = Host {
+            root: None,
+            made: Default::default(),
+        };
         let inside =
             |path: &[u8], target: &[u8]| leaves(&records, &host, path, target).unwrap().is_none();
         assert!(inside(b"latest", b"build/out"));

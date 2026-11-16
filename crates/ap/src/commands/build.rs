@@ -545,6 +545,10 @@ fn plan(
     let sources = take(&mut errors, Sources::read(instructions));
     let files = take(&mut errors, Files::read(instructions));
     take(&mut errors, Secrets::read(instructions));
+    if let Some(settings) = &settings {
+        let reserved = ap::adapter::reserved(settings.agent.harness);
+        errors.extend(agentfile::reserved(instructions, &reserved));
+    }
     take(&mut errors, Network::read(instructions));
     take(&mut errors, Policy::read(instructions));
     let guest = take(&mut errors, GuestPath::read(instructions, dir_name));

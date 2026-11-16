@@ -25,7 +25,7 @@ pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
 mod paths;
 pub use paths::GuestPath;
 mod secrets;
-pub use secrets::{Auth, Env, Part, Secret, Secrets};
+pub use secrets::{Auth, Env, Part, Reserved, Secret, Secrets, reserved};
 mod settings;
 pub use settings::{Agent, Compression, Effort, Harness, Mode, Os, Settings};
 mod sources;

@@ -356,12 +356,11 @@ fn claude_code_starts_with_its_adapters_configuration() {
         );
     }
 
-    // A version older than `--effort` gets the effort from its variable,
-    // which `ENV` can't change.
+    // A version older than `--effort` gets the effort from its variable.
     scratch.build(
         "older",
         &format!(
-            "AGENT claude:2.1.37\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_STATUS {STATUS}\nENV CLAUDE_CODE_EFFORT_LEVEL low\nEFFORT max\n"
+            "AGENT claude:2.1.37\nOS minimal\nNETWORK -\nENV FAKE_HARNESS_STATUS {STATUS}\nEFFORT max\n"
         ),
     );
     let report = scratch.run(&["older", "-p", PROMPT]);

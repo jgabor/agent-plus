@@ -6,6 +6,33 @@
 pub mod claude;
 pub mod codex;
 
+use agentfile::{Harness, Reserved};
+
+/// The variables that point tools at the run's certificate authority, from
+/// SPEC.md's SECRET section. Every harness gets them.
+pub const CERTIFICATES: [&str; 5] = [
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+];
+
+/// What the adapter for `harness` keeps for itself: the variables it sets,
+/// the ones the harness reads for sign-in, and the harness's own hosts.
+pub fn reserved(harness: Harness) -> Reserved<'static> {
+    let (name, set, sign_in, hosts) = match harness {
+        Harness::Claude => ("Claude Code", claude::SET, claude::SIGN_IN, claude::HOSTS),
+        Harness::Codex => ("Codex", codex::SET, codex::SIGN_IN, codex::HOSTS),
+    };
+    Reserved {
+        harness: name,
+        set: CERTIFICATES.iter().chain(set).copied().collect(),
+        sign_in,
+        hosts,
+    }
+}
+
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
 pub fn system(values: &[Vec<u8>]) -> Vec<u8> {

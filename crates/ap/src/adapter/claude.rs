@@ -36,6 +36,35 @@ pub const STATE: &str = "/home/agent/.claude.json";
 /// The variable that sets the effort of a version without `--effort`.
 pub const EFFORT_VARIABLE: &str = "CLAUDE_CODE_EFFORT_LEVEL";
 
+/// The variables the adapter sets, besides the certificate variables:
+/// [`EFFORT_VARIABLE`], the one its settings set, and the one SPEC.md's AUTH
+/// section gives `AUTH login`.
+pub const SET: &[&str] = &[EFFORT_VARIABLE, "DISABLE_AUTOUPDATER", "CLAUDE_CONFIG_DIR"];
+
+/// The variables Claude Code reads for sign-in. Claude Code 2.1.325 picks its
+/// credential from these, in the code that names each source, and reads the
+/// refresh token to sign in from it.
+pub const SIGN_IN: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+];
+
+/// The hosts Claude Code connects to for its model and sign-in. Claude Code
+/// 2.1.325 calls the model and makes its API key on `api.anthropic.com`,
+/// trades a sign-in code for a token on `platform.claude.com`, and has
+/// `claude.ai` as its subscription's origin. Versions before it traded the
+/// code on `console.anthropic.com`.
+pub const HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "claude.ai",
+    "console.anthropic.com",
+    "platform.claude.com",
+];
+
 /// The first version that reads [`EFFORT_VARIABLE`].
 const VARIABLE_FROM: [u64; 3] = [2, 0, 46];
 /// The first version whose variable takes `max`.

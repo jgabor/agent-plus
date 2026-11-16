@@ -1,7 +1,7 @@
 //! The arguments of `ENV`, `SECRET`, `SEAL`, and `AUTH`, the variables in
 //! `ENV` values, and the typed values they parse into.
 
-use agentfile::{Auth, Env, Error, Part, Secret, Secrets, Text, parse};
+use agentfile::{Auth, Env, Error, Part, Reserved, Secret, Secrets, Text, parse, reserved};
 
 /// Parses `lines` after an `AGENT claude` line, and returns their values.
 fn secrets_of(lines: &str) -> Secrets {
@@ -681,4 +681,47 @@ fn a_denied_bound_host_fails_secrets_read_too() {
     ];
     let errors = Secrets::read(&instructions).unwrap_err();
     assert_eq!(lines_of(&errors), [1], "{errors:?}");
+}
+
+/// The errors [`reserved`] finds in `lines`, after an `AGENT claude` line,
+/// with a made-up adapter's lists.
+fn reserved_errors(lines: &str) -> Vec<Error> {
+    let instructions = parse(&format!("AGENT claude\n{lines}")).unwrap();
+    let lists = Reserved {
+        harness: "Harness",
+        set: vec!["SET_BY_ADAPTER"],
+        sign_in: &["HARNESS_KEY", "HARNESS_TOKEN"],
+        hosts: &["api.harness.example"],
+    };
+    reserved(&instructions, &lists)
+}
+
+#[test]
+fn reserved_names_and_hosts_fail_on_their_own_lines() {
+    let errors = reserved_errors(
+        "ENV SET_BY_ADAPTER 1\n\
+         ENV HARNESS_KEY x\n\
+         SECRET HARNESS_TOKEN @api.harness.example\n\
+         SECRET MINE @other.example @API.Harness.Example\n\
+         SECRET THEIRS visible\n",
+    );
+    assert_eq!(lines_of(&errors), [2, 3, 4, 5], "{errors:?}");
+    assert!(errors[0].message.contains("`SET_BY_ADAPTER`"), "{errors:?}");
+    assert!(errors[1].message.contains("sign in"), "{errors:?}");
+    assert!(errors[2].message.contains("sign in"), "{errors:?}");
+    assert!(
+        errors[3].message.contains("`API.Harness.Example`"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn names_and_hosts_no_list_holds_pass() {
+    let errors = reserved_errors(
+        "ENV set_by_adapter 1\n\
+         ENV OTHER_KEY x\n\
+         SECRET MINE @harness.example @sub.api.harness.example\n\
+         SEAL HARNESS_KEY @api.harness.example\n",
+    );
+    assert!(errors.is_empty(), "{errors:?}");
 }

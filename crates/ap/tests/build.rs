@@ -1719,3 +1719,75 @@ fn a_cached_codex_file_that_is_not_zstd_fails_the_build() {
     assert_eq!(scratch.layer_files(), [ap::fetch::os().sha256]);
     assert!(scratch.agents().list().unwrap().is_empty());
 }
+
+// spec(ENV): So is a key the adapter sets, such as `CLAUDE_CONFIG_DIR` or the certificate variables under [SECRET](#secret), and a name the harness reads for sign-in, because only [`AUTH`](#auth) signs the harness in.
+#[test]
+fn env_cannot_set_what_the_adapter_sets_or_a_sign_in_name() {
+    let scratch = Scratch::new("env-reserved");
+    for (agent, key) in [
+        ("claude", "CLAUDE_CONFIG_DIR"),
+        ("claude", "SSL_CERT_FILE"),
+        ("claude", "NODE_EXTRA_CA_CERTS"),
+        ("claude", "ANTHROPIC_API_KEY"),
+        ("claude", "CLAUDE_CODE_OAUTH_TOKEN"),
+        ("codex", "GIT_SSL_CAINFO"),
+        ("codex", "OPENAI_API_KEY"),
+        ("codex", "CODEX_API_KEY"),
+    ] {
+        let dir = scratch.project(
+            &format!("{agent}-{key}"),
+            &format!("AGENT {agent}\nOS minimal\nENV OK 1\nENV {key} x\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {key}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.starts_with("Agentfile:4: "), "{message}");
+        assert!(message.contains(&format!("`{key}`")), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+// spec(SECRET): A bound host that is one of the harness's own hosts is an error, and so is a `SECRET` that uses a name the harness reads for sign-in.
+#[test]
+fn a_secret_cannot_bind_a_harness_host_or_use_a_sign_in_name() {
+    let scratch = Scratch::new("secret-reserved");
+    for (agent, line, named) in [
+        (
+            "claude",
+            "SECRET MINE @api.anthropic.com",
+            "api.anthropic.com",
+        ),
+        (
+            "claude",
+            "SECRET MINE @platform.claude.com visible",
+            "platform.claude.com",
+        ),
+        ("claude", "SECRET ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        (
+            "claude",
+            "SECRET ANTHROPIC_AUTH_TOKEN @example.com",
+            "ANTHROPIC_AUTH_TOKEN",
+        ),
+        ("codex", "SECRET MINE @chatgpt.com", "chatgpt.com"),
+        ("codex", "SECRET OPENAI_API_KEY", "OPENAI_API_KEY"),
+        (
+            "codex",
+            "SECRET CODEX_ACCESS_TOKEN visible",
+            "CODEX_ACCESS_TOKEN",
+        ),
+    ] {
+        let dir = scratch.project(
+            &format!("{agent}-{named}"),
+            &format!("AGENT {agent}\nOS minimal\nSECRET OK @example.com\n{line}\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {line}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.starts_with("Agentfile:4: "), "{message}");
+        assert!(message.contains(&format!("`{named}`")), "{message}");
+        assert!(message.contains("`AUTH`"), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}

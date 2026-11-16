@@ -220,7 +220,10 @@ fn apply_lands_changed_added_and_deleted_files() {
     fs::create_dir_all(share.join("vendor/lib/.git")).unwrap();
     fs::write(share.join("vendor/lib/file"), "old\n").unwrap();
     fs::write(share.join("vendor/lib/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
-    let before = fs::metadata(share.join("same.txt")).unwrap().modified().unwrap();
+    let before = fs::metadata(share.join("same.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
     let (run, pending) = scratch.run("notes", 1);
     change(share, &pending, "changed.txt", 0o644, b"two\n");
     delete(share, &pending, "deleted.txt");
@@ -253,12 +256,22 @@ fn apply_lands_changed_added_and_deleted_files() {
     );
     assert_eq!(scratch.read("vendor/lib/file"), "new\n");
     // A file the agent left as it was isn't written again.
-    let after = fs::metadata(share.join("same.txt")).unwrap().modified().unwrap();
+    let after = fs::metadata(share.join("same.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
     assert_eq!(before, after);
     // Nothing is left beside your files, and nothing stays pending.
     assert_eq!(
         scratch.names(""),
-        ["changed.txt", "latest", "new", "same.txt", "script", "vendor"]
+        [
+            "changed.txt",
+            "latest",
+            "new",
+            "same.txt",
+            "script",
+            "vendor"
+        ]
     );
     assert_eq!(scratch.names("new"), ["added.txt"]);
     assert!(!scratch.store().join("pending").join(&run).exists());
@@ -333,7 +346,12 @@ fn nothing_is_applied_under_git() {
     fs::write(share.join("vendor/lib/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
     let (run, pending) = scratch.run("notes", 1);
     change(share, &pending, "vendor/lib/.git/HEAD", 0o644, b"0000\n");
-    write(&pending, "vendor/lib/.git/hooks/pre-commit", 0o755, b"#!/bin/sh\n");
+    write(
+        &pending,
+        "vendor/lib/.git/hooks/pre-commit",
+        0o755,
+        b"#!/bin/sh\n",
+    );
     write(&pending, "vendor/lib/.GIT/config", 0o644, b"[core]\n");
     record(&pending, &base(share, "sub"));
     dir(&pending, "sub", 0o755);
@@ -351,7 +369,10 @@ fn nothing_is_applied_under_git() {
             "skipped vendor/lib/.git/hooks/pre-commit: it is under .git\n",
         )
     );
-    assert_eq!(scratch.read("vendor/lib/.git/HEAD"), "ref: refs/heads/main\n");
+    assert_eq!(
+        scratch.read("vendor/lib/.git/HEAD"),
+        "ref: refs/heads/main\n"
+    );
     assert_eq!(scratch.names("vendor/lib"), [".git"]);
     assert_eq!(scratch.names("vendor/lib/.git"), ["HEAD"]);
     assert!(!scratch.exists("sub/.Git"));
@@ -415,7 +436,8 @@ fn symlinks_are_never_followed_and_special_files_never_applied() {
     let output = scratch.ap(&["diff", &run]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("+++ b/docs/file\n") && stdout(&output).contains("+++ b/hop/file\n"),
+        stdout(&output).contains("+++ b/docs/file\n")
+            && stdout(&output).contains("+++ b/hop/file\n"),
         "{}",
         stdout(&output)
     );
@@ -468,7 +490,13 @@ fn apply_fails_while_the_run_is_active() {
     let scratch = Scratch::new("active");
     fs::write(scratch.share.join("kept.txt"), "yours\n").unwrap();
     let (run, pending) = scratch.run("notes", 1);
-    change(&scratch.share, &pending, "kept.txt", 0o644, b"the agent's\n");
+    change(
+        &scratch.share,
+        &pending,
+        "kept.txt",
+        0o644,
+        b"the agent's\n",
+    );
     let held = scratch.runs().hold(&run).unwrap();
 
     let output = scratch.ap(&["apply", &run]);
@@ -633,7 +661,10 @@ fn a_failed_write_leaves_your_file_as_it_was() {
     let output = command.output().unwrap();
 
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "failed big: File too large (os error 27)\n");
+    assert_eq!(
+        stdout(&output),
+        "failed big: File too large (os error 27)\n"
+    );
     assert_eq!(scratch.read("big"), "yours\n");
     assert_eq!(scratch.read("small"), "s\n");
     assert_eq!(scratch.names(""), ["big", "small"]);

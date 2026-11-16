@@ -1,10 +1,11 @@
 //! What `crates/git` reads, checked against the `git` on the host. Each test
 //! builds a repository with `git`, and every object and ref in it must read
 //! the same from the crate and from `git cat-file`, `git rev-parse`, and
-//! `git for-each-ref`.
+//! `git for-each-ref`, whether the object is loose or packed.
 
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -96,7 +97,7 @@ fn assert_objects_match(root: &Path) -> usize {
     for line in list.lines() {
         let (hex, kind) = line.split_once(' ').unwrap();
         let object = repo
-            .loose_object(&id(hex))
+            .object(&id(hex))
             .unwrap()
             .unwrap_or_else(|| panic!("{hex} is missing"));
         assert_eq!(object.kind.to_string(), kind, "the type of {hex}");
@@ -617,4 +618,437 @@ fn a_ref_whose_name_is_not_utf8_leaves_the_others_readable() {
     run(&root, &["pack-refs", "--all"]);
     assert_eq!(names(&repo), ["refs/heads/main"]);
     assert_resolves_as_git(&root, "refs/heads/main");
+}
+
+/// A repository whose history gives `git` much to delta: a file that grows
+/// a line at a time, a binary file that changes in place, and tags.
+fn history(name: &str) -> PathBuf {
+    let root = init(name);
+    let mut text = String::new();
+    let mut binary: Vec<u8> = (0..20_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    for n in 0..60 {
+        text.push_str(&format!("line {n} of a file that grows\n"));
+        binary[n * 300] ^= 0xff;
+        fs::create_dir_all(root.join("dir")).unwrap();
+        fs::write(root.join("dir/text"), &text).unwrap();
+        fs::write(root.join("binary"), &binary).unwrap();
+        run(&root, &["add", "-A"]);
+        run(
+            &root,
+            &["commit", "-q", "-m", &format!("commit {n}\n\n{text}")],
+        );
+    }
+    run(&root, &["tag", "-a", "-m", "annotated", "v1"]);
+    root
+}
+
+/// The longest delta chain in the repository's packs.
+fn longest_chain(root: &Path) -> usize {
+    let mut longest = 0;
+    for entry in fs::read_dir(root.join(".git/objects/pack")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "idx") {
+            let listing = text(root, &["verify-pack", "-v", path.to_str().unwrap()]);
+            for line in listing.lines() {
+                if let Some(rest) = line.strip_prefix("chain length = ") {
+                    longest = longest.max(rest.split(':').next().unwrap().parse().unwrap());
+                }
+            }
+        }
+    }
+    longest
+}
+
+fn assert_all_packed(root: &Path) {
+    let counts = text(root, &["count-objects", "-v"]);
+    assert!(counts.starts_with("count: 0\n"), "{counts}");
+}
+
+#[test]
+fn every_object_in_a_pack_reads_as_git_reads_it() {
+    // `gc --aggressive` searches more bases, and finds shorter chains.
+    for (name, args, deep) in [
+        ("offset-deltas", &["repack", "-adf"][..], 20),
+        (
+            "ref-deltas",
+            &["-c", "repack.useDeltaBaseOffset=false", "repack", "-adf"],
+            20,
+        ),
+        (
+            "aggressive",
+            &["gc", "-q", "--aggressive", "--prune=now"],
+            5,
+        ),
+    ] {
+        let root = history(name);
+        run(&root, args);
+        assert_all_packed(&root);
+        let chain = longest_chain(&root);
+        assert!(chain >= deep, "{name}: the longest chain is {chain}");
+        // 60 commits, 120 trees, 120 blobs, and a tag.
+        assert_eq!(assert_objects_match(&root), 301, "{name}");
+    }
+}
+
+#[test]
+fn a_loose_and_a_packed_object_with_the_same_id_read_the_same() {
+    let root = history("both");
+    // Without `-d`, the loose objects stay beside the pack.
+    run(&root, &["repack", "-a"]);
+    let repo = Repository::at(root.join(".git"));
+    let list = text(
+        &root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    );
+    for hex in list.lines() {
+        let loose = repo.loose_object(&id(hex)).unwrap().unwrap();
+        let packed = repo.packed_object(&id(hex)).unwrap().unwrap();
+        assert_eq!(loose, packed, "{hex}");
+    }
+}
+
+#[test]
+fn an_object_in_no_pack_is_missing() {
+    let root = history("no-pack");
+    run(&root, &["repack", "-adf"]);
+    let repo = Repository::at(root.join(".git"));
+    let absent = id("0123456789abcdef0123456789abcdef01234567");
+    assert!(repo.packed_object(&absent).unwrap().is_none());
+    assert!(repo.object(&absent).unwrap().is_none());
+    let empty = Repository::at(init("no-pack-at-all").join(".git"));
+    assert!(empty.packed_object(&absent).unwrap().is_none());
+}
+
+/// The repository's only pack and its index.
+fn only_pack(root: &Path) -> (PathBuf, PathBuf) {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(root.join(".git/objects/pack")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "pack") {
+            found.push(path);
+        }
+    }
+    assert_eq!(found.len(), 1, "{found:?}");
+    let pack = found.pop().unwrap();
+    let idx = pack.with_extension("idx");
+    // Git writes both read-only.
+    for path in [&idx, &pack] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    (idx, pack)
+}
+
+#[test]
+fn an_index_with_64_bit_offsets_reads_as_git_reads_it() {
+    let root = history("large-offsets");
+    run(&root, &["repack", "-adf"]);
+    let (idx, pack) = only_pack(&root);
+    let small = fs::metadata(&idx).unwrap().len();
+    fs::remove_file(&idx).unwrap();
+    // Every offset past 0x40 goes in the table of 64-bit offsets.
+    run(
+        &root,
+        &[
+            "index-pack",
+            "--index-version=2,0x40",
+            pack.to_str().unwrap(),
+        ],
+    );
+    let large = fs::metadata(&idx).unwrap().len();
+    assert_eq!(large - small, 8 * 300, "one 64-bit offset for all but one");
+    assert_eq!(assert_objects_match(&root), 301);
+}
+
+/// Every object `git` lists, read from a fresh `Repository`.
+fn read_all(root: &Path, ids: &[Id]) -> Vec<Result<Option<git::Object>, Error>> {
+    let repo = Repository::at(root.join(".git"));
+    ids.iter().map(|id| repo.packed_object(id)).collect()
+}
+
+fn listed_ids(root: &Path) -> Vec<Id> {
+    let list = text(
+        root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    );
+    list.lines().map(id).collect()
+}
+
+#[test]
+fn a_truncated_pack_or_index_is_refused() {
+    let root = init("truncated");
+    commit(&root, "a", &b"some text\n".repeat(20));
+    commit(&root, "a", &b"some text\n".repeat(21));
+    run(&root, &["repack", "-adf"]);
+    let ids = listed_ids(&root);
+    let (idx, pack) = only_pack(&root);
+    for path in [idx, pack] {
+        let whole = fs::read(&path).unwrap();
+        for len in 0..whole.len() {
+            fs::write(&path, &whole[..len]).unwrap();
+            for read in read_all(&root, &ids) {
+                assert!(
+                    matches!(read, Err(Error::Corrupt(_))),
+                    "{path:?} cut to {len}: {read:?}"
+                );
+            }
+        }
+        fs::write(&path, &whole).unwrap();
+    }
+}
+
+#[test]
+fn a_changed_byte_in_a_pack_or_index_reads_as_git_reads_it_or_is_refused() {
+    let root = init("flipped");
+    commit(&root, "a", &b"some text\n".repeat(20));
+    commit(&root, "a", &b"some text\n".repeat(21));
+    run(&root, &["repack", "-adf"]);
+    let ids = listed_ids(&root);
+    let good = read_all(&root, &ids);
+    let (idx, pack) = only_pack(&root);
+    for path in [idx, pack] {
+        let whole = fs::read(&path).unwrap();
+        for at in 0..whole.len() {
+            let mut changed = whole.clone();
+            changed[at] ^= 0x41;
+            fs::write(&path, &changed).unwrap();
+            for ((id, read), good) in ids.iter().zip(read_all(&root, &ids)).zip(&good) {
+                match read {
+                    Err(Error::Corrupt(_)) | Ok(None) => {}
+                    Ok(Some(object)) if Some(&object) == good.as_ref().unwrap().as_ref() => {}
+                    // Git reads what it can't tell was changed, and so must
+                    // the crate.
+                    Ok(Some(object)) => {
+                        let hex = id.to_string();
+                        let kind = object.kind.to_string();
+                        assert_eq!(
+                            object.data,
+                            run(&root, &["cat-file", &kind, &hex]),
+                            "{path:?} changed at {at}: {hex}"
+                        );
+                    }
+                    Err(error) => panic!("{path:?} changed at {at}: {error}"),
+                }
+            }
+        }
+        fs::write(&path, &whole).unwrap();
+    }
+}
+
+/// An entry's header: its type and size, as a pack writes them.
+fn entry_header(kind: u8, size: usize) -> Vec<u8> {
+    let mut bytes = vec![(kind << 4) | (size & 15) as u8];
+    let mut size = size >> 4;
+    while size > 0 {
+        *bytes.last_mut().unwrap() |= 0x80;
+        bytes.push((size & 0x7f) as u8);
+        size >>= 7;
+    }
+    bytes
+}
+
+/// A pack entry of a whole object.
+fn whole(kind: u8, data: &[u8]) -> Vec<u8> {
+    let mut entry = entry_header(kind, data.len());
+    entry.extend(miniz_oxide::deflate::compress_to_vec_zlib(data, 6));
+    entry
+}
+
+/// A pack entry of a delta against the object named `base`.
+fn ref_delta(base: &Id, delta: &[u8]) -> Vec<u8> {
+    let mut entry = entry_header(7, delta.len());
+    entry.extend(base.0);
+    entry.extend(miniz_oxide::deflate::compress_to_vec_zlib(delta, 6));
+    entry
+}
+
+/// Writes a pack of `entries`, each with the name given, and its version 2
+/// index. Neither is checked against its contents, as `git` doesn't check
+/// them when it reads an object.
+fn plant_pack(root: &Path, entries: &[(Id, Vec<u8>)]) {
+    let mut pack = b"PACK\0\0\0\x02".to_vec();
+    pack.extend((entries.len() as u32).to_be_bytes());
+    let mut offsets = Vec::new();
+    for (id, entry) in entries {
+        offsets.push((*id, pack.len() as u32));
+        pack.extend(entry);
+    }
+    let checksum = [0x5a; 20];
+    pack.extend(checksum);
+    offsets.sort();
+    let mut idx = b"\xfftOc\0\0\0\x02".to_vec();
+    for first in 0..=255u8 {
+        let below = offsets.iter().filter(|(id, _)| id.0[0] <= first).count();
+        idx.extend((below as u32).to_be_bytes());
+    }
+    for (id, _) in &offsets {
+        idx.extend(id.0);
+    }
+    for _ in &offsets {
+        idx.extend([0; 4]);
+    }
+    for (_, offset) in &offsets {
+        idx.extend(offset.to_be_bytes());
+    }
+    idx.extend(checksum);
+    idx.extend([0; 20]);
+    let dir = root.join(".git/objects/pack");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("pack-planted.pack"), pack).unwrap();
+    fs::write(dir.join("pack-planted.idx"), idx).unwrap();
+}
+
+/// A delta's header: the base's size, then the result's.
+fn delta_header(base: usize, result: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for mut size in [base, result] {
+        loop {
+            let more = if size >= 0x80 { 0x80 } else { 0 };
+            bytes.push((size & 0x7f) as u8 | more);
+            size >>= 7;
+            if more == 0 {
+                break;
+            }
+        }
+    }
+    bytes
+}
+
+#[test]
+fn a_planted_delta_reads_as_git_reads_it() {
+    let base = id(&"a".repeat(40));
+    let target = id(&"b".repeat(40));
+    let small = b"hello world".to_vec();
+    // One byte more than the largest copy.
+    let large: Vec<u8> = (0..=0x10000u32).map(|i| (i % 251) as u8).collect();
+    let cases: Vec<(&[u8], Vec<u8>)> = vec![
+        // Copy all 11 bytes of the base, then insert 3.
+        (
+            &small,
+            [delta_header(11, 14), vec![0x90, 11, 3], b"!!!".to_vec()].concat(),
+        ),
+        // A copy of size 0 means 0x10000.
+        (
+            &large,
+            [delta_header(0x10001, 0x10000), vec![0x80]].concat(),
+        ),
+        // That is more than a small base holds.
+        (&small, [delta_header(11, 12), vec![0x80, 1, b'x']].concat()),
+        // A copy past the end of the base.
+        (&small, [delta_header(11, 11), vec![0x91, 1, 11]].concat()),
+        // An insert past the end of the delta.
+        (&small, [delta_header(11, 3), vec![3, b'x']].concat()),
+        // The reserved opcode.
+        (&small, [delta_header(11, 1), vec![0, 1, b'x']].concat()),
+        // The wrong size of base.
+        (&small, [delta_header(10, 1), vec![1, b'x']].concat()),
+        // A result shorter or longer than the header says.
+        (&small, [delta_header(11, 2), vec![1, b'x']].concat()),
+        (&small, [delta_header(11, 1), vec![2, b'x', b'y']].concat()),
+        // Shorter than any delta git takes.
+        (&small, delta_header(0, 0)),
+    ];
+    for (n, (data, delta)) in cases.iter().enumerate() {
+        let root = init(&format!("delta-{n}"));
+        plant_pack(
+            &root,
+            &[(base, whole(3, data)), (target, ref_delta(&base, delta))],
+        );
+        let hex = target.to_string();
+        let theirs = output(&root, &["cat-file", "blob", &hex], b"");
+        let ours = Repository::at(root.join(".git")).object(&target);
+        match ours {
+            Ok(Some(object)) => {
+                assert!(theirs.status.success(), "{n}: git refuses {delta:?}");
+                assert_eq!(object.kind, Kind::Blob, "{n}");
+                assert_eq!(object.data, theirs.stdout, "{n}");
+            }
+            Err(Error::Corrupt(_)) => {
+                assert!(!theirs.status.success(), "{n}: git reads {delta:?}");
+            }
+            other => panic!("{n}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_planted_entry_git_refuses_is_refused() {
+    let one = id(&"a".repeat(40));
+    let two = id(&"b".repeat(40));
+    let delta = [delta_header(1, 1), vec![1, b'x']].concat();
+    let cases: Vec<Vec<(Id, Vec<u8>)>> = vec![
+        // Types 0 and 5 name no object.
+        vec![(one, whole(0, b"x"))],
+        vec![(one, whole(5, b"x"))],
+        // A size larger than the data.
+        vec![(
+            one,
+            [entry_header(3, 2), whole(3, b"x")[1..].to_vec()].concat(),
+        )],
+        // A size in more bytes than git reads: 4 bits, and 8 groups of 7.
+        vec![(
+            one,
+            [
+                vec![0xb1],
+                vec![0x80; 8],
+                vec![0],
+                whole(3, b"x")[1..].to_vec(),
+            ]
+            .concat(),
+        )],
+        // A base in no pack.
+        vec![(one, ref_delta(&two, &delta))],
+        // Two deltas, each the other's base.
+        vec![
+            (one, ref_delta(&two, &delta)),
+            (two, ref_delta(&one, &delta)),
+        ],
+        // An offset delta whose base is before the pack.
+        vec![(one, [entry_header(6, delta.len()), vec![0x7f]].concat())],
+    ];
+    for (n, entries) in cases.iter().enumerate() {
+        let root = init(&format!("entry-{n}"));
+        plant_pack(&root, entries);
+        let ours = Repository::at(root.join(".git")).object(&one);
+        assert!(matches!(ours, Err(Error::Corrupt(_))), "{n}: {ours:?}");
+        // A cycle of deltas is left to the crate alone.
+        if n != 5 {
+            let theirs = output(&root, &["cat-file", "-p", &one.to_string()], b"");
+            assert!(!theirs.status.success(), "{n}: git reads it");
+        }
+    }
+}
+
+#[test]
+fn an_index_with_more_64_bit_offsets_than_objects_is_refused() {
+    let one = id(&"a".repeat(40));
+    let two = id(&"b".repeat(40));
+    // Git takes at most one 64-bit offset fewer than there are objects.
+    for (n, entries, reads) in [
+        (0, vec![(one, whole(3, b"x"))], false),
+        (1, vec![(one, whole(3, b"x")), (two, whole(3, b"y"))], true),
+    ] {
+        let root = init(&format!("extra-offset-{n}"));
+        plant_pack(&root, &entries);
+        let idx = root.join(".git/objects/pack/pack-planted.idx");
+        let mut bytes = fs::read(&idx).unwrap();
+        let trailer = bytes.len() - 40;
+        bytes.splice(trailer..trailer, [0; 8]);
+        fs::write(&idx, bytes).unwrap();
+        let theirs = output(&root, &["cat-file", "blob", &one.to_string()], b"");
+        assert_eq!(theirs.status.success(), reads, "{n}: git");
+        let ours = Repository::at(root.join(".git")).object(&one);
+        match ours {
+            Ok(Some(object)) if reads => assert_eq!(object.data, theirs.stdout),
+            Err(Error::Corrupt(_)) if !reads => {}
+            other => panic!("{n}: {other:?}"),
+        }
+    }
 }

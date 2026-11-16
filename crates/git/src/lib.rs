@@ -1,13 +1,18 @@
-//! Reads a git repository the way `git` does: loose objects, and refs with
-//! `packed-refs`. It reads only SHA-1 repositories.
+//! Reads a git repository the way `git` does: loose and packed objects, and
+//! refs with `packed-refs`. It reads only SHA-1 repositories.
+
+mod pack;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use miniz_oxide::inflate::{self, TINFLStatus};
+
+use pack::Pack;
 
 /// An object's SHA-1 name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -113,6 +118,8 @@ impl From<io::Error> for Error {
 /// A repository, by its git directory.
 pub struct Repository {
     git_dir: PathBuf,
+    /// The packs, found when an object is first looked for in one.
+    packs: OnceLock<Vec<Pack>>,
 }
 
 /// How many symbolic refs `resolve` follows, as git's `SYMREF_MAXDEPTH`.
@@ -149,7 +156,56 @@ impl Repository {
     pub fn at(git_dir: impl Into<PathBuf>) -> Repository {
         Repository {
             git_dir: git_dir.into(),
+            packs: OnceLock::new(),
         }
+    }
+
+    /// The object named `id`, loose or packed, or `None` if there is none.
+    pub fn object(&self, id: &Id) -> Result<Option<Object>, Error> {
+        match self.loose_object(id)? {
+            Some(object) => Ok(Some(object)),
+            None => self.packed_object(id),
+        }
+    }
+
+    /// The object named `id` from the first pack that holds it, or `None`
+    /// if no pack does. It finds the packs once, so a pack written after
+    /// the first lookup needs a new `Repository`. A bad index or pack is an
+    /// error, where git would skip it.
+    pub fn packed_object(&self, id: &Id) -> Result<Option<Object>, Error> {
+        for pack in self.packs()? {
+            if let Some(offset) = pack.find(id)? {
+                return pack.read(offset).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every pack with an index in `objects/pack`, in the order of their
+    /// names. An index with no pack is left out, as git leaves it out.
+    fn packs(&self) -> Result<&[Pack], Error> {
+        if let Some(packs) = self.packs.get() {
+            return Ok(packs);
+        }
+        let dir = self.git_dir.join("objects").join("pack");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if is_missing(&e) => return Ok(self.packs.get_or_init(Vec::new)),
+            Err(e) => return Err(e.into()),
+        };
+        let mut indexes = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().is_some_and(|e| e == "idx") {
+                indexes.push(path);
+            }
+        }
+        indexes.sort();
+        let mut packs = Vec::new();
+        for index in indexes {
+            packs.extend(Pack::open(&index)?);
+        }
+        Ok(self.packs.get_or_init(|| packs))
     }
 
     /// The loose object named `id`, or `None` if there is no loose object.

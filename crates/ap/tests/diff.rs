@@ -186,7 +186,7 @@ impl Random {
 
 /// Lines that slide, indent, and repeat, so the cases reach git's
 /// heuristics and the places where two diffs are both shortest.
-const LINES: [&str; 9] = [
+const LINES: [&str; 11] = [
     "a\n",
     "b\n",
     "}\n",
@@ -196,6 +196,8 @@ const LINES: [&str; 9] = [
     "    d\n",
     "\tif y {\n",
     "   \n",
+    "\x0c\n",
+    "\x0b \n",
 ];
 
 /// A text of up to `len` lines from `LINES`, and maybe a last line with no

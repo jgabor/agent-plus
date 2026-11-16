@@ -271,6 +271,8 @@ const TARGETS: [Target; 6] = [
             "    c\n",
             "\tif y {\n",
             "   \n",
+            "\x0b\n",
+            "\x0c\n",
             "\0",
             "\r\n",
         ],

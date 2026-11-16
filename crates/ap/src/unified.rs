@@ -682,8 +682,10 @@ impl Score {
     }
 }
 
+/// Whitespace as git's own `isspace` has it, which leaves out the vertical
+/// tab and the form feed that C's has.
 fn is_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r')
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 /// Slides each group of changed lines to where it reads best, as

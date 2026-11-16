@@ -2,9 +2,21 @@
 //! prints and `--approve=<file>` reads.
 
 use agentfile::{
-    Auth, Destination, Error, Grants, Location, Network, NetworkRule, PathGrant, Policy, Secret,
-    Sign, parse,
+    Auth, Destination, Error, Grants, Harness, Location, Network, NetworkRule, PathGrant, Policy,
+    Reserved, Secret, Sign, parse,
 };
+
+/// Stands in for the adapters in `ap`, which own the real harness hosts.
+fn adapter(harness: Harness) -> Reserved<'static> {
+    let hosts: &'static [&'static str] = match harness {
+        Harness::Claude => &["model.claude.test"],
+        Harness::Codex => &["model.codex.test", "sign-in.codex.test"],
+    };
+    Reserved {
+        hosts,
+        ..Reserved::default()
+    }
+}
 
 /// Resolves a host path the way a build in `/ctx` with home `/home/u` would,
 /// without symlinks: relative paths land inside the build context.
@@ -26,7 +38,7 @@ fn resolve(text: &str) -> Result<Location, String> {
 /// Parses `lines` after an `AGENT claude` line, and returns their grants.
 fn grants_of(lines: &str) -> Grants {
     let instructions = parse(&format!("AGENT claude\n{lines}")).unwrap();
-    Grants::read(&instructions, resolve).unwrap()
+    Grants::read(&instructions, adapter, resolve).unwrap()
 }
 
 fn path(path: &str, write: bool) -> PathGrant {
@@ -95,7 +107,7 @@ fn host_paths_outside_the_context_are_grants() {
 #[test]
 fn a_symlink_that_leaves_the_context_is_a_grant() {
     let instructions = parse("AGENT claude\nADD ./link\nADD ./data").unwrap();
-    let grants = Grants::read(&instructions, |text| {
+    let grants = Grants::read(&instructions, adapter, |text| {
         if text == "./link" {
             Ok(Location {
                 path: "/home/u/.ssh".to_string(),
@@ -112,7 +124,7 @@ fn a_symlink_that_leaves_the_context_is_a_grant() {
 #[test]
 fn the_caller_reports_paths_that_fail_to_resolve() {
     let instructions = parse("AGENT claude\nADD ./data\nSHARE missing\nADD gone").unwrap();
-    let errors = Grants::read(&instructions, resolve).unwrap_err();
+    let errors = Grants::read(&instructions, adapter, resolve).unwrap_err();
     let lines: Vec<usize> = errors.iter().map(|error| error.line).collect();
     assert_eq!(lines, vec![3, 4], "{errors:?}");
     assert!(
@@ -248,6 +260,32 @@ fn git_credentials_are_left_out() {
 }
 
 #[test]
+fn the_harness_hosts_are_a_grant_only_under_network_deny() {
+    assert_eq!(grants_of("NETWORK +").hosts, Vec::<String>::new());
+    assert_eq!(grants_of("NETWORK -").hosts, ["model.claude.test"]);
+    let instructions = parse("AGENT codex\nNETWORK -").unwrap();
+    let grants = Grants::read(&instructions, adapter, resolve).unwrap();
+    assert_eq!(grants.hosts, ["model.codex.test", "sign-in.codex.test"]);
+}
+
+#[test]
+fn a_host_line_takes_one_host() {
+    assert_eq!(
+        errors_of("NETWORK -\nPOLICY +\nHOST\nHOST a.com b.com\n"),
+        [
+            Error {
+                line: 3,
+                message: "`HOST` takes one host".to_string(),
+            },
+            Error {
+                line: 4,
+                message: "`HOST` takes one host".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
 fn the_text_form_uses_agentfile_lines() {
     let grants = grants_of(
         "SHARE ./out ~/out rw\n\
@@ -280,6 +318,7 @@ fn the_text_form_uses_agentfile_lines() {
          NETWORK +registry.npmjs.org\n\
          NETWORK +stripe.com\n\
          NETWORK -10.1.0.0/16\n\
+         HOST model.claude.test\n\
          POLICY -\n\
          POLICY +reviewer\n",
     );
@@ -330,7 +369,7 @@ fn paths_with_spaces_quotes_and_backslashes_read_back() {
         "--flag",
     ] {
         let instructions = parse("AGENT claude\nADD ./x").unwrap();
-        let grants = Grants::read(&instructions, |_| {
+        let grants = Grants::read(&instructions, adapter, |_| {
             Ok(Location {
                 path: format!("/home/u/{name}"),
                 outside: true,
@@ -345,7 +384,7 @@ fn paths_with_spaces_quotes_and_backslashes_read_back() {
 fn control_characters_and_bidirectional_overrides_are_escaped() {
     let name = "a\u{1b}[31m\u{202e}b\u{2066}c\nd\te\u{7f}f\u{2028}g\u{200f}h";
     let instructions = parse("AGENT claude\nADD ./x\nSECRET X\u{202e}Y visible").unwrap();
-    let grants = Grants::read(&instructions, |_| {
+    let grants = Grants::read(&instructions, adapter, |_| {
         Ok(Location {
             path: format!("/home/u/{name}"),
             outside: true,

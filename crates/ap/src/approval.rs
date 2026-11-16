@@ -21,7 +21,7 @@ pub fn grants(
     instructions: &[Instruction],
     mut resolve: impl FnMut(&str) -> io::Result<HostPath>,
 ) -> Result<Grants, Vec<Error>> {
-    Grants::read(instructions, |text| {
+    Grants::read(instructions, crate::adapter::reserved, |text| {
         let host = resolve(text).map_err(|error| error.to_string())?;
         let path = host.path().to_str().ok_or_else(|| {
             format!(

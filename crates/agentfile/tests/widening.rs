@@ -2,8 +2,21 @@
 //! Grants section.
 
 use agentfile::{
-    Auth, Destination, Grants, Location, NetworkRule, PathGrant, Secret, Sign, Widening, parse,
+    Auth, Destination, Grants, Harness, Location, NetworkRule, PathGrant, Reserved, Secret, Sign,
+    Widening, parse,
 };
+
+/// Stands in for the adapters in `ap`, which own the real harness hosts.
+fn adapter(harness: Harness) -> Reserved<'static> {
+    let hosts: &'static [&'static str] = match harness {
+        Harness::Claude => &["model.claude.test"],
+        Harness::Codex => &["model.codex.test", "sign-in.codex.test"],
+    };
+    Reserved {
+        hosts,
+        ..Reserved::default()
+    }
+}
 
 /// Resolves a host path the way a build in `/ctx` with home `/home/u` would,
 /// without symlinks: relative paths land inside the build context.
@@ -25,7 +38,7 @@ fn resolve(text: &str) -> Result<Location, String> {
 /// Parses `lines` after an `AGENT claude` line, and returns their grants.
 fn grants_of(lines: &str) -> Grants {
     let instructions = parse(&format!("AGENT claude\n{lines}")).unwrap();
-    Grants::read(&instructions, resolve).unwrap()
+    Grants::read(&instructions, adapter, resolve).unwrap()
 }
 
 /// What `now` widens, compared with the grants approved from `approved`.
@@ -78,8 +91,8 @@ fn a_new_host_path_outside_the_build_context_widens() {
 #[test]
 fn an_approved_path_whose_canonical_location_changed_widens() {
     let instructions = parse("AGENT claude\nSHARE ~/data /data\n").unwrap();
-    let approved = Grants::read(&instructions, resolve).unwrap();
-    let now = Grants::read(&instructions, |_: &str| {
+    let approved = Grants::read(&instructions, adapter, resolve).unwrap();
+    let now = Grants::read(&instructions, adapter, |_: &str| {
         Ok(Location {
             path: "/home/u/.ssh".to_string(),
             outside: true,
@@ -264,6 +277,36 @@ fn changing_a_rule_widens_unless_it_only_drops_an_allow_or_adds_a_deny() {
         })]
     );
     assert_eq!(widened(approved, "NETWORK -\nNETWORK -github.com\n"), []);
+}
+
+/// What `now` widens, compared with `approved`, after `AGENT <harness>`
+/// lines of their own.
+fn widened_with(approved: (&str, &str), now: (&str, &str)) -> Vec<Widening> {
+    let grants = |(harness, lines): (&str, &str)| {
+        let instructions = parse(&format!("AGENT {harness}\n{lines}")).unwrap();
+        Grants::read(&instructions, adapter, resolve).unwrap()
+    };
+    grants(now).widening(&grants(approved))
+}
+
+// spec(Grants): any network change other than removing a `+` rule or adding a `-` rule, including a change in the harness hosts that stay allowed under `NETWORK -`
+#[test]
+fn another_harness_under_network_deny_widens() {
+    assert_eq!(
+        widened_with(("claude", "NETWORK -\n"), ("codex", "NETWORK -\n")),
+        [
+            Widening::HarnessHost("model.codex.test".to_string()),
+            Widening::HarnessHost("sign-in.codex.test".to_string()),
+        ]
+    );
+}
+
+// spec(Grants): A build that only narrows grants does not ask, and neither does a change that touches no grant, such as a new `PLUGIN`.
+#[test]
+fn another_harness_widens_nothing_where_every_host_was_allowed() {
+    let open = ("claude", "NETWORK +\n");
+    assert_eq!(widened_with(open, ("codex", "NETWORK +\n")), []);
+    assert_eq!(widened_with(open, ("codex", "NETWORK -\n")), []);
 }
 
 #[test]

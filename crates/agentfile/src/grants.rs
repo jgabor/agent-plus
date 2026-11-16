@@ -14,6 +14,7 @@
 //! AUTH key
 //! NETWORK -
 //! NETWORK +github.com
+//! HOST api.anthropic.com
 //! POLICY -
 //! POLICY +reviewer
 //! ```
@@ -30,8 +31,8 @@ use std::str::FromStr;
 use crate::network::{self, Line};
 use crate::secrets::{self, name_length};
 use crate::{
-    Auth, Destination, Error, Files, Instruction, Mcp, Network, NetworkRule, Policy, Scheme,
-    Secret, Secrets, ShareMode, Sign, Source, Sources, Text, read_argument,
+    Auth, Destination, Error, Files, Instruction, Mcp, Network, NetworkRule, Policy, Reserved,
+    Scheme, Secret, Secrets, Settings, ShareMode, Sign, Source, Sources, Text, read_argument,
 };
 
 /// Where a host path from an Agentfile really is, as the caller resolved it
@@ -66,15 +67,21 @@ pub struct Grants {
     /// `AUTH key` or `AUTH token`. `AUTH login` isn't a grant.
     pub auth: Option<Auth>,
     pub network: Network,
+    /// The harness hosts that stay allowed under `NETWORK -`, from the
+    /// adapter. Under `NETWORK +` every host is allowed, so it is empty.
+    pub hosts: Vec<String>,
     pub policy: Policy,
 }
 
 impl Grants {
     /// Lists the grants of the instructions that [`crate::parse`] returned.
-    /// `resolve` takes a host path as written and says where it really is.
-    /// Its error becomes an error on the line that names the path.
-    pub fn read(
+    /// `adapter` says what the adapter keeps for a harness, which gives the
+    /// harness hosts. `resolve` takes a host path as written and says where
+    /// it really is. Its error becomes an error on the line that names the
+    /// path.
+    pub fn read<'a>(
         instructions: &[Instruction],
+        adapter: impl Fn(crate::Harness) -> Reserved<'a>,
         mut resolve: impl FnMut(&str) -> Result<Location, String>,
     ) -> Result<Grants, Vec<Error>> {
         let sources = Sources::read(instructions)?;
@@ -150,6 +157,14 @@ impl Grants {
             })
             .collect();
         let auth = secrets.auth.filter(|auth| *auth != Auth::Login);
+        let hosts = match network.default {
+            Sign::Deny => {
+                let harness = Settings::read(instructions)?.agent.harness;
+                let hosts = adapter(harness).hosts;
+                hosts.iter().map(|host| host.to_string()).collect()
+            }
+            Sign::Allow => Vec::new(),
+        };
         Ok(Grants {
             paths,
             variables,
@@ -157,6 +172,7 @@ impl Grants {
             seals: secrets.seals,
             auth,
             network,
+            hosts,
             policy,
         }
         .sorted())
@@ -190,6 +206,8 @@ impl Grants {
         }
         self.network.rules.sort_by_cached_key(rule_text);
         self.network.rules.dedup();
+        self.hosts.sort();
+        self.hosts.dedup();
         self.policy.rules.sort_by_cached_key(agent_text);
         self.policy.rules.dedup();
         self
@@ -224,6 +242,9 @@ pub enum Widening {
     Unblock(NetworkRule),
     /// The network default moves from `-` to `+`.
     Open,
+    /// A harness host that now stays allowed under `NETWORK -`, such as
+    /// after a change of harness.
+    HarnessHost(String),
     /// The `POLICY` default moves from `-` to `+`, so the agent may call
     /// every agent that no rule names.
     CallAny,
@@ -234,7 +255,7 @@ pub enum Widening {
 impl Grants {
     /// Lists how these grants are wider than `approved`, in the order the
     /// text form prints them. It is empty when they only narrow, or are the
-    /// same. Git credentials and the harness hosts aren't compared yet.
+    /// same. Git credentials aren't compared yet.
     pub fn widening(&self, approved: &Grants) -> Vec<Widening> {
         let mut wider = Vec::new();
         for path in &self.paths {
@@ -300,6 +321,15 @@ impl Grants {
                 .filter(|rule| rule.sign == Sign::Deny && !now.contains(rule))
                 .map(|rule| Widening::Unblock(rule.clone())),
         );
+        // Under an approved `NETWORK +`, every harness host was allowed.
+        if approved.network.default == Sign::Deny {
+            wider.extend(
+                self.hosts
+                    .iter()
+                    .filter(|host| !approved.hosts.contains(host))
+                    .map(|host| Widening::HarnessHost(host.clone())),
+            );
+        }
         // Agents that no rule names follow the default, so only the default
         // and the named agents can change.
         if self.policy.default == Sign::Allow && approved.policy.default == Sign::Deny {
@@ -367,6 +397,7 @@ impl fmt::Display for Widening {
                 write!(f, "NETWORK {} is gone", printed(&rule_text(rule)))
             }
             Widening::Open => write!(f, "NETWORK + replaces NETWORK -"),
+            Widening::HarnessHost(host) => write!(f, "HOST {}", printed(host)),
             Widening::CallAny => write!(f, "POLICY + replaces POLICY -"),
             Widening::Call(name) => write!(f, "may call {}", printed(name)),
         }
@@ -412,6 +443,9 @@ impl fmt::Display for Grants {
         for rule in &self.network.rules {
             line("NETWORK", &[&rule_text(rule)])?;
         }
+        for host in &self.hosts {
+            line("HOST", &[host])?;
+        }
         line("POLICY", &[sign(self.policy.default)])?;
         for rule in &self.policy.rules {
             line("POLICY", &[&agent_text(rule)])?;
@@ -437,6 +471,7 @@ impl FromStr for Grants {
                 default: Sign::Allow,
                 rules: Vec::new(),
             },
+            hosts: Vec::new(),
             policy: Policy {
                 default: Sign::Allow,
                 rules: Vec::new(),
@@ -531,6 +566,10 @@ impl Grants {
             "NETWORK" => match network::line(instruction, network::rule)? {
                 Line::Bare(sign) => set_default("NETWORK", network_default, sign)?,
                 Line::Rule(rule) => self.network.rules.push(rule),
+            },
+            "HOST" => match arguments {
+                [host] if !host.is_empty() => self.hosts.push(host.clone()),
+                _ => return Err("`HOST` takes one host".to_string()),
             },
             "POLICY" => match network::line(instruction, network::agent_rule)? {
                 Line::Bare(sign) => set_default("POLICY", policy_default, sign)?,

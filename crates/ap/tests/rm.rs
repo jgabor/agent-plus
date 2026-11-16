@@ -107,11 +107,11 @@ fn stderr(output: &Output) -> String {
 const SIMPLE: &str = "AGENT claude\nOS minimal\nADD ./data\nNETWORK -\nPOLICY -\n";
 
 /// The grants that `SIMPLE` asks for.
-const SIMPLE_GRANTS: &str = "NETWORK -\nPOLICY -\n";
+const SIMPLE_GRANTS: &str = "NETWORK -\nHOST api.anthropic.com\nHOST claude.ai\nHOST console.anthropic.com\nHOST platform.claude.com\nPOLICY -\n";
 
 /// An Agentfile that asks for a host variable too, and its grants.
 const NOTES: &str = "AGENT claude\nOS minimal\nENV NAME $USER\nNETWORK -\nPOLICY -\n";
-const NOTES_GRANTS: &str = "VARIABLE USER\nNETWORK -\nPOLICY -\n";
+const NOTES_GRANTS: &str = "VARIABLE USER\nNETWORK -\nHOST api.anthropic.com\nHOST claude.ai\nHOST console.anthropic.com\nHOST platform.claude.com\nPOLICY -\n";
 
 // spec(ap rm): `ap rm <agent>` removes an agent and its persisted state.
 // spec(Build): `ap rm` and rebuilds free a layer only when no agent or active run still needs it, and no repository an agent kept still depends on it (see [REPO](#repo)).

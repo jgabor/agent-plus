@@ -70,8 +70,9 @@ Draft model: `claude-fable-5-2`, at effort `high`
    milestone. If none are, say so and stop. The milestone's failing steps come
    first, in journey order, then the budgets and promises that the parent's
    goal names.
-8. For each gap you chose, look for an open issue that already covers it,
-   among those with no parent and no label that says who acts next:
+8. For each gap you chose, up to the limit in step 9, look for an open issue
+   that already covers it, among those with no parent and no label that says
+   who acts next:
 
    ```sh
    gh issue list --state open --limit 1000 --json number,title,labels,parent \
@@ -81,19 +82,22 @@ Draft model: `claude-fable-5-2`, at effort `high`
    ```
 
    Read each likely one. Adopt it, in place of filing, only if its goal is
-   that gap, and its `Definition of done` names checks, not a decision of the
-   owner's. If it has a comment from the owner that defers it, adopt it only
-   once what that comment waits for has happened. To adopt it:
+   that gap, its `Definition of done` names checks, not a decision of the
+   owner's, and `gh issue view <n> --json subIssues` shows no sub-issues,
+   because the queue never offers a parent. If it has a comment from the
+   owner that defers it, adopt it only once what that comment waits for has
+   happened. Never adopt an issue outside the parent's goal and milestone.
+
+   To adopt it, first edit its body where it is out of date, so that
+   `Touches` names real paths and `Blocked by` names what it needs first. The
+   queue reads both as soon as the issue has its label. Then make it a
+   sub-issue, and add the label only if that worked:
 
    ```sh
    gh api -X POST 'repos/{owner}/{repo}/issues/<parent>/sub_issues' \
-     -F sub_issue_id="$(gh api 'repos/{owner}/{repo}/issues/<n>' --jq .id)"
-   gh issue edit <n> --add-label <the parent's auto:* label>
+     -F sub_issue_id="$(gh api 'repos/{owner}/{repo}/issues/<n>' --jq .id)" &&
+     gh issue edit <n> --add-label <the parent's auto:* label>
    ```
-
-   Then edit its body where it is out of date, so that `Touches` names real
-   paths and `Blocked by` names what it needs first. Never adopt an issue
-   outside the parent's goal and milestone.
 9. File or adopt at most 3 minus the larger of the sum from step 4 and the
    count from step 6. File each new one as a sub-issue of the parent, with
    `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:

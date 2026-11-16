@@ -105,7 +105,7 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 }
 
 /// The arguments after `codex` for this version: `exec` for a headless run,
-/// then the mode, the model, and the effort. `model` is passed unchanged.
+/// which skips the git repository check, then the mode, the model, and the effort. `model` is passed unchanged.
 /// Without a model or an effort, Codex uses its own default.
 ///
 /// The mode is the sandbox, the approval policy, and the reviewer, and for
@@ -122,7 +122,9 @@ pub fn arguments(
     let at_least = |from: &[u64]| version(version_text).as_slice() >= from;
     let mut arguments: Vec<String> = Vec::new();
     if !interactive {
-        arguments.push("exec".to_owned());
+        // `codex exec` refuses a directory that isn't a git repository, such
+        // as `/home/agent`, and trusting the directory doesn't change that.
+        arguments.extend(["exec".to_owned(), "--skip-git-repo-check".to_owned()]);
     } else if at_least(&NO_DAEMON_FROM) {
         arguments.push("--no-daemon".to_owned());
     }

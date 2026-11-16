@@ -1563,7 +1563,7 @@ with one directory `SHARE` or `REPO` starts in it, and any other starts in
 - A path that isn't a directory when the run starts fails the run, and the
   error names it. `ap` doesn't create it.
 - `ap run --share` wins over `WORKDIR`.
-- A headless Codex run starts in a directory that isn't a git repository,
+- A headless Codex run can start in a directory that isn't a git repository,
   such as `/home/agent`, because the adapter passes
   `codex exec --skip-git-repo-check`.
 

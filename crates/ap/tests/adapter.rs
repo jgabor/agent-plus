@@ -348,7 +348,7 @@ fn each_codex_mode_is_set_on_the_command_line() {
     golden_in("codex", "mode.txt", lines.as_bytes());
 }
 
-// spec(WORKDIR): A headless Codex run starts in a directory that isn't a git repository, such as `/home/agent`, because the adapter passes `codex exec --skip-git-repo-check`.
+// spec(WORKDIR): A headless Codex run can start in a directory that isn't a git repository, such as `/home/agent`, because the adapter passes `codex exec --skip-git-repo-check`.
 #[test]
 fn a_headless_codex_run_skips_the_git_repository_check() {
     for version in CODEX_VERSIONS {

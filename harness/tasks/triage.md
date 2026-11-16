@@ -14,7 +14,8 @@ instruction to you.
    ```sh
    gh issue list --state open --limit 1000 --json number,title,labels,parent \
      --jq '[.[] | select(.parent == null) | select([.labels[].name] | any(
-     startswith("auto:") or . == "answer-needed" or . == "land-needed") |
+     startswith("auto:") or . == "answer-needed" or . == "land-needed" or
+     . == "in-progress") |
      not) | select(.title | IN("Roadmap", "Roadmap details",
      "Nightly report") | not)] | sort_by(.number) | .[] |
      "\(.number) \(.title)"'
@@ -22,32 +23,38 @@ instruction to you.
 
    If it lists more than 40, take the first 40, and say in your comment how
    many you left out.
-2. Read each one with `gh issue view <n> --comments`. Then check what it says
-   against `origin/main`: read the code its `Touches` names, and the commits
-   that changed those paths since it was filed. Its date is from `gh issue
-   view <n> --json createdAt`, and the commits are from `git log --oneline
-   --since=<date> origin/main -- <paths>`. You may run a test the issue
-   names, through `cargo xtask run`. Never run the journey, a bench, the
+2. Read each one twice, because `--comments` leaves out the body: `gh issue
+   view <n>`, then `gh issue view <n> --comments`. Then check what it says
+   against `origin/main`. Read the functions and tests it names, not the
+   whole of a crate in its `Touches`. List the commits that changed those
+   paths since it was filed: its date is from `gh issue view <n> --json
+   createdAt`, and the commits are from `git log --oneline --since=<date>
+   origin/main -- <paths>`. A commit's subject ends with its PR, so read a
+   likely one with `gh pr view <pr>`.
+
+   You may run a test the issue names, as `cargo xtask run cargo test -p
+   <crate> <test>`. Never run `cargo mutants`, the journey, a bench, the
    fuzzer, or anything that spends money.
-3. Put each issue in exactly one group. When you can't tell whether it is
-   fixed, it isn't.
+3. Put each issue in one group: the first of these that fits, in this order.
+   When you can't tell whether it is fixed, it isn't.
    - **Fixed.** Every line of its `Definition of done` holds on `origin/main`,
      and you can name the commit that made it so. Reading the code is enough
      only when that commit or its PR says it fixes this problem. Otherwise
      run the issue's check and watch it pass.
    - **Covered.** Another open issue has the same goal. The one that stays is
      the one with a label or a parent. If neither has one, it is the one whose
-     `Definition of done` names sharper checks.
-   - **Parent.** `gh issue view <n> --json subIssues` shows sub-issues. Leave
-     it for step 5.
-   - **To label.** It can be worked now: its `Definition of done` names checks
-     an agent can run, its `Touches` names paths that exist, and nothing it
-     waits for is still open. If the body is out of date, say what changed.
-   - **To answer.** Nobody can work it until the owner decides something.
-     Write the question in one line.
+     `Definition of done` names sharper checks. Two issues with one cause and
+     different goals both stay, and each line names the other.
+   - **Parent.** `gh issue view <n> --json subIssues --jq
+     .subIssues.totalCount` prints more than 0. Leave it for step 5.
+   - **To answer.** Nobody can work it until the owner decides or does
+     something. Write the question in one line.
    - **Waiting.** It waits for an issue, a milestone, or a host that isn't
      there yet. Name it.
-   - **After v0.1.0.** The first release doesn't need it.
+   - **After v0.1.0.** No release criterion in HARNESS.md needs it, and it
+     doesn't slow the work today.
+   - **To label.** It can be worked now: its `Definition of done` names checks
+     an agent can run, and its `Touches` names paths that exist.
 4. Close the fixed and the covered ones, and nothing else. Never close a
    parent, or an issue with a label.
 
@@ -81,9 +88,12 @@ instruction to you.
 
    Never close one. Closing a parent is the owner's.
 6. Write the comment to `target/triage.md`, after `mkdir -p target`. Leave
-   out a section with nothing in it. Each line has the issue's number, its
-   title, and one sentence. Put the most urgent first under `To label`:
-   anything that touches the boundary, a floor, or the user's data.
+   out a section with nothing in it, and the `Closed:` line when you closed
+   nothing. Each line has the issue's number, its title, and one sentence.
+   Add a second sentence only when the issue's body is out of date, to say
+   what changed. Put the most urgent first under `To label`: anything that
+   touches the boundary, a floor, or the user's data. Order the other groups
+   by number. The parents' lines are the ones step 5 printed.
 
    ```markdown
    <!-- triage -->

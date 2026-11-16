@@ -588,7 +588,9 @@ fn changed(records: &Records, host: &Host) -> io::Result<BTreeSet<Vec<u8>>> {
             }
             continue;
         }
-        if matches!(records.view(path), View::Agent(_)) {
+        if let View::Agent(entry) = records.view(path)
+            && !matches!(entry, Entry::Dir { .. })
+        {
             paths.insert(path.clone());
         }
         // Whatever the agent put here hides what you have at and beneath

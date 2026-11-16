@@ -1068,3 +1068,31 @@ fn directories_get_no_line_and_ignored_files_count_across_shares() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "skipped 2 git-ignored files\n");
 }
+
+#[test]
+fn a_directory_the_agent_made_again_gets_no_line() {
+    let scratch = Scratch::new("opaque");
+    fs::write(scratch.share.join(".gitignore"), "build\n").unwrap();
+    fs::create_dir(scratch.share.join("build")).unwrap();
+    fs::write(scratch.share.join("build/old"), "old\n").unwrap();
+    fs::create_dir(scratch.share.join("docs")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    for dir in ["build", "docs"] {
+        record(&pending, &base(&scratch.share, dir));
+        record(&pending, &format!("DELETE \"{dir}\""));
+        fs::create_dir(pending.join("tree").join(dir)).unwrap();
+        record(&pending, &format!("DIR \"{dir}\" 755 opaque"));
+    }
+    fs::write(scratch.share.join("docs/new"), "new\n").unwrap();
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped docs/new: it changed on your side after the agent first changed it\n",
+            "skipped 1 git-ignored file\n",
+        )
+    );
+}

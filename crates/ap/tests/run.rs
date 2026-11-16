@@ -279,12 +279,6 @@ fn an_agent_with_any_network_but_none_fails_before_its_vm_starts() {
 #[test]
 fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts() {
     let scratch = Scratch::new("instructions");
-    fs::create_dir_all(scratch.root.join("shared/app")).unwrap();
-    scratch.build("shared", &format!("{RUNNABLE}SHARE ./app\n"));
-    refused(
-        &scratch.ap(&["run", "shared", "-p", "hi"], &[]),
-        "`SHARE` is not built yet",
-    );
     scratch.build("signed", &format!("{RUNNABLE}AUTH login\n"));
     refused(
         &scratch.ap(&["run", "signed", "-p", "hi"], &[]),
@@ -292,8 +286,13 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
     );
 }
 
-/// What a run with a `SHARE` says once its shares pass their checks.
-const SHARES_CHECKED: &str = "`SHARE` is not built yet";
+/// Fails unless `output` is a run that got past its checks, and failed
+/// when it read the stand-in layer.
+fn past_checks(output: &Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(FAILED), "{stderr}");
+    assert!(stderr.contains(PAST_CHECKS), "{stderr}");
+}
 
 // spec(SHARE): A missing `<src>` is an error, at build time and at run time.
 // spec(SHARE): At every run, `ap` canonicalizes `<src>` again.
@@ -313,15 +312,11 @@ fn a_missing_share_source_fails_the_build_and_the_run() {
 
     fs::create_dir_all(dir.join("app")).unwrap();
     scratch.build("missing", &format!("{RUNNABLE}SHARE ./app\n"));
-    refused(
-        &scratch.ap(&["run", "missing", "-p", "hi"], &[]),
-        SHARES_CHECKED,
-    );
+    past_checks(&scratch.ap(&["run", "missing", "-p", "hi"], &[]));
     fs::remove_dir(dir.join("app")).unwrap();
     let output = scratch.ap(&["run", "missing", "-p", "hi"], &[]);
     refused(&output, "`SHARE ./app`: ");
     refused(&output, "No such file or directory");
-    assert!(!String::from_utf8_lossy(&output.stderr).contains(SHARES_CHECKED));
 }
 
 // spec(SHARE): `ap build` records whether `<src>` is a file or a directory, and a run fails if that changed, because it can change the working directory (see [Run](#run)).
@@ -331,11 +326,11 @@ fn a_share_source_that_changed_kind_fails_the_run() {
     let dir = scratch.root.join("kind");
     fs::create_dir_all(dir.join("app")).unwrap();
     fs::write(dir.join("notes"), "one").unwrap();
-    scratch.build("kind", &format!("{RUNNABLE}SHARE ./app\nSHARE ./notes\n"));
-    refused(
-        &scratch.ap(&["run", "kind", "-p", "hi"], &[]),
-        SHARES_CHECKED,
+    scratch.build(
+        "kind",
+        &format!("{RUNNABLE}SHARE ./app\nSHARE ./notes ro\n"),
     );
+    past_checks(&scratch.ap(&["run", "kind", "-p", "hi"], &[]));
 
     fs::remove_dir(dir.join("app")).unwrap();
     fs::write(dir.join("app"), "now a file").unwrap();
@@ -363,7 +358,7 @@ fn a_relative_share_fails_once_the_build_context_is_a_link() {
     for (name, share) in [("relative", "./app"), ("tilde", "~/notes")] {
         fs::create_dir_all(scratch.root.join(name).join("app")).unwrap();
         scratch.build(name, &format!("{RUNNABLE}SHARE {share}\n"));
-        refused(&scratch.ap(&["run", name, "-p", "hi"], &[]), SHARES_CHECKED);
+        past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[]));
         // The build context moves, and a link takes its place.
         let dir = scratch.root.join(name);
         let moved = scratch.root.join(format!("{name}-moved"));
@@ -379,10 +374,7 @@ fn a_relative_share_fails_once_the_build_context_is_a_link() {
         ),
     );
     // A share that isn't relative doesn't resolve against the build context.
-    refused(
-        &scratch.ap(&["run", "tilde", "-p", "hi"], &[]),
-        SHARES_CHECKED,
-    );
+    past_checks(&scratch.ap(&["run", "tilde", "-p", "hi"], &[]));
 }
 
 // spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.
@@ -396,14 +388,11 @@ fn a_run_with_ro_and_rw_directory_shares_gets_past_its_checks() {
         "modes",
         &format!("{RUNNABLE}SHARE ./notes /srv/notes ro\nSHARE ./work rw\n"),
     );
-    let output = scratch.ap(&["run", "modes", "-p", "hi"], &[]);
-    assert_eq!(output.status.code(), Some(FAILED), "{output:?}");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains(PAST_CHECKS), "{stderr}");
+    past_checks(&scratch.ap(&["run", "modes", "-p", "hi"], &[]));
 }
 
 #[test]
-fn a_copy_on_write_share_is_not_built_yet() {
+fn a_copy_on_write_file_share_is_not_built_yet() {
     let scratch = Scratch::new("share-not-built");
     let dir = scratch.root.join("file");
     fs::create_dir_all(&dir).unwrap();
@@ -411,14 +400,34 @@ fn a_copy_on_write_share_is_not_built_yet() {
     scratch.build("file", &format!("{RUNNABLE}SHARE ./notes.txt\n"));
     refused(
         &scratch.ap(&["run", "file", "-p", "hi"], &[]),
-        "`SHARE ./notes.txt`: a copy-on-write `SHARE` is not built yet",
+        "`SHARE ./notes.txt`: a copy-on-write file `SHARE` is not built yet",
     );
-    fs::create_dir_all(scratch.root.join("cow/app")).unwrap();
-    scratch.build("cow", &format!("{RUNNABLE}SHARE ./app\n"));
-    refused(
-        &scratch.ap(&["run", "cow", "-p", "hi"], &[]),
-        "`SHARE ./app`: a copy-on-write `SHARE` is not built yet",
+}
+
+// spec(SHARE): **Bringing changes back.** Unapplied copy-on-write changes are kept per run, and they survive the end of the run until you apply or discard them.
+#[test]
+fn a_run_keeps_a_pending_directory_for_each_copy_on_write_share() {
+    let scratch = Scratch::new("share-pending");
+    let dir = scratch.root.join("cow");
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::create_dir_all(dir.join("docs")).unwrap();
+    scratch.build(
+        "cow",
+        &format!("{RUNNABLE}SHARE ./app\nSHARE ./docs /docs ro\nSHARE ./docs /srv\n"),
     );
+    past_checks(&scratch.ap(&["run", "cow", "-p", "hi"], &[]));
+    let runs = ::store::Runs::new(scratch.home.join(".local/share/ap"));
+    let [run] = &runs.list_pending().unwrap()[..] else {
+        panic!("not one run with a pending directory");
+    };
+    let shares = runs.pending_shares(run).unwrap();
+    let roots: Vec<&Path> = shares.iter().map(|share| share.root.as_path()).collect();
+    assert_eq!(roots, [dir.join("app"), dir.join("docs")]);
+    // The share server made what it keeps, and nothing is pending yet.
+    for share in &shares {
+        assert!(share.dir.join("tree").is_dir(), "{}", share.dir.display());
+    }
+    assert!(!runs.has_pending(run).unwrap());
 }
 
 // spec(SHARE): A destination that overlaps another one fails the run.

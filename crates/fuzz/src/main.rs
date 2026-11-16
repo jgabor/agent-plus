@@ -8,7 +8,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
 use std::panic;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -29,7 +29,7 @@ struct Target {
 }
 
 /// Network rules join this list when they exist.
-const TARGETS: [Target; 4] = [
+const TARGETS: [Target; 5] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -203,6 +203,52 @@ const TARGETS: [Target; 4] = [
             "45 ",
         ],
     },
+    Target {
+        name: "git",
+        check: |input| {
+            git_input(input);
+        },
+        corpus: &[
+            "",
+            "78981922613b2afb6025042ff6bd878ac1994e85\n",
+            "ref: refs/heads/main\n",
+            concat!(
+                "# pack-refs with: peeled fully-peeled sorted \n",
+                "78981922613b2afb6025042ff6bd878ac1994e85 refs/heads/main\n",
+                "78981922613b2afb6025042ff6bd878ac1994e85 refs/tags/v1\n",
+                "^78981922613b2afb6025042ff6bd878ac1994e85\n",
+            ),
+            "blob 4\0four",
+            "tree 0\0",
+        ],
+        words: &[
+            "\n",
+            " ",
+            "\0",
+            "\x0c",
+            "ref:",
+            "ref: ",
+            "refs/heads/main",
+            "refs/heads/fuzz",
+            "refs/heads/",
+            "refs/tags/v1",
+            "78981922613b2afb6025042ff6bd878ac1994e85",
+            "0000000000000000000000000000000000000000",
+            "^",
+            "# pack-refs with: ",
+            "peeled ",
+            "sorted ",
+            "blob ",
+            "commit ",
+            "tag ",
+            "0",
+            "4",
+            "99999999999999999999",
+            "..",
+            ".lock",
+            "@{",
+        ],
+    },
 ];
 
 const DEVICE_MEMORY: usize = 1 << 16;
@@ -286,6 +332,165 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
     }
     device.signal_used();
     accepted
+}
+
+/// The blob `a\n`, which every ref in the git target's corpus names.
+const GIT_BLOB: &str = "78981922613b2afb6025042ff6bd878ac1994e85";
+
+/// The name of the loose object the git target plants.
+const GIT_PLANTED: &str = "fe00000000000000000000000000000000000000";
+
+/// A repository holding one blob and `refs/heads/main`, for this process
+/// alone, since each input rewrites it.
+fn git_repo() -> &'static Path {
+    static REPO: OnceLock<PathBuf> = OnceLock::new();
+    REPO.get_or_init(|| {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fuzz-git")
+            .join(std::process::id().to_string());
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("the fuzz repository");
+        let init = git(&root).args(["init", "-q", "-b", "main"]).status();
+        assert!(init.expect("git").success(), "git init");
+        fs::write(root.join("a"), "a\n").expect("the fuzz repository");
+        let hash = git(&root).args(["hash-object", "-w", "a"]).output();
+        assert_eq!(
+            hash.expect("git").stdout,
+            format!("{GIT_BLOB}\n").as_bytes()
+        );
+        fs::write(root.join(".git/refs/heads/main"), format!("{GIT_BLOB}\n"))
+            .expect("the fuzz repository");
+        root
+    })
+}
+
+/// `git` in `root`, reading no configuration but the repository's own.
+fn git(root: &Path) -> Command {
+    let mut git = Command::new("git");
+    git.current_dir(root)
+        .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    git
+}
+
+/// What `git` prints, or `None` if it fails.
+fn git_says(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
+    let out = git(root).args(args).output().expect("git");
+    out.status.success().then_some(out.stdout)
+}
+
+/// Reads the input as `crates/git` and as `git` do, and panics where they
+/// differ. The input is a loose ref, then `packed-refs`, then the
+/// uncompressed bytes of a loose object. Returns how many of the three git
+/// accepted.
+fn git_input(input: &str) -> usize {
+    let root = git_repo();
+    let dir = root.join(".git");
+    let repo = git::Repository::at(&dir);
+    let mut accepted = 0;
+
+    let fuzz = dir.join("refs/heads/fuzz");
+    fs::write(&fuzz, input).expect("the fuzz repository");
+    let theirs = git_says(root, &["rev-parse", "--verify", "-q", "refs/heads/fuzz"]);
+    let ours = repo.resolve("refs/heads/fuzz");
+    accepted += usize::from(theirs.is_some());
+    same_ref(input, ours, theirs);
+    fs::remove_file(&fuzz).expect("the fuzz repository");
+
+    fs::write(dir.join("packed-refs"), input).expect("the fuzz repository");
+    // With a pattern, git seeks past records it never parses, so it lists
+    // every ref, and the crate's are those under `refs/`.
+    let theirs = git_says(root, &["for-each-ref", "--format=%(refname) %(objectname)"])
+        .map(|listed| under_refs(&listed));
+    let ours = repo.refs().map(|refs| {
+        let mut listed = String::new();
+        for (name, _) in refs {
+            let id = repo.resolve(&name).ok().flatten();
+            let id = id.map_or("?".to_string(), |id| id.to_string());
+            listed.push_str(&format!("{name} {id}\n"));
+        }
+        listed.into_bytes()
+    });
+    accepted += usize::from(theirs.is_some());
+    same_list(input, ours, theirs);
+    fs::remove_file(dir.join("packed-refs")).expect("the fuzz repository");
+
+    let object = dir.join("objects/fe").join(&GIT_PLANTED[2..]);
+    fs::create_dir_all(object.parent().unwrap()).expect("the fuzz repository");
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(input.as_bytes(), 1);
+    fs::write(&object, compressed).expect("the fuzz repository");
+    let id = git::Id::from_hex(GIT_PLANTED).unwrap();
+    let ours = repo.loose_object(&id);
+    let kind = git_says(root, &["cat-file", "-t", GIT_PLANTED]);
+    accepted += usize::from(kind.is_some());
+    // `git cat-file` reads a size that disagrees with the data leniently,
+    // where the crate follows `git fsck`, so only what the crate accepts must
+    // match exactly.
+    match (ours, kind) {
+        (Ok(Some(object)), Some(kind)) => {
+            assert_eq!(format!("{}\n", object.kind).as_bytes(), kind, "{input:?}");
+            let kind = object.kind.to_string();
+            let data = git_says(root, &["cat-file", &kind, GIT_PLANTED]);
+            assert_eq!(Some(object.data), data, "{input:?}");
+        }
+        (Ok(Some(_)), None) => panic!("crates/git reads an object git refuses: {input:?}"),
+        (Err(git::Error::Corrupt(_)), _) => {}
+        (other, _) => panic!("{input:?}: {other:?}"),
+    }
+    fs::remove_file(&object).expect("the fuzz repository");
+    accepted
+}
+
+/// The name in a line of a `git for-each-ref` listing.
+fn name_of(line: &[u8]) -> &[u8] {
+    let space = line.iter().rposition(|&b| b == b' ');
+    &line[..space.unwrap_or(line.len())]
+}
+
+/// The lines of a `git for-each-ref` listing that name refs under `refs/`.
+fn under_refs(listed: &[u8]) -> Vec<u8> {
+    let lines = listed.split_inclusive(|&b| b == b'\n');
+    lines
+        .filter(|line| line.starts_with(b"refs/"))
+        .flatten()
+        .copied()
+        .collect()
+}
+
+/// A ref resolves to what git resolves it to, and git's refusal is ours.
+fn same_ref(input: &str, ours: Result<Option<git::Id>, git::Error>, theirs: Option<Vec<u8>>) {
+    match (ours, theirs) {
+        (Ok(Some(id)), Some(theirs)) => {
+            assert_eq!(format!("{id}\n").as_bytes(), theirs, "{input:?}");
+        }
+        (Ok(None) | Err(git::Error::Corrupt(_)), None) => {}
+        (ours, theirs) => panic!("{input:?}: crates/git {ours:?}, git {theirs:?}"),
+    }
+}
+
+/// Refs list as `git for-each-ref` lists them, and git's refusal is ours.
+fn same_list(input: &str, ours: Result<Vec<u8>, git::Error>, theirs: Option<Vec<u8>>) {
+    match (ours, theirs) {
+        (Ok(ours), Some(theirs)) => {
+            // Git writes `packed-refs` sorted, with each name once. Given a
+            // file that isn't, git lists it in file order, and the crate
+            // lists each name once in order, so only the verdicts compare.
+            let names: Vec<&[u8]> = theirs.split(|&b| b == b'\n').map(name_of).collect();
+            if names
+                .windows(2)
+                .all(|pair| pair[0] < pair[1] || pair[1].is_empty())
+            {
+                let show = String::from_utf8_lossy;
+                assert_eq!(show(&ours), show(&theirs), "{input:?}");
+            }
+        }
+        (Err(git::Error::Corrupt(_)), None) => {}
+        (ours, theirs) => panic!("{input:?}: crates/git {ours:?}, git {theirs:?}"),
+    }
 }
 
 const CANARY: &[u8] = b"canary: a host file outside the share";
@@ -731,6 +936,29 @@ mod tests {
             "1 1 outside\n1 2 secret\n14 3 w:1 w:0\n16 0 1 0 w:3 w:0 0 w:0 w:0 bad\n",
             ".",
         );
+    }
+
+    #[test]
+    fn the_git_corpus_reads_as_git_reads_it() {
+        let corpus = TARGETS[4].corpus;
+        // An empty loose ref and object are refused, and an empty
+        // packed-refs holds no refs.
+        assert_eq!(git_input(corpus[0]), 1);
+        // The loose ref, and as packed-refs it holds a bad line.
+        assert_eq!(git_input(corpus[1]), 1);
+        assert_eq!(git_input(corpus[2]), 1);
+        // Only as packed-refs.
+        assert_eq!(git_input(corpus[3]), 1);
+        // Only as an object.
+        assert_eq!(git_input(corpus[4]), 1);
+        assert_eq!(git_input(corpus[5]), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "crates/git")]
+    fn a_ref_git_reads_differently_is_found() {
+        let id = git::Id::from_hex(GIT_BLOB).unwrap();
+        same_ref("planted", Ok(Some(id)), None);
     }
 
     #[test]

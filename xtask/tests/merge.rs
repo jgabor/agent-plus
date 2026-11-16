@@ -1547,7 +1547,10 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
 }
 
 /// A PR that changes xtask is proven twice, and each proof gets the whole
-/// timeout, so the two together may take longer.
+/// timeout, so the two together may take longer. The two hangs alone outlast
+/// one timeout, so a timeout that both proofs shared would stop the merge.
+/// Each proof keeps the rest of its timeout for its other work, which takes
+/// 12 seconds on a loaded machine.
 #[test]
 fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
     let repo = changing(
@@ -1560,7 +1563,7 @@ fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
         .args(["merge", "9"])
         .env("HANG_ON", "cargo fmt --all")
         .env("HANG_FOR", "20")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "32")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "39")
         .output()
         .unwrap();
     assert_eq!(

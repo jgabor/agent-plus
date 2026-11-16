@@ -25,7 +25,7 @@ const BUILD_BUDGETS: &str = "[[budget]]\nkey = \"noop_build_ms\"\nname = \"build
 /// An `ap build` that fails unless it has an approval file, a directory with
 /// an Agentfile, and an `Agentfile.lock` whose harness its `HOME`'s download
 /// cache holds, and counts its runs in its `HOME`.
-const BUILDS: &str = "use std::io::Write;\nfn main() -> std::process::ExitCode {\n    let args: Vec<String> = std::env::args().skip(1).collect();\n    if args.first().map(String::as_str) != Some(\"build\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    let approved = args.iter().find_map(|a| a.strip_prefix(\"--approve=\")).and_then(|f| std::fs::read_to_string(f).ok());\n    let dir = std::path::Path::new(args.last().unwrap());\n    if !approved.is_some_and(|a| a.contains(\"POLICY +\")) || !dir.join(\"Agentfile\").is_file() {\n        eprintln!(\"ap: needs approval {args:?}\");\n        return std::process::ExitCode::from(1);\n    }\n    let home = std::env::var(\"HOME\").unwrap();\n    let lock = std::fs::read_to_string(dir.join(\"Agentfile.lock\")).unwrap_or_default();\n    let digest = lock.strip_prefix(\"HARNESS claude 0.0.0 \").map(str::trim_end).unwrap_or_default();\n    if digest.len() != 64 || !std::path::Path::new(&home).join(\".cache/ap\").join(digest).is_file() {\n        eprintln!(\"ap: Agentfile.lock locks no harness the cache holds\");\n        return std::process::ExitCode::from(1);\n    }\n    // sleep\n    let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{home}/builds\")).unwrap();\n    writeln!(runs, \"build\").unwrap();\n    std::process::ExitCode::SUCCESS\n}\n";
+const BUILDS: &str = "use std::io::Write;\nfn main() -> std::process::ExitCode {\n    let args: Vec<String> = std::env::args().skip(1).collect();\n    if args.first().map(String::as_str) != Some(\"build\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    let asks = \"NETWORK +\\nPOLICY +\\n\";\n    let Some(file) = args.iter().find_map(|a| a.strip_prefix(\"--approve=\")) else {\n        eprint!(\"ap: Agentfile asks for these grants:\\n{}ap: approve them on a terminal, or with `--approve=<file>`\\n\", asks.lines().map(|l| format!(\"  {l}\\n\")).collect::<String>());\n        return std::process::ExitCode::from(1);\n    };\n    let approved = std::fs::read_to_string(file).ok();\n    let dir = std::path::Path::new(args.last().unwrap());\n    if approved.as_deref() != Some(asks) || !dir.join(\"Agentfile\").is_file() {\n        eprintln!(\"ap: needs approval {args:?}\");\n        return std::process::ExitCode::from(1);\n    }\n    let home = std::env::var(\"HOME\").unwrap();\n    let lock = std::fs::read_to_string(dir.join(\"Agentfile.lock\")).unwrap_or_default();\n    let digest = lock.strip_prefix(\"HARNESS claude 0.0.0 \").map(str::trim_end).unwrap_or_default();\n    if digest.len() != 64 || !std::path::Path::new(&home).join(\".cache/ap\").join(digest).is_file() {\n        eprintln!(\"ap: Agentfile.lock locks no harness the cache holds\");\n        return std::process::ExitCode::from(1);\n    }\n    // sleep\n    let mut runs = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{home}/builds\")).unwrap();\n    writeln!(runs, \"build\").unwrap();\n    std::process::ExitCode::SUCCESS\n}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
 const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
@@ -394,8 +394,8 @@ fn a_base_with_no_build_command_is_no_comparison() {
 #[test]
 fn a_base_whose_build_rejects_approve_is_no_comparison() {
     let old = BUILDS.replace(
-        "    let approved",
-        "    if args.iter().any(|a| a.starts_with(\"--approve\")) {\n        return std::process::ExitCode::from(2);\n    }\n    let approved",
+        "    let asks",
+        "    if args.iter().any(|a| a.starts_with(\"--approve\")) {\n        return std::process::ExitCode::from(2);\n    }\n    let asks",
     );
     let repo = Repo::with("build-old", BUILD_BUDGETS, &old, &[]);
     repo.plant(BUILDS);
@@ -406,6 +406,18 @@ fn a_base_whose_build_rejects_approve_is_no_comparison() {
         out.contains("no-comparison noop_build_ms candidate "),
         "{out}"
     );
+}
+
+/// A candidate that asks for a grant the base doesn't know approves its own
+/// grants, and the base approves its own.
+#[test]
+fn each_build_approves_the_grants_it_asks_for() {
+    let repo = Repo::with("build-grant", BUILD_BUDGETS, BUILDS, &[]);
+    repo.plant(&BUILDS.replace("NETWORK +\\n", "NETWORK +\\nNETWORK +github.com\\n"));
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass noop_build_ms base "), "{out}");
 }
 
 #[test]
@@ -450,9 +462,14 @@ fn main() -> ExitCode {
     let home = Path::new(&home);
     match args.first().map(String::as_str) {
         Some("build") => {
-            let approved = args.iter().find_map(|a| a.strip_prefix("--approve=")).and_then(|f| std::fs::read_to_string(f).ok());
+            let asks = "NETWORK -\nPOLICY +\n";
+            let Some(file) = args.iter().find_map(|a| a.strip_prefix("--approve=")) else {
+                eprint!("ap: Agentfile asks for these grants:\n{}ap: approve them on a terminal, or with `--approve=<file>`\n", asks.lines().map(|l| format!("  {l}\n")).collect::<String>());
+                return ExitCode::from(1);
+            };
+            let approved = std::fs::read_to_string(file).ok();
             let dir = Path::new(args.last().unwrap());
-            if !approved.is_some_and(|a| a.contains("NETWORK -") && a.contains("POLICY +")) || !dir.join("Agentfile").is_file() {
+            if approved.as_deref() != Some(asks) || !dir.join("Agentfile").is_file() {
                 eprintln!("ap: needs approval {args:?}");
                 return ExitCode::from(1);
             }
@@ -599,6 +616,18 @@ fn a_candidate_with_no_run_command_is_a_problem() {
     assert_problem(&repo.bench(), "run");
 }
 
+/// A candidate that records the harness as a grant under `NETWORK -` runs
+/// next to a base that doesn't know that grant.
+#[test]
+fn each_run_approves_the_grants_its_build_asks_for() {
+    let repo = run_repo("run-grant", RUNS);
+    repo.plant(&RUNS.replace("NETWORK -\\n", "NETWORK -\\nAGENT claude\\n"));
+    let output = repo.bench();
+    assert_passes(&output);
+    let out = stdout(&output);
+    assert!(out.contains("pass run_ms base "), "{out}");
+}
+
 #[test]
 fn a_base_whose_run_fails_is_a_problem() {
     let broken = RUNS.replace(
@@ -641,9 +670,14 @@ fn main() -> ExitCode {
     let home = Path::new(&home);
     match args.first().map(String::as_str) {
         Some("build") => {
-            let approved = args.iter().find_map(|a| a.strip_prefix("--approve=")).and_then(|f| std::fs::read_to_string(f).ok());
+            let asks = "NETWORK -\nPOLICY +\n";
+            let Some(file) = args.iter().find_map(|a| a.strip_prefix("--approve=")) else {
+                eprint!("ap: Agentfile asks for these grants:\n{}ap: approve them on a terminal, or with `--approve=<file>`\n", asks.lines().map(|l| format!("  {l}\n")).collect::<String>());
+                return ExitCode::from(1);
+            };
+            let approved = std::fs::read_to_string(file).ok();
             let dir = Path::new(args.last().unwrap());
-            if !approved.is_some_and(|a| a.contains("NETWORK -") && a.contains("POLICY +")) || !dir.join("Agentfile").is_file() {
+            if approved.as_deref() != Some(asks) || !dir.join("Agentfile").is_file() {
                 eprintln!("ap: needs approval {args:?}");
                 return ExitCode::from(1);
             }

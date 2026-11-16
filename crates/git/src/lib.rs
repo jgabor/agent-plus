@@ -125,14 +125,21 @@ fn corrupt(why: impl Into<String>) -> Error {
     Error::Corrupt(why.into())
 }
 
+/// Whether an error opening a path means nothing is there.
+fn is_missing(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::IsADirectory | io::ErrorKind::NotADirectory
+    )
+}
+
 /// The file at `path`, or `None` if there is none.
 fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         // A directory where a ref would be, such as `refs/heads/a` beside
-        // `refs/heads/a/b`, means there is no such ref.
-        Err(e) if e.kind() == io::ErrorKind::IsADirectory => Ok(None),
+        // `refs/heads/a/b`, or a file above one, means there is no such ref.
+        Err(e) if is_missing(&e) => Ok(None),
         Err(e) => Err(e.into()),
     }
 }
@@ -203,9 +210,11 @@ impl Repository {
         )))
     }
 
-    /// Every ref under `refs/`, loose and packed, sorted by name. Like `git
-    /// for-each-ref`, it leaves out a loose ref it can't read. A ref whose
-    /// name isn't UTF-8 is left out too.
+    /// Every ref under `refs/`, loose and packed, sorted by name, each once.
+    /// Like `git for-each-ref`, it leaves out a ref it can't read. A ref
+    /// whose name isn't UTF-8 is left out too. Git writes `packed-refs`
+    /// sorted and with each name once; given one that isn't, git lists it in
+    /// file order, and this lists the last record of each name, in order.
     pub fn refs(&self) -> Result<Vec<(String, Target)>, Error> {
         let mut refs: BTreeMap<String, Target> = self
             .packed_refs()?
@@ -251,7 +260,7 @@ impl Repository {
         let path = self.git_dir.join(name);
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if is_missing(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
         if metadata.is_symlink() {
@@ -292,44 +301,70 @@ impl Repository {
         Ok(())
     }
 
-    /// The refs in `packed-refs`, by name. Like git, it refuses a last
-    /// line with no newline, and a `^` line that doesn't follow a ref.
+    /// The refs in `packed-refs` under `refs/`, by name. It parses records
+    /// as git's `next_record` does: an id, one whitespace byte other than a
+    /// newline, and a name up to a newline, with an optional `^` line that peels it. A name git
+    /// calls dangerous refuses the file, and any other bad name is left out.
     fn packed_refs(&self) -> Result<BTreeMap<String, Id>, Error> {
         let mut refs = BTreeMap::new();
         let Some(contents) = read(&self.git_dir.join("packed-refs"))? else {
             return Ok(refs);
         };
-        let Some(body) = contents.strip_suffix(b"\n") else {
-            return match contents.is_empty() {
-                true => Ok(refs),
-                false => Err(corrupt("packed-refs ends without a newline")),
-            };
-        };
-        // Whether the line before was a ref, which a `^` line may peel.
-        let mut after_ref = false;
-        for (n, line) in body.split(|&b| b == b'\n').enumerate() {
-            let bad = || corrupt(format!("packed-refs has a bad line {}", n + 1));
-            if n == 0 && line.starts_with(b"# pack-refs with: ") {
-                continue;
-            }
-            if let Some(peeled) = line.strip_prefix(b"^") {
-                if !after_ref || hex_id(peeled).is_none() {
-                    return Err(bad());
+        let mut rest = &contents[..];
+        let mut sorted = false;
+        if let Some(traits) = rest.strip_prefix(b"# pack-refs with: ") {
+            let eol = traits.iter().position(|&b| b == b'\n');
+            let eol = eol.ok_or_else(|| corrupt("packed-refs has an unterminated header"))?;
+            sorted = traits[..eol].split(|&b| b == b' ').any(|t| t == b"sorted");
+            rest = &traits[eol + 1..];
+        }
+        // A file that doesn't say it is sorted, git sorts first, and that
+        // takes every line but a `^` one to be long enough for a record.
+        if !sorted {
+            let mut lines = rest.split(|&b| b == b'\n');
+            while let Some(line) = lines.next() {
+                if line.is_empty() && lines.clone().next().is_none() {
+                    break;
                 }
-                after_ref = false;
-                continue;
+                if line.len() < 42 {
+                    return Err(corrupt("packed-refs has a short line"));
+                }
+                if lines
+                    .clone()
+                    .next()
+                    .is_some_and(|next| next.starts_with(b"^"))
+                {
+                    lines.next();
+                }
             }
-            if line.len() < 41 || line[40] != b' ' {
+        }
+        while !rest.is_empty() {
+            let bad = || corrupt("packed-refs has a bad line");
+            // Git finds records by line, so the space can't be a newline.
+            if rest.len() < 42 || !is_git_space(rest[40]) || rest[40] == b'\n' {
                 return Err(bad());
             }
-            let id = hex_id(&line[..40]).ok_or_else(bad)?;
-            after_ref = true;
+            let id = hex_id(&rest[..40]).ok_or_else(bad)?;
+            rest = &rest[41..];
+            let eol = rest.iter().position(|&b| b == b'\n');
+            let eol = eol.ok_or_else(|| corrupt("packed-refs ends without a newline"))?;
+            let name = &rest[..eol];
+            rest = &rest[eol + 1..];
+            if name.contains(&0) || (!format_ok(name) && !is_safe(name)) {
+                return Err(corrupt("packed-refs holds a dangerous name"));
+            }
+            if let Some(peeled) = rest.strip_prefix(b"^") {
+                if peeled.len() < 41 || hex_id(&peeled[..40]).is_none() || peeled[40] != b'\n' {
+                    return Err(bad());
+                }
+                rest = &peeled[41..];
+            }
             // A name that isn't UTF-8 can't be asked for, so it is left out.
-            let Ok(name) = std::str::from_utf8(&line[41..]) else {
-                continue;
-            };
-            check_name(name).map_err(|_| bad())?;
-            refs.insert(name.to_string(), id);
+            if let Ok(name) = std::str::from_utf8(name) {
+                if name.starts_with("refs/") && format_ok(name.as_bytes()) {
+                    refs.insert(name.to_string(), id);
+                }
+            }
         }
         Ok(refs)
     }
@@ -357,6 +392,17 @@ fn parse_header(bytes: &[u8]) -> Option<(Kind, usize, usize)> {
     Some((kind, size.parse().ok()?, nul + 1))
 }
 
+/// Whether git's `refname_is_safe` takes `name`: under `refs/` with no
+/// empty, `.`, or `..` component, or else only capitals and underscores.
+fn is_safe(name: &[u8]) -> bool {
+    match name.strip_prefix(b"refs/") {
+        Some(rest) => rest
+            .split(|&b| b == b'/')
+            .all(|component| !matches!(component, b"" | b"." | b"..")),
+        None => !name.is_empty() && name.iter().all(|&b| b.is_ascii_uppercase() || b == b'_'),
+    }
+}
+
 /// The bytes git's `isspace` takes as whitespace.
 fn is_git_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
@@ -365,18 +411,18 @@ fn is_git_space(b: u8) -> bool {
 /// What a loose ref file says: 40 hex digits, or `ref:` and another ref.
 fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
     let bad = || corrupt(format!("{name} isn't a ref"));
-    // Git reads the file as a C string, so it ends at the first NUL.
+    // As git's `refs_read_raw_ref` does: trim whitespace from the end of
+    // the file, then read what is left as a C string, to its first NUL.
+    let end = contents.iter().rposition(|&b| !is_git_space(b));
+    let contents = &contents[..end.map_or(0, |end| end + 1)];
     let contents = match contents.iter().position(|&b| b == 0) {
         Some(nul) => &contents[..nul],
         None => contents,
     };
     if let Some(target) = contents.strip_prefix(b"ref:") {
         let start = target.iter().position(|&b| !is_git_space(b));
-        let end = target.iter().rposition(|&b| !is_git_space(b));
-        let (Some(start), Some(end)) = (start, end) else {
-            return Err(bad());
-        };
-        let target = std::str::from_utf8(&target[start..=end]).map_err(|_| bad())?;
+        let target = &target[start.unwrap_or(target.len())..];
+        let target = std::str::from_utf8(target).map_err(|_| bad())?;
         check_name(target)?;
         return Ok(Target::Symbolic(target.to_string()));
     }
@@ -393,24 +439,25 @@ fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
 /// Refuses a name that isn't `HEAD` or a full name under `refs/` that `git
 /// check-ref-format` accepts, so no name reaches outside the git directory.
 fn check_name(name: &str) -> Result<(), Error> {
-    if name == "HEAD" {
+    if name == "HEAD" || (name.starts_with("refs/") && format_ok(name.as_bytes())) {
         return Ok(());
     }
-    let bad = || corrupt(format!("{name:?} isn't a ref name"));
-    if !name.starts_with("refs/") || name.ends_with('/') || name.ends_with('.') {
-        return Err(bad());
+    Err(corrupt(format!("{name:?} isn't a ref name")))
+}
+
+/// Whether git's `check_refname_format` takes `name`, allowing one level.
+fn format_ok(name: &[u8]) -> bool {
+    if name == b"@" || name.ends_with(b".") {
+        return false;
     }
-    if name.contains("..") || name.contains("@{") {
-        return Err(bad());
+    if name.windows(2).any(|pair| pair == b".." || pair == b"@{") {
+        return false;
     }
-    let forbidden = |c: char| c.is_ascii_control() || " ~^:?*[\\".contains(c);
-    if name.chars().any(forbidden) {
-        return Err(bad());
+    let forbidden = |b: u8| b < 0x20 || b == 0x7f || b" ~^:?*[\\".contains(&b);
+    if name.iter().any(|&b| forbidden(b)) {
+        return false;
     }
-    for component in name.split('/') {
-        if component.is_empty() || component.starts_with('.') || component.ends_with(".lock") {
-            return Err(bad());
-        }
-    }
-    Ok(())
+    name.split(|&b| b == b'/').all(|component| {
+        !component.is_empty() && !component.starts_with(b".") && !component.ends_with(b".lock")
+    })
 }

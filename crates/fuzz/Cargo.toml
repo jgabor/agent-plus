@@ -7,6 +7,8 @@ publish.workspace = true
 
 [dependencies]
 agentfile = { path = "../agentfile" }
+git = { path = "../git" }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 share = { path = "../share" }
 vmm = { path = "../vmm" }
 

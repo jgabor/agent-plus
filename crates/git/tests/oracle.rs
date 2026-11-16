@@ -113,7 +113,12 @@ fn assert_objects_match(root: &Path) -> usize {
 /// Every ref must read as `git for-each-ref` and `git rev-parse` read it.
 fn assert_refs_match(root: &Path) {
     let repo = Repository::at(root.join(".git"));
-    let expected = text(root, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+    // Git lists every ref, and the crate those under `refs/`.
+    let listed = text(root, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let expected: String = listed
+        .split_inclusive('\n')
+        .filter(|line| line.starts_with("refs/"))
+        .collect();
     let mut actual = String::new();
     for (name, _) in repo.refs().unwrap() {
         let id = repo.resolve(&name).unwrap().unwrap();
@@ -411,6 +416,8 @@ fn a_loose_ref_reads_only_as_git_reads_it() {
         b"not a ref\n".to_vec(),
         [head.as_bytes(), b"\0garbage\n"].concat(),
         b"ref: refs/heads/main\0garbage\n".to_vec(),
+        b"ref: refs/heads/main\n\0".to_vec(),
+        b"ref: refs/heads/main \0x".to_vec(),
         format!("{}\n", "0".repeat(40)).into_bytes(),
     ]
     .iter()
@@ -433,6 +440,26 @@ fn assert_resolves_as_git(root: &Path, name: &str) {
     } else {
         assert!(matches!(ours, Err(Error::Corrupt(_))), "{name}: {ours:?}");
     }
+}
+
+#[test]
+fn a_ref_below_a_ref_file_is_missing() {
+    let root = init("below");
+    commit(&root, "a", b"a\n");
+    let out = output(
+        &root,
+        &["rev-parse", "--verify", "-q", "refs/heads/main/x"],
+        b"",
+    );
+    assert!(!out.status.success());
+    let repo = Repository::at(root.join(".git"));
+    assert_eq!(repo.find_ref("refs/heads/main/x").unwrap(), None);
+    fs::write(
+        root.join(".git/refs/heads/alias"),
+        "ref: refs/heads/main/x\n",
+    )
+    .unwrap();
+    assert_eq!(repo.resolve("refs/heads/alias").unwrap(), None);
 }
 
 #[test]
@@ -505,6 +532,18 @@ fn a_packed_refs_file_git_refuses_is_refused() {
         format!("{good}{hex}refs/heads/x\n"),
         format!("# bogus header\n{hex} refs/heads/main\n"),
         format!("# pack-refs with:sorted\n{hex} refs/heads/main\n"),
+        format!("{good}{hex} refs/heads/z@{{b\n"),
+        format!("{good}{hex} refs/heads/z b\n"),
+        format!("{good}{hex} refs\t/z\n"),
+        format!("{good}{hex} refs/../z\n"),
+        format!("{good}{hex} refs/heads/../z\n"),
+        format!("{good}{hex} ZEBRA\n"),
+        // One whitespace byte after the id, which may be a newline.
+        format!("{good}{hex}\trefs/heads/z\n"),
+        format!("{good}{hex}\nrefs/heads/z\n"),
+        // Without `sorted`, git takes every line to be a whole record.
+        format!("{hex}\nrefs/heads/z\n"),
+        format!("{hex} refs/heads/main\n"),
         format!("{hex} refs/heads/main\n"),
     ] {
         fs::write(root.join(".git/packed-refs"), &contents).unwrap();

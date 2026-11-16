@@ -6,7 +6,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -754,6 +754,8 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     )])
     .expect("the share server");
     let answered = fuse_answers(&mut server, input);
+    // The guest may change a directory's mode, so the check reaches past it.
+    reach(&base);
     for name in PROTECTED {
         let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
         let found = fs::read(base.join(name)).ok();
@@ -783,6 +785,19 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     );
     let _ = fs::remove_dir_all(&base);
     answered
+}
+
+/// Lets the owner into `directory` and every directory beneath it, so a
+/// mode the guest set hides no file from the check. It follows no symlink.
+fn reach(directory: &Path) {
+    let reachable = fs::Permissions::from_mode(0o700);
+    fs::set_permissions(directory, reachable).expect("the fuzz tree");
+    for entry in fs::read_dir(directory).expect("the fuzz tree") {
+        let entry = entry.expect("the fuzz tree");
+        if entry.file_type().expect("the fuzz tree").is_dir() {
+            reach(&entry.path());
+        }
+    }
 }
 
 fn fuse_input_with(server: &mut share::Server, input: &str) -> usize {
@@ -1090,6 +1105,14 @@ mod tests {
         assert_eq!(fuse_rw_input(corpus[2]), 4);
         // The lookup, the open, both locks, and the flush.
         assert_eq!(fuse_rw_input(corpus[3]), 5);
+    }
+
+    #[test]
+    fn a_root_the_guest_locked_itself_out_of_still_holds_what_is_protected() {
+        // SETATTR of the root's mode to 0: SPEC.md lets the guest of an
+        // `rw` share do it, and nothing protected changes.
+        let mode = "4 1 w:1 w:0 0 0 0 0 0 0 w:0 w:0 w:0 w:0 w:0 w:0 w:0 w:0\n";
+        assert_eq!(fuse_rw_input(mode), 1);
     }
 
     #[test]

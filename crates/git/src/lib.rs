@@ -219,11 +219,26 @@ impl Repository {
                 Ok(Some(target)) => {
                     refs.insert(name, target);
                 }
-                Ok(None) | Err(Error::Corrupt(_)) => {}
+                // A broken loose ref still hides the packed one.
+                Ok(None) | Err(Error::Corrupt(_)) => {
+                    refs.remove(&name);
+                }
                 Err(error) => return Err(error),
             }
         }
-        Ok(refs.into_iter().collect())
+        // A symbolic ref that leads nowhere is left out, as git leaves it.
+        let mut listed = Vec::new();
+        for (name, target) in refs {
+            if let Target::Symbolic(_) = target {
+                match self.resolve(&name) {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(Error::Corrupt(_)) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            listed.push((name, target));
+        }
+        Ok(listed)
     }
 
     /// The loose ref `name`, or `None` if it has no file. A symlink is a
@@ -290,7 +305,7 @@ impl Repository {
         let mut after_ref = false;
         for (n, line) in body.split(|&b| b == b'\n').enumerate() {
             let bad = || corrupt(format!("packed-refs has a bad line {}", n + 1));
-            if n == 0 && line.starts_with(b"#") {
+            if n == 0 && line.starts_with(b"# pack-refs with:") {
                 continue;
             }
             if let Some(peeled) = line.strip_prefix(b"^") {
@@ -338,22 +353,32 @@ fn parse_header(bytes: &[u8]) -> Option<(Kind, usize, usize)> {
     Some((kind, size.parse().ok()?, nul + 1))
 }
 
+/// The bytes git's `isspace` takes as whitespace.
+fn is_git_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
 /// What a loose ref file says: 40 hex digits, or `ref:` and another ref.
 fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
     let bad = || corrupt(format!("{name} isn't a ref"));
-    let text = std::str::from_utf8(contents).map_err(|_| bad())?;
-    if let Some(target) = text.strip_prefix("ref:") {
-        let target = target.trim_matches(|c: char| c.is_ascii_whitespace());
+    if let Some(target) = contents.strip_prefix(b"ref:") {
+        let start = target.iter().position(|&b| !is_git_space(b));
+        let end = target.iter().rposition(|&b| !is_git_space(b));
+        let (Some(start), Some(end)) = (start, end) else {
+            return Err(bad());
+        };
+        let target = std::str::from_utf8(&target[start..=end]).map_err(|_| bad())?;
         check_name(target)?;
         return Ok(Target::Symbolic(target.to_string()));
     }
-    // Git reads the id, and takes only whitespace after it.
-    let hex = text.get(..40).ok_or_else(bad)?;
-    let rest = &text[40..];
-    if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
-        return Err(bad());
+    // Git reads the id, and takes anything after it that starts with
+    // whitespace.
+    let id = contents.get(..40).and_then(hex_id).ok_or_else(bad)?;
+    match contents.get(40) {
+        None => Ok(Target::Object(id)),
+        Some(&b) if is_git_space(b) => Ok(Target::Object(id)),
+        Some(_) => Err(bad()),
     }
-    Id::from_hex(hex).map(Target::Object).ok_or_else(bad)
 }
 
 /// Refuses a name that isn't `HEAD` or a full name under `refs/` that `git

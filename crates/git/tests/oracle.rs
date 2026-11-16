@@ -395,32 +395,27 @@ fn a_loose_ref_reads_only_as_git_reads_it() {
     let root = init("loose-ref");
     commit(&root, "a", b"a\n");
     let head = text(&root, &["rev-parse", "HEAD"]);
-    let repo = Repository::at(root.join(".git"));
+    let head = head.trim();
     for (n, contents) in [
-        head.trim().to_string(),
-        format!("{} trailing words\n", head.trim()),
-        format!("{}x\n", head.trim()),
-        format!("{}\n", &head[..39]),
-        "ref:refs/heads/main".to_string(),
-        "ref: refs/heads/main \n".to_string(),
-        "not a ref\n".to_string(),
+        head.as_bytes().to_vec(),
+        format!("{head} trailing words\n").into_bytes(),
+        format!("{head}x\n").into_bytes(),
+        format!("{}\n", &head[..39]).into_bytes(),
+        format!("{head}\x0c\n").into_bytes(),
+        format!("{head}\r\n").into_bytes(),
+        [head.as_bytes(), b" \xff\n"].concat(),
+        b"ref:refs/heads/main".to_vec(),
+        b"ref: refs/heads/main \n".to_vec(),
+        b"ref: refs/heads/main\x0c\n".to_vec(),
+        b"ref:\trefs/heads/main\r\n".to_vec(),
+        b"not a ref\n".to_vec(),
     ]
     .iter()
     .enumerate()
     {
         let name = format!("refs/heads/case{n}");
         fs::write(root.join(".git").join(&name), contents).unwrap();
-        let out = output(&root, &["rev-parse", "--verify", "-q", &name], b"");
-        let ours = repo.resolve(&name);
-        if out.status.success() {
-            let theirs = id(&String::from_utf8(out.stdout).unwrap());
-            assert_eq!(ours.unwrap(), Some(theirs), "{contents:?}");
-        } else {
-            assert!(
-                matches!(ours, Err(Error::Corrupt(_))),
-                "{contents:?}: {ours:?}"
-            );
-        }
+        assert_resolves_as_git(&root, &name);
     }
 }
 
@@ -505,6 +500,8 @@ fn a_packed_refs_file_git_refuses_is_refused() {
         format!("^{hex}\n{good}"),
         format!("{good}^{hex}\n^{hex}\n"),
         format!("{good}{hex}refs/heads/x\n"),
+        format!("# bogus header\n{hex} refs/heads/main\n"),
+        format!("{hex} refs/heads/main\n"),
     ] {
         fs::write(root.join(".git/packed-refs"), &contents).unwrap();
         // With a `sorted` header, `git rev-parse` reads only the lines it
@@ -527,6 +524,19 @@ fn a_broken_loose_ref_is_left_out_as_git_leaves_it_out() {
     commit(&root, "a", b"a\n");
     run(&root, &["branch", "other"]);
     fs::write(root.join(".git/refs/heads/broken"), "not a ref\n").unwrap();
+    assert_refs_match(&root);
+    // A broken loose ref hides the packed one it would override.
+    run(&root, &["tag", "packed"]);
+    run(&root, &["pack-refs", "--all"]);
+    fs::write(root.join(".git/refs/tags/packed"), "not a ref\n").unwrap();
+    assert_refs_match(&root);
+    // A symbolic ref to nothing, or in a cycle, is left out too.
+    run(
+        &root,
+        &["symbolic-ref", "refs/tags/dangling", "refs/tags/missing"],
+    );
+    fs::write(root.join(".git/refs/heads/one"), "ref: refs/heads/two\n").unwrap();
+    fs::write(root.join(".git/refs/heads/two"), "ref: refs/heads/one\n").unwrap();
     assert_refs_match(&root);
 }
 

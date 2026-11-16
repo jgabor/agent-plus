@@ -965,7 +965,7 @@ fn running(pid: u32) -> bool {
 
 /// The SHA-256 digest of the file at `path`, in hex. macOS has `shasum`, and
 /// may lack `sha256sum`.
-fn sha256(path: &Path) -> Result<String, Problem> {
+pub fn sha256(path: &Path) -> Result<String, Problem> {
     let shown = path.display();
     let output = Command::new("sha256sum")
         .arg(path)

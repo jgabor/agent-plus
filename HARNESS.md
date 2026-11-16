@@ -288,6 +288,12 @@ change can affect a budget when its diff touches `crates/`, `.cargo/`,
 `guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
 `harness/budgets.toml`, or `xtask/src/bench.rs`.
 
+**Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
+into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps
+a copy at `xtask/kernel/vmlinux` in the shared git directory, and gives it to a
+tree that lacks it, so a fresh tree doesn't fetch it again. Only a file whose
+digest matches the pin moves either way.
+
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
 
@@ -667,7 +673,9 @@ The checkout that a command starts from doesn't judge the PR, so it can be
 any branch, with any changes. Once the command holds the merge slot and has
 fetched, it builds the xtask of the fetched `main` in a worktree of its own,
 and runs the sequence again in that xtask, which fetches again. If `main` has
-moved by then, it builds again.
+moved by then, it builds again. Each worktree's path is padded to 160 bytes,
+longer than a worker's worktree and shorter than a `#!` line may be, so that a
+check that passes only in a short path fails here too.
 
 A PR that changes `xtask/` is proven twice. `main`'s xtask proves it, so that
 it can't pass by changing its judge. The xtask of its rebased tree proves it

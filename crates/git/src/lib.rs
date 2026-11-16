@@ -226,17 +226,21 @@ impl Repository {
                 Err(error) => return Err(error),
             }
         }
-        // A symbolic ref that leads nowhere is left out, as git leaves it.
+        // A ref that leads nowhere, or to the null id, is left out, as git
+        // leaves it out.
         let mut listed = Vec::new();
         for (name, target) in refs {
-            if let Target::Symbolic(_) = target {
-                match self.resolve(&name) {
-                    Ok(Some(_)) => {}
+            let id = match &target {
+                Target::Object(id) => *id,
+                Target::Symbolic(_) => match self.resolve(&name) {
+                    Ok(Some(id)) => id,
                     Ok(None) | Err(Error::Corrupt(_)) => continue,
                     Err(error) => return Err(error),
-                }
+                },
+            };
+            if id != Id([0; 20]) {
+                listed.push((name, target));
             }
-            listed.push((name, target));
         }
         Ok(listed)
     }
@@ -305,7 +309,7 @@ impl Repository {
         let mut after_ref = false;
         for (n, line) in body.split(|&b| b == b'\n').enumerate() {
             let bad = || corrupt(format!("packed-refs has a bad line {}", n + 1));
-            if n == 0 && line.starts_with(b"# pack-refs with:") {
+            if n == 0 && line.starts_with(b"# pack-refs with: ") {
                 continue;
             }
             if let Some(peeled) = line.strip_prefix(b"^") {
@@ -361,6 +365,11 @@ fn is_git_space(b: u8) -> bool {
 /// What a loose ref file says: 40 hex digits, or `ref:` and another ref.
 fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
     let bad = || corrupt(format!("{name} isn't a ref"));
+    // Git reads the file as a C string, so it ends at the first NUL.
+    let contents = match contents.iter().position(|&b| b == 0) {
+        Some(nul) => &contents[..nul],
+        None => contents,
+    };
     if let Some(target) = contents.strip_prefix(b"ref:") {
         let start = target.iter().position(|&b| !is_git_space(b));
         let end = target.iter().rposition(|&b| !is_git_space(b));

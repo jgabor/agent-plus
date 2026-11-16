@@ -409,6 +409,9 @@ fn a_loose_ref_reads_only_as_git_reads_it() {
         b"ref: refs/heads/main\x0c\n".to_vec(),
         b"ref:\trefs/heads/main\r\n".to_vec(),
         b"not a ref\n".to_vec(),
+        [head.as_bytes(), b"\0garbage\n"].concat(),
+        b"ref: refs/heads/main\0garbage\n".to_vec(),
+        format!("{}\n", "0".repeat(40)).into_bytes(),
     ]
     .iter()
     .enumerate()
@@ -501,6 +504,7 @@ fn a_packed_refs_file_git_refuses_is_refused() {
         format!("{good}^{hex}\n^{hex}\n"),
         format!("{good}{hex}refs/heads/x\n"),
         format!("# bogus header\n{hex} refs/heads/main\n"),
+        format!("# pack-refs with:sorted\n{hex} refs/heads/main\n"),
         format!("{hex} refs/heads/main\n"),
     ] {
         fs::write(root.join(".git/packed-refs"), &contents).unwrap();
@@ -537,6 +541,14 @@ fn a_broken_loose_ref_is_left_out_as_git_leaves_it_out() {
     );
     fs::write(root.join(".git/refs/heads/one"), "ref: refs/heads/two\n").unwrap();
     fs::write(root.join(".git/refs/heads/two"), "ref: refs/heads/one\n").unwrap();
+    assert_refs_match(&root);
+    // So is a ref to the null id, and a symbolic ref to it.
+    let null = format!("{}\n", "0".repeat(40));
+    fs::write(root.join(".git/refs/heads/null"), null).unwrap();
+    run(
+        &root,
+        &["symbolic-ref", "refs/heads/to-null", "refs/heads/null"],
+    );
     assert_refs_match(&root);
 }
 

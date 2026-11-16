@@ -1086,6 +1086,27 @@ fn a_failing_gate_stops_the_merge() {
     assert!(!repo.calls().contains("git push"));
 }
 
+/// Binds a socket in its crate, which works only where the path is short.
+const BINDS_A_SOCKET: &str = "#[test]\nfn binds() {\n    let path = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"s.sock\");\n    std::os::unix::net::UnixListener::bind(&path).unwrap();\n    std::fs::remove_file(&path).unwrap();\n}\n";
+
+/// A worker's worktree is long, so a check that needs a short path must fail
+/// in the merge too, even when the temporary directory is short.
+#[test]
+fn a_check_that_needs_a_short_path_fails_the_proof() {
+    let mut repo = Repo::new("short-path");
+    let short = env::temp_dir().join(format!("xm{}", std::process::id()));
+    if short.exists() {
+        fs::remove_dir_all(&short).unwrap();
+    }
+    fs::create_dir_all(&short).unwrap();
+    repo.temp = short.clone();
+    repo.change_branch("crates/demo/src/lib.rs", BINDS_A_SOCKET);
+    let output = repo.prepare();
+    fs::remove_dir_all(&short).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stdout(&output).contains("fail tests"), "{}", stdout(&output));
+}
+
 fn with_base(name: &str, proven: u32, passing: u32) -> Repo {
     let base = record(proven, passing, "");
     Repo::with(

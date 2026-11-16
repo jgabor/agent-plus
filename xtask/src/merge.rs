@@ -655,7 +655,7 @@ impl Tree {
     /// finds and clears what an earlier attempt left.
     fn path(root: &Path, number: u64) -> Result<PathBuf, Problem> {
         let name = format!("xtask-merge-{}-{number}", repository(root)?);
-        Ok(bench::temp_outside(root)?.join(name))
+        Ok(long(&bench::temp_outside(root)?, &name))
     }
 
     pub fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
@@ -684,6 +684,18 @@ impl Tree {
         let _ = fs::remove_dir_all(path);
         let _ = base::git(root, &["worktree", "prune"]);
     }
+}
+
+/// How long a tree's path is, at least. A worker's worktree is longer than a
+/// Unix socket path may be, so a check that needs a short path fails here
+/// too. It stays under 256 bytes, where the kernel cuts a `#!` line.
+const TREE_PATH: usize = 160;
+
+/// `name` in `temp`, padded to `TREE_PATH` bytes.
+fn long(temp: &Path, name: &str) -> PathBuf {
+    let short = temp.join(name).as_os_str().len();
+    let padding = "_".repeat(TREE_PATH.saturating_sub(short));
+    temp.join(format!("{name}{padding}"))
 }
 
 /// Names the repository, whichever of its worktrees this is.
@@ -1025,4 +1037,20 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
         .and_then(|()| fs::write(&result, lines.concat()))
         .map_err(|e| Problem(format!("couldn't write {}: {e}", result.display())))?;
     Ok(verdict)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TREE_PATH, long};
+    use std::path::Path;
+
+    #[test]
+    fn a_tree_path_is_padded_to_its_length() {
+        let path = long(Path::new("/tmp"), "xtask-merge-0123456789abcdef-9");
+        assert_eq!(path.as_os_str().len(), TREE_PATH);
+        assert!(path.starts_with("/tmp"));
+        let deep = format!("/{}", "d".repeat(200));
+        let path = long(Path::new(&deep), "xtask-merge-0123456789abcdef-9");
+        assert_eq!(path, Path::new(&deep).join("xtask-merge-0123456789abcdef-9"));
+    }
 }

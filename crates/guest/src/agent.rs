@@ -53,8 +53,9 @@ const SIGNALED: u8 = 128;
 
 /// The agent's home directory.
 pub const HOME: &str = "/home/agent";
-/// The agent's user and group id. They are fixed, so no layer chooses them.
-const ID: u32 = 1000;
+/// The agent's user and group id. They are fixed, so no layer chooses them,
+/// and the build can give the agent what a layer puts in its home.
+pub const ID: u32 = 1000;
 const PASSWD: &str = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
 const GROUP: &str = "agent:x:1000:";
 /// Where the build puts the agent's prompt.

@@ -6,7 +6,7 @@ use std::env;
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -753,9 +753,15 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
         share::Mode::ReadWrite,
     )])
     .expect("the share server");
+    // The directories whose mode the guest must not change: the tree, the
+    // one outside the root, and the read-only hooks.
+    let kept = ["", "outside", "root/.git/hooks"].map(|name| base.join(name));
+    let mode = |path: &PathBuf| fs::symlink_metadata(path).map(|meta| meta.mode()).ok();
+    let modes = kept.each_ref().map(mode);
     let answered = fuse_answers(&mut server, input);
-    // The guest may change a directory's mode, so the check reaches past it.
-    reach(&base);
+    // The guest may change the mode of any other directory, so the check
+    // reaches past it.
+    reach(&base, &kept);
     for name in PROTECTED {
         let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
         let found = fs::read(base.join(name)).ok();
@@ -764,6 +770,10 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
             Some(expected),
             "{name} changed: {input:?}"
         );
+    }
+    for (path, before) in kept.iter().zip(modes) {
+        let name = path.strip_prefix(&base).expect("the fuzz tree").display();
+        assert_eq!(mode(path), before, "{name}'s mode changed: {input:?}");
     }
     let names = |dir: &Path| -> Vec<_> {
         let mut names: Vec<_> = fs::read_dir(dir)
@@ -787,15 +797,23 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     answered
 }
 
-/// Lets the owner into `directory` and every directory beneath it, so a
-/// mode the guest set hides no file from the check. It follows no symlink.
-fn reach(directory: &Path) {
-    let reachable = fs::Permissions::from_mode(0o700);
-    fs::set_permissions(directory, reachable).expect("the fuzz tree");
-    for entry in fs::read_dir(directory).expect("the fuzz tree") {
+/// Lets the owner into `directory` and every directory beneath it, except
+/// those `kept`, so a mode the guest may set hides no file from the check.
+/// It follows no symlink.
+fn reach(directory: &Path, kept: &[PathBuf]) {
+    if !kept.iter().any(|path| path == directory) {
+        let reachable = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(directory, reachable).expect("the fuzz tree");
+    }
+    // A kept directory the guest closed hides its files, and the check
+    // finds them changed.
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries {
         let entry = entry.expect("the fuzz tree");
         if entry.file_type().expect("the fuzz tree").is_dir() {
-            reach(&entry.path());
+            reach(&entry.path(), kept);
         }
     }
 }
@@ -1120,6 +1138,15 @@ mod tests {
     fn a_change_outside_an_rw_share_is_found() {
         fuse_rw_input_at(
             "1 1 outside\n1 2 secret\n14 3 w:1 w:0\n16 0 1 0 w:3 w:0 0 w:0 w:0 bad\n",
+            ".",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "outside's mode changed")]
+    fn a_mode_change_outside_an_rw_share_is_found() {
+        fuse_rw_input_at(
+            "1 1 outside\n4 2 w:1 w:0 0 0 0 0 0 0 w:0 w:0 w:0 w:511 w:0 w:0 w:0 w:0\n",
             ".",
         );
     }

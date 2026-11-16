@@ -36,6 +36,18 @@ pub const INSTRUCTIONS: &str = "/home/agent/.codex/AGENTS.md";
 /// The user configuration.
 pub const CONFIGURATION: &str = "/home/agent/.codex/config.toml";
 
+/// The variables the adapter sets, besides the certificate variables.
+pub const SET: &[&str] = &[];
+
+/// The variables Codex reads for sign-in. Codex 0.169.0 looks for these
+/// three before its stored sign-in.
+pub const SIGN_IN: &[&str] = &["CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"];
+
+/// The hosts Codex connects to for its model and sign-in. Codex 0.169.0
+/// calls the model on `api.openai.com` with an API key, and on `chatgpt.com`
+/// with a ChatGPT sign-in, which it gets from `auth.openai.com`.
+pub const HOSTS: &[&str] = &["api.openai.com", "auth.openai.com", "chatgpt.com"];
+
 /// The oldest version the adapter configures.
 pub const OLDEST: &str = "0.137.0";
 

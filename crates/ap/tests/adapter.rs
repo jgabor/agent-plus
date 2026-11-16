@@ -364,3 +364,23 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
         ]
     );
 }
+
+/// The errors the adapter for `agent`'s harness finds in `lines`.
+fn reserved_errors(agent: &str, lines: &str) -> Vec<agentfile::Error> {
+    let instructions = agentfile::parse(&format!("AGENT {agent}\n{lines}")).unwrap();
+    let harness = agentfile::Settings::read(&instructions)
+        .unwrap()
+        .agent
+        .harness;
+    agentfile::reserved(&instructions, &ap::adapter::reserved(harness))
+}
+
+#[test]
+fn one_harness_may_use_what_the_other_keeps() {
+    let claude = "ENV CODEX_API_KEY x\nSECRET OPENAI_API_KEY\nSECRET MINE @chatgpt.com\n";
+    assert!(reserved_errors("claude", claude).is_empty());
+    let codex = "ENV CLAUDE_CONFIG_DIR x\nSECRET ANTHROPIC_API_KEY\nSECRET MINE @claude.ai\n";
+    assert!(reserved_errors("codex", codex).is_empty());
+    assert_eq!(reserved_errors("claude", codex).len(), 3);
+    assert_eq!(reserved_errors("codex", claude).len(), 3);
+}

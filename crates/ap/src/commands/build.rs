@@ -192,7 +192,7 @@ fn build(args: &Args) -> Result<(), String> {
             .collect();
         lines.join("\n")
     };
-    let instructions = agentfile::parse(&source).map_err(report)?;
+    let instructions = agentfile::parse_for(&source, ap::adapter::reserved).map_err(report)?;
     let mut lock = read_lock(&path.with_extension("lock"), &context)?;
     let cache = lock::cache(
         std::env::var_os("XDG_CACHE_HOME").as_deref(),

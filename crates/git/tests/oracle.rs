@@ -11,7 +11,9 @@ use std::process::{Command, Output, Stdio};
 use git::{Error, Id, Kind, Repository, Target};
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("git").join(name);
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("git")
+        .join(name);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -84,7 +86,11 @@ fn assert_objects_match(root: &Path) -> usize {
     let repo = Repository::at(root.join(".git"));
     let list = text(
         root,
-        &["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype)"],
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
     );
     let mut count = 0;
     for line in list.lines() {
@@ -134,7 +140,10 @@ fn every_kind_of_loose_object_reads_as_git_reads_it() {
         .collect();
     commit(&root, "dir/sub/large", &large);
     run(&root, &["tag", "-a", "-m", "annotated", "v1"]);
-    run(&root, &["tag", "-a", "-m", "a tag of a tag", "v1-again", "v1"]);
+    run(
+        &root,
+        &["tag", "-a", "-m", "a tag of a tag", "v1-again", "v1"],
+    );
     let tree_count = text(&root, &["count-objects", "-v"]);
     assert!(tree_count.contains("in-pack: 0"), "{tree_count}");
     let count = assert_objects_match(&root);
@@ -191,6 +200,7 @@ fn a_loose_object_git_refuses_is_refused() {
         b"blob 4",
         b"kite 4\0four",
         b"blob 99999999999999999999999\0four",
+        b"blob 04\0four",
     ];
     for (n, raw) in cases.iter().enumerate() {
         let hex = format!("{n:02}{}", "e".repeat(38));
@@ -264,9 +274,16 @@ fn loose_and_packed_refs_read_as_git_reads_them() {
     run(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
     run(
         &root,
-        &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
     );
-    run(&root, &["symbolic-ref", "refs/heads/alias", "refs/heads/main"]);
+    run(
+        &root,
+        &["symbolic-ref", "refs/heads/alias", "refs/heads/main"],
+    );
     assert!(root.join(".git/packed-refs").exists());
     assert_refs_match(&root);
 
@@ -291,7 +308,10 @@ fn a_detached_head_reads_as_git_reads_it() {
     run(&root, &["checkout", "-q", "--detach", "HEAD~1"]);
     assert_refs_match(&root);
     let repo = Repository::at(root.join(".git"));
-    assert!(matches!(repo.find_ref("HEAD").unwrap(), Some(Target::Object(_))));
+    assert!(matches!(
+        repo.find_ref("HEAD").unwrap(),
+        Some(Target::Object(_))
+    ));
 }
 
 #[test]
@@ -357,8 +377,46 @@ fn a_cycle_of_symbolic_refs_is_refused() {
     commit(&root, "a", b"a\n");
     fs::write(root.join(".git/refs/heads/one"), "ref: refs/heads/two\n").unwrap();
     fs::write(root.join(".git/refs/heads/two"), "ref: refs/heads/one\n").unwrap();
-    let out = output(&root, &["rev-parse", "--verify", "-q", "refs/heads/one"], b"");
+    let out = output(
+        &root,
+        &["rev-parse", "--verify", "-q", "refs/heads/one"],
+        b"",
+    );
     assert!(!out.status.success());
     let repo = Repository::at(root.join(".git"));
-    assert!(matches!(repo.resolve("refs/heads/one"), Err(Error::Corrupt(_))));
+    assert!(matches!(
+        repo.resolve("refs/heads/one"),
+        Err(Error::Corrupt(_))
+    ));
+}
+
+#[test]
+fn a_loose_ref_reads_only_as_git_reads_it() {
+    let root = init("loose-ref");
+    commit(&root, "a", b"a\n");
+    let head = text(&root, &["rev-parse", "HEAD"]);
+    let repo = Repository::at(root.join(".git"));
+    for (n, contents) in [
+        format!("{}", head.trim()),
+        format!("{} trailing words\n", head.trim()),
+        format!("{}x\n", head.trim()),
+        format!("{}\n", &head[..39]),
+        "ref:refs/heads/main".to_string(),
+        "ref: refs/heads/main \n".to_string(),
+        "not a ref\n".to_string(),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let name = format!("refs/heads/case{n}");
+        fs::write(root.join(".git").join(&name), contents).unwrap();
+        let out = output(&root, &["rev-parse", "--verify", "-q", &name], b"");
+        let ours = repo.resolve(&name);
+        if out.status.success() {
+            let theirs = id(&String::from_utf8(out.stdout).unwrap());
+            assert_eq!(ours.unwrap(), Some(theirs), "{contents:?}");
+        } else {
+            assert!(matches!(ours, Err(Error::Corrupt(_))), "{contents:?}: {ours:?}");
+        }
+    }
 }

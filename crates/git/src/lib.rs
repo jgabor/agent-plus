@@ -1,9 +1,13 @@
 //! Reads a git repository the way `git` does: loose objects, and refs with
 //! `packed-refs`. It reads only SHA-1 repositories.
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use miniz_oxide::inflate::{self, TINFLStatus};
 
 /// An object's SHA-1 name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -11,8 +15,25 @@ pub struct Id(pub [u8; 20]);
 
 impl Id {
     /// Parses 40 hex digits, in either case.
-    pub fn from_hex(_hex: &str) -> Option<Id> {
-        None
+    pub fn from_hex(hex: &str) -> Option<Id> {
+        let hex = hex.as_bytes();
+        if hex.len() != 40 {
+            return None;
+        }
+        let mut id = [0; 20];
+        for (byte, pair) in id.iter_mut().zip(hex.chunks(2)) {
+            *byte = (digit(pair[0])? << 4) | digit(pair[1])?;
+        }
+        Some(Id(id))
+    }
+}
+
+fn digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -87,8 +108,29 @@ impl From<io::Error> for Error {
 
 /// A repository, by its git directory.
 pub struct Repository {
-    #[allow(dead_code)]
     git_dir: PathBuf,
+}
+
+/// How many symbolic refs `resolve` follows, as git's `SYMREF_MAXDEPTH`.
+const MAX_DEPTH: usize = 5;
+
+/// The longest header a loose object can have: `commit `, 20 digits, and NUL.
+const MAX_HEADER: usize = 28;
+
+fn corrupt(why: impl Into<String>) -> Error {
+    Error::Corrupt(why.into())
+}
+
+/// The file at `path`, or `None` if there is none.
+fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        // A directory where a ref would be, such as `refs/heads/a` beside
+        // `refs/heads/a/b`, means there is no such ref.
+        Err(e) if e.kind() == io::ErrorKind::IsADirectory => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 impl Repository {
@@ -100,24 +142,188 @@ impl Repository {
     }
 
     /// The loose object named `id`, or `None` if there is no loose object.
-    pub fn loose_object(&self, _id: &Id) -> Result<Option<Object>, Error> {
-        let _ = miniz_oxide::inflate::decompress_to_vec_zlib;
-        Err(Error::Corrupt("unimplemented".into()))
+    pub fn loose_object(&self, id: &Id) -> Result<Option<Object>, Error> {
+        let hex = id.to_string();
+        let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
+        let Some(compressed) = read(&path)? else {
+            return Ok(None);
+        };
+        // Inflate only the header first, so the size it declares bounds the
+        // rest, and a small file can't inflate without limit.
+        let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
+            Ok(all) => all,
+            Err(e) if e.status == TINFLStatus::HasMoreOutput => e.output,
+            Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
+        };
+        let (kind, size, header) =
+            parse_header(&prefix).ok_or_else(|| corrupt(format!("{hex} has a bad header")))?;
+        let total = header
+            .checked_add(size)
+            .ok_or_else(|| corrupt(format!("{hex} is too large")))?;
+        let mut data = match inflate::decompress_to_vec_zlib_with_limit(&compressed, total) {
+            Ok(all) => all,
+            Err(e) if e.status == TINFLStatus::HasMoreOutput => {
+                return Err(corrupt(format!("{hex} is longer than its header says")));
+            }
+            Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
+        };
+        if data.len() != total {
+            return Err(corrupt(format!("{hex} is shorter than its header says")));
+        }
+        data.drain(..header);
+        Ok(Some(Object { kind, data }))
     }
 
     /// The ref named `name`, which is `HEAD` or a full name under `refs/`,
     /// from its loose file or else from `packed-refs`.
-    pub fn find_ref(&self, _name: &str) -> Result<Option<Target>, Error> {
-        Err(Error::Corrupt("unimplemented".into()))
+    pub fn find_ref(&self, name: &str) -> Result<Option<Target>, Error> {
+        check_name(name)?;
+        if let Some(contents) = read(&self.git_dir.join(name))? {
+            return parse_loose_ref(name, &contents).map(Some);
+        }
+        Ok(self.packed_refs()?.remove(name).map(Target::Object))
     }
 
     /// The object that `name` points at, through any symbolic refs.
-    pub fn resolve(&self, _name: &str) -> Result<Option<Id>, Error> {
-        Err(Error::Corrupt("unimplemented".into()))
+    pub fn resolve(&self, name: &str) -> Result<Option<Id>, Error> {
+        let mut name = name.to_string();
+        for _ in 0..=MAX_DEPTH {
+            match self.find_ref(&name)? {
+                None => return Ok(None),
+                Some(Target::Object(id)) => return Ok(Some(id)),
+                Some(Target::Symbolic(next)) => name = next,
+            }
+        }
+        Err(corrupt(format!(
+            "{name} is too deep a chain of symbolic refs"
+        )))
     }
 
     /// Every ref under `refs/`, loose and packed, sorted by name.
     pub fn refs(&self) -> Result<Vec<(String, Target)>, Error> {
-        Err(Error::Corrupt("unimplemented".into()))
+        let mut refs: BTreeMap<String, Target> = self
+            .packed_refs()?
+            .into_iter()
+            .map(|(name, id)| (name, Target::Object(id)))
+            .collect();
+        let mut loose = Vec::new();
+        self.loose_refs("refs", &mut loose)?;
+        for (name, contents) in loose {
+            let target = parse_loose_ref(&name, &contents)?;
+            refs.insert(name, target);
+        }
+        Ok(refs.into_iter().collect())
     }
+
+    /// The name and contents of every loose ref under `dir`. A file whose
+    /// name git wouldn't take as a ref, such as a lock, isn't one.
+    fn loose_refs(&self, dir: &str, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), Error> {
+        let entries = match fs::read_dir(self.git_dir.join(dir)) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let Some(file) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let name = format!("{dir}/{file}");
+            if entry.file_type()?.is_dir() {
+                self.loose_refs(&name, out)?;
+            } else if check_name(&name).is_ok() {
+                if let Some(contents) = read(&entry.path())? {
+                    out.push((name, contents));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The refs in `packed-refs`, by name.
+    fn packed_refs(&self) -> Result<BTreeMap<String, Id>, Error> {
+        let mut refs = BTreeMap::new();
+        let Some(contents) = read(&self.git_dir.join("packed-refs"))? else {
+            return Ok(refs);
+        };
+        let text =
+            std::str::from_utf8(&contents).map_err(|_| corrupt("packed-refs isn't UTF-8"))?;
+        for line in text.lines() {
+            // A comment heads the file, and a `^` line peels the tag above it.
+            if line.starts_with('#') || line.starts_with('^') {
+                continue;
+            }
+            let bad = || corrupt(format!("packed-refs has a bad line: {line:?}"));
+            let (hex, name) = line.split_once(' ').ok_or_else(bad)?;
+            let id = Id::from_hex(hex).ok_or_else(bad)?;
+            check_name(name).map_err(|_| bad())?;
+            refs.insert(name.to_string(), id);
+        }
+        Ok(refs)
+    }
+}
+
+/// The type, the declared size, and the header's length, NUL included, of
+/// `<type> <size>\0`. Like git, it takes no leading zero in the size.
+fn parse_header(bytes: &[u8]) -> Option<(Kind, usize, usize)> {
+    let nul = bytes.iter().position(|&b| b == 0)?;
+    let header = std::str::from_utf8(&bytes[..nul]).ok()?;
+    let (kind, size) = header.split_once(' ')?;
+    let kind = match kind {
+        "commit" => Kind::Commit,
+        "tree" => Kind::Tree,
+        "blob" => Kind::Blob,
+        "tag" => Kind::Tag,
+        _ => return None,
+    };
+    if size.is_empty() || !size.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if size.len() > 1 && size.starts_with('0') {
+        return None;
+    }
+    Some((kind, size.parse().ok()?, nul + 1))
+}
+
+/// What a loose ref file says: 40 hex digits, or `ref:` and another ref.
+fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
+    let bad = || corrupt(format!("{name} isn't a ref"));
+    let text = std::str::from_utf8(contents).map_err(|_| bad())?;
+    if let Some(target) = text.strip_prefix("ref:") {
+        let target = target.trim();
+        check_name(target)?;
+        return Ok(Target::Symbolic(target.to_string()));
+    }
+    // Git reads the id, and takes only whitespace after it.
+    let hex = text.get(..40).ok_or_else(bad)?;
+    let rest = &text[40..];
+    if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+        return Err(bad());
+    }
+    Id::from_hex(hex).map(Target::Object).ok_or_else(bad)
+}
+
+/// Refuses a name that isn't `HEAD` or a full name under `refs/` that `git
+/// check-ref-format` accepts, so no name reaches outside the git directory.
+fn check_name(name: &str) -> Result<(), Error> {
+    if name == "HEAD" {
+        return Ok(());
+    }
+    let bad = || corrupt(format!("{name:?} isn't a ref name"));
+    if !name.starts_with("refs/") || name.ends_with('/') || name.ends_with('.') {
+        return Err(bad());
+    }
+    if name.contains("..") || name.contains("@{") {
+        return Err(bad());
+    }
+    let forbidden = |c: char| c.is_ascii_control() || " ~^:?*[\\".contains(c);
+    if name.chars().any(forbidden) {
+        return Err(bad());
+    }
+    for component in name.split('/') {
+        if component.is_empty() || component.starts_with('.') || component.ends_with(".lock") {
+            return Err(bad());
+        }
+    }
+    Ok(())
 }

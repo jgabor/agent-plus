@@ -84,6 +84,7 @@ nightly job: main -> slow tiers -> report, or a revert PR
 | `xtask` | Program | None | Scoring, gating, measuring, selection, and merging |
 | Dispatcher | T3 Code scheduled task | Sonnet | Starts workers for claimable issues |
 | Planner | T3 Code scheduled task | Opus | Files issues from score gaps |
+| Triage | T3 Code scheduled task | Opus | Says what each unlabeled issue needs, and closes the fixed and the covered |
 | Drafter | Delegated agent, from the planner | Fable | Drafts the parent of a milestone that has none |
 | Worker | T3 Code thread, one per issue | Opus | Takes one issue from claim to merge |
 | Reviewer | Delegated agent, one per round | Another provider | Reviews a diff, and changes nothing |
@@ -556,7 +557,8 @@ diagnostics go to stderr.
 
 ### Scheduling
 
-The dispatcher, planner, and nightly job are T3 Code scheduled tasks. Each is
+The dispatcher, planner, triage, and nightly job are T3 Code scheduled tasks.
+Each is
 bound to its own thread, whose settings give it its model and full access,
 because no one is there to answer a prompt. Each run starts a fresh session, so
 no run depends on the context of an earlier one. A run moves its checkout to
@@ -610,6 +612,27 @@ says which milestone waits on the owner, and stops. No program closes a parent,
 because closing it is the owner's acceptance of the milestone.
 
 The order of the milestones in `harness/journey.toml` is the order of the work.
+
+### Triage
+
+Runs at the triage time, after the nightly job has written the roadmap. Its
+inbox is what `Roadmap details` lists under "To label or close": the open
+issues with no parent and no `auto:*`, `answer-needed`, or `land-needed`
+label, apart from the ones `xtask` writes. An agent that finds other work
+files it this way, so the inbox grows with every review.
+
+The task reads each issue against `origin/main`, and closes it only with
+proof. It closes one as completed when its definition of done already holds,
+and names the commit. It closes one as a duplicate when another open issue has
+the same goal, after it copies the owner's decisions to the issue that stays.
+It never closes a parent, never adds or removes a label, and never works an
+issue.
+
+It says what each of the rest needs in one comment on `Roadmap details`, which
+it replaces on every run: to label, to answer, waiting, or after v0.1.0, each
+with one line of reason, and the most urgent first. The comment also lists the
+open parents whose sub-issues are all closed, labeled or not, because closing
+a parent is the owner's.
 
 ### Worker
 
@@ -877,6 +900,7 @@ passes. No scheduled work runs on GitHub.
 | Dispatch period | 30 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
+| Triage time | 06:00 local |
 | Fuzzing and mutation limit | 1 hour each |
 | Memory for fuzzing, mutation, the gate's tests, and `cargo xtask run` | 8 GiB per job |
 | Lease length | 12 hours |
@@ -906,7 +930,9 @@ passes. No scheduled work runs on GitHub.
 
 ## Owner actions
 
-- Add `auto:*` labels to top-level issues.
+- Add `auto:*` labels to top-level issues. The triage comment on `Roadmap
+  details` says which unlabeled issues are ready, which need an answer, and
+  which parents are ready to close.
 - Merge each PR that [waits for the owner](#what-waits-for-the-owner) with any
   merge button once `xtask/gate` is green. A PR comment says why it waits.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.

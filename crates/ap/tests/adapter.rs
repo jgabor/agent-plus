@@ -354,7 +354,11 @@ fn a_headless_codex_run_skips_the_git_repository_check() {
     for version in CODEX_VERSIONS {
         for mode in MODES {
             let headless = codex::arguments(version, None, None, mode, false);
-            assert_eq!(headless[..2], ["exec", "--skip-git-repo-check"], "{version}");
+            assert_eq!(
+                headless[..2],
+                ["exec", "--skip-git-repo-check"],
+                "{version}"
+            );
             let interactive = codex::arguments(version, None, None, mode, true);
             assert!(!interactive.iter().any(|a| a == "--skip-git-repo-check"));
         }

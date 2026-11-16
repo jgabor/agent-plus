@@ -155,10 +155,11 @@ impl Runs {
         // the name already.
         let name = loop {
             let name = pick()?;
-            if self.agents.has(&name)? {
-                continue;
-            }
-            match fs::hard_link(&partial.0, self.dir.join(&name)) {
+            let record = self.dir.join(&name);
+            match fs::hard_link(&partial.0, &record) {
+                // Checked once the name is taken, so an agent recorded
+                // before the run's name appeared is never missed.
+                Ok(()) if self.agents.has(&name)? => fs::remove_file(&record)?,
                 Ok(()) => break name,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),

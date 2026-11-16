@@ -66,7 +66,8 @@ work starts from this label, so treat it as the owner's written permission.
 | `auto:merge` | Work it through to merged, once the merge gate passes |
 
 - Only the owner adds these labels. The one exception: a sub-issue you file
-  under a parent inherits the parent's label. Never widen a label.
+  under a parent inherits the parent's label, and so does an open issue that
+  the Planner adopts under one. Never widen a label.
 - Both labels let you push your own branch, force-push it with
   `--force-with-lease` after a rebase, and run the tests the work needs.
 - Neither label lets you merge a PR that waits for the owner, change

@@ -8,6 +8,7 @@ mod guest;
 
 use guest::*;
 use std::fs;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -160,32 +161,45 @@ fn a_git_file_is_not_captured() {
 }
 
 #[test]
-fn a_packed_refs_that_is_a_symlink_is_not_followed() {
-    let tree = Tree::new("cow-git-linked");
-    let first = repository(&tree.root);
-    let outside = tree.base.join("outside/packed-refs");
-    fs::write(&outside, format!("{first} refs/heads/main\n")).unwrap();
-    fs::remove_file(tree.root.join(".git/refs/heads/main")).unwrap();
-    let packed = tree.root.join(".git/packed-refs");
-    std::os::unix::fs::symlink(&outside, &packed).unwrap();
-    let pending = pending(&tree);
-    let mut guest = Guest::cow(&tree.root, &pending);
-    // The copy keeps the symlink, which the guest resolves itself.
-    assert_eq!(guest.mode(".git/packed-refs").map(kind), Ok(S_IFLNK));
-    drop(guest);
-    assert_eq!(fs::read_to_string(pending.join("head")).unwrap(), "none\n");
+fn a_symlink_on_the_way_to_a_ref_is_not_followed() {
+    for (label, linked) in [("packed", ".git/packed-refs"), ("heads", ".git/refs/heads")] {
+        let tree = Tree::new(&format!("cow-git-linked-{label}"));
+        let first = repository(&tree.root);
+        let outside = tree.base.join("outside/linked");
+        fs::remove_file(tree.root.join(".git/refs/heads/main")).unwrap();
+        match label {
+            "packed" => fs::write(&outside, format!("{first} refs/heads/main\n")).unwrap(),
+            _ => {
+                fs::create_dir(&outside).unwrap();
+                fs::write(outside.join("main"), format!("{first}\n")).unwrap();
+                fs::remove_dir(tree.root.join(linked)).unwrap();
+            }
+        }
+        std::os::unix::fs::symlink(&outside, tree.root.join(linked)).unwrap();
+        let pending = pending(&tree);
+        let mut guest = Guest::cow(&tree.root, &pending);
+        // The copy keeps the symlink, which the guest resolves itself.
+        assert_eq!(guest.mode(linked).map(kind), Ok(S_IFLNK));
+        drop(guest);
+        assert_eq!(fs::read_to_string(pending.join("head")).unwrap(), "none\n");
+    }
 }
 
 #[test]
-fn a_read_only_directory_s_copy_can_be_discarded() {
-    let tree = Tree::new("cow-git-read-only");
+fn the_capture_keeps_each_entry_as_itself_with_your_mode() {
+    let tree = Tree::new("cow-git-modes");
     repository(&tree.root);
     let info = tree.root.join(".git/info");
     fs::set_permissions(&info, fs::Permissions::from_mode(0o555)).unwrap();
+    let fifo =
+        std::ffi::CString::new(tree.root.join(".git/pipe").into_os_string().into_vec()).unwrap();
+    // SAFETY: `fifo` is NUL-terminated and outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o640) }, 0);
     let pending = pending(&tree);
     let mut guest = Guest::cow(&tree.root, &pending);
-    assert_eq!(guest.mode(".git/info").map(|mode| mode & 0o7777), Ok(0o755));
+    assert_eq!(guest.mode(".git/info"), Ok(libc::S_IFDIR | 0o555));
+    assert_eq!(guest.mode(".git/pipe"), Ok(S_IFIFO | 0o640));
     drop(guest);
     fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::remove_dir_all(&pending).unwrap();
+    fs::set_permissions(pending.join("git/info"), fs::Permissions::from_mode(0o755)).unwrap();
 }

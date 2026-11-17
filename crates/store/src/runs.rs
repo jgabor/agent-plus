@@ -334,9 +334,19 @@ impl Runs {
 
     /// Throws away the pending changes of the run with this name, if it has
     /// any.
+    /// A run's copy of your `.git` keeps your modes, so a directory you
+    /// can't write to is made writable first.
     pub fn discard(&self, name: &str) -> io::Result<()> {
         check_run_name(name)?;
-        match fs::remove_dir_all(self.pending.join(name)) {
+        let dir = self.pending.join(name);
+        let removed = match fs::remove_dir_all(&dir) {
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                make_writable(&dir)?;
+                fs::remove_dir_all(&dir)
+            }
+            removed => removed,
+        };
+        match removed {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         }
@@ -433,6 +443,22 @@ fn read_record(name: &str, text: &str) -> Result<Run, String> {
         started: started.ok_or("no STARTED line")?,
         exited,
     })
+}
+
+/// Lets you read, write, and search `dir` and each directory beneath it,
+/// following no symlink.
+fn make_writable(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+    let mode = metadata.permissions().mode();
+    fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o700))?;
+    for entry in fs::read_dir(dir)? {
+        make_writable(&entry?.path())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

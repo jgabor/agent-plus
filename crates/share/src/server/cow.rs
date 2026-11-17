@@ -34,10 +34,8 @@
 //! also holds `git`, a copy of everything in it but `objects`, made when the
 //! run starts, and `head`, the commit `HEAD` named then, in hex, or `none`.
 //! The guest sees that copy in place of your `.git`, but for `objects`,
-//! which it reads live. The copy holds directories, regular files, and
-//! symlinks, each with your mode and times, and leaves out special files.
-//! A directory's copy always lets you read, write, and search it, so
-//! `ap discard` can remove it.
+//! which it reads live. The copy holds each entry as itself, with your
+//! mode, and each directory and regular file with your times.
 //! The agent's changes there are recorded as anywhere else.
 //!
 //! A guest's node is a path. Each request resolves it again, one layer at a
@@ -399,17 +397,15 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
     }
     sys::mkdirat(pending, GIT, DIR_MODE)?;
     let copy = sys::open_beneath(pending, GIT, libc::O_PATH | libc::O_DIRECTORY)?;
-    copy_tree(git.as_fd(), copy.as_fd(), b"")?;
+    let mut linked = false;
+    copy_tree(git.as_fd(), copy.as_fd(), b"", &mut linked)?;
     finish(copy.as_fd(), &stat)?;
     // `HEAD` and the refs are read from the copy, so they are what the
-    // guest sees. Each directory in the copy is one this made, and a ref
-    // that is a symlink is read as a symbolic ref, so only `packed-refs`
-    // could lead elsewhere, and then no ref is read. A `HEAD` that names no
-    // commit git could read counts as none, so a branch import starts from
-    // the agent's history alone.
-    let linked = sys::open_beneath(copy.as_fd(), c"packed-refs", PATH_FLAGS)
-        .and_then(|packed| sys::fstat(packed.as_fd()))
-        .is_ok_and(|packed| is(packed.st_mode, libc::S_IFLNK));
+    // guest sees. A ref that is a symlink is read as a symbolic ref, but a
+    // symlink at `packed-refs`, or on the way to a ref, would be followed,
+    // so then no ref is read. A `HEAD` that names no commit git could read
+    // counts as none, so a branch import starts from the agent's history
+    // alone.
     let path = format!("/proc/self/fd/{}", copy.as_raw_fd());
     let head = match linked {
         true => Ok(None),
@@ -429,8 +425,9 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
 }
 
 /// Copies the directory `from`, at `path` in a git directory, into the
-/// directory `to`, but for special files, and for what `objects` holds.
-fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8]) -> io::Result<()> {
+/// directory `to`, but for what `objects` holds. `linked` is set if
+/// `packed-refs`, or anything beneath `refs`, is a symlink.
+fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -> io::Result<()> {
     let listed = names(from).map_err(io::Error::from_raw_os_error)?;
     for (name, _, _) in listed {
         let inner = join(path, &name);
@@ -448,7 +445,7 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8]) -> io::Result<()> {
                 let made = sys::open_beneath(to, &name, libc::O_PATH | libc::O_DIRECTORY)?;
                 // The guest reads `objects` live, so it is left empty here.
                 if inner != b"objects" {
-                    copy_tree(entry.as_fd(), made.as_fd(), &inner)?;
+                    copy_tree(entry.as_fd(), made.as_fd(), &inner, linked)?;
                 }
                 finish(made.as_fd(), &stat)?;
             }
@@ -468,8 +465,26 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8]) -> io::Result<()> {
                 let target =
                     CString::new(target).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
                 sys::symlinkat(&target, to, &name)?;
+                *linked |=
+                    matches!(&inner[..], b"packed-refs" | b"refs") || inner.starts_with(b"refs/");
             }
-            _ => {}
+            _ => {
+                sys::mknodat(
+                    to,
+                    &name,
+                    stat.st_mode & libc::S_IFMT | FILE_MODE,
+                    stat.st_rdev,
+                )?;
+                // A special file has no contents, and nothing opens it to
+                // set its mode and times.
+                let made = sys::open_beneath(to, &name, PATH_FLAGS)?;
+                let path = CString::new(format!("/proc/self/fd/{}", made.as_raw_fd()))
+                    .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                // SAFETY: `path` is NUL-terminated and outlives the call.
+                if unsafe { libc::chmod(path.as_ptr(), stat.st_mode & PERMISSIONS) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
         }
     }
     Ok(())
@@ -486,12 +501,7 @@ fn finish(copy: BorrowedFd, stat: &libc::stat) -> io::Result<()> {
         }
         false => copy,
     };
-    // A directory stays yours to change, so its copy can be removed.
-    let mode = match is(stat.st_mode, libc::S_IFDIR) {
-        true => stat.st_mode & PERMISSIONS | 0o700,
-        false => stat.st_mode & PERMISSIONS,
-    };
-    sys::fchmod(fd, mode)?;
+    sys::fchmod(fd, stat.st_mode & PERMISSIONS)?;
     set_times(fd, stat).map_err(io::Error::from_raw_os_error)
 }
 

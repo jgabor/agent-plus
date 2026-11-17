@@ -231,6 +231,21 @@ pub fn unlinkat(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<()
     .map(drop)
 }
 
+/// Makes the special file `name` in `directory`, of `mode`'s kind.
+pub fn mknodat(directory: BorrowedFd, name: &CStr, mode: u32, rdev: u64) -> io::Result<()> {
+    // SAFETY: `name` is NUL-terminated and outlives the call.
+    check(unsafe {
+        libc::syscall(
+            libc::SYS_mknodat,
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            mode,
+            rdev,
+        )
+    })
+    .map(drop)
+}
+
 pub fn symlinkat(target: &CStr, directory: BorrowedFd, name: &CStr) -> io::Result<()> {
     // SAFETY: both names are NUL-terminated and outlive the call.
     check(unsafe {

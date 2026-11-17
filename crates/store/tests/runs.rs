@@ -142,3 +142,29 @@ fn a_run_never_takes_an_agent_s_name() {
     assert_eq!(run.name, "a1b2c3d4");
     assert_eq!(runs.get("k3x9q2mf").unwrap(), None);
 }
+
+// spec(SHARE): `ap discard <agent | run>` throws the changes away.
+#[test]
+fn discard_removes_a_directory_you_can_t_write_to() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = store_root("discard-read-only");
+    let runs = Runs::new(&root);
+    let run = runs.create("notes", 1).unwrap();
+    runs.create_pending(&run.name).unwrap();
+    let share = runs
+        .create_pending_share(&run.name, Path::new("/x"))
+        .unwrap();
+    let hooks = share.join("git/hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::write(hooks.join("pre-commit"), "").unwrap();
+    fs::set_permissions(&hooks, fs::Permissions::from_mode(0o555)).unwrap();
+    // A symlink to a directory you can't write to isn't followed.
+    let outside = root.join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
+    std::os::unix::fs::symlink(&outside, share.join("git/link")).unwrap();
+    runs.discard(&run.name).unwrap();
+    assert!(!root.join("pending").join(&run.name).exists());
+    let mode = fs::metadata(&outside).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o500);
+}

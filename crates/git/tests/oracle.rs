@@ -666,17 +666,37 @@ fn assert_all_packed(root: &Path) {
 
 #[test]
 fn every_object_in_a_pack_reads_as_git_reads_it() {
-    // `gc --aggressive` searches more bases, and finds shorter chains.
+    // `gc --aggressive` searches more bases, and finds shorter chains. One
+    // thread keeps each chain whole: with more, git splits the objects
+    // between threads where the scheduler says, and a chain breaks there.
     for (name, args, deep) in [
-        ("offset-deltas", &["repack", "-adf"][..], 20),
+        (
+            "offset-deltas",
+            &["-c", "pack.threads=1", "repack", "-adf"][..],
+            20,
+        ),
         (
             "ref-deltas",
-            &["-c", "repack.useDeltaBaseOffset=false", "repack", "-adf"],
+            &[
+                "-c",
+                "pack.threads=1",
+                "-c",
+                "repack.useDeltaBaseOffset=false",
+                "repack",
+                "-adf",
+            ],
             20,
         ),
         (
             "aggressive",
-            &["gc", "-q", "--aggressive", "--prune=now"],
+            &[
+                "-c",
+                "pack.threads=1",
+                "gc",
+                "-q",
+                "--aggressive",
+                "--prune=now",
+            ],
             5,
         ),
     ] {

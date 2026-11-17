@@ -8,7 +8,7 @@ mod guest;
 
 use guest::*;
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// A tree to share, and a place beside it for the pending directory.
@@ -61,6 +61,12 @@ fn a_run_captures_git_but_its_objects_and_records_head() {
         [".git/HEAD", ".git/refs/heads/main", ".git/index"].map(|path| guest.read_file(path))
     };
     let before = seen(&mut guest);
+    for (path, seen) in [".git/HEAD", ".git/refs/heads/main", ".git/index"]
+        .iter()
+        .zip(&before)
+    {
+        assert_eq!(seen, &Ok(fs::read(tree.root.join(path)).unwrap()));
+    }
     // The copy keeps your modes.
     let mode = fs::metadata(tree.root.join(".git/config")).unwrap().mode();
     assert_eq!(guest.mode(".git/config"), Ok(mode));
@@ -151,4 +157,35 @@ fn a_git_file_is_not_captured() {
     drop(guest);
     assert!(!pending.join("head").exists());
     assert!(!pending.join("git").exists());
+}
+
+#[test]
+fn a_packed_refs_that_is_a_symlink_is_not_followed() {
+    let tree = Tree::new("cow-git-linked");
+    let first = repository(&tree.root);
+    let outside = tree.base.join("outside/packed-refs");
+    fs::write(&outside, format!("{first} refs/heads/main\n")).unwrap();
+    fs::remove_file(tree.root.join(".git/refs/heads/main")).unwrap();
+    let packed = tree.root.join(".git/packed-refs");
+    std::os::unix::fs::symlink(&outside, &packed).unwrap();
+    let pending = pending(&tree);
+    let mut guest = Guest::cow(&tree.root, &pending);
+    // The copy keeps the symlink, which the guest resolves itself.
+    assert_eq!(guest.mode(".git/packed-refs").map(kind), Ok(S_IFLNK));
+    drop(guest);
+    assert_eq!(fs::read_to_string(pending.join("head")).unwrap(), "none\n");
+}
+
+#[test]
+fn a_read_only_directory_s_copy_can_be_discarded() {
+    let tree = Tree::new("cow-git-read-only");
+    repository(&tree.root);
+    let info = tree.root.join(".git/info");
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o555)).unwrap();
+    let pending = pending(&tree);
+    let mut guest = Guest::cow(&tree.root, &pending);
+    assert_eq!(guest.mode(".git/info").map(|mode| mode & 0o7777), Ok(0o755));
+    drop(guest);
+    fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::remove_dir_all(&pending).unwrap();
 }

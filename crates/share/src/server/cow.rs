@@ -403,7 +403,8 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
     // `HEAD` and the refs are read from the copy, so they are what the
     // guest sees. A ref that is a symlink is read as a symbolic ref, but a
     // symlink at `packed-refs`, or on the way to a ref, would be followed,
-    // so then no ref is read. A `HEAD` that names no commit git could read
+    // and a special file there could block the read, so then no ref is
+    // read. A `HEAD` that names no commit git could read
     // counts as none, so a branch import starts from the agent's history
     // alone.
     let path = format!("/proc/self/fd/{}", copy.as_raw_fd());
@@ -426,7 +427,8 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
 
 /// Copies the directory `from`, at `path` in a git directory, into the
 /// directory `to`, but for what `objects` holds. `linked` is set if
-/// `packed-refs`, or anything beneath `refs`, is a symlink.
+/// `packed-refs`, `refs`, or anything beneath it is a symlink, or if one of
+/// them or `HEAD` is a special file.
 fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -> io::Result<()> {
     let listed = names(from).map_err(io::Error::from_raw_os_error)?;
     for (name, _, _) in listed {
@@ -469,6 +471,8 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -
                     matches!(&inner[..], b"packed-refs" | b"refs") || inner.starts_with(b"refs/");
             }
             _ => {
+                *linked |= matches!(&inner[..], b"HEAD" | b"packed-refs" | b"refs")
+                    || inner.starts_with(b"refs/");
                 sys::mknodat(
                     to,
                     &name,

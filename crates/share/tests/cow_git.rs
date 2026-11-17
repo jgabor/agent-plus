@@ -186,6 +186,20 @@ fn a_symlink_on_the_way_to_a_ref_is_not_followed() {
 }
 
 #[test]
+fn a_special_file_in_place_of_a_ref_is_not_read() {
+    let tree = Tree::new("cow-git-fifo-ref");
+    repository(&tree.root);
+    let main = tree.root.join(".git/refs/heads/main");
+    fs::remove_file(&main).unwrap();
+    let fifo = std::ffi::CString::new(main.into_os_string().into_vec()).unwrap();
+    // SAFETY: `fifo` is NUL-terminated and outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let pending = pending(&tree);
+    drop(Guest::cow(&tree.root, &pending));
+    assert_eq!(fs::read_to_string(pending.join("head")).unwrap(), "none\n");
+}
+
+#[test]
 fn the_capture_keeps_each_entry_as_itself_with_your_mode() {
     let tree = Tree::new("cow-git-modes");
     repository(&tree.root);

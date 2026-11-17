@@ -327,8 +327,9 @@ impl Repo {
     /// Wrappers for `git` and `cargo`, and the fake `gh`. Each logs the call.
     /// `KILL_ON` kills `xtask` at the first call containing it, `KILL_WHEN`
     /// says whether before or after doing the call, `HANG_ON` makes a matching
-    /// call sleep for `HANG_FOR` seconds, or 3, and `RUN_ON` runs `RUN_COMMAND` just before the first
-    /// matching call. The fake `gh` keeps the newest state posted on each
+    /// call sleep for `HANG_FOR` seconds, or 3, and with `HANG_UNTIL` a later
+    /// matching call sleeps until that many seconds after the first one
+    /// started. `RUN_ON` runs `RUN_COMMAND` just before the first matching call. The fake `gh` keeps the newest state posted on each
     /// commit, and gives it back when asked for that commit's status.
     fn write_tools(&self) {
         let bin = self.bin.display();
@@ -342,7 +343,13 @@ maybe_kill() {{
   fi
 }}
 if [ -n "$HANG_ON" ]; then
-  case "$call" in *"$HANG_ON"*) exec sleep "${{HANG_FOR:-3}}" ;; esac
+  case "$call" in *"$HANG_ON"*)
+    if [ -n "$HANG_UNTIL" ] && [ -f '{bin}/hung' ]; then
+      left=$(( $(cat '{bin}/hung') + HANG_UNTIL - $(date +%s) ))
+      exec sleep $(( left > 0 ? left : 0 ))
+    fi
+    date +%s > '{bin}/hung'; exec sleep "${{HANG_FOR:-3}}" ;;
+  esac
 fi
 if [ -n "$RUN_ON" ] && [ ! -f '{bin}/ran' ]; then
   case "$call" in *"$RUN_ON"*) : > '{bin}/ran'; eval "$RUN_COMMAND" ;; esac
@@ -1547,10 +1554,11 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
 }
 
 /// A PR that changes xtask is proven twice, and each proof gets the whole
-/// timeout, so the two together may take longer. The two hangs alone outlast
-/// one timeout, so a timeout that both proofs shared would stop the merge at
-/// any load. Each proof keeps 31 seconds for its other work, which takes up to
-/// 20 on a loaded machine.
+/// timeout, so the two together may take longer. The second hang ends 61
+/// seconds after the first one starts, and the merge holds the slot before
+/// that, so a timeout that both proofs shared would stop the merge at any
+/// load. The first proof keeps 45 seconds for its other work, which takes up
+/// to 40 on a loaded machine.
 #[test]
 fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
     let repo = changing(
@@ -1562,8 +1570,9 @@ fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
         .command(env!("CARGO_BIN_EXE_xtask"))
         .args(["merge", "9"])
         .env("HANG_ON", "cargo fmt --all")
-        .env("HANG_FOR", "32")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "63")
+        .env("HANG_FOR", "15")
+        .env("HANG_UNTIL", "61")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
         .output()
         .unwrap();
     assert_eq!(

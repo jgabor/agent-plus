@@ -211,16 +211,24 @@ fn descendants(pid: u32) -> Vec<u32> {
     found
 }
 
-/// Whether the process `pid` is running: whether it exists and isn't a
-/// zombie that is waiting to be reaped.
+/// Whether the process `pid` is running: whether it exists and any of its
+/// threads isn't a zombie. Its first thread reads as a zombie as soon as it
+/// exits, while the others can still be exiting, and holding the process's
+/// files and their locks.
 fn running(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            let state = stat.rsplit_once(") ")?.1.chars().next()?;
-            Some(state != 'Z')
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|task| {
+            fs::read_to_string(task.path().join("stat"))
+                .ok()
+                .and_then(|stat| {
+                    let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                    Some(state != 'Z')
+                })
+                .unwrap_or(false)
         })
-        .unwrap_or(false)
 }
 
 impl Drop for Scratch {

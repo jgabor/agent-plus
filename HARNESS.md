@@ -323,10 +323,11 @@ releases a hold when its process exits. `cargo` builds `xtask` itself before
 it can take the lock, which is one reason `xtask` has no dependencies.
 
 **Places.** A run of the tests also takes one of a set number of places, so
-only that many run at once on a host, and the rest wait their turn. The gate,
-a merge, `prepare`, the nightly job, `score`, `gaps`, `record`, `roadmap
---details`, and `cargo xtask run` each take one, before the activity lock, so
-a run that waits for a place never holds up a bench. A nested `xtask`
+only that many run at once in a repository, across all its worktrees, and
+the rest wait their turn. The gate, a merge, `prepare`, the nightly job,
+`score`, `gaps`, `record`, `roadmap --details`, and `cargo xtask run` each
+take one, before the activity lock, so a run that waits for a place never
+holds up a bench. A nested `xtask`
 inherits its parent's place, and the kernel frees a place when its holder
 exits. The places live beside the activity lock.
 
@@ -937,7 +938,7 @@ passes. No scheduled work runs on GitHub.
 | Worker slots | 3 |
 | Measuring slots | 1 |
 | Merge slots | 1 |
-| Places for test runs | 2 per host |
+| Places for test runs | 2 per repository |
 | Dispatch period | 30 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |

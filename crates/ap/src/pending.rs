@@ -335,6 +335,8 @@ fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<
 /// through a symlink.
 struct Host {
     root: Option<OwnedFd>,
+    /// While `ap apply` changes your files, its journal.
+    journal: Option<std::cell::RefCell<Journal>>,
 }
 
 impl Host {
@@ -343,8 +345,14 @@ impl Host {
     fn new(root: &Path) -> io::Result<Host> {
         let name = CString::new(root.as_os_str().as_bytes()).map_err(io::Error::other)?;
         match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
-            Ok(root) => Ok(Host { root: Some(root) }),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host { root: None }),
+            Ok(root) => Ok(Host {
+                root: Some(root),
+                journal: None,
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Host {
+                root: None,
+                journal: None,
+            }),
             Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(
                 "the share's directory is now reached through a symlink",
             )),
@@ -474,13 +482,18 @@ impl Host {
                         _ => 0o755,
                     };
                     // SAFETY: `name` is NUL-terminated, and outlives the call.
-                    if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) } < 0 {
+                    let made = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) } == 0;
+                    if !made {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             return Err(error);
                         }
                     }
-                    openat2(dir.as_raw_fd(), &name, flags, BENEATH)?
+                    let opened = openat2(dir.as_raw_fd(), &name, flags, BENEATH)?;
+                    if made {
+                        self.note(at);
+                    }
+                    opened
                 }
                 // A symlink there is never followed, and says so.
                 Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {
@@ -642,23 +655,84 @@ impl Host {
         made
     }
 
-    /// Gives each directory the agent made where you had nothing the mode
+    /// Adds what you have at `path` now to the journal, as `ap apply`
+    /// lands it.
+    fn note(&self, path: &[u8]) {
+        if let Some(journal) = &self.journal
+            && let Ok(Some(now)) = self.stat(path)
+        {
+            journal.borrow_mut().add(path, &Base::of(&now));
+        }
+    }
+
+    /// Gives each directory that `ap apply` made, by its journal, the mode
     /// the agent gave it, deepest first, once nothing beneath it stays
-    /// pending. Until then it stays one you can write in, and what stays
-    /// pending keeps its record.
-    fn seal(&self, records: &Records, kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>) {
+    /// pending. Until then it stays one you can write in.
+    fn seal(
+        &self,
+        records: &Records,
+        landed: &BTreeMap<Vec<u8>, Option<Base>>,
+        kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>,
+    ) {
         for path in records.entries.keys().rev() {
             let View::Agent(Entry::Dir { mode, .. }) = records.view(path) else {
                 continue;
             };
-            if records.bases.get(path) != Some(&None)
-                || kept.keys().any(|other| beneath(other, path))
-                || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
+            let made = |metadata: &fs::Metadata| matches!(landed.get(path), Some(Some(base)) if base.ino == metadata.ino());
+            if kept.keys().any(|other| beneath(other, path))
+                || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir() && made(&m))
             {
                 continue;
             }
             if let Ok(Some(dir)) = self.dir(path) {
                 let _ = File::from(dir).set_permissions(fs::Permissions::from_mode(*mode));
+            }
+        }
+    }
+}
+
+/// The journal of what an `ap apply` landed, which it adds to.
+struct Journal {
+    file: File,
+    /// How much of the file holds whole records.
+    len: u64,
+}
+
+impl Journal {
+    /// Opens the journal at `path`, without the part of a record that an
+    /// `ap apply` stopped while it wrote.
+    fn open(path: &Path) -> io::Result<Journal> {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        let mut text = Vec::new();
+        io::Read::read_to_end(&mut file, &mut text)?;
+        let len = text
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
+        file.set_len(len as u64)?;
+        Ok(Journal {
+            file,
+            len: len as u64,
+        })
+    }
+
+    /// Adds a record that your file at `path` is `base`. A record it can't
+    /// write whole is left out, which only costs a later `ap apply` the
+    /// file's exemption.
+    fn add(&mut self, path: &[u8], base: &Base) {
+        use std::os::unix::fs::FileExt;
+        let mut out = Vec::new();
+        base_record(&mut out, path, Some(base));
+        match self.file.write_all_at(&out, self.len) {
+            Ok(()) => self.len += out.len() as u64,
+            Err(_) => {
+                let _ = self.file.set_len(self.len);
             }
         }
     }
@@ -781,7 +855,7 @@ impl Share<'_> {
         };
         for path in changed(&records, &host)? {
             match verdict(&records, &landed, &host, &ignore, repository, &path)? {
-                Verdict::History => continue,
+                Verdict::History | Verdict::Landed => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
                     continue;
@@ -847,7 +921,7 @@ impl Share<'_> {
         let mut changes = Vec::new();
         for path in changed(&records, &host)? {
             match verdict(&records, &landed, &host, &ignore, false, &path)? {
-                Verdict::History => {}
+                Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
                     let mut out = Vec::new();
@@ -861,13 +935,11 @@ impl Share<'_> {
                 Verdict::Change => changes.push(path),
             }
         }
-        // Each file this lands, as it lands it, so that one stopped before
-        // it rewrites the records doesn't find them changed on your side.
-        let mut journal = fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .mode(0o600)
-            .open(self.dir.join(LANDED))?;
+        // Each file and directory this lands, as it lands it, so that one
+        // stopped before it rewrites the records doesn't find them changed
+        // on your side.
+        let mut host = host;
+        host.journal = Some(Journal::open(&self.dir.join(LANDED))?.into());
         // From here on, a failure keeps its one file pending, and nothing
         // stops the rest, so the records always say what stays.
         let mut failed = BTreeMap::new();
@@ -900,13 +972,7 @@ impl Share<'_> {
                 _ => Ok(false),
             };
             match written {
-                Ok(true) => {
-                    if let Ok(Some(now)) = host.stat(path) {
-                        let mut out = Vec::new();
-                        base_record(&mut out, path, Some(&Base::of(&now)));
-                        let _ = io::Write::write_all(&mut journal, &out);
-                    }
-                }
+                Ok(true) => host.note(path),
                 Ok(false) => {}
                 Err(error) => {
                     failed.insert(path.clone(), error);
@@ -925,10 +991,12 @@ impl Share<'_> {
             let now = host.stat(&path).ok().flatten();
             kept.insert(path, Some(now.as_ref().map(Base::of)));
         }
-        host.seal(&records, &kept);
+        host.journal = None;
+        let landed = self.read(LANDED)?.bases;
+        host.seal(&records, &landed, &kept);
         applied.text = report.into_values().flatten().collect();
         applied.pending = kept.len();
-        self.keep(&records, &kept)?;
+        self.keep(&records, &landed, &kept)?;
         Ok(applied)
     }
 
@@ -937,6 +1005,7 @@ impl Share<'_> {
     fn keep(
         &self,
         records: &Records,
+        landed: &BTreeMap<Vec<u8>, Option<Base>>,
         kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>,
     ) -> io::Result<()> {
         let mut out = Vec::new();
@@ -971,24 +1040,43 @@ impl Share<'_> {
             }
             entry_record(&mut out, path, &entry);
         }
-        let new = self.dir.join(format!("{RECORDS}.new"));
+        self.replace(RECORDS, &out)?;
+        // The journal keeps only the directories it made above what stays,
+        // so a later `ap apply` gives them the agent's mode.
+        let mut journal = Vec::new();
+        for dir in dirs {
+            if let Some(Some(base)) = landed.get(dir) {
+                base_record(&mut journal, dir, Some(base));
+            }
+        }
+        match journal.is_empty() {
+            true => match fs::remove_file(self.dir.join(LANDED)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            },
+            false => self.replace(LANDED, &journal)?,
+        }
+        match prune_tree(&self.dir.join("tree"), b"", &files) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Share<'_> {
+    /// Replaces the file `name` in the share's pending directory with one
+    /// that holds `text`.
+    fn replace(&self, name: &str, text: &[u8]) -> io::Result<()> {
+        let new = self.dir.join(format!("{name}.new"));
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
             .open(&new)?;
-        io::Write::write_all(&mut file, &out)?;
+        io::Write::write_all(&mut file, text)?;
         file.sync_all()?;
-        fs::rename(&new, self.dir.join(RECORDS))?;
-        match fs::remove_file(self.dir.join(LANDED)) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-        match prune_tree(&self.dir.join("tree"), b"", &files) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        }
+        fs::rename(&new, self.dir.join(name))
     }
 }
 
@@ -1013,6 +1101,8 @@ enum Verdict {
         why: String,
         conflict: bool,
     },
+    /// An `ap apply` that was stopped landed it already.
+    Landed,
     Change,
 }
 
@@ -1056,10 +1146,10 @@ fn verdict(
     }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.
-    if !repository
-        && changed_on_your_side(records, host, path)?
-        && !landed_by_apply(landed, host, path)?
-    {
+    if !repository && changed_on_your_side(records, host, path)? {
+        if landed_by_apply(landed, host, path)? {
+            return Ok(Verdict::Landed);
+        }
         return Ok(Verdict::Skipped {
             why: "it changed on your side after the agent first changed it".to_owned(),
             conflict: true,
@@ -1559,7 +1649,10 @@ mod tests {
                 target: b"/".to_vec(),
             },
         );
-        let host = Host { root: None };
+        let host = Host {
+            root: None,
+            journal: None,
+        };
         let inside =
             |path: &[u8], target: &[u8]| leaves(&records, &host, path, target).unwrap().is_none();
         assert!(inside(b"latest", b"build/out"));

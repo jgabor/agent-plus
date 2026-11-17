@@ -561,6 +561,32 @@ fn a_directory_the_agent_made_read_only_still_gets_its_files() {
     assert_eq!(scratch.names(""), ["sealed"]);
 }
 
+/// Only a directory `ap apply` made gets the agent's mode, so a directory
+/// you made since keeps yours, and one that replaces your file gets it.
+#[test]
+fn only_a_directory_apply_makes_gets_the_agent_s_mode() {
+    let scratch = Scratch::new("sealed-yours");
+    let share = &scratch.share;
+    fs::write(share.join("was-a-file"), "yours\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    record(&pending, &base(share, "yours"));
+    dir(&pending, "yours", 0o555);
+    delete(share, &pending, "was-a-file");
+    dir(&pending, "was-a-file", 0o555);
+    write(&pending, "was-a-file/file", 0o644, b"b\n");
+    // You make `yours` after the run.
+    fs::create_dir(share.join("yours")).unwrap();
+    fs::set_permissions(share.join("yours"), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = scratch.ap(&["apply", &run]);
+
+    let modes = (mode(&share.join("yours")), mode(&share.join("was-a-file")));
+    writable(share);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(scratch.read("was-a-file/file"), "b\n");
+    assert_eq!(modes, (0o700, 0o555));
+}
+
 // spec(SHARE): Git-ignored files are neither shown nor applied.
 // spec(SHARE): `ap diff` and `ap apply` report how many files they skipped, and why.
 // spec(SHARE): Your `.gitignore` files in the share decide which files are git-ignored, and ones the agent wrote don't.
@@ -810,6 +836,61 @@ fn a_failed_write_in_a_read_only_directory_lands_later() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(fs::read(share.join("sealed/big")).unwrap(), large);
     assert_eq!(sealed, 0o555);
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
+/// A journal whose last record an `ap apply` was stopped while writing is
+/// read without it, and added to after its last whole record, so that the
+/// next `ap apply`, stopped too, leaves one the one after can read.
+#[test]
+fn a_journal_cut_short_is_read_and_added_to() {
+    use std::os::unix::process::ExitStatusExt;
+    let scratch = Scratch::new("journal-torn");
+    let share = &scratch.share;
+    let (run, pending) = scratch.run("notes", 1);
+    let large = vec![b'x'; 1 << 20];
+    write(&pending, "a", 0o644, b"a\n");
+    write(&pending, "big", 0o644, &large);
+    fs::write(pending.join("landed"), "BASE \"gone\" none\nBASE \"a").unwrap();
+
+    let mut command = scratch.command(&["apply", &run]);
+    limit_file_size(&mut command, libc::SIG_DFL);
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.signal(), Some(libc::SIGXFSZ));
+    for name in scratch.names("") {
+        if name != "a" {
+            fs::remove_file(share.join(name)).unwrap();
+        }
+    }
+    let output = scratch.ap(&["apply", &run]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(scratch.read("a"), "a\n");
+    assert_eq!(fs::read(share.join("big")).unwrap(), large);
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
+/// A file a stopped `ap apply` landed is neither read nor written again,
+/// even one the agent left so that you can't read it.
+#[test]
+fn a_file_a_stopped_apply_landed_is_left_as_it_is() {
+    let scratch = Scratch::new("journal-unreadable");
+    let share = &scratch.share;
+    fs::write(share.join("a"), "old\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    change(share, &pending, "a", 0o000, b"the agent's\n");
+    // What the stopped `ap apply` did, and the journal it left.
+    fs::write(share.join("a"), "the agent's\n").unwrap();
+    fs::set_permissions(share.join("a"), fs::Permissions::from_mode(0o000)).unwrap();
+    fs::write(pending.join("landed"), format!("{}\n", base(share, "a"))).unwrap();
+
+    let output = scratch.ap(&["apply", &run]);
+
+    fs::set_permissions(share.join("a"), fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(scratch.read("a"), "the agent's\n");
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 

@@ -395,7 +395,7 @@ fn a_base_with_no_build_command_is_no_comparison() {
 fn a_base_whose_build_rejects_approve_is_no_comparison() {
     let old = BUILDS.replace(
         "    let asks",
-        "    if args.iter().any(|a| a.starts_with(\"--approve\")) {\n        return std::process::ExitCode::from(2);\n    }\n    let asks",
+        "    if args.iter().any(|a| a.starts_with(\"--approve\")) {\n        return std::process::ExitCode::from(2);\n    }\n    if args.len() == 2 {\n        return std::process::ExitCode::SUCCESS;\n    }\n    let asks",
     );
     let repo = Repo::with("build-old", BUILD_BUDGETS, &old, &[]);
     repo.plant(BUILDS);

@@ -20,9 +20,10 @@ const INHERITED: &str = "XTASK_ACTIVITY_HELD";
 /// Set to the lock directory on a command that runs in a place, so a nested
 /// `xtask` doesn't wait for a second one.
 const PLACE_INHERITED: &str = "XTASK_PLACE_HELD";
-/// How many runs of the tests share the machine at once. On 16 CPUs, three
-/// gates together finish no later than with no limit, and a fourth waits.
-const PLACES: usize = 3;
+/// How many runs of the tests share the machine at once. On 16 CPUs, gates
+/// three at a time failed their tests in 13 of 18 runs, and two at a time in
+/// none of 6.
+const PLACES: usize = 2;
 /// Replaces the number of places, so that a test needs few holders.
 const PLACES_OVERRIDE: &str = "XTASK_PLACES";
 

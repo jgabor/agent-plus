@@ -938,7 +938,7 @@ passes. No scheduled work runs on GitHub.
 | Worker slots | 3 |
 | Measuring slots | 1 |
 | Merge slots | 1 |
-| Places for test runs | 3 per repository |
+| Places for test runs | 2 per repository |
 | Dispatch period | 30 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |

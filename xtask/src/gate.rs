@@ -52,7 +52,7 @@ pub fn verdict(failed: &Failed) -> Verdict {
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::shared(&root)?;
+    let hold = lock::testing(&root)?;
     let (failed, _) = check(&root, &hold, None)?;
     Ok(verdict(&failed))
 }

@@ -11,6 +11,8 @@ use std::thread;
 use std::time::Duration;
 
 const HOLD_ENV: &str = "XTASK_ACTIVITY_HELD";
+const PLACE_ENV: &str = "XTASK_PLACE_HELD";
+const PLACES_ENV: &str = "XTASK_PLACES";
 /// Long enough for `xtask` to reach the lock. A slow machine can only make a
 /// check that something stays blocked pass, never fail.
 const WAIT: Duration = Duration::from_millis(400);
@@ -55,6 +57,8 @@ fn xtask(root: &Path, args: &[&str]) -> Command {
         .args(args)
         .current_dir(root)
         .env_remove(HOLD_ENV)
+        .env_remove(PLACE_ENV)
+        .env_remove(PLACES_ENV)
         .env_remove("CARGO_TARGET_DIR");
     command
 }
@@ -73,7 +77,13 @@ struct Holder {
 }
 
 fn start_holder(root: &Path) -> Holder {
+    start_holder_in(root, 2)
+}
+
+/// A holder in a host with this many places.
+fn start_holder_in(root: &Path, places: usize) -> Holder {
     let mut child = xtask(root, &["run", "sh", "-c", "echo held; read line"])
+        .env(PLACES_ENV, places.to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -296,6 +306,81 @@ fn run_passes_stdin_through() {
     let output = child.wait_with_output().unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
     assert_eq!(output.status.code(), Some(0));
+}
+
+/// `xtask run true` in a host with this many places.
+fn waiter(root: &Path, places: usize) -> Child {
+    xtask(root, &["run", "true"])
+        .env(PLACES_ENV, places.to_string())
+        .spawn()
+        .unwrap()
+}
+
+#[test]
+fn a_run_past_the_places_waits_for_one_to_free() {
+    let root = workspace("places-full");
+    let first = start_holder_in(&root, 2);
+    let second = start_holder_in(&root, 2);
+    assert_blocked_until_released(waiter(&root, 2), || second.finish());
+    first.finish();
+}
+
+#[test]
+fn a_killed_holder_frees_its_place() {
+    let root = workspace("place-killed");
+    let mut holder = start_holder_in(&root, 1);
+    assert_blocked_until_released(waiter(&root, 1), || {
+        holder.child.kill().unwrap();
+        holder.child.wait().unwrap();
+    });
+}
+
+#[test]
+fn a_nested_xtask_shares_its_parents_place() {
+    let root = workspace("place-nested");
+    let script = format!("exec timeout 20 {} run true", env!("CARGO_BIN_EXE_xtask"));
+    let output = xtask(&root, &["run", "sh", "-c", &script])
+        .env(PLACES_ENV, "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+/// Takes the lock within a while, or says that it couldn't.
+fn takes_within(file: &File, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if file.try_lock().is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// One waiting for a place holds nothing a bench needs, so the bench goes
+/// first once the holders are done, and the waiter goes after the bench.
+#[test]
+fn a_bench_does_not_wait_for_a_run_waiting_for_a_place() {
+    let root = workspace("place-bench");
+    let holder = start_holder_in(&root, 1);
+    let mut later = waiter(&root, 1);
+    thread::sleep(WAIT);
+    let pending = turnstile(&root);
+    assert!(takes_within(&pending, Duration::from_secs(30)));
+    holder.finish();
+    let bench = activity(&root);
+    assert!(
+        takes_within(&bench, Duration::from_secs(30)),
+        "the bench waited for a run that waits for a place"
+    );
+    thread::sleep(WAIT);
+    assert!(
+        later.try_wait().unwrap().is_none(),
+        "it ran during the bench"
+    );
+    drop((bench, pending));
+    assert!(later.wait().unwrap().success());
 }
 
 #[test]

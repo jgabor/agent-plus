@@ -25,6 +25,11 @@ impl Results {
 }
 
 pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
+    if !hold.has_place() {
+        return Err(Problem(
+            "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
+        ));
+    }
     let mut results = Results {
         by_test: HashMap::new(),
         all_passed: true,

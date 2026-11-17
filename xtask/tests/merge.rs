@@ -1619,6 +1619,42 @@ fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
     assert_merged(&repo, &output);
 }
 
+/// The timeout starts again once the merge has a place, so a merge that waits
+/// for one longer than the timeout still merges.
+#[test]
+fn the_wait_for_a_place_does_not_count_against_the_timeout() {
+    let repo = Repo::new("place-wait");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let place = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(directory.join("place-0.lock"))
+        .unwrap();
+    place.lock().unwrap();
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_PLACES", "1")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "15")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_secs(20));
+    if merge.try_wait().unwrap().is_some() {
+        let output = merge.wait_with_output().unwrap();
+        panic!(
+            "the merge didn't wait for the place:\n{}\n{}",
+            stdout(&output),
+            stderr(&output)
+        );
+    }
+    place.unlock().unwrap();
+    assert_merged(&repo, &merge.wait_with_output().unwrap());
+}
+
 /// A command that a merge starts, and that outlives its parent: it ignores
 /// hangups, and nothing waits for it. It writes its process id to `stray`.
 fn stray(repo: &Repo) -> String {

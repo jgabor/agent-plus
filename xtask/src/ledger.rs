@@ -179,7 +179,7 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
             "`record` describes a commit, so run it at the top of a git repository".to_string(),
         ));
     }
-    let hold = lock::shared(&root)?;
+    let hold = lock::testing(&root)?;
     let changed = changes(&root)?;
     if !changed.is_empty() {
         return Err(Problem(format!(

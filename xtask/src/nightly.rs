@@ -29,7 +29,7 @@ pub fn run() -> Result<Verdict, Problem> {
     // `main` with itself only measures it, which is why the bench comes first,
     // on the quietest machine.
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""))))];
-    let hold = lock::shared(&root)?;
+    let hold = lock::testing(&root)?;
     let (gated, score) = match gate::check(&root, &hold, None) {
         Ok((failed, score)) => (state(Ok(gate::verdict(&failed))), Some(score)),
         Err(problem) => (state(Err(problem)), None),

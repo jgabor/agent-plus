@@ -1555,10 +1555,10 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
 
 /// A PR that changes xtask is proven twice, and each proof gets the whole
 /// timeout, so the two together may take longer. The second hang ends 61
-/// seconds after the first one starts, and the merge holds the slot before
-/// that, so a timeout that both proofs shared would stop the merge at any
-/// load. The first proof keeps 45 seconds for its other work, which takes up
-/// to 40 on a loaded machine.
+/// seconds after the first one starts, and the merge reports that it holds
+/// the slot well before that, so a timeout that both proofs shared would stop
+/// the merge. The first proof keeps 45 seconds for its other work, which takes
+/// up to 40 on a loaded machine.
 #[test]
 fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
     let repo = changing(

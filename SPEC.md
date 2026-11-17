@@ -1515,6 +1515,9 @@ attributes, because those can run commands.
     Your `.gitignore` files in the share decide which files are
     git-ignored, and ones the agent wrote don't. `ap diff` counts them
     across every share.
+  - `ap apply` makes a directory only to hold what it applies, and gives
+    each file it writes and each directory it makes the permission bits
+    the agent gave it.
 - `ap apply` and `ap discard` fail while the run is active. After `ap apply`,
   the only changes still pending are files it couldn't apply, because they
   changed on your side too or a write failed, and `ap discard` removes them.

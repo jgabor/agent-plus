@@ -8,6 +8,7 @@ use std::time::Duration;
 use ap::boot;
 
 mod commands {
+    pub mod apply;
     pub mod build;
     pub mod diff;
     pub mod discard;
@@ -36,6 +37,7 @@ const USAGE: &str = "usage: ap --version
        ap exec run command [arg...]
        ap stop run
        ap diff agent|run
+       ap apply agent|run
        ap discard agent|run
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -137,6 +139,11 @@ fn main() -> ExitCode {
         && let Some(name) = commands::diff::parse(&args[1..])
     {
         return ExitCode::from(commands::diff::run(&name));
+    }
+    if args.first().is_some_and(|command| command == "apply")
+        && let Some(name) = commands::diff::parse(&args[1..])
+    {
+        return ExitCode::from(commands::apply::run(&name));
     }
     if args.first().is_some_and(|command| command == "discard")
         && let Some(name) = commands::diff::parse(&args[1..])

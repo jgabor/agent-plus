@@ -7,8 +7,12 @@
 //! keeps its log, until `ap rm` of that name runs again, which then removes
 //! the log even though the agent is gone.
 //!
-//! An agent has no persisted state, kept repositories, or pending changes
-//! yet, so there's nothing else to remove, and nothing to refuse for.
+//! It refuses, and removes nothing, while any run of the agent has pending
+//! changes, as the SHARE section says, so they can still be found by the
+//! agent's name. That holds for the runs an earlier `ap rm` left, too.
+//!
+//! An agent has no persisted state or kept repositories yet, so there's
+//! nothing else to remove.
 
 use std::ffi::OsString;
 
@@ -45,16 +49,39 @@ fn remove(name: &str) -> Result<(), String> {
     if !::store::valid_name(name) {
         return Err(unknown());
     }
+    let runs = ::store::Runs::new(&root);
+    let pending = pending_runs(&runs, name)
+        .map_err(|error| format!("ap: can't read the runs of {name}: {error}"))?;
+    if !pending.is_empty() {
+        return Err(format!(
+            "ap: agent {name} has pending changes, so nothing is removed. \
+             Apply or discard them first:\n{}",
+            pending.join("\n")
+        ));
+    }
     let removed = ::store::Agents::new(&root)
         .remove(name)
         .map_err(|error| format!("ap: {error}"))?;
     // An agent removed while it ran leaves that run's log, which goes now.
-    let runs = remove_runs(&::store::Runs::new(&root), name)
+    let runs = remove_runs(&runs, name)
         .map_err(|error| format!("ap: can't remove the runs of {name}: {error}"))?;
     match removed || runs > 0 {
         true => Ok(()),
         false => Err(unknown()),
     }
+}
+
+/// The names of the runs of the agent `name` that have pending changes,
+/// newest first.
+fn pending_runs(runs: &::store::Runs, name: &str) -> std::io::Result<Vec<String>> {
+    let mut pending = Vec::new();
+    for run in runs.list()? {
+        if run.agent == name && runs.has_pending(&run.name)? {
+            pending.push(run);
+        }
+    }
+    pending.sort_by(|a, b| b.started.cmp(&a.started).then(a.name.cmp(&b.name)));
+    Ok(pending.into_iter().map(|run| run.name).collect())
 }
 
 /// Removes the finished runs of the agent `name`, and their logs, and

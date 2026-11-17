@@ -2,8 +2,9 @@
 //! from the store, and frees the layers no other agent uses. The approval
 //! stays, because it belongs to the Agentfile's path.
 //!
-//! An agent has no persisted state, runs, kept repositories, or pending
-//! changes yet, so there's nothing else to remove and nothing to refuse for.
+//! It refuses while a run of the agent has pending changes, as the SHARE
+//! section says. An agent has no persisted state or kept repositories yet,
+//! so there's nothing else to remove.
 
 mod common;
 
@@ -215,6 +216,79 @@ fn rm_deletes_the_logs_of_finished_runs_and_keeps_an_active_run_s() {
     let output = scratch.ap(&["rm", "notes"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(runs.log(&other.name).unwrap().is_some());
+}
+
+/// Records a finished run of `agent` with one copy-on-write share, and
+/// returns its name and the share's pending directory. The share has no
+/// changes yet.
+fn run_sharing(scratch: &Scratch, agent: &str, started: u128) -> (String, PathBuf) {
+    let runs = Runs::new(scratch.store());
+    let run = runs.create(agent, started).unwrap();
+    runs.create_pending(&run.name).unwrap();
+    let pending = runs.create_pending_share(&run.name, &scratch.root).unwrap();
+    fs::create_dir(pending.join("tree")).unwrap();
+    fs::write(pending.join("records"), "").unwrap();
+    (run.name, pending)
+}
+
+// spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+#[test]
+fn rm_refuses_while_a_run_of_the_agent_has_pending_changes() {
+    let scratch = Scratch::new("pending");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let runs = Runs::new(scratch.store());
+    let (older, _) = run_sharing(&scratch, "notes", 1);
+    let (newer, pending) = run_sharing(&scratch, "notes", 2);
+    fs::write(pending.join("records"), "DELETE \"data\"\n").unwrap();
+    let (other, other_pending) = run_sharing(&scratch, "other", 3);
+    fs::write(other_pending.join("records"), "DELETE \"data\"\n").unwrap();
+
+    let output = scratch.ap(&["rm", "notes"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "ap: agent notes has pending changes, so nothing is removed. Apply or discard them first:\n{newer}\n"
+        )
+    );
+    // Nothing is removed: not the agent, its runs, or their changes.
+    assert_eq!(
+        scratch.ok_in(&scratch.root, &["ls"]),
+        format!("notes {}\n", dir.display())
+    );
+    assert!(runs.get(&older).unwrap().is_some());
+    assert!(runs.get(&newer).unwrap().is_some());
+    assert!(runs.has_pending(&newer).unwrap());
+
+    // Once the changes are gone, and another agent's don't count, it goes.
+    scratch.ok_in(&scratch.root, &["discard", "notes"]);
+    scratch.ok_in(&scratch.root, &["rm", "notes"]);
+    assert_eq!(scratch.ok_in(&scratch.root, &["ls"]), "");
+    assert!(runs.has_pending(&other).unwrap());
+}
+
+// spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+#[test]
+fn rm_refuses_for_pending_changes_after_the_agent_is_gone() {
+    let scratch = Scratch::new("pending-gone");
+    let runs = Runs::new(scratch.store());
+    let (run, pending) = run_sharing(&scratch, "notes", 1);
+    fs::write(pending.join("records"), "DELETE \"data\"\n").unwrap();
+
+    let output = scratch.ap(&["rm", "notes"]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stderr(&output),
+        format!(
+            "ap: agent notes has pending changes, so nothing is removed. Apply or discard them first:\n{run}\n"
+        )
+    );
+    assert!(runs.get(&run).unwrap().is_some());
+    assert!(runs.has_pending(&run).unwrap());
 }
 
 #[test]

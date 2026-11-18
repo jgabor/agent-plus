@@ -179,10 +179,10 @@ fn merge_if_armed(
         if gh.pull_request(number)?.changes_requested {
             return Ok(Some("a review of it requested changes".to_string()));
         }
-        if let Err(problem) = gh.merge_pr(number, head, &slot) {
-            if gh.armed(number)?.state != "MERGED" {
-                return Err(problem);
-            }
+        if let Err(problem) = gh.merge_pr(number, head, &slot)
+            && gh.armed(number)?.state != "MERGED"
+        {
+            return Err(problem);
         }
         println!("refresh: PR {number} merged at {head}");
     }

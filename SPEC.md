@@ -533,6 +533,8 @@ agents it may call. [Grants](#grants) specifies `ap inspect --grants`, and
 `ap rm <agent>` removes an agent and its persisted state. [Build](#build)
 says which layers it frees, and [SHARE](#share) says when it refuses.
 When it refuses, it lists the runs with pending changes, newest first.
+`ap rm --force` keeps an active run's pending changes, as it keeps the
+run's log.
 
 ### ap run
 

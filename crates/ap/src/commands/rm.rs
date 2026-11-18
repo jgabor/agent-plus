@@ -10,23 +10,35 @@
 //! It refuses, and removes nothing, while any run of the agent has pending
 //! changes, as the SHARE section says, so they can still be found by the
 //! agent's name. That holds for the runs an earlier `ap rm` left, too.
+//! `ap rm --force` deletes the pending changes of the finished runs it
+//! removes. An active run keeps them, as it keeps its log, because its
+//! share server may still be writing them.
 //!
 //! An agent has no persisted state or kept repositories yet, so there's
 //! nothing else to remove.
 
 use std::ffi::OsString;
 
-/// Reads `ap rm`'s arguments: one agent's name. Anything else is bad usage.
-pub fn parse(args: &[OsString]) -> Option<String> {
+/// Reads `ap rm`'s arguments: an optional `--force`, then one agent's name,
+/// and returns the name and whether `--force` was given. Anything else is
+/// bad usage.
+pub fn parse(args: &[OsString]) -> Option<(String, bool)> {
+    let (force, args) = match args {
+        [flag, rest @ ..] if flag == "--force" => (true, rest),
+        _ => (false, args),
+    };
     match args {
-        [name] if !name.as_encoded_bytes().starts_with(b"-") => Some(name.to_str()?.to_string()),
+        [name] if !name.as_encoded_bytes().starts_with(b"-") => {
+            Some((name.to_str()?.to_string(), force))
+        }
         _ => None,
     }
 }
 
-/// Removes the agent, and returns the exit status.
-pub fn run(name: &str) -> u8 {
-    match remove(name) {
+/// Removes the agent, and returns the exit status. With `force`, it removes
+/// the agent even while its runs have pending changes, and deletes them.
+pub fn run(name: &str, force: bool) -> u8 {
+    match remove(name, force) {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("{message}");
@@ -35,7 +47,7 @@ pub fn run(name: &str) -> u8 {
     }
 }
 
-fn remove(name: &str) -> Result<(), String> {
+fn remove(name: &str, force: bool) -> Result<(), String> {
     let home = std::env::var_os("HOME");
     let root = ap::store::default_root(
         std::env::var_os("XDG_DATA_HOME").as_deref(),
@@ -50,8 +62,11 @@ fn remove(name: &str) -> Result<(), String> {
         return Err(unknown());
     }
     let runs = ::store::Runs::new(&root);
-    let pending = pending_runs(&runs, name)
-        .map_err(|error| format!("ap: can't read the runs of {name}: {error}"))?;
+    let pending = match force {
+        true => Vec::new(),
+        false => pending_runs(&runs, name)
+            .map_err(|error| format!("ap: can't read the runs of {name}: {error}"))?,
+    };
     if !pending.is_empty() {
         return Err(format!(
             "ap: agent {name} has pending changes, so nothing is removed. \
@@ -84,12 +99,14 @@ fn pending_runs(runs: &::store::Runs, name: &str) -> std::io::Result<Vec<String>
     Ok(pending.into_iter().map(|run| run.name).collect())
 }
 
-/// Removes the finished runs of the agent `name`, and their logs, and
-/// returns how many it removed.
+/// Removes the finished runs of the agent `name`, their logs, and their
+/// pending changes, and returns how many it removed. The changes go first,
+/// so a failure leaves them findable by the run's name.
 fn remove_runs(runs: &::store::Runs, name: &str) -> std::io::Result<usize> {
     let mut removed = 0;
     for run in runs.list()? {
         if run.agent == name && !runs.active(&run.name)? {
+            runs.discard(&run.name)?;
             runs.remove(&run.name)?;
             removed += 1;
         }

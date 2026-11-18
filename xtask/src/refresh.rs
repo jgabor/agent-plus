@@ -175,6 +175,10 @@ fn merge_if_armed(
         if now.head != head {
             return Ok(Some(format!("its head moved from {head} to {}", now.head)));
         }
+        // A green from an earlier proof can predate the review.
+        if gh.pull_request(number)?.changes_requested {
+            return Ok(Some("a review of it requested changes".to_string()));
+        }
         if let Err(problem) = gh.merge_pr(number, head, &slot) {
             if gh.armed(number)?.state != "MERGED" {
                 return Err(problem);

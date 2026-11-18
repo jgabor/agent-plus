@@ -3048,6 +3048,89 @@ fn a_refresh_merges_no_pr_whose_head_moved() {
     assert!(!calls.contains("/labels/"), "{calls}");
 }
 
+/// `prepare` refuses a PR with a standing change request, so a green from
+/// before the review doesn't merge it either.
+#[test]
+fn a_refresh_merges_no_green_pr_that_a_review_asked_to_change() {
+    let repo = Repo::new("refresh-changes-requested");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("requested changes"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+}
+
+/// Each merge moves `main`, so a PR that was green on the old one is proven
+/// again before it merges.
+#[test]
+fn a_refresh_proves_a_pr_that_an_earlier_merge_left_behind() {
+    let repo = Repo::new("refresh-left-behind");
+    repo.other_pr(
+        4,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    let (nine, four) = (repo.head(), repo.head_of("8-y"));
+    repo.set_green(&nine);
+    repo.set_green(&four);
+    repo.set_open_prs(&[
+        listed(4, "8-y", &four, 8, false),
+        listed(9, BRANCH, &nine, 7, false),
+    ]);
+    repo.set_land_needed(&[7, 8]);
+    repo.git(&["checkout", "-q", "main"]);
+
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("RUN_ON", "gh pr merge 4")
+        .env(
+            "RUN_COMMAND",
+            repo.update_ref("refs/heads/main", "refs/heads/8-y"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(4, &four)), "{calls}");
+    assert!(
+        stdout(&output).contains("refresh: proving PR 9 (1 of 1)\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert_ne!(repo.head(), nine);
+    assert_eq!(repo.origin(&["rev-parse", "refs/heads/7-x~2"]), four);
+    assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+}
+
 /// A proof that fails only because `main` moved says nothing about the
 /// change, so the PR keeps waiting for the next run.
 #[test]

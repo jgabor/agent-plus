@@ -759,10 +759,11 @@ A PR that waits for the owner is approved when the owner arms auto-merge on
 it, or clicks Merge on it while it is behind `main`, which arms auto-merge.
 Nothing proves a waiting PR before that, so until then it shows as behind.
 
-A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, and on
-every push to `main`, one run at a time, with the workflow and `xtask` of
-`main`. GitHub-hosted x86_64 runners can run the VMM, once a udev rule opens
-KVM and a systemd user session is started.
+A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
+an issue gets `land-needed`, and on every push to `main`, one run at a time,
+with the workflow and `xtask` of `main`. GitHub-hosted x86_64 runners can
+run the VMM, once a udev rule opens KVM and a systemd user session is
+started.
 
 1. Find each open PR whose issue has `land-needed` and whose auto-merge is
    armed, oldest first. Every other PR, and its status, is left alone.
@@ -775,8 +776,9 @@ KVM and a systemd user session is started.
    record keeps the budget values and reason of the record at the tip of the
    branch, and `prepare` fails if the tip has none.
 4. Once a PR's head has `success`, `refresh` squashes it, if its auto-merge is
-   still armed and its head is the one that was proven. A PR whose head moved,
-   or whose auto-merge was turned off, stays open. After the squash, `refresh`
+   still armed, its head is the one that was proven, and no review requests
+   changes. Any other PR stays open. A merge moves `main`, so the PRs after
+   it are checked against the new `main`. After the squash, `refresh`
    removes `land-needed` from the PR and its issue, because GitHub starts no
    workflow for a merge made with the workflow's own token.
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`

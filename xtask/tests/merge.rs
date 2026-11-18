@@ -1145,10 +1145,12 @@ fn a_lowered_journey_count_needs_the_owner() {
     assert_prepared(&repo, &repo.prepare());
 }
 
-/// The base build is fast and the candidate sleeps, in the same run.
+/// The base build is fast and the candidate sleeps, in the same run. The
+/// sleep is the target, so the candidate always misses it, and the base has
+/// all of it to spare.
 #[test]
 fn a_lowered_budget_count_needs_the_owner() {
-    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 100.0\n";
+    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 150.0\n";
     let base = record(0, 1, "version_ms = 1\n");
     let repo = Repo::with(
         "lower-budget",
@@ -1190,7 +1192,7 @@ fn a_target_both_builds_miss_in_one_run_lowers_no_count() {
 /// and the PR needs no `Hill: none` line.
 #[test]
 fn a_budget_the_base_cant_be_measured_for_isnt_met_for_it() {
-    let budgets = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 150.0\nband_pct = 10.0\nband_abs = 25.0\n";
+    let budgets = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 10000.0\nband_pct = 10.0\nband_abs = 25.0\n";
     let base = record(0, 1, "boot_ms = 1\n");
     let repo = Repo::with(
         "unmeasured-base",

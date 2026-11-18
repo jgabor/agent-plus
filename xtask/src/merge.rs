@@ -23,6 +23,9 @@ use std::thread;
 use std::time::Duration;
 
 const AUTO_MERGE: &str = "auto:merge";
+/// Why a proof failed when the change may be fine.
+pub const MAIN_MOVED: &str =
+    "`main` moved during the merge, so this head wasn't tested on it. Run it again";
 /// The one status that `main` requires.
 pub const GATE: &str = "xtask/gate";
 const MAIN: &str = "refs/remotes/origin/main";
@@ -633,10 +636,7 @@ fn changed_during_proof(
         }
     }
     if remote_commit(root, "refs/heads/main")?.as_deref() != Some(main) {
-        return Ok(Some(
-            "`main` moved during the merge, so this head wasn't tested on it. Run it again"
-                .to_string(),
-        ));
+        return Ok(Some(MAIN_MOVED.to_string()));
     }
     Ok(None)
 }

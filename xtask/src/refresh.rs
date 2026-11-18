@@ -1,9 +1,9 @@
-//! `cargo xtask refresh`: proves each `land-needed` PR again on the newest
-//! `main`, so that a merge button is never pressed on a stale proof.
+//! `cargo xtask refresh`: proves each `land-needed` PR that the owner approved
+//! by arming auto-merge on the newest `main`, and merges it.
 
 use crate::forge::{Gh, OpenPr};
 use crate::work::LAND_NEEDED;
-use crate::{Problem, Verdict, merge, workspace};
+use crate::{Problem, Verdict, lock, merge, workspace};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::OpenOptions;
@@ -27,15 +27,16 @@ pub fn run() -> Result<Verdict, Problem> {
         .map(|issue| issue.number)
         .collect();
     let mut prs = gh.open_prs()?;
-    prs.retain(|pr| pr.closing_issues.iter().any(|n| waiting.contains(n)));
+    prs.retain(|pr| pr.auto_merge && pr.closing_issues.iter().any(|n| waiting.contains(n)));
     // GitHub numbers PRs in the order they were opened.
     prs.sort_by_key(|pr| pr.number);
 
     let actions = env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
     let mut verdict = Verdict::Pass;
     let mut rows = Vec::new();
-    let mut stale = Vec::new();
-    // Every stale PR goes yellow first, because the proofs run one at a time.
+    let mut ready = Vec::new();
+    let mut count = 0;
+    // Every PR to prove goes yellow first, because the proofs run one at a time.
     for pr in prs {
         let mut row = Row {
             number: pr.number,
@@ -43,15 +44,13 @@ pub fn run() -> Result<Verdict, Problem> {
             said: String::new(),
             took: None,
         };
-        match stale_head(&root, &pr) {
-            Ok(None) => {
-                println!("refresh: PR {} is up to date", pr.number);
-                row.verdict = "up to date";
+        match needs_proof(&root, &gh, &pr) {
+            Ok((head, true)) => {
+                merge::post_gate(&gh, &head, "pending", &queued(count));
+                count += 1;
+                ready.push((rows.len(), pr));
             }
-            Ok(Some(head)) => {
-                merge::post_gate(&gh, &head, "pending", &queued(stale.len()));
-                stale.push((rows.len(), pr));
-            }
+            Ok((_, false)) => ready.push((rows.len(), pr)),
             Err(Problem(message)) => {
                 eprintln!("refresh: PR {}: {message}", pr.number);
                 row.said = message;
@@ -60,42 +59,86 @@ pub fn run() -> Result<Verdict, Problem> {
         }
         rows.push(row);
     }
-    let count = stale.len();
-    for (i, (at, pr)) in stale.iter().enumerate() {
-        let place = format!("PR {} ({} of {count})", pr.number, i + 1);
-        println!("refresh: proving {place}");
-        if actions {
-            println!("::group::{place}: {}", escaped(&pr.title));
-        }
-        let started = Instant::now();
-        let proven = prepare(&root, pr.number);
-        if actions {
-            println!("::endgroup::");
-        }
+    let mut proofs = 0;
+    for (at, pr) in &ready {
         let row = &mut rows[*at];
-        row.took = Some(started.elapsed());
-        let proven = proven?;
-        let head = current_head(&root, pr);
+        // A merge earlier in this run can leave this PR behind.
+        let (seen, stale) = match needs_proof(&root, &gh, pr) {
+            Ok(seen) => seen,
+            Err(Problem(message)) => {
+                eprintln!("refresh: PR {}: {message}", pr.number);
+                row.said = message;
+                verdict = Verdict::Fail;
+                continue;
+            }
+        };
+        let mut proven = true;
+        let mut head = seen;
+        if stale {
+            proofs += 1;
+            count = count.max(proofs);
+            let place = format!("PR {} ({proofs} of {count})", pr.number);
+            println!("refresh: proving {place}");
+            if actions {
+                println!("::group::{place}: {}", escaped(&pr.title));
+            }
+            let started = Instant::now();
+            let prepared = prepare(&root, pr.number);
+            if actions {
+                println!("::endgroup::");
+            }
+            row.took = Some(started.elapsed());
+            proven = prepared?;
+            head = current_head(&root, pr);
+        }
         let result = gh.described_status(&head, merge::GATE);
         if let Ok(Some((state, said))) = &result {
             row.said.clone_from(said);
             if state == "success" {
                 row.verdict = "proven";
+                if !proven {
+                    verdict = Verdict::Fail;
+                }
+                match merge_if_armed(&root, &gh, pr, &head) {
+                    Ok(None) => row.verdict = "merged",
+                    Ok(Some(why)) => {
+                        println!("refresh: PR {} stays open, because {why}", pr.number)
+                    }
+                    Err(Problem(message)) => {
+                        eprintln!("refresh: PR {} wasn't merged: {message}", pr.number);
+                        verdict = Verdict::Fail;
+                    }
+                }
+                continue;
             }
         }
         if proven {
+            // Someone pushed after the proof, so its green is on an older head.
             row.verdict = "proven";
             continue;
         }
         eprintln!("refresh: PR {} wasn't proven", pr.number);
-        // A `prepare` that fails a PR says why on its head, and one that was
-        // stopped after its green did prove the PR. One that was stopped
-        // earlier, or that refused the PR before the fetch, left no result.
-        if !matches!(&result, Ok(Some((state, _))) if state == "failure" || state == "success") {
-            merge::post_gate(&gh, &head, "failure", NOT_PROVEN);
-            row.said = NOT_PROVEN.to_string();
-        }
         verdict = Verdict::Fail;
+        // A `prepare` that fails a PR says why on its head. One that was
+        // stopped early, or that refused the PR before the fetch, left no result.
+        let why = match &result {
+            Ok(Some((state, said))) if state == "failure" => said.clone(),
+            _ => {
+                merge::post_gate(&gh, &head, "failure", NOT_PROVEN);
+                row.said = NOT_PROVEN.to_string();
+                NOT_PROVEN.to_string()
+            }
+        };
+        if why == merge::MAIN_MOVED {
+            println!(
+                "refresh: `main` moved during the proof of PR {}, so the next run proves it again",
+                pr.number
+            );
+            continue;
+        }
+        if let Err(Problem(message)) = hand_back(&gh, pr, &why, &waiting) {
+            eprintln!("refresh: PR {}: {message}", pr.number);
+        }
     }
     if actions && let Ok(path) = env::var("GITHUB_STEP_SUMMARY") {
         let appended = OpenOptions::new()
@@ -108,6 +151,67 @@ pub fn run() -> Result<Verdict, Problem> {
         }
     }
     Ok(verdict)
+}
+
+/// Squashes a proven PR, if the owner's approval still stands for the head
+/// that was proven. Returns why it left the PR open, if it did.
+fn merge_if_armed(
+    root: &Path,
+    gh: &Gh,
+    pr: &OpenPr,
+    head: &str,
+) -> Result<Option<String>, Problem> {
+    let number = pr.number;
+    let slot = lock::merge_slot(root)?;
+    let now = gh.armed(number)?;
+    // GitHub's own auto-merge can get there first.
+    if now.state != "MERGED" {
+        if now.state != "OPEN" {
+            return Ok(Some(format!("it is {}", now.state)));
+        }
+        if !now.auto_merge {
+            return Ok(Some("its auto-merge was turned off".to_string()));
+        }
+        if now.head != head {
+            return Ok(Some(format!("its head moved from {head} to {}", now.head)));
+        }
+        // A green from an earlier proof can predate the review.
+        if gh.pull_request(number)?.changes_requested {
+            return Ok(Some("a review of it requested changes".to_string()));
+        }
+        if let Err(problem) = gh.merge_pr(number, head, &slot)
+            && gh.armed(number)?.state != "MERGED"
+        {
+            return Err(problem);
+        }
+        println!("refresh: PR {number} merged at {head}");
+    }
+    // A merge with the workflow's token starts no `mirror-labels` run.
+    remove_land_needed(gh, pr)?;
+    Ok(None)
+}
+
+/// Tells the PR why it failed, and lets the dispatcher restart its issue.
+/// Its auto-merge stays armed, so the owner's approval stands for the fix.
+fn hand_back(gh: &Gh, pr: &OpenPr, why: &str, waiting: &BTreeSet<u64>) -> Result<(), Problem> {
+    let body = format!(
+        "The refresh couldn't prove this PR: {why}\n\nIts issue no longer has `{LAND_NEEDED}`, so a worker takes it up again. Auto-merge stays armed, and the refresh merges the PR once its fix is proven."
+    );
+    gh.comment_on_pr(pr.number, &body)?;
+    let issues = pr.closing_issues.iter().filter(|n| waiting.contains(n));
+    for issue in issues {
+        gh.remove_label(*issue, LAND_NEEDED)?;
+    }
+    gh.remove_label(pr.number, LAND_NEEDED)
+}
+
+/// From the PR and every issue it closes, which `remove_label` allows when
+/// one has no such label.
+fn remove_land_needed(gh: &Gh, pr: &OpenPr) -> Result<(), Problem> {
+    for number in pr.closing_issues.iter().chain([&pr.number]) {
+        gh.remove_label(*number, LAND_NEEDED)?;
+    }
+    Ok(())
 }
 
 const NOT_PROVEN: &str = "Not proven";
@@ -172,11 +276,12 @@ fn queued(ahead: usize) -> String {
     }
 }
 
-/// The head to mark, if this PR isn't on the newest `main`. A fork's branch
-/// isn't here to compare, and `prepare` refuses it anyway.
-fn stale_head(root: &Path, pr: &OpenPr) -> Result<Option<String>, Problem> {
+/// The PR's head, and whether it needs a proof: when it is behind the newest
+/// `main`, or has no green. A fork's branch isn't here to compare, and
+/// `prepare` refuses it anyway.
+fn needs_proof(root: &Path, gh: &Gh, pr: &OpenPr) -> Result<(String, bool), Problem> {
     if pr.from_fork {
-        return Ok(Some(pr.head.clone()));
+        return Ok((pr.head.clone(), true));
     }
     let fetched = merge::fetch(root, &pr.head_ref)?;
     let args = [
@@ -185,7 +290,9 @@ fn stale_head(root: &Path, pr: &OpenPr) -> Result<Option<String>, Problem> {
         &fetched.main,
         &fetched.branch,
     ];
-    Ok((merge::exit_code(root, &args)? != 0).then_some(fetched.branch))
+    let behind = merge::exit_code(root, &args)? != 0;
+    let green = !behind && gh.status_passed(&fetched.branch, merge::GATE)?;
+    Ok((fetched.branch, !green))
 }
 
 /// A `prepare` that failed may have pushed a new head before it stopped.

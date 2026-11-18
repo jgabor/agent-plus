@@ -647,7 +647,7 @@ fn the_roadmap_reads_github_and_writes_nothing() {
         repo.calls(),
         [
             "issue list --state all --limit 2000 --json number,state,title,body,labels,parent,url",
-            "pr list --state open --limit 1000 --json number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences",
+            "pr list --state open --limit 1000 --json number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences,autoMergeRequest",
         ]
     );
 }

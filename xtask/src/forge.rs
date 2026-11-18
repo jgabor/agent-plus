@@ -81,6 +81,15 @@ pub struct OpenPr {
     pub head_ref: String,
     pub head: String,
     pub closing_issues: Vec<u64>,
+    /// Whether the owner armed auto-merge, which approves a waiting PR.
+    pub auto_merge: bool,
+}
+
+/// What a merge by `refresh` checks just before the squash.
+pub struct Armed {
+    pub state: String,
+    pub head: String,
+    pub auto_merge: bool,
 }
 
 pub trait Forge {
@@ -281,7 +290,7 @@ impl Gh {
             "--limit",
             &limit,
             "--json",
-            "number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences",
+            "number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences,autoMergeRequest",
         ];
         let value = self.json(&args)?;
         let prs = value.as_arr().ok_or_else(|| unexpected("gh pr list"))?;
@@ -388,6 +397,24 @@ impl Gh {
             .rsplit_once("/pull/")
             .and_then(|(_, number)| number.parse().ok())
             .ok_or_else(|| unexpected("gh pr create"))
+    }
+
+    pub fn armed(&self, number: u64) -> Result<Armed, Problem> {
+        let value = self.json(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--json",
+            "state,headRefOid,autoMergeRequest",
+        ])?;
+        let read = || {
+            Some(Armed {
+                state: value.get("state")?.as_str()?.to_string(),
+                head: value.get("headRefOid")?.as_str()?.to_string(),
+                auto_merge: is_armed(&value),
+            })
+        };
+        read().ok_or_else(|| unexpected("gh pr view"))
     }
 
     /// Whether this status is a success on this commit.
@@ -657,7 +684,15 @@ fn read_open_pr(value: &Json) -> Option<OpenPr> {
         head_ref: value.get("headRefName")?.as_str()?.to_string(),
         head: value.get("headRefOid")?.as_str()?.to_string(),
         closing_issues: closing_here(value)?,
+        auto_merge: is_armed(value),
     })
+}
+
+/// GitHub gives `null` when auto-merge isn't armed.
+fn is_armed(value: &Json) -> bool {
+    value
+        .get("autoMergeRequest")
+        .is_some_and(|request| *request != Json::Null)
 }
 
 fn read_pull_request(value: &Json) -> Option<PullRequest> {

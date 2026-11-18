@@ -2,10 +2,10 @@
 
 use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, base, floors, ledger, lock, score, testrun};
-use std::io;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use crate::{Problem, Verdict, base, bench, floors, ledger, lock, score, testrun, toml};
+use std::path::{Path, PathBuf};
+use std::process::{self, Command, Stdio};
+use std::{fs, io};
 
 struct Check {
     name: &'static str,
@@ -78,7 +78,14 @@ pub fn check(
     if let Some(merging) = merging {
         (merging.starting)("tests");
     }
+    let kernel = Kernel::find(root)?;
+    if let Some(kernel) = &kernel {
+        kernel.copy(&kernel.store, &kernel.tree);
+    }
     let results = testrun::run(root, hold)?;
+    if let Some(kernel) = &kernel {
+        kernel.copy(&kernel.tree, &kernel.store);
+    }
     record("tests", results.all_passed(), &mut failed);
     let score = score::compute(root, &results)?;
     score::report_findings(&score);
@@ -122,6 +129,57 @@ fn compare_with_base(
     }
     record("hills", score.proven >= floor || allowed, failed);
     Ok(())
+}
+
+/// The pinned guest kernel, which t1's tests fetch into the tree. A store in
+/// the shared git directory keeps it, so that a fresh tree needn't fetch it.
+struct Kernel {
+    digest: String,
+    tree: PathBuf,
+    store: PathBuf,
+}
+
+impl Kernel {
+    /// `None` when the workspace pins no digest. A pin that t1 can't read
+    /// fails its tests, so the gate needn't say so.
+    fn find(root: &Path) -> Result<Option<Kernel>, Problem> {
+        let text = fs::read_to_string(root.join("guest/kernel/pin.toml")).unwrap_or_default();
+        let pin = toml::document(&text).unwrap_or_default();
+        let Some(toml::Value::Str(digest)) = pin.get("sha256") else {
+            return Ok(None);
+        };
+        Ok(Some(Kernel {
+            digest: digest.clone(),
+            tree: root.join("target/guest/vmlinux"),
+            store: lock::directory(root)?.join("kernel/vmlinux"),
+        }))
+    }
+
+    /// Copies a pinned kernel from `from` to `to`, unless `to` has one. The
+    /// copy moves into place only once its digest matches, so a reader never
+    /// sees part of one. It saves a download, so a failure only warns.
+    fn copy(&self, from: &Path, to: &Path) {
+        if self.pinned(to) || !from.exists() {
+            return;
+        }
+        let partial = to.with_extension(format!("{}.part", process::id()));
+        let copied = to
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::copy(from, &partial));
+        if let Err(e) = copied {
+            eprintln!("kernel: couldn't copy {}: {e}", from.display());
+        } else if !self.pinned(&partial) {
+            eprintln!("kernel: {} doesn't match pin.toml", from.display());
+        } else if let Err(e) = fs::rename(&partial, to) {
+            eprintln!("kernel: couldn't move it to {}: {e}", to.display());
+        }
+        let _ = fs::remove_file(&partial);
+    }
+
+    fn pinned(&self, path: &Path) -> bool {
+        path.exists() && bench::sha256(path).is_ok_and(|digest| digest == self.digest)
+    }
 }
 
 pub fn record(name: &'static str, passed: bool, failed: &mut Failed) {

@@ -192,3 +192,67 @@ fn a_test_over_the_memory_limit_is_killed_and_the_gate_fails() {
         stdout(&output)
     );
 }
+
+const KERNEL_DIGEST: &str = "a0c936696eb7d5ee3192bf53b9d281cecbb40ca9db520de72cb95817ad92ac72";
+
+/// A repository whose pin names the digest of `kernel\n`, and whose test runs
+/// `body` with `tree`, the path of the kernel that t1 fetches.
+fn kernel_workspace(name: &str, body: &str) -> PathBuf {
+    let source = format!(
+        "#[test]\nfn kernel() {{\n    let tree = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../target/guest/vmlinux\");\n    {body}\n}}\n"
+    );
+    let root = workspace(name, &source);
+    fs::create_dir_all(root.join("guest/kernel")).unwrap();
+    fs::write(
+        root.join("guest/kernel/pin.toml"),
+        format!(
+            "version = \"1\"\nurl = \"https://example.com/vmlinux\"\nsha256 = \"{KERNEL_DIGEST}\"\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    root
+}
+
+fn kernel_store(root: &Path) -> PathBuf {
+    root.join(".git/xtask/kernel/vmlinux")
+}
+
+fn store_kernel(root: &Path, content: &str) {
+    let store = kernel_store(root);
+    fs::create_dir_all(store.parent().unwrap()).unwrap();
+    fs::write(store, content).unwrap();
+}
+
+#[test]
+fn a_tree_without_the_kernel_gets_it_from_the_store() {
+    let body = "assert_eq!(std::fs::read_to_string(&tree).unwrap(), \"kernel\\n\");";
+    let root = kernel_workspace("kernel-out", body);
+    store_kernel(&root, "kernel\n");
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[test]
+fn the_gate_keeps_the_kernel_that_the_tests_fetched() {
+    let body = "std::fs::create_dir_all(tree.parent().unwrap()).unwrap();\n    std::fs::write(&tree, \"kernel\\n\").unwrap();";
+    let root = kernel_workspace("kernel-in", body);
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(kernel_store(&root)).unwrap(), "kernel\n");
+}
+
+#[test]
+fn only_the_pinned_kernel_moves_between_the_store_and_a_tree() {
+    let body = "assert!(!tree.exists());\n    std::fs::create_dir_all(tree.parent().unwrap()).unwrap();\n    std::fs::write(&tree, \"other\\n\").unwrap();";
+    let root = kernel_workspace("kernel-wrong", body);
+    store_kernel(&root, "wrong\n");
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(kernel_store(&root)).unwrap(), "wrong\n");
+}

@@ -40,12 +40,14 @@ const NOOP_FILES: &[(&str, &str)] = &[
     ("agent/data", "one\n"),
     ("agent/src/main.rs", "fn main() {}\n"),
     ("agent/out/.keep", ""),
-    ("grants", "NETWORK +\nPOLICY +\n"),
 ];
 /// The agent that `run_ms` runs: the fake harness, as journey step 7 builds
 /// it, with no network, so nothing outside the machine is timed.
 const RUN_AGENTFILE: &str = "AGENT claude:0.0.0\nOS minimal\nNETWORK -\n";
-const RUN_GRANTS: &str = "NETWORK -\nPOLICY +\n";
+/// What `ap build` prints before the grants a first build asks for, when it
+/// has no terminal to ask on. Each grant follows on a line of its own,
+/// indented by two spaces.
+const ASKS_FOR: &str = " asks for these grants:\n";
 const RUN_PROMPT: &str = "Say what you can see.";
 /// The agent that `idle_mib` runs: `run_ms`'s, with a harness that waits
 /// after it reports, longer than `RUN_TIMEOUT` lets a run last.
@@ -570,12 +572,27 @@ fn noop_builds(
         fs::write(cache.join(NOOP_HARNESS_SHA256), NOOP_HARNESS).map_err(problem)?;
     }
     let home_of = |binary: &Path| if binary == base { &homes[0] } else { &homes[1] };
-    let grants = directory.join("grants");
+    let grants = [
+        directory.join("grants/base"),
+        directory.join("grants/candidate"),
+    ];
+    let grants_of = |binary: &Path| {
+        if binary == base {
+            &grants[0]
+        } else {
+            &grants[1]
+        }
+    };
     let agent = directory.join("agent");
     let timed = |binary: &Path| {
-        build_once(binary, &grants, &agent, home_of(binary))?.ok_or_else(|| no_build(binary))
+        build_once(binary, grants_of(binary), &agent, home_of(binary))?
+            .ok_or_else(|| no_build(binary))
     };
-    let base_builds = build_once(base, &grants, &agent, home_of(base))?.is_some();
+    let base_builds = ask(base, &agent, home_of(base), grants_of(base))?
+        && build_once(base, grants_of(base), &agent, home_of(base))?.is_some();
+    if !ask(candidate, &agent, home_of(candidate), grants_of(candidate))? {
+        return Err(no_build(candidate));
+    }
     timed(candidate)?;
     if base_builds {
         let (before, after) = interleaved(base, candidate, timed)?;
@@ -592,6 +609,56 @@ fn no_build(binary: &Path) -> Problem {
         "`{} build --approve=<file> <dir>` isn't a command",
         binary.display()
     ))
+}
+
+/// Writes to `grants` what `binary` asks for to build the directory `agent`
+/// for the first time, so each build of `ap` approves its own grants. It
+/// builds with no terminal, so the build lists them and stops. It returns
+/// false if this build exits with its usage status, because it has no `ap
+/// build`.
+fn ask(binary: &Path, agent: &Path, home: &Path, grants: &Path) -> Result<bool, Problem> {
+    let shown = binary.display();
+    let output = Command::new(binary)
+        .arg("build")
+        .arg(agent)
+        .env_clear()
+        .env("HOME", home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| Problem(format!("couldn't run `{shown} build`: {e}")))?;
+    if output.status.code() == Some(USAGE_STATUS) {
+        return Ok(false);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A build from before grants builds without asking, and needs none.
+    let listed = match output.status.success() {
+        true => String::new(),
+        false => asked(&stderr).ok_or_else(|| {
+            Problem(format!(
+                "`{shown} build` didn't list the grants it asks for: {}: {}",
+                output.status,
+                stderr.trim()
+            ))
+        })?,
+    };
+    let problem = |e: std::io::Error| Problem(format!("couldn't write {}: {e}", grants.display()));
+    fs::create_dir_all(grants.parent().expect("a file has a parent")).map_err(problem)?;
+    fs::write(grants, listed).map_err(problem)?;
+    Ok(true)
+}
+
+/// The grants that `stderr`, from a first build with no terminal, lists, in
+/// the form that `--approve=<file>` reads, or `None` if it lists none.
+fn asked(stderr: &str) -> Option<String> {
+    let (_, after) = stderr.split_once(ASKS_FOR)?;
+    let listed: String = after
+        .lines()
+        .map_while(|line| line.strip_prefix("  "))
+        .flat_map(|grant| [grant, "\n"])
+        .collect();
+    (!listed.is_empty()).then_some(listed)
 }
 
 /// Milliseconds that `ap build` takes on the directory `agent`, with the
@@ -658,8 +725,6 @@ fn runs(
     let cache = home.join(".cache/ap");
     fs::create_dir_all(&cache).map_err(problem)?;
     fs::copy(harness, cache.join(&digest)).map_err(problem)?;
-    let grants = directory.join("grants");
-    fs::write(&grants, RUN_GRANTS).map_err(problem)?;
     let agents = [directory.join("base"), directory.join("candidate")];
     for agent in &agents {
         fs::create_dir_all(agent).map_err(problem)?;
@@ -677,6 +742,10 @@ fn runs(
     let name_of = |binary: &Path| if binary == base { "base" } else { "candidate" };
     let timed = |binary: &Path| once(binary, name_of(binary), &home)?.ok_or_else(|| no_run(binary));
     let warm = |binary: &Path| {
+        let grants = directory.join("grants").join(name_of(binary));
+        if !ask(binary, agent_of(binary), &home, &grants)? {
+            return Err(no_build(binary));
+        }
         build_once(binary, &grants, agent_of(binary), &home)?.ok_or_else(|| no_build(binary))?;
         timed(binary)
     };
@@ -983,7 +1052,7 @@ fn over_band(base: f64, candidate: f64, band: Band) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, median, over_band};
+    use super::{Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, median, over_band};
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -1020,6 +1089,18 @@ mod tests {
             lock,
             Some(format!("HARNESS claude 0.0.0 {NOOP_HARNESS_SHA256}\n").as_str())
         );
+    }
+
+    #[test]
+    fn the_grants_a_build_asks_for_are_what_it_lists() {
+        let stderr = "ap: Agentfile asks for these grants:\n  NETWORK -\n  AGENT claude\n  POLICY +\n\
+                      ap: approve them on a terminal, or with `--approve=<file>`\n";
+        assert_eq!(
+            asked(stderr).as_deref(),
+            Some("NETWORK -\nAGENT claude\nPOLICY +\n")
+        );
+        assert_eq!(asked("ap: Agentfile: no such file\n"), None);
+        assert_eq!(asked("ap: Agentfile asks for these grants:\n"), None);
     }
 
     #[test]

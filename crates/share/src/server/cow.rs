@@ -30,6 +30,14 @@
 //!   have at its path. A path is quoted, with `\"`, `\\`, and `\xNN` for a
 //!   control character or a byte that isn't UTF-8.
 //!
+//! When the share's root holds a `.git` directory, the pending directory
+//! also holds `git`, a copy of everything in it but `objects`, made when the
+//! run starts, and `head`, the commit `HEAD` named then, in hex, or `none`.
+//! The guest sees that copy in place of your `.git`, but for `objects`,
+//! which it reads live. The copy holds each entry as itself, with your
+//! mode, and each directory and regular file with your times.
+//! The agent's changes there are recorded as anywhere else.
+//!
 //! A guest's node is a path. Each request resolves it again, one layer at a
 //! time, beneath the root or the tree, following no symlink. A directory
 //! that has your files beneath it can't be renamed, as in overlayfs, so a
@@ -41,6 +49,9 @@ use super::*;
 
 const TREE: &CStr = c"tree";
 const RECORDS: &CStr = c"records";
+/// The copy of your `.git`, and the commit its `HEAD` named.
+const GIT: &CStr = c"git";
+const HEAD: &CStr = c"head";
 /// What a file and a directory in the pending directory allow.
 const FILE_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
@@ -157,6 +168,8 @@ enum Handle {
 pub(super) struct Cow {
     root: OwnedFd,
     pending: OwnedFd,
+    /// The copy of your `.git`, if the root held one when the run started.
+    git: Option<OwnedFd>,
     tree: OwnedFd,
     records: OwnedFd,
     /// How long `records` is, so a record that fails half-written goes.
@@ -351,6 +364,151 @@ fn set_times(fd: BorrowedFd, stat: &libc::stat) -> Result<(), i32> {
     sys::futimens(fd, &times).map_err(errno)
 }
 
+/// Copies what `from` holds to `to`, each an open regular file.
+fn copy_contents(from: BorrowedFd, to: BorrowedFd) -> io::Result<()> {
+    let mut buffer = vec![0; MAX_READ];
+    let mut offset = 0;
+    loop {
+        let len = sys::pread(from, &mut buffer, offset)?;
+        if len == 0 {
+            return Ok(());
+        }
+        let mut done = 0;
+        while done < len {
+            done += sys::pwrite(to, &buffer[done..len], offset + done as u64)?;
+        }
+        offset += len as u64;
+    }
+}
+
+/// Copies the `.git` directory at `root`, if it has one, to `git` in
+/// `pending`, but for what is in its `objects`, and writes `head`. Returns
+/// the copy.
+fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>> {
+    let git = match sys::open_beneath(root, c".git", PATH_FLAGS) {
+        Ok(git) => git,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let stat = sys::fstat(git.as_fd())?;
+    // A `.git` file, as in a linked worktree, or a symlink, stays live.
+    if !is(stat.st_mode, libc::S_IFDIR) {
+        return Ok(None);
+    }
+    sys::mkdirat(pending, GIT, DIR_MODE)?;
+    let copy = sys::open_beneath(pending, GIT, libc::O_PATH | libc::O_DIRECTORY)?;
+    let mut linked = false;
+    copy_tree(git.as_fd(), copy.as_fd(), b"", &mut linked)?;
+    finish(copy.as_fd(), &stat)?;
+    // `HEAD` and the refs are read from the copy, so they are what the
+    // guest sees. A ref that is a symlink is read as a symbolic ref, but a
+    // symlink at `packed-refs`, or on the way to a ref, would be followed,
+    // and a special file there could block the read, so then no ref is
+    // read. A `HEAD` that names no commit git could read
+    // counts as none, so a branch import starts from the agent's history
+    // alone.
+    let path = format!("/proc/self/fd/{}", copy.as_raw_fd());
+    let head = match linked {
+        true => Ok(None),
+        false => git::Repository::at(path).resolve("HEAD"),
+    };
+    let head = match head {
+        Ok(Some(id)) => format!("{id}\n"),
+        Ok(None) | Err(git::Error::Corrupt(_)) => "none\n".to_owned(),
+        Err(git::Error::Io(error)) => return Err(error),
+    };
+    let flags = libc::O_WRONLY | libc::O_EXCL;
+    let file = sys::create_beneath(pending, HEAD, flags, FILE_MODE)?;
+    if sys::pwrite(file.as_fd(), head.as_bytes(), 0)? != head.len() {
+        return Err(io::Error::from_raw_os_error(libc::EIO));
+    }
+    Ok(Some(copy))
+}
+
+/// Copies the directory `from`, at `path` in a git directory, into the
+/// directory `to`, but for what `objects` holds. `linked` is set if
+/// `packed-refs`, `refs`, or anything beneath it is a symlink, or if one of
+/// them or `HEAD` is a special file.
+fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -> io::Result<()> {
+    let listed = names(from).map_err(io::Error::from_raw_os_error)?;
+    for (name, _, _) in listed {
+        let inner = join(path, &name);
+        let name = c(&name);
+        let entry = match sys::open_beneath(from, &name, PATH_FLAGS) {
+            Ok(entry) => entry,
+            // Git removed it since, such as a lock file.
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        let stat = sys::fstat(entry.as_fd())?;
+        match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => {
+                sys::mkdirat(to, &name, DIR_MODE)?;
+                let made = sys::open_beneath(to, &name, libc::O_PATH | libc::O_DIRECTORY)?;
+                // The guest reads `objects` live, so it is left empty here.
+                if inner != b"objects" {
+                    copy_tree(entry.as_fd(), made.as_fd(), &inner, linked)?;
+                }
+                finish(made.as_fd(), &stat)?;
+            }
+            libc::S_IFREG => {
+                let source = match sys::open_beneath(from, &name, READ_FLAGS) {
+                    Ok(source) => source,
+                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+                    Err(error) => return Err(error),
+                };
+                let flags = libc::O_WRONLY | libc::O_EXCL;
+                let made = sys::create_beneath(to, &name, flags, FILE_MODE)?;
+                copy_contents(source.as_fd(), made.as_fd())?;
+                finish(made.as_fd(), &stat)?;
+            }
+            libc::S_IFLNK => {
+                let target = sys::readlink(entry.as_fd())?;
+                let target =
+                    CString::new(target).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                sys::symlinkat(&target, to, &name)?;
+                *linked |=
+                    matches!(&inner[..], b"packed-refs" | b"refs") || inner.starts_with(b"refs/");
+            }
+            _ => {
+                *linked |= matches!(&inner[..], b"HEAD" | b"packed-refs" | b"refs")
+                    || inner.starts_with(b"refs/");
+                sys::mknodat(
+                    to,
+                    &name,
+                    stat.st_mode & libc::S_IFMT | FILE_MODE,
+                    stat.st_rdev,
+                )?;
+                // A special file has no contents, and nothing opens it to
+                // set its mode and times.
+                let made = sys::open_beneath(to, &name, PATH_FLAGS)?;
+                let path = CString::new(format!("/proc/self/fd/{}", made.as_raw_fd()))
+                    .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                // SAFETY: `path` is NUL-terminated and outlives the call.
+                if unsafe { libc::chmod(path.as_ptr(), stat.st_mode & PERMISSIONS) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Gives a copy the mode and times of your file, which `stat` describes.
+fn finish(copy: BorrowedFd, stat: &libc::stat) -> io::Result<()> {
+    let opened;
+    let fd = match is(stat.st_mode, libc::S_IFDIR) {
+        // `fchmod` and `futimens` need a descriptor that isn't `O_PATH`.
+        true => {
+            opened = sys::open_beneath(copy, c".", libc::O_RDONLY | libc::O_DIRECTORY)?;
+            opened.as_fd()
+        }
+        false => copy,
+    };
+    sys::fchmod(fd, stat.st_mode & PERMISSIONS)?;
+    set_times(fd, stat).map_err(io::Error::from_raw_os_error)
+}
+
 impl Cow {
     /// A share of `root` that keeps its changes in `pending`, which must be
     /// empty, so a run never takes over another's changes.
@@ -364,9 +522,11 @@ impl Cow {
         let tree = sys::open_beneath(pending.as_fd(), TREE, libc::O_PATH | libc::O_DIRECTORY)?;
         let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_EXCL;
         let records = sys::create_beneath(pending.as_fd(), RECORDS, flags, FILE_MODE)?;
+        let git = capture(root.as_fd(), pending.as_fd())?;
         Ok(Self {
             root,
             pending,
+            git,
             tree,
             records,
             recorded: std::cell::Cell::new(0),
@@ -394,7 +554,26 @@ impl Cow {
     }
 
     fn open_lower(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
-        sys::open_beneath(self.root.as_fd(), &c(path), flags).map_err(errno)
+        let (dir, path) = self.lower(path);
+        sys::open_beneath(dir, &c(path), flags).map_err(errno)
+    }
+
+    /// Where your file at `path` is, as the guest sees it: the copy of your
+    /// `.git` for what it holds, and the root for everything else.
+    fn lower<'a>(&self, path: &'a [u8]) -> (BorrowedFd<'_>, &'a [u8]) {
+        if let Some(git) = &self.git {
+            let rest = match path {
+                b".git" => Some(&b""[..]),
+                _ => path.strip_prefix(b".git/"),
+            };
+            if let Some(rest) = rest
+                && rest != b"objects"
+                && !rest.starts_with(b"objects/")
+            {
+                return (git.as_fd(), rest);
+            }
+        }
+        (self.root.as_fd(), path)
     }
 
     fn open_upper(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
@@ -672,20 +851,7 @@ impl Cow {
         if (found.st_dev, found.st_ino) != (stat.st_dev, stat.st_ino) {
             return Err(libc::ESTALE);
         }
-        let mut buffer = vec![0; MAX_READ];
-        let mut offset = 0;
-        loop {
-            let len = sys::pread(from.as_fd(), &mut buffer, offset).map_err(errno)?;
-            if len == 0 {
-                return Ok(());
-            }
-            let mut done = 0;
-            while done < len {
-                done +=
-                    sys::pwrite(copy, &buffer[done..len], offset + done as u64).map_err(errno)?;
-            }
-            offset += len as u64;
-        }
+        copy_contents(from.as_fd(), copy).map_err(errno)
     }
 
     /// The attributes of `node`, which `view` shows.

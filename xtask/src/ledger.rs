@@ -68,26 +68,37 @@ impl Record {
             passing: count(journey, "passing")?,
             steps: count(journey, "steps")?,
             reason: string(&table, "reason")?,
-            budgets: read_budgets(&table)?,
+            budgets: read_values(&table, "budgets")?,
         })
     }
 }
 
-/// What a passing bench measured, kept for `record`.
+/// What a passing bench measured, kept for `record`, and for the counts that
+/// `merge` compares.
+#[derive(Debug, PartialEq)]
 pub struct Measured {
     pub commit: String,
+    /// The `main` commit whose build was the base.
+    pub base: String,
     pub reason: String,
+    /// The candidate's values.
     pub budgets: BTreeMap<String, f64>,
+    /// The base's values from the same run. A budget the base can't be
+    /// measured for has none.
+    pub base_budgets: BTreeMap<String, f64>,
 }
 
 impl Measured {
     fn render(&self) -> String {
         let mut text = format!(
-            "commit = {}\nreason = {}\n\n[budgets]\n",
+            "commit = {}\nbase = {}\nreason = {}\n\n[budgets]\n",
             toml::quoted(&self.commit),
+            toml::quoted(&self.base),
             toml::quoted(&self.reason),
         );
         push_budgets(&mut text, &self.budgets);
+        text.push_str("\n[base_budgets]\n");
+        push_budgets(&mut text, &self.base_budgets);
         text
     }
 
@@ -95,8 +106,10 @@ impl Measured {
         let table = toml::document(text)?;
         Ok(Measured {
             commit: string(&table, "commit")?,
+            base: string(&table, "base")?,
             reason: string(&table, "reason")?,
-            budgets: read_budgets(&table)?,
+            budgets: read_values(&table, "budgets")?,
+            base_budgets: read_values(&table, "base_budgets")?,
         })
     }
 }
@@ -113,6 +126,18 @@ pub fn clear_measured(root: &Path) -> Result<(), Problem> {
 pub fn write_measured(root: &Path, measured: &Measured) -> Result<(), Problem> {
     fs::write(root.join(MEASURED), measured.render())
         .map_err(|e| Problem(format!("couldn't write {MEASURED}: {e}")))
+}
+
+/// What the bench measured for the base, if the last bench was of `commit`
+/// against `base`.
+pub fn measured_base(
+    root: &Path,
+    commit: &str,
+    base: &str,
+) -> Result<Option<BTreeMap<String, f64>>, Problem> {
+    Ok(read_measured(root, commit)?
+        .filter(|measured| measured.base == base)
+        .map(|measured| measured.base_budgets))
 }
 
 /// What the bench measured, if the last bench was of this commit.
@@ -132,9 +157,9 @@ fn push_budgets(text: &mut String, budgets: &BTreeMap<String, f64>) {
     }
 }
 
-fn read_budgets(table: &Table) -> Result<BTreeMap<String, f64>, String> {
+fn read_values(table: &Table, key: &str) -> Result<BTreeMap<String, f64>, String> {
     let mut budgets = BTreeMap::new();
-    for (name, value) in section(table, "budgets")?.entries() {
+    for (name, value) in section(table, key)?.entries() {
         let value = match value {
             Value::Int(number) => *number as f64,
             Value::Float(number) => *number,
@@ -393,7 +418,7 @@ fn read_at(root: &Path, commit: &str, path: &str) -> Result<Record, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::Record;
+    use super::{Measured, Record};
     use std::collections::BTreeMap;
 
     fn sample(reason: &str) -> Record {
@@ -415,6 +440,21 @@ mod tests {
                 ("run_ms".to_string(), 930.0),
             ]),
         }
+    }
+
+    #[test]
+    fn a_bench_result_keeps_the_bases_values() {
+        let measured = Measured {
+            commit: "abc1234".to_string(),
+            base: "def5678".to_string(),
+            reason: String::new(),
+            budgets: BTreeMap::from([
+                ("boot_ms".to_string(), 277.0),
+                ("version_ms".to_string(), 1.5),
+            ]),
+            base_budgets: BTreeMap::from([("version_ms".to_string(), 1.25)]),
+        };
+        assert_eq!(Measured::parse(&measured.render()).unwrap(), measured);
     }
 
     #[test]

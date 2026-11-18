@@ -245,6 +245,7 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     };
     let mut verdict = Verdict::Pass;
     let mut values = BTreeMap::new();
+    let mut base_values = BTreeMap::new();
     for row in &rows {
         let word = match (row.has_band, row.over, &reason) {
             (false, _, _) => "recorded",
@@ -264,19 +265,22 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
             None => println!("no-comparison {} candidate {}", row.key, row.candidate),
         }
         values.insert(row.key.clone(), row.candidate);
+        if let Some(base) = row.base {
+            base_values.insert(row.key.clone(), base);
+        }
     }
     if verdict == Verdict::Pass {
-        if let Some(commit) = head
-            && clean_head(root)?.as_ref() == Some(&commit)
+        if let Some(head) = head
+            && clean_head(root)?.as_ref() == Some(&head)
         {
-            let reason = reason.unwrap_or_default();
-            let budgets = values;
             ledger::write_measured(
                 root,
                 &Measured {
-                    commit,
-                    reason,
-                    budgets,
+                    commit: head,
+                    base: commit,
+                    reason: reason.unwrap_or_default(),
+                    budgets: values,
+                    base_budgets: base_values,
                 },
             )?;
         }

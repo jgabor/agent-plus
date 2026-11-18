@@ -9,6 +9,7 @@ use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
 use crate::{Problem, Verdict, base, bench, journey, lock, waits, work, workspace};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -824,7 +825,8 @@ fn prove(
     // The base of a revert may be what doesn't build, and a revert puts back a
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
-    if !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)? {
+    let benched = !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)?;
+    if benched {
         starting("bench");
         if bench::compare(tree, Some(&pr.body))? == Verdict::Fail {
             return Ok(Err(vec!["bench"]));
@@ -849,7 +851,7 @@ fn prove(
         record.reason = kept.reason.clone();
     }
     let mut accepted = waiting;
-    match compare_counts(tree, &commit, &record, scoring)? {
+    match compare_counts(tree, &commit, &record, scoring, benched)? {
         Ok(fell) => accepted.extend(fell),
         Err(failed) => return Ok(Err(failed)),
     }
@@ -863,18 +865,27 @@ fn prove(
 /// The spec count is compared by the gate. This compares the two that need the
 /// journey and the bench, and then asks whether anything rose. Returns the
 /// counts that fell and are allowed to, or the checks that the PR fails here.
+///
+/// When the bench ran, the base's budgets come from what it measured for the
+/// base, so a loaded machine slows both builds alike. Otherwise they come from
+/// the base's ledger record, as the candidate's do.
 fn compare_counts(
     tree: &Path,
     commit: &str,
     record: &Record,
     scoring: &Scoring,
+    benched: bool,
 ) -> Result<Result<Vec<String>, Failed>, Problem> {
     let budgets = bench::read_budgets(tree)?;
     let before = ledger::newest(tree, commit)?;
-    let (proven, passing, budgets_met) = before.map_or((0, 0, 0), |base| {
-        let met = bench::met(&budgets, &base.budgets).0;
-        (base.proven, base.passing, met)
-    });
+    let (proven, passing) = before.as_ref().map_or((0, 0), |base| (base.proven, base.passing));
+    let measured = if benched {
+        ledger::measured_base(tree, scoring.gated, commit)?
+    } else {
+        None
+    };
+    let budgets_met = base_values(measured.as_ref(), before.as_ref())
+        .map_or(0, |values| bench::met(&budgets, values).0);
     let met_now = bench::met(&budgets, &record.budgets).0;
 
     let mut failed = Failed::new();
@@ -910,6 +921,16 @@ fn compare_counts(
     } else {
         Err(failed)
     })
+}
+
+/// The base's budget values: what this run's bench measured for it, or else
+/// its ledger record. A budget the bench couldn't measure for the base has no
+/// value, so it isn't met, whatever the record says.
+fn base_values<'a>(
+    measured: Option<&'a BTreeMap<String, f64>>,
+    before: Option<&'a Record>,
+) -> Option<&'a BTreeMap<String, f64>> {
+    measured.or(before.map(|base| &base.budgets))
 }
 
 fn declares_no_hill(body: &str) -> bool {

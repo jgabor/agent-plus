@@ -338,20 +338,60 @@ fn build_base(root: &Path, directory: &Path, commit: &str) -> Result<PathBuf, Pr
     keep(&built, &directory)
 }
 
-/// The system's temp directory, which must be outside the checkout.
+/// Where the merge, checks, and base trees are built: the system's temp
+/// directory, or `/var/tmp` when only that one is on a disk. A tree's
+/// `target/` takes gigabytes, which a tmpfs would hold in memory. Either must
+/// be outside the checkout.
 pub fn temp_outside(root: &Path) -> Result<PathBuf, Problem> {
-    let resolve = |path: &Path| {
-        fs::canonicalize(path)
-            .map_err(|e| Problem(format!("couldn't resolve {}: {e}", path.display())))
-    };
-    let temp = resolve(&env::temp_dir())?;
-    if temp.starts_with(resolve(root)?) {
-        return Err(Problem(format!(
+    let root = fs::canonicalize(root)
+        .map_err(|e| Problem(format!("couldn't resolve {}: {e}", root.display())))?;
+    let candidates: Vec<PathBuf> = [env::temp_dir(), PathBuf::from("/var/tmp")]
+        .iter()
+        .filter_map(|path| fs::canonicalize(path).ok())
+        .collect();
+    let mounts = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    choose_temp(&root, &candidates, &mounts).ok_or_else(|| {
+        Problem(format!(
             "TMPDIR is {}, inside the checkout, so Cargo would apply the candidate's settings to the base build. Point it outside the checkout",
-            temp.display()
-        )));
+            env::temp_dir().display()
+        ))
+    })
+}
+
+/// The first candidate outside `root` that isn't in memory, or else the
+/// first outside `root`.
+fn choose_temp(root: &Path, candidates: &[PathBuf], mounts: &str) -> Option<PathBuf> {
+    let outside: Vec<&PathBuf> = candidates.iter().filter(|p| !p.starts_with(root)).collect();
+    outside
+        .iter()
+        .find(|path| !in_memory(path, mounts))
+        .or(outside.first())
+        .map(|path| path.to_path_buf())
+}
+
+/// Whether the mount that holds `path`, as `/proc/self/mountinfo` lists it,
+/// keeps its files in memory. A mount point the kernel had to escape, for a
+/// space in it, matches nothing.
+fn in_memory(path: &Path, mounts: &str) -> bool {
+    let mut best: Option<(&Path, &str)> = None;
+    for line in mounts.lines() {
+        let Some((fields, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let (Some(point), Some(kind)) = (fields.split(' ').nth(4), after.split(' ').next()) else {
+            continue;
+        };
+        let point = Path::new(point);
+        // A later mount on the same point hides the earlier one.
+        if path.starts_with(point)
+            && best
+                .as_ref()
+                .is_none_or(|(b, _)| point.as_os_str().len() >= b.as_os_str().len())
+        {
+            best = Some((point, kind));
+        }
     }
-    Ok(temp)
+    best.is_some_and(|(_, kind)| matches!(kind, "tmpfs" | "ramfs"))
 }
 
 fn keep(built: &Path, directory: &Path) -> Result<PathBuf, Problem> {
@@ -1056,8 +1096,11 @@ fn over_band(base: f64, candidate: f64, band: Band) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, median, over_band};
+    use super::{
+        Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, choose_temp, median, over_band,
+    };
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
     #[test]
@@ -1131,5 +1174,55 @@ mod tests {
         assert!(!over_band(10.0, 1.0, band));
         assert!(!over_band(10.0, 10.0, band));
         assert!(over_band(10.0, 10.5, band));
+    }
+
+    const DISK_TMP: &str = "\
+22 1 0:21 / / rw - btrfs /dev/nvme0n1p2 rw
+23 22 0:22 / /tmp rw - btrfs /dev/nvme0n1p2 rw
+";
+
+    const TMPFS_TMP: &str = "\
+22 1 0:21 / / rw - ext4 /dev/sda1 rw
+23 22 0:22 / /tmp rw,nosuid - tmpfs tmpfs rw
+24 22 0:23 / /home rw - ext4 /dev/sda2 rw
+";
+
+    fn candidates() -> Vec<PathBuf> {
+        vec![PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+    }
+
+    #[test]
+    fn trees_go_in_the_temp_directory_on_a_disk() {
+        let root = Path::new("/home/u/repo");
+        assert_eq!(
+            choose_temp(root, &candidates(), DISK_TMP),
+            Some(PathBuf::from("/tmp"))
+        );
+    }
+
+    #[test]
+    fn trees_leave_a_temp_directory_in_memory_for_var_tmp() {
+        let root = Path::new("/home/u/repo");
+        assert_eq!(
+            choose_temp(root, &candidates(), TMPFS_TMP),
+            Some(PathBuf::from("/var/tmp"))
+        );
+        let later = format!("{DISK_TMP}25 23 0:24 / /tmp rw - tmpfs tmpfs rw\n");
+        assert_eq!(
+            choose_temp(root, &candidates(), &later),
+            Some(PathBuf::from("/var/tmp"))
+        );
+    }
+
+    #[test]
+    fn trees_stay_outside_the_checkout() {
+        let root = Path::new("/var/tmp/repo");
+        let inside = vec![PathBuf::from("/var/tmp/repo/tmp")];
+        assert_eq!(choose_temp(root, &inside, DISK_TMP), None);
+        let tmpfs_inside = vec![PathBuf::from("/var/tmp/repo/tmp"), PathBuf::from("/tmp")];
+        assert_eq!(
+            choose_temp(root, &tmpfs_inside, TMPFS_TMP),
+            Some(PathBuf::from("/tmp"))
+        );
     }
 }

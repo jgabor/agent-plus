@@ -15,6 +15,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -182,6 +183,7 @@ fn sequence(
     }
     let slot = lock::merge_slot(&root)?;
     report_slot()?;
+    Tree::sweep(&root)?;
     let (pr, issue) = match decide(&gh, number, mode, thread)? {
         Decision::Merged => {
             Tree::clear(&root, &Tree::path(&root, number)?);
@@ -668,6 +670,9 @@ fn changed_during_proof(
 pub struct Tree {
     root: PathBuf,
     pub path: PathBuf,
+    /// Says that a live run holds the tree. The kernel lets go when the run
+    /// dies, so that the next merge can tell the tree was left behind.
+    _held: fs::File,
 }
 
 impl Tree {
@@ -692,13 +697,41 @@ impl Tree {
     /// Starts from nothing, because an earlier attempt may have died at any
     /// point in this worktree.
     fn at(root: &Path, path: PathBuf, commit: &str) -> Result<Tree, Problem> {
+        let held = hold(&path, true)?.expect("a blocking lock is always taken");
         Tree::clear(root, &path);
         let name = path.to_string_lossy();
         base::git_text(root, &["worktree", "add", "-q", "--detach", &name, commit])?;
         Ok(Tree {
             root: root.to_path_buf(),
             path,
+            _held: held,
         })
+    }
+
+    /// Removes this repository's merge trees that no live run holds, which
+    /// a killed run leaves. Nothing else would remove them until the same PR
+    /// is proven again.
+    fn sweep(root: &Path) -> Result<(), Problem> {
+        let temp = bench::temp_outside(root)?;
+        let prefix = format!("xtask-merge-{}-", repository(root)?);
+        let entries = fs::read_dir(&temp)
+            .map_err(|e| Problem(format!("couldn't read {}: {e}", temp.display())))?;
+        let mut trees: Vec<PathBuf> = entries
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                let name = name.strip_suffix(".lock").unwrap_or(&name);
+                name.starts_with(&prefix).then(|| temp.join(name))
+            })
+            .collect();
+        trees.sort();
+        trees.dedup();
+        for tree in trees {
+            if let Some(_held) = hold(&tree, false)? {
+                Tree::clear(root, &tree);
+                let _ = fs::remove_file(lock_of(&tree));
+            }
+        }
+        Ok(())
     }
 
     /// Does what it can, and the next attempt clears the rest. `--force` twice
@@ -735,6 +768,46 @@ fn repository(root: &Path) -> Result<String, Problem> {
 impl Drop for Tree {
     fn drop(&mut self) {
         Tree::clear(&self.root, &self.path);
+        let _ = fs::remove_file(lock_of(&self.path));
+    }
+}
+
+fn lock_of(tree: &Path) -> PathBuf {
+    let mut name = tree.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Locks the file beside a tree that says a run holds it, or says that one
+/// does when `wait` is false. Whoever removes the tree unlinks the file while
+/// it holds the lock, so a lock on a file that is gone is taken again.
+fn hold(tree: &Path, wait: bool) -> Result<Option<fs::File>, Problem> {
+    let path = lock_of(tree);
+    let problem = |e: io::Error| Problem(format!("couldn't lock {}: {e}", path.display()));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(problem)?;
+    }
+    loop {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(problem)?;
+        if wait {
+            file.lock().map_err(problem)?;
+        } else {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(fs::TryLockError::Error(e)) => return Err(problem(e)),
+            }
+        }
+        let held = file.metadata().map_err(problem)?;
+        let current = fs::metadata(&path);
+        if current.is_ok_and(|m| m.dev() == held.dev() && m.ino() == held.ino()) {
+            return Ok(Some(file));
+        }
     }
 }
 

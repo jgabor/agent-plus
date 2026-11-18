@@ -62,14 +62,7 @@ const DEFAULT_SIZE: Size = Size {
 const KEYS: usize = 4096;
 
 /// The flags SPEC.md gives `ap run` that aren't built yet.
-const FLAGS_NOT_BUILT: [&str; 6] = [
-    "-t",
-    "--share",
-    "--network",
-    "--resume",
-    "--gui",
-    "--approve",
-];
+const FLAGS_NOT_BUILT: [&str; 5] = ["-t", "--network", "--resume", "--gui", "--approve"];
 
 /// The instructions a run can't honor yet. `ap build` refuses the ones that
 /// need a fetch, so an agent that has them can't be built either.
@@ -93,18 +86,22 @@ pub struct Args {
     prompt: Option<Vec<u8>>,
     /// Whether `-i` forces an interactive run.
     interactive: bool,
+    /// Each directory from `--share`, as typed.
+    shares: Vec<OsString>,
     /// The first flag that isn't built yet.
     not_built: Option<&'static str>,
 }
 
-/// Reads `ap run`'s arguments: the agent, `-i` at most once, and
-/// `-p <prompt>` or `--prompt <prompt>` at most once, in any order. A flag
+/// Reads `ap run`'s arguments: the agent, `-i` at most once,
+/// `-p <prompt>` or `--prompt <prompt>` at most once, and `--share <path>`,
+/// in any order. A second `--share` fails the run, not the reading. A flag
 /// that isn't built yet stops the reading, because `ap run` fails on it
 /// anyway. Any other flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut agent = None;
     let mut prompt = None;
     let mut interactive = false;
+    let mut shares = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let flag = arg.as_bytes();
@@ -117,11 +114,14 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
                 agent: agent.unwrap_or_default(),
                 prompt,
                 interactive,
+                shares,
                 not_built: Some(not_built),
             });
         }
         if (arg == "-p" || arg == "--prompt") && prompt.is_none() {
             prompt = Some(args.next()?.as_bytes().to_vec());
+        } else if arg == "--share" {
+            shares.push(args.next()?.clone());
         } else if arg == "-i" && !interactive {
             interactive = true;
         } else if flag.starts_with(b"-") || agent.is_some() {
@@ -134,6 +134,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
         agent: agent?,
         prompt,
         interactive,
+        shares,
         not_built: None,
     })
 }
@@ -508,6 +509,13 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
     if let Some(flag) = args.not_built {
         return Err(fail(format!("`ap run {flag}` is not built yet")));
     }
+    let typed = match &args.shares[..] {
+        [] => None,
+        [only] => Some(only),
+        _ => {
+            return Err(fail("`ap run --share` can appear only once".to_owned()));
+        }
+    };
     let agent = args.agent.as_bytes();
     if [&b"./"[..], b"../", b"/", b"~/"]
         .iter()
@@ -598,7 +606,7 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
         .unwrap_or("");
     let placed = GuestPath::read(&instructions, context_name).map_err(unreadable)?;
     // Each share's guest path, in share order.
-    let shares: Vec<String> = (files.share.iter())
+    let mut shares: Vec<String> = (files.share.iter())
         .map(|share| {
             (placed.iter())
                 .find(|placed| placed.line == share.line)
@@ -606,6 +614,32 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
                 .ok_or_else(|| fail(format!("line {} has no guest path", share.line)))
         })
         .collect::<Result<_, _>>()?;
+    // SPEC.md's `SHARE`: the share from `ap run --share` is copy-on-write,
+    // needs no approval, and maps to `~/<directory name>`.
+    let typed = match typed {
+        None => None,
+        Some(typed) => {
+            let shown = format!("`--share {}`", typed.to_string_lossy());
+            let opened = |error: io::Error| fail(format!("{shown}: {error}"));
+            let host = HostPath::resolve_typed(Path::new(typed)).map_err(opened)?;
+            if !host.is_dir().map_err(opened)? {
+                return Err(fail(format!("{shown}: it isn't a directory")));
+            }
+            let name = (host.path().file_name())
+                .ok_or_else(|| fail(format!("{shown}: it has no name to map to")))?
+                .to_str()
+                .ok_or_else(|| fail(format!("{shown}: its name isn't UTF-8")))?;
+            let path = GuestPath::for_run_share(name, &placed)
+                .map_err(|message| fail(format!("{shown}: {message}")))?;
+            roots.push(Opened {
+                directory: host.open().map_err(opened)?,
+                file: None,
+                mode: share::Mode::CopyOnWrite(()),
+                host: host.path().to_owned(),
+            });
+            Some(path)
+        }
+    };
     let settings = Settings::read(&instructions).map_err(unreadable)?;
     let tier = match settings.os {
         Os::Minimal => None,
@@ -668,17 +702,19 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
     for (key, value) in [("HOME", HOME), ("USER", "agent"), ("LOGNAME", "agent")] {
         env.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
     }
-    // SPEC.md's Run section: `WORKDIR`, then the only directory share, then
-    // the agent's home.
+    // SPEC.md's Run section: the share from `--share`, then `WORKDIR`, then
+    // the only directory share, then the agent's home.
     let directory_shares: Vec<&String> = (shares.iter().zip(&checked))
         .filter(|(_, (_, directory))| *directory)
         .map(|(path, _)| path)
         .collect();
-    let directory = match (files.workdir, &directory_shares[..]) {
-        (Some(workdir), _) => guest_path(&workdir.path),
-        (None, [only]) => (*only).clone(),
-        (None, _) => HOME.to_owned(),
+    let directory = match (&typed, files.workdir, &directory_shares[..]) {
+        (Some(typed), _, _) => typed.clone(),
+        (None, Some(workdir), _) => guest_path(&workdir.path),
+        (None, None, [only]) => (*only).clone(),
+        (None, None, _) => HOME.to_owned(),
     };
+    shares.extend(typed);
     let harness = super::build::harness_path(settings.agent.harness);
     // `--` keeps a prompt that starts with `-` from reading as a flag.
     let argv = match settings.agent.harness {

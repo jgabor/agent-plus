@@ -1542,7 +1542,8 @@ attributes, because those can run commands.
 It can appear once and takes no destination: the path resolves against your
 current directory, it maps to `~/<directory name>`, and it becomes the
 working directory, ahead of any `WORKDIR` in the Agentfile. A destination
-that overlaps another one fails the run.
+that overlaps another one fails the run. The run fails if the path isn't a
+directory, or if its name is missing, as for `/`, or isn't UTF-8.
 
 ### WORKDIR
 

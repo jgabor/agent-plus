@@ -78,7 +78,7 @@ fn remove(name: &str, force: bool) -> Result<(), String> {
         .remove(name)
         .map_err(|error| format!("ap: {error}"))?;
     // An agent removed while it ran leaves that run's log, which goes now.
-    let runs = remove_runs(&runs, name)
+    let runs = remove_runs(&runs, name, force)
         .map_err(|error| format!("ap: can't remove the runs of {name}: {error}"))?;
     match removed || runs > 0 {
         true => Ok(()),
@@ -100,12 +100,17 @@ fn pending_runs(runs: &::store::Runs, name: &str) -> std::io::Result<Vec<String>
 }
 
 /// Removes the finished runs of the agent `name`, their logs, and their
-/// pending changes, and returns how many it removed. The changes go first,
-/// so a failure leaves them findable by the run's name.
-fn remove_runs(runs: &::store::Runs, name: &str) -> std::io::Result<usize> {
+/// pending changes, and returns how many it removed. Without `force`, it
+/// keeps a run with pending changes, which a run that finished after the
+/// check can have. The changes go first, so a failure leaves them findable
+/// by the run's name.
+fn remove_runs(runs: &::store::Runs, name: &str, force: bool) -> std::io::Result<usize> {
     let mut removed = 0;
     for run in runs.list()? {
         if run.agent == name && !runs.active(&run.name)? {
+            if !force && runs.has_pending(&run.name)? {
+                continue;
+            }
             runs.discard(&run.name)?;
             runs.remove(&run.name)?;
             removed += 1;

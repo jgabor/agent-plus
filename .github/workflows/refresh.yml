@@ -1,13 +1,21 @@
-# Proves each land-needed PR again whenever `main` moves. `cargo xtask refresh`
+# Proves each land-needed PR that the owner approved by arming auto-merge, and
+# merges it, when one is armed and whenever `main` moves. `cargo xtask refresh`
 # holds the logic.
 #
 # This job runs a PR's tests with a token that can write. `prepare` refuses PRs
 # from forks, so only code from people with write access runs here.
+# `pull_request_target` runs this file from the default branch, and the job
+# checks out `main`, so a PR can't change what proves it.
 name: refresh
 
 on:
   push:
     branches: [main]
+  pull_request_target:
+    types: [auto_merge_enabled]
+  # A worker parks a fixed PR this way, and its auto-merge is still armed.
+  issues:
+    types: [labeled]
 
 permissions: {}
 
@@ -19,6 +27,7 @@ concurrency:
 
 jobs:
   refresh:
+    if: github.event_name != 'issues' || github.event.label.name == 'land-needed'
     runs-on: ubuntu-latest
     permissions:
       contents: write

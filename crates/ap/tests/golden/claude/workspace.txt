@@ -1,0 +1,16 @@
+AGENT claude
+SHARE ./app
+SHARE ./notes.md ~/notes.md ro
+SHARE /var/log/output.log rw
+SHARE /var/log/error.log rw
+SHARE ./data /srv/my.data
+SHARE "./My Notes"
+SHARE ./app /srv/app
+# directory /home/agent/app
+# file /home/agent/notes.md
+# file /var/log/output.log
+# file /var/log/error.log
+# directory /srv/my.data
+# directory /home/agent/My Notes
+# directory /srv/app
+["--add-dir", "/home/agent/app", "--add-dir", "/var/log", "--add-dir", "/srv/my.data", "--add-dir", "/home/agent/My Notes", "--add-dir", "/srv/app"]

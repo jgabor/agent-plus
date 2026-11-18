@@ -72,3 +72,26 @@ fn effort_name(effort: agentfile::Effort) -> &'static str {
         Effort::Max => "max",
     }
 }
+
+/// The guest home directory, which a file share never adds to the workspace.
+const HOME: &str = "/home/agent";
+
+/// The directories that shares add to the harness's workspace, from SPEC.md's
+/// MODE section, in share order and without repeats: each directory share,
+/// and the directory that holds each file share, unless that is the home
+/// directory. Each share is its guest path, and whether it is a directory.
+pub fn workspace<'a>(shares: impl IntoIterator<Item = (&'a str, bool)>) -> Vec<&'a str> {
+    let mut directories: Vec<&str> = Vec::new();
+    for (path, directory) in shares {
+        let added = match (directory, path.rsplit_once('/')) {
+            (true, _) => path,
+            (false, Some((HOME, _)) | None) => continue,
+            (false, Some(("", _))) => "/",
+            (false, Some((parent, _))) => parent,
+        };
+        if !directories.contains(&added) {
+            directories.push(added);
+        }
+    }
+    directories
+}

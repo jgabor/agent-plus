@@ -402,3 +402,72 @@ fn one_harness_may_use_what_the_other_keeps() {
     assert_eq!(reserved_errors("claude", codex).len(), 3);
     assert_eq!(reserved_errors("codex", claude).len(), 3);
 }
+
+/// The Agentfile the workspace golden files show, and whether each `SHARE`
+/// is a directory on the host, in line order.
+const SHARES: &str = "\
+SHARE ./app
+SHARE ./notes.md ~/notes.md ro
+SHARE /var/log/output.log rw
+SHARE /var/log/error.log rw
+SHARE ./data /srv/my.data
+SHARE \"./My Notes\"
+SHARE ./app /srv/app
+";
+const SHARE_DIRECTORIES: [bool; 7] = [true, false, false, false, true, true, true];
+
+/// The Agentfile's shares, for `agent`, as [`ap::adapter::workspace`] takes
+/// them, and the directories it gives.
+fn shares(agent: &str) -> (String, Vec<String>) {
+    let text = format!("AGENT {agent}\n{SHARES}");
+    let instructions = agentfile::parse(&text).unwrap();
+    let placed = agentfile::GuestPath::read(&instructions, "project").unwrap();
+    assert_eq!(placed.len(), SHARE_DIRECTORIES.len());
+    let paths: Vec<(&str, bool)> = (placed.iter().zip(SHARE_DIRECTORIES))
+        .map(|(placed, directory)| (placed.path.as_str(), directory))
+        .collect();
+    let directories = ap::adapter::workspace(paths.iter().copied());
+    let mut shown = text.clone();
+    for (path, directory) in &paths {
+        let kind = if *directory { "directory" } else { "file" };
+        shown.push_str(&format!("# {kind} {path}\n"));
+    }
+    (shown, directories.into_iter().map(str::to_owned).collect())
+}
+
+// spec(MODE): The harness's workspace is the working directory plus every `SHARE` and `REPO`.
+// spec(MODE): The adapter adds those on the harness's command line, with `--add-dir` or a configuration override.
+// spec(MODE): For a single file, it adds the parent directory, unless that is the home directory.
+#[test]
+fn every_share_joins_the_claude_workspace() {
+    let (shown, directories) = shares("claude");
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    let arguments = claude::workspace(&directories);
+    golden(
+        "workspace.txt",
+        format!("{shown}{arguments:?}\n").as_bytes(),
+    );
+    assert!(claude::workspace(&[]).is_empty());
+}
+
+// spec(MODE): The harness's workspace is the working directory plus every `SHARE` and `REPO`.
+// spec(MODE): The adapter adds those on the harness's command line, with `--add-dir` or a configuration override.
+// spec(MODE): For a single file, it adds the parent directory, unless that is the home directory.
+// spec(Run): The Codex adapter marks every share as trusted (`trust_level = "trusted"`), so Codex loads a repository's own configuration, hooks, and rules.
+#[test]
+fn every_share_joins_the_codex_workspace_and_is_trusted() {
+    let (shown, directories) = shares("codex");
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    let arguments = codex::workspace(&directories);
+    golden_in(
+        "codex",
+        "workspace.txt",
+        format!("{shown}{arguments:?}\n").as_bytes(),
+    );
+    assert!(codex::workspace(&[]).is_empty());
+    let quoted = codex::workspace(&["/srv/a\"b\\c"]);
+    assert_eq!(
+        quoted[3],
+        r#"projects={"/srv/a\"b\\c"={trust_level="trusted"}}"#
+    );
+}

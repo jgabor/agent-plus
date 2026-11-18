@@ -173,3 +173,44 @@ pub fn arguments(
     }
     arguments
 }
+
+/// The arguments that add `directories`, from [`super::workspace`], to the
+/// workspace, and mark each as trusted, so Codex loads its configuration,
+/// hooks, and rules: `--add-dir` before each, and one `-c` override of the
+/// `projects` table. The table is written whole, because Codex splits a
+/// dotted key at every `.`, including one inside a quoted path.
+/// Codex 0.137.0 and 0.169.0 take both, and load a trusted directory's
+/// `.codex/config.toml`.
+pub fn workspace(directories: &[&str]) -> Vec<String> {
+    let mut arguments = Vec::new();
+    for directory in directories {
+        arguments.extend(["--add-dir".to_owned(), (*directory).to_owned()]);
+    }
+    if !directories.is_empty() {
+        let projects: Vec<String> = (directories.iter())
+            .map(|directory| format!("{}={{trust_level=\"trusted\"}}", toml_string(directory)))
+            .collect();
+        arguments.extend([
+            "-c".to_owned(),
+            format!("projects={{{}}}", projects.join(",")),
+        ]);
+    }
+    arguments
+}
+
+/// `text` as a TOML basic string.
+fn toml_string(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            character if character.is_control() => {
+                quoted.push_str(&format!("\\u{:04X}", u32::from(character)));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
+}

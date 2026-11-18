@@ -297,19 +297,63 @@ fn rm_refuses_for_pending_changes_after_the_agent_is_gone() {
     assert!(runs.has_pending(&run).unwrap());
 }
 
+// spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+// spec(ap rm): `ap rm --force` keeps an active run's pending changes, as it keeps the run's log.
+#[test]
+fn rm_force_deletes_the_pending_changes_of_the_agent_s_finished_runs() {
+    let scratch = Scratch::new("force");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let runs = Runs::new(scratch.store());
+    let (finished, finished_pending) = run_sharing(&scratch, "notes", 1);
+    fs::write(finished_pending.join("records"), "DELETE \"data\"\n").unwrap();
+    runs.create_log(&finished).unwrap();
+    let (active, active_pending) = run_sharing(&scratch, "notes", 2);
+    fs::write(active_pending.join("records"), "DELETE \"data\"\n").unwrap();
+    runs.create_log(&active).unwrap();
+    let held = runs.hold(&active).unwrap();
+    let (other, other_pending) = run_sharing(&scratch, "other", 3);
+    fs::write(other_pending.join("records"), "DELETE \"data\"\n").unwrap();
+
+    let output = scratch.ap(&["rm", "--force", "notes"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+    assert_eq!(scratch.ok_in(&scratch.root, &["ls"]), "");
+    assert_eq!(runs.get(&finished).unwrap(), None);
+    assert!(runs.log(&finished).unwrap().is_none());
+    assert!(!runs.has_pending(&finished).unwrap());
+    assert!(!runs.list_pending().unwrap().contains(&finished));
+    // The active run's share server may still be writing, so its changes
+    // and its log stay, and so do another agent's.
+    assert!(runs.has_pending(&active).unwrap());
+    assert!(runs.log(&active).unwrap().is_some());
+    assert!(runs.has_pending(&other).unwrap());
+
+    // Once the run ends, `ap rm --force` deletes its changes too.
+    drop(held);
+    scratch.ok_in(&scratch.root, &["rm", "--force", "notes"]);
+    assert_eq!(runs.get(&active).unwrap(), None);
+    assert!(!runs.list_pending().unwrap().contains(&active));
+    assert!(runs.has_pending(&other).unwrap());
+}
+
 #[test]
 fn rm_takes_one_agent() {
     let scratch = Scratch::new("arguments");
     for args in [
         &["rm"][..],
         &["rm", "a", "b"],
-        &["rm", "--force", "a"],
+        &["rm", "--force"],
+        &["rm", "--force", "a", "b"],
+        &["rm", "--force", "--force", "a"],
         &["rm", "-f", "a"],
     ] {
         let output = scratch.ap(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert!(
-            stderr(&output).contains("ap rm agent\n"),
+            stderr(&output).contains("ap rm [--force] agent\n"),
             "{}",
             stderr(&output)
         );
@@ -322,7 +366,7 @@ fn usage_lists_rm() {
     let output = scratch.ap(&[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("ap rm agent\n"),
+        stderr(&output).contains("ap rm [--force] agent\n"),
         "{}",
         stderr(&output)
     );

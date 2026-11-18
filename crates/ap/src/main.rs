@@ -30,7 +30,7 @@ const USAGE: &str = "usage: ap --version
        ap build [--strict] [--replace] [--approve=file] [-t name] [dir]
        ap ls
        ap inspect [--grants] agent
-       ap rm agent
+       ap rm [--force] agent
        ap run [-i] [-p prompt] agent
        ap ps [-a]
        ap logs run
@@ -106,9 +106,9 @@ fn main() -> ExitCode {
         return ExitCode::from(commands::inspect::run(&inspect));
     }
     if args.first().is_some_and(|command| command == "rm")
-        && let Some(name) = commands::rm::parse(&args[1..])
+        && let Some((name, force)) = commands::rm::parse(&args[1..])
     {
-        return ExitCode::from(commands::rm::run(&name));
+        return ExitCode::from(commands::rm::run(&name, force));
     }
     if args.first().is_some_and(|command| command == "run")
         && let Some(run) = commands::run::parse(&args[1..])

@@ -694,10 +694,9 @@ worktree, and shorter than a `#!` line may be, so a check that passes only in
 a short path fails here too.
 
 These worktrees, and the tree the bench builds its base in, are kept in the
-system's temp directory, or in `/var/tmp` when the temp directory is a tmpfs,
-because each build's output takes gigabytes. Either must be outside the
-checkout, because Cargo reads `.cargo/config.toml` from every parent
-directory. A run holds a lock on a file beside its tree. `merge` and `prepare`
+system's temp directory, or in `/var/tmp` when only that one is on a disk,
+because each build's output takes gigabytes. They stay outside the checkout,
+because Cargo reads `.cargo/config.toml` from every parent directory. A run holds a lock on a file beside its tree. `merge` and `prepare`
 remove each tree of the repository whose lock no live run holds, which is what
 a killed run leaves.
 

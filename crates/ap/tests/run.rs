@@ -5,10 +5,12 @@
 
 mod common;
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -496,6 +498,7 @@ fn a_run_with_share_asks_nothing_and_keeps_its_changes_pending() {
     assert_eq!(roots, [project.as_path()]);
 }
 
+// spec(SHARE): The run fails if the path isn't a directory, or if its name is missing, as for `/`, or isn't UTF-8.
 // spec(SHARE): It can appear once and takes no destination: the path resolves against your current directory, it maps to `~/<directory name>`, and it becomes the working directory, ahead of any `WORKDIR` in the Agentfile.
 #[test]
 fn a_run_takes_share_once_and_only_for_a_directory() {
@@ -521,6 +524,17 @@ fn a_run_takes_share_once_and_only_for_a_directory() {
         &scratch.ap(&["run", "plain", "--share", "missing", "-p", "hi"], &[]),
         "`--share missing`: ",
     );
+    refused(
+        &scratch.ap(&["run", "plain", "--share", "/", "-p", "hi"], &[]),
+        "`--share /`: it has no name to map to",
+    );
+    let latin1 = OsStr::from_bytes(b"caf\xe9");
+    fs::create_dir_all(scratch.root.join(latin1)).unwrap();
+    let output = (scratch.command(&["run", "plain", "-p", "hi", "--share"], &[]))
+        .arg(latin1)
+        .output()
+        .unwrap();
+    refused(&output, "its name isn't UTF-8");
     let runs = ::store::Runs::new(scratch.home.join(".local/share/ap"));
     assert!(runs.list_pending().unwrap().is_empty());
 }

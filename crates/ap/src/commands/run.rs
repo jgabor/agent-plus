@@ -626,13 +626,9 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
                 return Err(fail(format!("{shown}: it isn't a directory")));
             }
             let name = (host.path().file_name())
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| {
-                    fail(format!(
-                        "{shown}: {} has no name that a guest path can take",
-                        host.path().display()
-                    ))
-                })?;
+                .ok_or_else(|| fail(format!("{shown}: it has no name to map to")))?
+                .to_str()
+                .ok_or_else(|| fail(format!("{shown}: its name isn't UTF-8")))?;
             let path = GuestPath::for_run_share(name, &placed)
                 .map_err(|message| fail(format!("{shown}: {message}")))?;
             roots.push(Opened {

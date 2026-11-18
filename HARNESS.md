@@ -698,7 +698,7 @@ system's temp directory, or in `/var/tmp` when only that one is on a disk,
 because each build's output takes gigabytes. They stay outside the checkout,
 because Cargo reads `.cargo/config.toml` from every parent directory. A run holds a lock on a file beside its tree. `merge` and `prepare`
 remove each tree of the repository whose lock no live run holds, which is what
-a killed run leaves.
+a killed run leaves, in either place.
 
 A PR that changes `xtask/` is proven twice. `main`'s xtask proves it, so that
 it can't pass by changing its judge. The xtask of its rebased tree proves it

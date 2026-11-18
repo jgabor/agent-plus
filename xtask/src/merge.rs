@@ -710,19 +710,23 @@ impl Tree {
 
     /// Removes this repository's merge trees that no live run holds, which
     /// a killed run leaves. Nothing else would remove them until the same PR
-    /// is proven again.
+    /// is proven again. The system's temp directory is swept too, for trees
+    /// left there before `temp_outside` chose another place.
     fn sweep(root: &Path) -> Result<(), Problem> {
-        let temp = bench::temp_outside(root)?;
         let prefix = format!("xtask-merge-{}-", repository(root)?);
-        let entries = fs::read_dir(&temp)
-            .map_err(|e| Problem(format!("couldn't read {}: {e}", temp.display())))?;
-        let mut trees: Vec<PathBuf> = entries
-            .filter_map(|entry| {
+        let mut places = vec![bench::temp_outside(root)?];
+        places.extend(fs::canonicalize(env::temp_dir()).ok());
+        places.dedup();
+        let mut trees = Vec::new();
+        for place in places {
+            let entries = fs::read_dir(&place)
+                .map_err(|e| Problem(format!("couldn't read {}: {e}", place.display())))?;
+            trees.extend(entries.filter_map(|entry| {
                 let name = entry.ok()?.file_name().into_string().ok()?;
                 let name = name.strip_suffix(".lock").unwrap_or(&name);
-                name.starts_with(&prefix).then(|| temp.join(name))
-            })
-            .collect();
+                name.starts_with(&prefix).then(|| place.join(name))
+            }));
+        }
         trees.sort();
         trees.dedup();
         for tree in trees {

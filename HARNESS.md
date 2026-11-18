@@ -510,7 +510,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask record --issue <n> --pr <n>` | Writes the ledger record for the current head |
 | `cargo xtask merge <pr> [--thread <link>]` | Runs the [merge sequence](#merge-sequence) |
 | `cargo xtask prepare <pr> [--keep-budgets] [--thread <link>]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
-| `cargo xtask refresh` | Runs the [refresh](#refresh) of `land-needed` PRs that are behind `main` |
+| `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
 | `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
@@ -755,27 +755,46 @@ record.
 
 ### Refresh
 
-A workflow runs `cargo xtask refresh` on every push to `main`, one run at a
-time, with `xtask` built from `main`. GitHub-hosted x86_64 runners can run the
-VMM, once a udev rule opens KVM and a systemd user session is started.
+A PR that waits for the owner is approved when the owner arms auto-merge on
+it, or clicks Merge on it while it is behind `main`, which arms auto-merge.
+Nothing proves a waiting PR before that, so until then it shows as behind.
 
-1. Find each open PR whose issue has `land-needed` and that is behind `main`,
-   oldest first. A PR that isn't behind is left alone.
-2. Post `pending` as `xtask/gate` on each, saying how many PRs are proven
-   before it: `Queued, next`, `Queued, 1 PR ahead`, or `Queued, 2 PRs ahead`.
+A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, and on
+every push to `main`, one run at a time, with the workflow and `xtask` of
+`main`. GitHub-hosted x86_64 runners can run the VMM, once a udev rule opens
+KVM and a systemd user session is started.
+
+1. Find each open PR whose issue has `land-needed` and whose auto-merge is
+   armed, oldest first. Every other PR, and its status, is left alone.
+2. Prove each one that is behind `main`, or whose head has no `success` from
+   `xtask/gate`. First post `pending` as `xtask/gate` on each, saying how many
+   PRs are proven before it: `Queued, next`, `Queued, 1 PR ahead`, or
+   `Queued, 2 PRs ahead`.
 3. Run `cargo xtask prepare <pr> --keep-budgets` for each as its own process.
    It runs no bench, because a shared runner can't measure a budget. The new
    record keeps the budget values and reason of the record at the tip of the
    branch, and `prepare` fails if the tip has none.
-4. Try every PR. A PR that fails stays `land-needed`, and the command exits
-   1. Its `prepare` posts `failure` and says why. If its `prepare` ended with
-   neither a `success` nor a `failure` on the PR's head, as at the merge
-   timeout, `refresh` posts `failure` as `Not proven`.
+4. Once a PR's head has `success`, `refresh` squashes it, if its auto-merge is
+   still armed and its head is the one that was proven. A PR whose head moved,
+   or whose auto-merge was turned off, stays open. After the squash, `refresh`
+   removes `land-needed` from the PR and its issue, because GitHub starts no
+   workflow for a merge made with the workflow's own token.
+5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
+   and says why. If it ended with neither a `success` nor a `failure` on the
+   PR's head, as at the merge timeout, `refresh` posts `failure` as `Not
+   proven`.
+6. A proof that failed only because `main` moved keeps `land-needed`, and the
+   next run proves it again. Any other failure is the change's. `refresh`
+   comments on the PR with the reason, and removes `land-needed` from the PR
+   and its issue, so the dispatcher restarts the issue. Auto-merge stays
+   armed, so the fixed PR merges once a refresh proves it, without another
+   approval.
 
 Before each proof, `refresh` prints `refresh: proving PR 5 (1 of 2)`. In
 Actions, each proof sits in a `::group::PR 5 (1 of 2): <title>` fold, and
 `refresh` appends a table to `$GITHUB_STEP_SUMMARY`, with a row per PR: the
-PR, the verdict, the status description, and how long the proof took.
+PR, the verdict (`merged`, `proven`, or `not proven`), the status
+description, and how long the proof took.
 Elsewhere it prints no fold markers and writes no summary.
 
 Each `prepare` proves its PR with the xtask of the `main` it fetched, as in
@@ -937,10 +956,9 @@ passes. No scheduled work runs on GitHub.
   merge button once `xtask/gate` is green. A PR comment says why it waits.
 - Merge `auto:pr` PRs, revert PRs, and any PR that lowers a hill, the same way.
   A PR comment says what merging a lowered count or a revert accepts.
-- If the PR is behind `main`, wait for the [refresh](#refresh) to prove it
-  again. A Merge click on a PR that is behind can arm auto-merge instead. The
-  request survives the refresh's force-push, and the PR merges once its new
-  `xtask/gate` is green.
+- If the PR is behind `main`, arm auto-merge on it, or click Merge, which
+  arms it. That is the approval. The [refresh](#refresh) then proves the PR
+  on the newest `main` and merges it. Nothing proves a waiting PR before it.
 - Don't use Update branch. It adds a commit with no ledger record at the tip
   and no `xtask/gate` status, so the ruleset blocks the PR, and the next
   refresh turns it red.

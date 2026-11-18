@@ -369,17 +369,27 @@ maybe_kill before
             let file = self.bin.join(tool);
             common::write_tool(&file, &script);
         }
+        let git = real("git");
+        let origin = self.origin.display();
         let gh = format!(
             r#"{prelude}case "$1 $2" in
   "repo view") echo '{{"nameWithOwner":"o/r","owner":{{"login":"o"}}}}' ;;
-  "pr view") if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
+  "pr view") case "$*" in
+    *autoMergeRequest*) if [ -f "{bin}/merged-$3" ]; then state=MERGED; else state=OPEN; fi
+      if [ -f "{bin}/disarmed-$3" ]; then auto=null; else auto='{{"mergeMethod":"SQUASH"}}'; fi
+      head=$('{git}' --git-dir '{origin}' rev-parse "refs/heads/$(cat "{bin}/branch-$3")")
+      printf '{{"state":"%s","headRefOid":"%s","autoMergeRequest":%s}}\n' "$state" "$head" "$auto" ;;
+    *) if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
+  esac ;;
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
   "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
-    echo merged >> '{bin}/merges'; echo "$9" > '{bin}/merged' ;;
+    echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
+    if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi ;;
   "issue view") cat '{bin}/issue.json' ;;
-  "api -X") if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
+  "api -X") case "$4" in */labels*) exit 0 ;; esac
+    if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
   "api repos/"*) posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
@@ -2403,15 +2413,32 @@ fn land_takes_one_pr() {
 }
 
 /// One row of `gh pr list`.
+/// A row of `gh pr list` for a PR whose auto-merge is armed.
 fn listed(number: u64, branch: &str, head: &str, closes: u64, fork: bool) -> String {
     format!(
-        "{{\"number\":{number},\"title\":\"t\",\"labels\":[],\"url\":\"https://github.com/o/r/pull/{number}\",\"isCrossRepository\":{fork},\"headRefName\":{},\"headRefOid\":{},\"closingIssuesReferences\":[{{\"number\":{closes},\"url\":\"https://github.com/o/r/issues/{closes}\"}}]}}",
+        "{{\"number\":{number},\"title\":\"t\",\"labels\":[],\"url\":\"https://github.com/o/r/pull/{number}\",\"isCrossRepository\":{fork},\"headRefName\":{},\"headRefOid\":{},\"closingIssuesReferences\":[{{\"number\":{closes},\"url\":\"https://github.com/o/r/issues/{closes}\"}}],\"autoMergeRequest\":{ARMED}}}",
         quoted(branch),
         quoted(head)
     )
 }
 
+const ARMED: &str = "{\"mergeMethod\":\"SQUASH\"}";
+
+/// The same row, for a PR the owner hasn't approved by arming auto-merge.
+fn unarmed(row: &str) -> String {
+    row.replace(ARMED, "null")
+}
+
+fn merged(number: u64, head: &str) -> String {
+    format!("gh pr merge {number} -R o/r --squash --delete-branch --match-head-commit {head}")
+}
+
+fn unlabeled(number: u64) -> String {
+    format!("gh api -X DELETE repos/{{owner}}/{{repo}}/issues/{number}/labels/land-needed")
+}
+
 const KEPT: &str = "version_ms = 12.5\n";
+const GREEN: &str = "spec 0 of 2, journey 1 of 1";
 
 fn status(head: &str, state: &str) -> String {
     format!(
@@ -2420,8 +2447,26 @@ fn status(head: &str, state: &str) -> String {
 }
 
 impl Repo {
+    /// The fake `gh pr view` reads each PR's head from its branch.
     fn set_open_prs(&self, rows: &[String]) {
+        for row in rows {
+            let field = |name: &str, end: char| {
+                let start = row.find(name).unwrap() + name.len();
+                row[start..].split(end).next().unwrap().to_string()
+            };
+            let number = field("\"number\":", ',');
+            let branch = field("\"headRefName\":\"", '"');
+            fs::write(self.bin.join(format!("branch-{number}")), branch).unwrap();
+        }
         fs::write(self.bin.join("prs.json"), format!("[{}]\n", rows.join(","))).unwrap();
+    }
+
+    /// A green `xtask/gate` on this commit, as a proof leaves it.
+    fn set_green(&self, head: &str) {
+        let status = format!(
+            "{{\"statuses\":[{{\"context\":\"xtask/gate\",\"state\":\"success\",\"description\":\"{GREEN}\"}}]}}\n"
+        );
+        fs::write(self.bin.join(format!("status-{head}")), status).unwrap();
     }
 
     /// Which open issues have `land-needed`. Issue 2 has another label.
@@ -2475,7 +2520,7 @@ impl Repo {
 }
 
 #[test]
-fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
+fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     let repo = Repo::new("refresh");
     repo.other_pr(
         5,
@@ -2496,7 +2541,7 @@ fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
     repo.prepared(BRANCH, 7, "");
     repo.prepared("8-y", 8, "");
     repo.advance_main("later.txt", "x\n");
-    // Cut from the new `main`, so it isn't behind.
+    // Cut from the new `main`, so it isn't behind, and never proven.
     repo.other_pr(
         4,
         "6-up",
@@ -2512,7 +2557,7 @@ fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
         .collect();
     repo.set_open_prs(&[
         listed(9, BRANCH, &before[0], 7, false),
-        listed(4, "6-up", &before[3], 6, false),
+        unarmed(&listed(4, "6-up", &before[3], 6, false)),
         listed(6, "2-z", &before[2], 2, false),
         listed(5, "8-y", &before[1], 8, false),
     ]);
@@ -2545,11 +2590,26 @@ fn a_refresh_proves_each_stale_land_needed_pr_again_oldest_first() {
         status(&before[0], "pending")
     ));
     assert!(at(&status(&before[0], "pending")) < green_five, "{calls}");
-    assert!(green_five < green_nine, "{calls}");
-    for (branch, head) in [("2-z", &before[2]), ("6-up", &before[3])] {
+    let merged_five = at(&merged(5, &repo.head_of("8-y")));
+    assert!(
+        green_five < merged_five && merged_five < green_nine,
+        "{calls}"
+    );
+    assert!(
+        green_nine < at(&merged(9, &repo.head_of(BRANCH))),
+        "{calls}"
+    );
+    // Its `mirror-labels` run doesn't start for a merge by the workflow.
+    for number in [5, 8, 9, 7] {
+        assert!(merged_five < at(&unlabeled(number)), "{calls}");
+    }
+    for (number, branch, head) in [(6, "2-z", &before[2]), (4, "6-up", &before[3])] {
         assert_eq!(&repo.head_of(branch), head);
         assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
+        assert!(!calls.contains(&format!("gh pr merge {number}")), "{calls}");
+        assert!(!calls.contains(&unlabeled(number)), "{calls}");
     }
+    assert!(!calls.contains("pr comment"), "{calls}");
     let out = stdout(&output);
     let line = |text: &str| {
         out.find(&format!("{text}\n"))
@@ -2595,6 +2655,7 @@ fn a_refresh_in_actions_folds_each_proof_and_sums_them_up() {
         listed(4, "6-up", &four, 6, false),
     ]);
     repo.set_land_needed(&[6, 7, 8]);
+    repo.set_green(&four);
     let summary = repo.temp.join("summary.md");
     fs::write(&summary, "earlier\n").unwrap();
     repo.git(&["checkout", "-q", "main"]);
@@ -2637,12 +2698,16 @@ fn a_refresh_in_actions_folds_each_proof_and_sums_them_up() {
             "|---|---|---|---|"
         ]
     );
-    assert_eq!(rows[4], "| #4 | up to date | | |", "{summary}");
+    assert_eq!(rows[4], format!("| #4 | merged | {GREEN} | |"), "{summary}");
     assert!(
         rows[5].starts_with("| #5 | not proven | Not proven | "),
         "{summary}"
     );
-    assert!(rows[6].starts_with("| #9 | proven | spec "), "{summary}");
+    assert!(rows[6].starts_with("| #9 | merged | spec "), "{summary}");
+    let calls = repo.calls();
+    // A green head on the newest `main` needs no proof.
+    assert!(calls.contains(&merged(4, &four)), "{calls}");
+    assert!(!calls.contains(&format!("statuses/{four}")), "{calls}");
     for row in &rows[5..] {
         assert!(row.ends_with("s |"), "{summary}");
     }
@@ -2684,10 +2749,22 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
     let unproven = format!("{} -f description=Not proven\n", status(&five, "failure"));
     assert!(calls.contains(&unproven), "{calls}");
     assert_eq!(repo.head_of("8-y"), five);
+    assert!(!calls.contains("gh pr merge 5"), "{calls}");
+    // The dispatcher restarts its issue, and its auto-merge stays armed.
+    assert!(calls.contains("gh pr comment 5 --body-file -"), "{calls}");
+    assert!(
+        repo.pr_comments().contains("Not proven"),
+        "{}",
+        repo.pr_comments()
+    );
+    assert!(calls.contains(&unlabeled(8)), "{calls}");
+    assert!(calls.contains(&unlabeled(5)), "{calls}");
+    assert!(!calls.contains("--disable-auto"), "{calls}");
     assert!(
         calls.contains(&status(&repo.head_of(BRANCH), "success")),
         "{calls}"
     );
+    assert!(calls.contains(&merged(9, &repo.head_of(BRANCH))), "{calls}");
 }
 
 /// A fork's branch isn't in this repository, and `prepare` refuses it.
@@ -2777,8 +2854,13 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
         .into_iter()
         .filter(|(_, said)| said.starts_with("failure"))
         .collect();
-    let why = "failure the tip of PR 9 has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare 9`";
-    assert_eq!(failures, [(head, why.to_string())]);
+    let why = "the tip of PR 9 has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare 9`";
+    assert_eq!(failures, [(head, format!("failure {why}"))]);
+    assert!(repo.pr_comments().contains(why), "{}", repo.pr_comments());
+    let calls = repo.calls();
+    assert!(calls.contains(&unlabeled(7)), "{calls}");
+    assert!(calls.contains(&unlabeled(9)), "{calls}");
+    assert!(!calls.contains("gh pr merge"), "{calls}");
 }
 
 /// A `prepare` that was stopped after it posted the green did prove the PR.
@@ -2817,8 +2899,13 @@ fn a_refresh_leaves_a_green_that_its_prepare_posted() {
         )
     );
     let summary = fs::read_to_string(&summary).unwrap();
-    let row = "| #9 | proven | spec 0 of 2, journey 1 of 1 | ";
+    let row = "| #9 | merged | spec 0 of 2, journey 1 of 1 | ";
     assert!(summary.contains(row), "{summary}");
+    assert!(
+        repo.calls().contains(&merged(9, &repo.head())),
+        "{}",
+        repo.calls()
+    );
 }
 
 /// The queue position only says what is happening, as any `pending` does.
@@ -2840,6 +2927,163 @@ fn a_refresh_proves_a_pr_whose_queue_position_can_not_be_posted() {
         stderr(&output)
     );
     assert_eq!(last_post(&repo), "success spec 0 of 2, journey 1 of 1");
+}
+
+/// Nothing proves a waiting PR before the owner approves it by arming
+/// auto-merge.
+#[test]
+fn a_refresh_leaves_a_pr_alone_until_its_auto_merge_is_armed() {
+    let repo = Repo::new("refresh-unarmed");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head();
+    repo.set_open_prs(&[unarmed(&listed(9, BRANCH, &head, 7, false))]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(repo.head(), head);
+    assert_eq!(posts(&repo), []);
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+}
+
+/// An armed PR on the newest `main` that was never proven, or whose proof
+/// failed, is proven again.
+#[test]
+fn a_refresh_proves_an_armed_pr_that_is_up_to_date_but_not_green() {
+    let repo = Repo::new("refresh-not-green");
+    repo.prepared(BRANCH, 7, "");
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), format!("success {GREEN}"));
+    assert!(
+        repo.calls().contains(&merged(9, &repo.head())),
+        "{}",
+        repo.calls()
+    );
+}
+
+/// The owner can take the approval back during the proof.
+#[test]
+fn a_refresh_merges_no_pr_whose_auto_merge_was_turned_off() {
+    let repo = Repo::new("refresh-disarmed");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.git(&["checkout", "-q", "main"]);
+    let disarm = format!(": > '{}'", repo.bin.join("disarmed-9").display());
+
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("RUN_ON", "state=success")
+        .env("RUN_COMMAND", &disarm)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), format!("success {GREEN}"));
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+}
+
+/// A head that a person pushed after the proof isn't the one it proved.
+#[test]
+fn a_refresh_merges_no_pr_whose_head_moved() {
+    let repo = Repo::new("refresh-head-moved");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.git(&["checkout", "-q", "main"]);
+
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("RUN_ON", "state,headRefOid,autoMergeRequest")
+        .env(
+            "RUN_COMMAND",
+            repo.update_ref("refs/heads/7-x", "refs/heads/main"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(
+        calls.contains("state,headRefOid,autoMergeRequest"),
+        "{calls}"
+    );
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+}
+
+/// A proof that fails only because `main` moved says nothing about the
+/// change, so the PR keeps waiting for the next run.
+#[test]
+fn a_refresh_keeps_a_pr_waiting_when_main_moved_during_its_proof() {
+    let repo = Repo::new("refresh-main-moved");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.git(&["checkout", "-q", "main"]);
+
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("RUN_ON", "cargo build --release")
+        .env(
+            "RUN_COMMAND",
+            repo.update_ref("refs/heads/main", "refs/heads/7-x"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(
+        last_post(&repo),
+        "failure `main` moved during the merge, so this head wasn't tested on it. Run it again"
+    );
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+    assert_eq!(repo.pr_comments(), "");
 }
 
 /// Every `prepare` builds the xtask of the newest `main`, whatever `refresh`

@@ -175,3 +175,12 @@ pub fn arguments(
     arguments.extend(["--permission-mode".to_owned(), mode.to_owned()]);
     arguments
 }
+
+/// The arguments that add `directories`, from [`super::workspace`], to the
+/// workspace: `--add-dir` before each, which Claude Code has had since 1.0.18.
+pub fn workspace(directories: &[&str]) -> Vec<String> {
+    directories
+        .iter()
+        .flat_map(|directory| ["--add-dir".to_owned(), (*directory).to_owned()])
+        .collect()
+}

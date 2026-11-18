@@ -715,6 +715,10 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
         (None, None, _) => HOME.to_owned(),
     };
     shares.extend(typed);
+    // SPEC.md's MODE section: every share joins the harness's workspace. The
+    // share from `--share` is a directory.
+    let kinds = (checked.iter().map(|(_, directory)| *directory)).chain(std::iter::repeat(true));
+    let workspace = ap::adapter::workspace(shares.iter().map(String::as_str).zip(kinds));
     let harness = super::build::harness_path(settings.agent.harness);
     // `--` keeps a prompt that starts with `-` from reading as a flag.
     let argv = match settings.agent.harness {
@@ -739,6 +743,7 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
                 settings.effort,
                 settings.mode,
             ));
+            argv.extend(ap::adapter::claude::workspace(&workspace));
             argv.push("--".to_owned());
             argv
         }
@@ -757,6 +762,7 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
                 settings.mode,
                 interactive,
             ));
+            argv.extend(ap::adapter::codex::workspace(&workspace));
             argv.push("--".to_owned());
             argv
         }

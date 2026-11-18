@@ -1436,8 +1436,10 @@ fn a_merge_removes_trees_no_live_run_holds() {
     else {
         panic!("{left:?}");
     };
-    let dead = left.replacen("-9_", "-8_", 1);
-    let live = left.replacen("-9_", "-7_", 1);
+    // The PR number ends the name, before any padding.
+    let at = left.rfind("-9").unwrap();
+    let dead = format!("{}-8{}", &left[..at], &left[at + 2..]);
+    let live = format!("{}-7{}", &left[..at], &left[at + 2..]);
     let moved = [
         "worktree",
         "move",

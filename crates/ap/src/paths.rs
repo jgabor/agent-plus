@@ -52,6 +52,17 @@ impl HostPath {
         Ok(HostPath { path, outside })
     }
 
+    /// Resolves a path you typed on the command line, against the current
+    /// directory if it is relative. The result is canonical, as
+    /// [`HostPath::resolve`] makes it. There is no build context, so it
+    /// counts as outside one.
+    pub fn resolve_typed(path: &Path) -> io::Result<HostPath> {
+        Ok(HostPath {
+            path: canonical(path)?,
+            outside: true,
+        })
+    }
+
     /// The canonical path.
     pub fn path(&self) -> &Path {
         &self.path

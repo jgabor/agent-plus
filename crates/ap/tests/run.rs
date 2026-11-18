@@ -248,14 +248,7 @@ fn a_run_without_a_prompt_or_with_i_is_interactive_and_needs_a_terminal() {
 fn a_flag_that_isnt_built_yet_is_named() {
     let scratch = Scratch::new("flags");
     scratch.build("runnable", RUNNABLE);
-    for flag in [
-        "-t",
-        "--share",
-        "--network",
-        "--resume",
-        "--gui",
-        "--approve=grants",
-    ] {
+    for flag in ["-t", "--network", "--resume", "--gui", "--approve=grants"] {
         let output = scratch.ap(&["run", "runnable", flag, "-p", "hi"], &[]);
         let name = flag.split('=').next().unwrap();
         refused(&output, &format!("`ap run {name}` is not built yet"));
@@ -461,4 +454,109 @@ fn a_run_whose_share_destinations_overlap_fails() {
         &scratch.ap(&["run", "overlap", "-p", "hi"], &[]),
         "the destination `/data/b` overlaps `/data`",
     );
+}
+
+/// Every approval in the store under `home`, by file name.
+fn approvals(home: &Path) -> Vec<(String, Vec<u8>)> {
+    let dir = home.join(".local/share/ap/approvals");
+    let mut found: Vec<(String, Vec<u8>)> = match fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, fs::read(entry.path()).unwrap())
+            })
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("{}: {error}", dir.display()),
+    };
+    found.sort();
+    found
+}
+
+// spec(SHARE): `ap run --share <directory>` adds a copy-on-write share for a single run.
+// spec(Grants): Options you type on the command line (for example, `ap run --share .`) are already your decision and need no approval.
+// spec(Run): **Flags.** `ap run` takes `-p`/`--prompt`, `-i`, `-t`, `--share`, `--network`, `--resume`, `--gui`, and `--approve=<file>`.
+#[test]
+fn a_run_with_share_asks_nothing_and_keeps_its_changes_pending() {
+    let scratch = Scratch::new("run-share");
+    scratch.build("plain", RUNNABLE);
+    let project = scratch.root.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let before = approvals(&scratch.home);
+    // Standard input is no terminal, so a question would fail the run.
+    past_checks(&scratch.ap(&["run", "plain", "--share", "project", "-p", "hi"], &[]));
+    assert_eq!(approvals(&scratch.home), before);
+    let runs = ::store::Runs::new(scratch.home.join(".local/share/ap"));
+    let [run] = &runs.list_pending().unwrap()[..] else {
+        panic!("not one run with a pending directory");
+    };
+    let shares = runs.pending_shares(run).unwrap();
+    let roots: Vec<&Path> = shares.iter().map(|share| share.root.as_path()).collect();
+    assert_eq!(roots, [project.as_path()]);
+}
+
+// spec(SHARE): It can appear once and takes no destination: the path resolves against your current directory, it maps to `~/<directory name>`, and it becomes the working directory, ahead of any `WORKDIR` in the Agentfile.
+#[test]
+fn a_run_takes_share_once_and_only_for_a_directory() {
+    let scratch = Scratch::new("run-share-once");
+    scratch.build("plain", RUNNABLE);
+    fs::create_dir_all(scratch.root.join("one")).unwrap();
+    fs::create_dir_all(scratch.root.join("two")).unwrap();
+    fs::write(scratch.root.join("notes.txt"), "one").unwrap();
+    refused(
+        &scratch.ap(
+            &[
+                "run", "plain", "--share", "one", "--share", "two", "-p", "hi",
+            ],
+            &[],
+        ),
+        "`ap run --share` can appear only once",
+    );
+    refused(
+        &scratch.ap(&["run", "plain", "--share", "notes.txt", "-p", "hi"], &[]),
+        "`--share notes.txt`: it isn't a directory",
+    );
+    refused(
+        &scratch.ap(&["run", "plain", "--share", "missing", "-p", "hi"], &[]),
+        "`--share missing`: ",
+    );
+    let runs = ::store::Runs::new(scratch.home.join(".local/share/ap"));
+    assert!(runs.list_pending().unwrap().is_empty());
+}
+
+// spec(SHARE): A destination that overlaps another one fails the run.
+#[test]
+fn a_run_whose_share_overlaps_a_destination_fails() {
+    let scratch = Scratch::new("run-share-overlap");
+    let dir = scratch.root.join("overlap");
+    fs::create_dir_all(dir.join("app")).unwrap();
+    scratch.build("overlap", &format!("{RUNNABLE}SHARE ./app ro\n"));
+    let mine = scratch.root.join("mine");
+    for name in ["app", ".claude", "other"] {
+        fs::create_dir_all(mine.join(name)).unwrap();
+    }
+    let share = |name: &str| {
+        let path = mine.join(name);
+        scratch.ap(
+            &[
+                "run",
+                "overlap",
+                "--share",
+                path.to_str().unwrap(),
+                "-p",
+                "hi",
+            ],
+            &[],
+        )
+    };
+    refused(
+        &share("app"),
+        "the destination `/home/agent/app` overlaps `/home/agent/app`",
+    );
+    refused(
+        &share(".claude"),
+        "the destination `/home/agent/.claude` is reserved",
+    );
+    past_checks(&share("other"));
 }

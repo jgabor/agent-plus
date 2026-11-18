@@ -108,6 +108,25 @@ impl GuestPath {
     }
 }
 
+impl GuestPath {
+    /// The guest path of the share that `ap run --share` adds, from the name
+    /// of its directory: `~/<name>`. It fails when that path is reserved, or
+    /// overlaps one of the destinations in `placed`.
+    pub fn for_run_share(name: &str, placed: &[GuestPath]) -> Result<String, String> {
+        let parts = resolve(&format!("~/{name}"));
+        reserved(&parts)?;
+        if let Some(other) = (placed.iter()).find(|other| overlap(&parts, &resolve(&other.path))) {
+            return Err(format!(
+                "the destination `{}` overlaps `{}` from line {}. One destination can't equal or contain another",
+                join(&parts),
+                other.path,
+                other.line
+            ));
+        }
+        Ok(join(&parts))
+    }
+}
+
 /// The guest path of an `ADD` or `SHARE`: its destination, or else the
 /// mirror rule applied to its host path.
 fn place(source: &str, destination: Option<&str>, directory: &str) -> Result<Vec<String>, String> {

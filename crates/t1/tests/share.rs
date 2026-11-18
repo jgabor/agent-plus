@@ -403,3 +403,72 @@ fn a_copy_on_write_share_keeps_the_agent_s_changes_until_they_are_discarded() {
     printed(&scratch.ap(&["diff", first]), "");
     assert_eq!(yours("change.txt").as_deref(), Some("change\n"));
 }
+
+// spec(SHARE): It can appear once and takes no destination: the path resolves against your current directory, it maps to `~/<directory name>`, and it becomes the working directory, ahead of any `WORKDIR` in the Agentfile.
+// spec(Run): Of these, only `-p`, `--share`, and `--network` change what the Agentfile says, and only for that run.
+// spec(Run): the share from `ap run --share`
+// spec(WORKDIR): `ap run --share` wins over `WORKDIR`.
+#[test]
+fn a_run_with_share_starts_in_it_and_keeps_its_changes_pending() {
+    let scratch = Scratch::new("run-share");
+    let dir = scratch.dir("plain");
+    fs::create_dir_all(dir.join("work")).unwrap();
+    scratch.build(
+        "plain",
+        "ENV FAKE_HARNESS_SLEEP 300\nSHARE ./work ro\nWORKDIR ~/work\n",
+    );
+    let yours = scratch.root.join("yours");
+    let project = yours.join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("keep.txt"), "keep\n").unwrap();
+
+    let mut run = Started(
+        scratch
+            .command(&["run", "plain", "--share", "project", "-p", PROMPT])
+            .current_dir(&yours)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut report = String::new();
+    BufReader::new(run.0.stdout.take().unwrap())
+        .read_line(&mut report)
+        .unwrap();
+    assert!(
+        report.contains("\"directory\":\"/home/agent/project\""),
+        "{report}"
+    );
+    let ps = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
+    let line = ps.lines().nth(1).unwrap_or_default();
+    let name = line
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    printed(
+        &scratch.sh(&name, "pwd && cat keep.txt && echo new > new.txt && ls"),
+        "/home/agent/project\nkeep\nkeep.txt\nnew.txt\n",
+    );
+    // The Agentfile's own share is still there.
+    printed(&scratch.sh(&name, "ls -A ~/work"), "");
+    // Your directory stays as it was.
+    assert!(!project.join("new.txt").exists());
+    let stopped = scratch.ap(&["stop", &name]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+
+    let diff = scratch.ap(&["diff", &name]);
+    assert_eq!(diff.status.code(), Some(0), "{diff:?}");
+    let shown = String::from_utf8_lossy(&diff.stdout);
+    assert!(shown.lines().any(|line| line == "+new"), "{shown}");
+
+    // Without `--share`, the next run starts in its `WORKDIR` again.
+    let (run, report, name) = scratch.start("plain");
+    assert!(
+        report.contains("\"directory\":\"/home/agent/work\""),
+        "{report}"
+    );
+    let stopped = scratch.ap(&["stop", &name]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+}

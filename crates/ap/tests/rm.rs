@@ -232,16 +232,19 @@ fn run_sharing(scratch: &Scratch, agent: &str, started: u128) -> (String, PathBu
 }
 
 // spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+// spec(ap rm): When it refuses, it lists the runs with pending changes, newest first.
 #[test]
 fn rm_refuses_while_a_run_of_the_agent_has_pending_changes() {
     let scratch = Scratch::new("pending");
     let dir = scratch.project("notes", SIMPLE, "notes");
     scratch.build(&dir, SIMPLE_GRANTS);
     let runs = Runs::new(scratch.store());
-    let (older, _) = run_sharing(&scratch, "notes", 1);
-    let (newer, pending) = run_sharing(&scratch, "notes", 2);
-    fs::write(pending.join("records"), "DELETE \"data\"\n").unwrap();
-    let (other, other_pending) = run_sharing(&scratch, "other", 3);
+    let (oldest, oldest_pending) = run_sharing(&scratch, "notes", 1);
+    fs::write(oldest_pending.join("records"), "DELETE \"data\"\n").unwrap();
+    let (clean, _) = run_sharing(&scratch, "notes", 2);
+    let (newest, newest_pending) = run_sharing(&scratch, "notes", 3);
+    fs::write(newest_pending.join("records"), "DELETE \"data\"\n").unwrap();
+    let (other, other_pending) = run_sharing(&scratch, "other", 4);
     fs::write(other_pending.join("records"), "DELETE \"data\"\n").unwrap();
 
     let output = scratch.ap(&["rm", "notes"]);
@@ -251,7 +254,7 @@ fn rm_refuses_while_a_run_of_the_agent_has_pending_changes() {
     assert_eq!(
         stderr(&output),
         format!(
-            "ap: agent notes has pending changes, so nothing is removed. Apply or discard them first:\n{newer}\n"
+            "ap: agent notes has pending changes, so nothing is removed. Apply or discard them first:\n{newest}\n{oldest}\n"
         )
     );
     // Nothing is removed: not the agent, its runs, or their changes.
@@ -259,12 +262,15 @@ fn rm_refuses_while_a_run_of_the_agent_has_pending_changes() {
         scratch.ok_in(&scratch.root, &["ls"]),
         format!("notes {}\n", dir.display())
     );
-    assert!(runs.get(&older).unwrap().is_some());
-    assert!(runs.get(&newer).unwrap().is_some());
-    assert!(runs.has_pending(&newer).unwrap());
+    for run in [&oldest, &clean, &newest] {
+        assert!(runs.get(run).unwrap().is_some(), "{run}");
+    }
+    assert!(runs.has_pending(&oldest).unwrap());
+    assert!(runs.has_pending(&newest).unwrap());
 
     // Once the changes are gone, and another agent's don't count, it goes.
-    scratch.ok_in(&scratch.root, &["discard", "notes"]);
+    scratch.ok_in(&scratch.root, &["discard", &oldest]);
+    scratch.ok_in(&scratch.root, &["discard", &newest]);
     scratch.ok_in(&scratch.root, &["rm", "notes"]);
     assert_eq!(scratch.ok_in(&scratch.root, &["ls"]), "");
     assert!(runs.has_pending(&other).unwrap());

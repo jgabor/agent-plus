@@ -1228,3 +1228,90 @@ fn writing_an_object_that_is_packed_writes_no_loose_object() {
     assert_eq!(repo.write(&object).unwrap().to_string(), hex.trim());
     assert!(repo.loose_object(&object.id()).unwrap().is_none());
 }
+
+/// Every commit's tree and parents, every tree's entries, and every tag's
+/// object must read as `git` reads them, and the repository must have each
+/// object, loose or packed, and no other.
+fn assert_links_match(root: &Path) {
+    let repo = Repository::at(root.join(".git"));
+    for (hex, kind, _) in listed_objects(root) {
+        let object = repo.object(&id(&hex)).unwrap().unwrap();
+        assert!(repo.contains(&id(&hex)).unwrap(), "{hex}");
+        match kind {
+            Kind::Commit => {
+                let commit = object.commit().unwrap();
+                let tree = text(root, &["rev-parse", &format!("{hex}^{{tree}}")]);
+                assert_eq!(commit.tree, id(&tree), "the tree of {hex}");
+                let parents = text(root, &["rev-list", "--parents", "-n1", &hex]);
+                let parents: Vec<Id> = parents.split_whitespace().skip(1).map(id).collect();
+                assert_eq!(commit.parents, parents, "the parents of {hex}");
+            }
+            Kind::Tree => {
+                let mut listed = String::new();
+                for entry in object.entries().unwrap() {
+                    let kind = match entry.mode {
+                        0o40000 => "tree",
+                        0o160000 => "commit",
+                        _ => "blob",
+                    };
+                    listed.push_str(&format!("{:06o} {kind} {}\t", entry.mode, entry.id));
+                    listed.push_str(std::str::from_utf8(&entry.name).unwrap());
+                    listed.push('\n');
+                }
+                assert_eq!(listed, text(root, &["ls-tree", "--full-tree", &hex]));
+            }
+            Kind::Tag => {
+                let target = text(root, &["cat-file", "tag", &hex]);
+                assert!(object.tag_target().is_ok(), "{target}");
+                // The object a tag names is what `^{}` peels one level of.
+                let peeled = text(
+                    root,
+                    &[
+                        "for-each-ref",
+                        "--format=%(objectname) %(object)",
+                        "refs/tags",
+                    ],
+                );
+                if let Some(line) = peeled.lines().find(|line| line.starts_with(&hex)) {
+                    let (_, target) = line.split_once(' ').unwrap();
+                    assert_eq!(object.tag_target().unwrap(), id(target), "{hex}");
+                }
+            }
+            Kind::Blob => {
+                assert!(object.commit().is_err());
+                assert!(object.entries().is_err());
+            }
+        }
+    }
+    let absent = id("0123456789abcdef0123456789abcdef01234567");
+    assert!(!repo.contains(&absent).unwrap());
+}
+
+#[test]
+fn commits_trees_and_tags_link_as_git_reads_them() {
+    let root = every_kind("links");
+    // A merge, an executable, a symlink, and a submodule's commit.
+    run(&root, &["checkout", "-q", "-b", "side", "HEAD~1"]);
+    commit(&root, "side", b"side\n");
+    run(&root, &["checkout", "-q", "main"]);
+    run(&root, &["merge", "-q", "--no-edit", "side"]);
+    fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+    fs::set_permissions(root.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("run.sh", root.join("link")).unwrap();
+    let head = text(&root, &["rev-parse", "HEAD"]);
+    run(
+        &root,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{},vendor", head.trim()),
+        ],
+    );
+    run(&root, &["add", "run.sh", "link"]);
+    run(&root, &["commit", "-q", "-m", "kinds"]);
+    assert_links_match(&root);
+    run(&root, &["gc", "-q", "--prune=now"]);
+    assert_all_packed(&root);
+    assert_links_match(&root);
+}

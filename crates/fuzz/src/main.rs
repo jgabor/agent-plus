@@ -607,14 +607,16 @@ fn packed_input(root: &Path, input: &str) {
         let theirs = git_fed(root, &["cat-file", "--batch"], &ids).expect("git cat-file");
         let repo = git::Repository::at(root.join(".git"));
         let mut ours = Vec::new();
+        let mut objects = Vec::new();
         for hex in ids.split(|&b| b == b'\n').filter(|hex| !hex.is_empty()) {
             let id = git::Id::from_hex(std::str::from_utf8(hex).expect("an id")).expect("an id");
             match repo.packed_object(&id) {
                 Ok(Some(object)) => {
                     let size = object.data.len();
                     ours.extend(format!("{id} {} {size}\n", object.kind).into_bytes());
-                    ours.extend(object.data);
+                    ours.extend(&object.data);
                     ours.push(b'\n');
+                    objects.push(object);
                 }
                 other => {
                     panic!("crates/git reads {id} from a {delta} pack as {other:?}: {input:?}")
@@ -626,6 +628,11 @@ fn packed_input(root: &Path, input: &str) {
         for entry in fs::read_dir(&pack).expect("the fuzz repository") {
             fs::remove_file(entry.expect("the fuzz repository").path())
                 .expect("the fuzz repository");
+        }
+        // A new `Repository`, which finds no pack, writes each object loose.
+        let repo = git::Repository::at(root.join(".git"));
+        for object in &objects {
+            written_input(&repo, object, input);
         }
     }
 }

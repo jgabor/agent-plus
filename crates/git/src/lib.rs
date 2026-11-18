@@ -271,9 +271,10 @@ impl Repository {
     }
 
     /// Writes `object` as a loose object, and returns its name. It writes a
-    /// temporary file beside the object and renames it into place, so a
-    /// reader never sees half an object. An object that already exists, loose
-    /// or packed, is left as it was.
+    /// temporary file beside the object and links it into place, as git does,
+    /// so a reader never sees half an object. An object that already exists,
+    /// loose or packed, is left as it was, even one another writer puts there
+    /// first.
     pub fn write(&self, object: &Object) -> Result<Id, Error> {
         let id = object.id();
         let hex = id.to_string();
@@ -290,11 +291,12 @@ impl Repository {
         let written = file
             .write_all(&compressed)
             .and_then(|()| file.sync_all())
-            .and_then(|()| fs::rename(&temp, &path));
-        if let Err(e) = written {
-            let _ = fs::remove_file(&temp);
-            return Err(e.into());
-        }
+            .and_then(|()| match fs::hard_link(&temp, &path) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                linked => linked,
+            });
+        let removed = fs::remove_file(&temp);
+        written.and(removed)?;
         Ok(id)
     }
 

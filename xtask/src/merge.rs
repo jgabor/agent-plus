@@ -878,7 +878,9 @@ fn compare_counts(
 ) -> Result<Result<Vec<String>, Failed>, Problem> {
     let budgets = bench::read_budgets(tree)?;
     let before = ledger::newest(tree, commit)?;
-    let (proven, passing) = before.as_ref().map_or((0, 0), |base| (base.proven, base.passing));
+    let (proven, passing) = before
+        .as_ref()
+        .map_or((0, 0), |base| (base.proven, base.passing));
     let measured = if benched {
         ledger::measured_base(tree, scoring.gated, commit)?
     } else {

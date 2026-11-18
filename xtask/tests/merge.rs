@@ -1177,7 +1177,11 @@ fn a_target_both_builds_miss_in_one_run_lowers_no_count() {
         &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
     );
     let output = repo.merge();
-    assert!(stdout(&output).contains("bench: pass"), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("bench: pass"),
+        "{}",
+        stdout(&output)
+    );
     assert_merged(&repo, &output);
 }
 

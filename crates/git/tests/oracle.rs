@@ -134,9 +134,10 @@ fn assert_refs_match(root: &Path) {
     assert_eq!(repo.resolve("HEAD").unwrap(), Some(id(&head)), "HEAD");
 }
 
-#[test]
-fn every_kind_of_loose_object_reads_as_git_reads_it() {
-    let root = init("kinds");
+/// A repository of loose objects of every kind: an empty, a binary, and a
+/// large blob, trees, commits, and tags, one of them of another tag.
+fn every_kind(name: &str) -> PathBuf {
+    let root = init(name);
     commit(&root, "empty", b"");
     let binary: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
     commit(&root, "dir/binary", &binary);
@@ -150,6 +151,39 @@ fn every_kind_of_loose_object_reads_as_git_reads_it() {
         &root,
         &["tag", "-a", "-m", "a tag of a tag", "v1-again", "v1"],
     );
+    root
+}
+
+/// Each object in the repository, by name, type, and contents, as `git
+/// cat-file` reads it.
+fn listed_objects(root: &Path) -> Vec<(String, Kind, Vec<u8>)> {
+    let list = text(
+        root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname) %(objecttype)",
+        ],
+    );
+    list.lines()
+        .map(|line| {
+            let (hex, kind) = line.split_once(' ').unwrap();
+            let data = run(root, &["cat-file", kind, hex]);
+            let kind = match kind {
+                "commit" => Kind::Commit,
+                "tree" => Kind::Tree,
+                "blob" => Kind::Blob,
+                "tag" => Kind::Tag,
+                other => panic!("{other} isn't a type"),
+            };
+            (hex.to_string(), kind, data)
+        })
+        .collect()
+}
+
+#[test]
+fn every_kind_of_loose_object_reads_as_git_reads_it() {
+    let root = every_kind("kinds");
     let tree_count = text(&root, &["count-objects", "-v"]);
     assert!(tree_count.contains("in-pack: 0"), "{tree_count}");
     let count = assert_objects_match(&root);
@@ -1071,4 +1105,126 @@ fn an_index_with_more_64_bit_offsets_than_objects_is_refused() {
             other => panic!("{n}: {other:?}"),
         }
     }
+}
+
+#[test]
+fn every_kind_of_object_is_named_as_git_hash_object_names_it() {
+    let root = every_kind("names");
+    let objects = listed_objects(&root);
+    // 3 blobs, 6 trees, 3 commits, and 2 tags.
+    assert_eq!(objects.len(), 14);
+    let empty = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+    assert!(objects.iter().any(|(hex, ..)| hex == empty));
+    assert!(objects.iter().any(|(_, _, data)| data.len() == 2_000_000));
+    for (hex, kind, data) in objects {
+        let kind_name = kind.to_string();
+        let args = ["hash-object", "-t", &kind_name, "--stdin"];
+        let out = output(&root, &args, &data);
+        assert!(out.status.success(), "git hash-object {hex}");
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), hex);
+        let object = git::Object { kind, data };
+        assert_eq!(object.id().to_string(), hex, "the name of a {kind_name}");
+    }
+}
+
+#[test]
+fn every_written_object_reads_as_git_reads_it_and_passes_fsck() {
+    let source = every_kind("source");
+    let root = init("written");
+    let repo = Repository::at(root.join(".git"));
+    let objects = listed_objects(&source);
+    for (hex, kind, data) in &objects {
+        let object = git::Object {
+            kind: *kind,
+            data: data.clone(),
+        };
+        assert_eq!(repo.write(&object).unwrap().to_string(), *hex);
+    }
+    for (hex, kind, _) in &objects {
+        assert_eq!(
+            text(&root, &["cat-file", "-t", hex]).trim(),
+            kind.to_string(),
+            "the type of {hex}"
+        );
+        assert_eq!(
+            run(&root, &["cat-file", "-p", hex]),
+            run(&source, &["cat-file", "-p", hex]),
+            "the contents of {hex}"
+        );
+    }
+    // Every file is an object, so no temporary file was left behind.
+    let mut files = 0;
+    for dir in fs::read_dir(root.join(".git/objects")).unwrap() {
+        let dir = dir.unwrap();
+        let name = dir.file_name().into_string().unwrap();
+        if name == "info" || name == "pack" {
+            continue;
+        }
+        for file in fs::read_dir(dir.path()).unwrap() {
+            let file = file.unwrap().file_name().into_string().unwrap();
+            let hex = format!("{name}{file}");
+            assert!(objects.iter().any(|(h, ..)| *h == hex), "{hex}");
+            files += 1;
+        }
+    }
+    assert_eq!(files, objects.len());
+    // Point refs at the commit and the tags, so fsck walks every object.
+    for name in ["refs/heads/main", "refs/tags/v1", "refs/tags/v1-again"] {
+        let hex = text(&source, &["rev-parse", name]);
+        run(&root, &["update-ref", name, hex.trim()]);
+    }
+    let out = output(&root, &["fsck", "--strict", "--full", "--no-dangling"], b"");
+    assert!(
+        out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+        "git fsck: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn writing_an_object_that_exists_leaves_its_file_as_it_was() {
+    use std::os::unix::fs::MetadataExt;
+    let root = init("exists");
+    // Git compresses at level 0 here, and the crate wouldn't.
+    run(&root, &["config", "core.compression", "0"]);
+    let data = b"some text that compresses\n".repeat(50);
+    commit(&root, "file", &data);
+    let hex = text(&root, &["rev-parse", "HEAD:file"]);
+    let hex = hex.trim();
+    let path = root.join(".git/objects").join(&hex[..2]).join(&hex[2..]);
+    let before = fs::metadata(&path).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    let repo = Repository::at(root.join(".git"));
+    let object = git::Object {
+        kind: Kind::Blob,
+        data,
+    };
+    assert_eq!(repo.write(&object).unwrap().to_string(), hex);
+    let after = fs::metadata(&path).unwrap();
+    assert!(fs::read(&path).unwrap() == bytes, "the file changed");
+    assert_eq!(after.ino(), before.ino());
+    assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+    for file in fs::read_dir(path.parent().unwrap()).unwrap() {
+        let name = file.unwrap().file_name().into_string().unwrap();
+        assert!(
+            name.len() == 38 && Id::from_hex(&format!("00{name}")).is_some(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn writing_an_object_that_is_packed_writes_no_loose_object() {
+    let root = init("packed-exists");
+    commit(&root, "file", b"packed\n");
+    run(&root, &["gc", "-q", "--prune=now"]);
+    let hex = text(&root, &["rev-parse", "HEAD:file"]);
+    let object = git::Object {
+        kind: Kind::Blob,
+        data: b"packed\n".to_vec(),
+    };
+    let repo = Repository::at(root.join(".git"));
+    assert_eq!(repo.write(&object).unwrap().to_string(), hex.trim());
+    assert!(repo.loose_object(&object.id()).unwrap().is_none());
 }

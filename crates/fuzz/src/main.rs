@@ -525,7 +525,8 @@ fn git_input(input: &str) -> usize {
             assert_eq!(format!("{}\n", object.kind).as_bytes(), kind, "{input:?}");
             let kind = object.kind.to_string();
             let data = git_says(root, &["cat-file", &kind, GIT_PLANTED]);
-            assert_eq!(Some(object.data), data, "{input:?}");
+            assert_eq!(Some(&object.data), data.as_ref(), "{input:?}");
+            written_input(&repo, &object, input);
         }
         (Ok(Some(_)), None) => panic!("crates/git reads an object git refuses: {input:?}"),
         (Err(git::Error::Corrupt(_)), _) => {}
@@ -534,6 +535,42 @@ fn git_input(input: &str) -> usize {
     fs::remove_file(&object).expect("the fuzz repository");
     packed_input(root, input);
     accepted
+}
+
+/// Writes `object` as `crates/git` does, and panics unless it reads back the
+/// same under the name its bytes hash to, from the crate and from `git`.
+fn written_input(repo: &git::Repository, object: &git::Object, input: &str) {
+    let root = git_repo();
+    let raw = [
+        format!("{} {}\0", object.kind, object.data.len()).as_bytes(),
+        &object.data,
+    ]
+    .concat();
+    let mut child = Command::new("sha1sum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("sha1sum");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&raw)
+        .expect("sha1sum");
+    let out = child.wait_with_output().expect("sha1sum");
+    let hex = String::from_utf8(out.stdout).expect("sha1sum")[..40].to_string();
+    let path = root.join(".git/objects").join(&hex[..2]).join(&hex[2..]);
+    let existed = path.exists();
+    let id = repo.write(object).expect("crates/git writes the object");
+    assert_eq!(id.to_string(), hex, "{input:?}");
+    let ours = repo.loose_object(&id).expect("crates/git reads it back");
+    assert_eq!(ours.as_ref(), Some(object), "{input:?}");
+    let kind = object.kind.to_string();
+    let theirs = git_says(root, &["cat-file", &kind, &hex]);
+    assert_eq!(theirs.as_ref(), Some(&object.data), "{input:?}");
+    if !existed {
+        fs::remove_file(&path).expect("the fuzz repository");
+    }
 }
 
 /// Writes the input and two blobs like it, which git can store as deltas

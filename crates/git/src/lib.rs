@@ -1,15 +1,19 @@
 //! Reads a git repository the way `git` does: loose and packed objects, and
-//! refs with `packed-refs`. It reads only SHA-1 repositories.
+//! refs with `packed-refs`. It writes loose objects. It reads and writes only
+//! SHA-1 repositories.
 
 mod pack;
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use miniz_oxide::deflate;
 use miniz_oxide::inflate::{self, TINFLStatus};
 
 use pack::Pack;
@@ -82,6 +86,21 @@ pub struct Object {
     pub data: Vec<u8>,
 }
 
+impl Object {
+    /// The object's name, the SHA-1 of its header and contents.
+    pub fn id(&self) -> Id {
+        let mut hash = sha1_smol::Sha1::new();
+        hash.update(&self.header());
+        hash.update(&self.data);
+        Id(hash.digest().bytes())
+    }
+
+    /// `<type> <size>\0`, which comes before the contents.
+    fn header(&self) -> Vec<u8> {
+        format!("{} {}\0", self.kind, self.data.len()).into_bytes()
+    }
+}
+
 /// What a ref points at.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Target {
@@ -90,7 +109,7 @@ pub enum Target {
     Symbolic(String),
 }
 
-/// Why a read failed.
+/// Why a read or a write failed.
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
@@ -181,6 +200,16 @@ impl Repository {
         Ok(None)
     }
 
+    /// Whether a pack holds the object named `id`.
+    fn is_packed(&self, id: &Id) -> Result<bool, Error> {
+        for pack in self.packs()? {
+            if pack.find(id)?.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Every pack with an index in `objects/pack`, in the order of their
     /// names. An index with no pack is left out, as git leaves it out.
     fn packs(&self) -> Result<&[Pack], Error> {
@@ -239,6 +268,36 @@ impl Repository {
         }
         data.drain(..header);
         Ok(Some(Object { kind, data }))
+    }
+
+    /// Writes `object` as a loose object, and returns its name. It writes a
+    /// temporary file beside the object and links it into place, as git does,
+    /// so a reader never sees half an object. An object that already exists,
+    /// loose or packed, is left as it was, even one another writer puts there
+    /// first.
+    pub fn write(&self, object: &Object) -> Result<Id, Error> {
+        let id = object.id();
+        let hex = id.to_string();
+        let dir = self.git_dir.join("objects").join(&hex[..2]);
+        let path = dir.join(&hex[2..]);
+        if fs::symlink_metadata(&path).is_ok() || self.is_packed(&id)? {
+            return Ok(id);
+        }
+        fs::create_dir_all(&dir)?;
+        let mut raw = object.header();
+        raw.extend_from_slice(&object.data);
+        let compressed = deflate::compress_to_vec_zlib(&raw, 6);
+        let (temp, mut file) = temp_file(&dir)?;
+        let written = file
+            .write_all(&compressed)
+            .and_then(|()| file.sync_all())
+            .and_then(|()| match fs::hard_link(&temp, &path) {
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                linked => linked,
+            });
+        let removed = fs::remove_file(&temp);
+        written.and(removed)?;
+        Ok(id)
     }
 
     /// The ref named `name`, which is `HEAD` or a full name under `refs/`,
@@ -424,6 +483,26 @@ impl Repository {
             }
         }
         Ok(refs)
+    }
+}
+
+/// A new file in `dir`, named as git names its temporary objects, and
+/// read-only once closed, as git leaves an object.
+fn temp_file(dir: &Path) -> io::Result<(PathBuf, fs::File)> {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let n = COUNT.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("tmp_obj_{}_{n}", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o444)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
 }
 

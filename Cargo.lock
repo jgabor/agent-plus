@@ -106,6 +106,7 @@ name = "git"
 version = "0.0.0"
 dependencies = [
  "miniz_oxide",
+ "sha1_smol",
 ]
 
 [[package]]
@@ -214,6 +215,12 @@ checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "share"

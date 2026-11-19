@@ -1461,6 +1461,11 @@ files.
 The agent can't make a device, a FIFO, or a socket in an `rw` share, change
 a file's owner, or set an extended attribute.
 
+In a share, what your user owns on your host appears owned by the agent's
+user, and what your primary group owns appears owned by the agent's group.
+Any other owner appears as uid or gid 65534, `nobody`. A share never changes
+who owns a file on your host.
+
 **Bringing changes back.** Unapplied copy-on-write changes are kept per run,
 and they survive the end of the run until you apply or discard them. The
 next run starts from your current files, not from earlier unapplied

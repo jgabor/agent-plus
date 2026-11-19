@@ -83,6 +83,9 @@ pub struct Records {
     /// Your file at each path the agent changed, before it did, or `None`
     /// where you had none.
     pub bases: BTreeMap<Vec<u8>, Option<Base>>,
+    /// Each path the agent deleted, even one it made again since, or
+    /// deleted with a directory above it.
+    pub deleted: BTreeSet<Vec<u8>>,
 }
 
 /// What the agent sees at a path.
@@ -169,6 +172,7 @@ impl Records {
                 for other in beneath {
                     self.entries.remove(&other);
                 }
+                self.deleted.insert(path.clone());
                 Entry::Deleted
             }
             _ => return None,

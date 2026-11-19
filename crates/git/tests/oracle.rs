@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use git::{Error, Id, Kind, Repository, Target};
+use git::{Error, Id, Kind, Object, Repository, Target, TreeEntry};
 
 fn scratch(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -1322,4 +1322,101 @@ fn commits_trees_and_tags_link_as_git_reads_them() {
     run(&root, &["gc", "-q", "--prune=now"]);
     assert_all_packed(&root);
     assert_links_match(&root);
+}
+
+/// A tree the crate makes, from entries in any order, is the one `git
+/// mktree` makes, a commit of it is the one `git commit-tree` makes, and
+/// `git fsck --strict` accepts both.
+#[test]
+fn trees_and_commits_made_are_the_ones_git_makes() {
+    let root = init("made");
+    let repo = Repository::at(root.join(".git"));
+    let blob = |data: &[u8]| {
+        let object = Object {
+            kind: Kind::Blob,
+            data: data.to_vec(),
+        };
+        repo.write(&object).unwrap()
+    };
+    let (file, script, link) = (blob(b"a\n"), blob(b"#!/bin/sh\n"), blob(b"a"));
+    let inner = Object::tree(vec![TreeEntry {
+        mode: 0o100644,
+        name: b"x".to_vec(),
+        id: file,
+    }]);
+    let inner = repo.write(&inner).unwrap();
+    // `a.b` sorts before the tree `a`, which sorts as `a/`, and `a-` before
+    // both.
+    let entries = [
+        (0o40000, "a", inner),
+        (0o100755, "run", script),
+        (0o120000, "link", link),
+        (0o100644, "a.b", file),
+        (0o100644, "a-", file),
+        (0o160000, "vendor", Id([0x11; 20])),
+    ];
+    let listing: String = (entries.iter())
+        .map(|(mode, name, id)| {
+            let kind = match *mode {
+                0o40000 => "tree",
+                0o160000 => "commit",
+                _ => "blob",
+            };
+            format!("{mode:06o} {kind} {id}\t{name}\n")
+        })
+        .collect();
+    let tree = Object::tree(
+        (entries.iter())
+            .map(|&(mode, name, id)| TreeEntry {
+                mode,
+                name: name.as_bytes().to_vec(),
+                id,
+            })
+            .collect(),
+    );
+    let made = output(&root, &["mktree", "--missing"], listing.as_bytes());
+    assert!(made.status.success());
+    assert_eq!(tree.id(), id(&String::from_utf8(made.stdout).unwrap()));
+    // `vendor` names a commit that isn't there, which only a submodule's
+    // commit may.
+    let tree = Object::tree(
+        tree.entries()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.name != b"vendor")
+            .collect(),
+    );
+    let tree = repo.write(&tree).unwrap();
+    let parent = text(&root, &["commit-tree", "-m", "first", &tree.to_string()]);
+    let parent = id(&parent);
+    let identity = "Agent+ <ap@localhost>";
+    let commit = Object::new_commit(tree, &[parent], identity, 1_790_000_000, "Made\n");
+    let written = repo.write(&commit).unwrap();
+    let expected = git(&root)
+        .args(["commit-tree", "-p", &parent.to_string(), "-m", "Made"])
+        .arg(tree.to_string())
+        .env("GIT_AUTHOR_NAME", "Agent+")
+        .env("GIT_AUTHOR_EMAIL", "ap@localhost")
+        .env("GIT_AUTHOR_DATE", "@1790000000 +0000")
+        .env("GIT_COMMITTER_NAME", "Agent+")
+        .env("GIT_COMMITTER_EMAIL", "ap@localhost")
+        .env("GIT_COMMITTER_DATE", "@1790000000 +0000")
+        .output()
+        .unwrap();
+    assert_eq!(written, id(&String::from_utf8(expected.stdout).unwrap()));
+    let root_commit = Object::new_commit(tree, &[], identity, 0, "Root\n");
+    let root_commit = repo.write(&root_commit).unwrap();
+    run(
+        &root,
+        &["update-ref", "refs/heads/made", &written.to_string()],
+    );
+    run(
+        &root,
+        &["update-ref", "refs/heads/root", &root_commit.to_string()],
+    );
+    assert_eq!(
+        text(&root, &["log", "-1", "--format=%an <%ae> %at %s", "root"]),
+        "Agent+ <ap@localhost> 0 Root\n"
+    );
+    run(&root, &["fsck", "--strict", "--no-dangling"]);
 }

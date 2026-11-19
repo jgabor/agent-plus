@@ -1508,6 +1508,9 @@ attributes, because those can run commands.
     subject is `Uncommitted changes from <agent>/<run>`, and its time is
     when `ap apply` ran. When nothing is uncommitted, there is no such
     commit.
+  - The last commit's time is in UTC. A file the agent never wrote is in
+    the last commit as the agent's `HEAD` holds it, so a change you made to
+    it during the run is left out.
   - With no `git` on your host, `ap apply` fails the branch import, says
     so, and everything stays pending.
   - `ap apply` refuses a branch import into a repository whose object

@@ -231,8 +231,8 @@ impl<'a> Agent<'a> {
     /// The mode and object at `path` as the agent left it, if it left
     /// anything there that git keeps, where `head` is what its `HEAD` tree
     /// holds there. A file that doesn't land is as `head` holds it, and so
-    /// is one of yours the agent never wrote, unless the agent made the
-    /// directory above it again, which holds only what is still there.
+    /// is one of yours the agent never wrote, unless the agent made or
+    /// removed a directory above it, which holds only what is still there.
     /// That is `remade`.
     fn left_at(
         &self,
@@ -298,7 +298,17 @@ impl<'a> Agent<'a> {
         if !root && ((yours && !below && !remade) || ignore.is_ignored(bytes_path(path), true)) {
             return Ok(head);
         }
-        let remade = remade || (!root && !yours);
+        // A directory the agent made where you had none holds only what is
+        // still there, and so does one it removed. One it copied from
+        // yours, to change its mode, holds your files.
+        let remade = remade
+            || match view {
+                View::Agent(Entry::Dir { .. }) => {
+                    !matches!(self.records.bases.get(path), Some(Some(_)))
+                }
+                View::Absent => true,
+                _ => false,
+            };
         let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();
         if let Some((TREE, tree)) = head {
             for entry in self.object(&tree)?.entries()? {

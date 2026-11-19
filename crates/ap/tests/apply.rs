@@ -871,6 +871,11 @@ impl Repository {
             ]
         );
         assert_eq!(lines[3], "", "a commit with a body: {log}");
+        let raw = repo::run(share, &["cat-file", "commit", &branch]);
+        let zones = (raw.lines())
+            .filter(|line| line.starts_with("author ") || line.starts_with("committer "))
+            .filter(|line| line.ends_with(" +0000"));
+        assert_eq!(zones.count(), 2, "{raw}");
         for time in &lines[4..6] {
             let time: u64 = time.parse().unwrap();
             assert!((from..=to).contains(&time), "{time} isn't in {from}..={to}");
@@ -1142,6 +1147,7 @@ fn a_branch_that_exists_is_refused() {
 // spec(SHARE): When the share's root on your host holds a `.git` directory, the agent's commits, and the files it wrote but didn't commit, land as a new branch, `ap/<agent>/<run>`, imported as git objects and checked with `git fsck`.
 // spec(SHARE): The files the agent wrote but didn't commit land as one last commit on the branch.
 // spec(SHARE): Its author and committer are `Agent+ <ap@localhost>`, its subject is `Uncommitted changes from <agent>/<run>`, and its time is when `ap apply` ran.
+// spec(SHARE): The last commit's time is in UTC.
 #[test]
 fn uncommitted_files_land_as_one_last_commit() {
     // Your repository has commits or none, and the agent commits or doesn't.
@@ -1236,6 +1242,7 @@ fn uncommitted_files_land_as_one_last_commit() {
 /// the last commit, which holds the file as the agent's `HEAD` does, but
 /// it lands on the branch once the agent commits it.
 // spec(SHARE): If the agent commits them, they land on its branch.
+// spec(SHARE): A file the agent never wrote is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
 #[test]
 fn your_change_lands_only_if_the_agent_commits_it() {
     for commits in [false, true] {
@@ -1563,6 +1570,34 @@ fn a_head_that_is_a_symlink_still_names_the_branch() {
         repo::history(repository.share(), &repository.branch()),
         repo::history(&repository.guest, "HEAD")
     );
+}
+
+/// A file you removed during the run, beneath your directory whose mode
+/// the agent changed, is in the last commit as the agent's `HEAD` holds it,
+/// and so there is none.
+// spec(SHARE): A file the agent never wrote is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
+#[test]
+fn a_file_you_removed_beneath_your_directory_is_left_as_committed() {
+    let keep = |share: &Path| {
+        repo::commit(share, "docs/keep", "keep\n", "keep");
+    };
+    let repository = Repository::with(
+        "yours-removed",
+        true,
+        Setup {
+            before: Some(&keep),
+            ..Setup::default()
+        },
+    );
+    let share = repository.share();
+    record(&repository.pending, &base(share, "docs"));
+    dir(&repository.pending, "docs", 0o700);
+    fs::remove_file(share.join("docs/keep")).unwrap();
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!repository.has_branch());
 }
 
 /// A directory the agent made where its `HEAD` holds a file is a change it

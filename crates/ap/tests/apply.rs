@@ -1534,18 +1534,32 @@ fn a_second_branch_that_can_t_be_written_takes_back_the_first() {
 }
 
 /// A file or a directory the agent committed, then deleted without
-/// committing that, is a change it didn't commit, though you never had it.
+/// committing that, is a change it didn't commit, though you never had it,
+/// and so is a directory it made again without what it committed there.
 #[test]
 fn a_committed_file_deleted_since_is_uncommitted() {
-    for (name, path) in [("deleted-file", "a"), ("deleted-directory", "docs")] {
+    let cases = [
+        ("deleted-file", &["DELETE \"a\""][..]),
+        (
+            "deleted-directory",
+            &["DELETE \"docs/guide.md\"", "DELETE \"docs\""],
+        ),
+        // The agent makes the directory again, empty, with and without
+        // hiding yours.
+        ("remade-directory", &["DELETE \"docs\"", "DIR \"docs\" 755"]),
+        (
+            "remade-opaque",
+            &["DELETE \"docs\"", "DIR \"docs\" 755 opaque"],
+        ),
+    ];
+    for (name, lines) in cases {
         let repository = Repository::new(name, true, &[]);
         repository.commit("a", "a\n");
         repository.commit("docs/guide.md", "read me\n");
         repository.land();
-        if path == "docs" {
-            record(&repository.pending, "DELETE \"docs/guide.md\"");
+        for line in lines {
+            record(&repository.pending, line);
         }
-        record(&repository.pending, &format!("DELETE \"{path}\""));
         let before = repository.objects_and_refs();
 
         let output = repository.apply();

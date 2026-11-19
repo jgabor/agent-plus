@@ -203,7 +203,7 @@ impl<'a> Agent<'a> {
     }
 
     /// Whether the agent's file at `path` is as `head` holds it.
-    fn committed(&self, head: Option<Id>, path: &[u8]) -> Result<bool, git::Error> {
+    fn committed(&self, host: &Host, head: Option<Id>, path: &[u8]) -> Result<bool, git::Error> {
         let blob = |data: Vec<u8>| {
             Object {
                 kind: Kind::Blob,
@@ -223,13 +223,42 @@ impl<'a> Agent<'a> {
             View::Agent(Entry::Symlink { target }) => {
                 committed == Some((SYMLINK, blob(target.clone())))
             }
-            // Git keeps no directory, so a tree there holds only what is
-            // beneath it, which is checked by itself.
-            View::Agent(Entry::Dir { .. }) => committed.is_none_or(|(mode, _)| mode == TREE),
+            // Git keeps no directory, so a tree there must hold only what
+            // is still beneath it. Each file the agent wrote there is
+            // checked by itself.
+            View::Agent(Entry::Dir { .. }) => match committed {
+                None => true,
+                Some((TREE, tree)) => self.still_there(host, tree, path)?,
+                Some(_) => false,
+            },
             View::Yours => true,
             // Nothing is there, so nothing must be beneath it either.
             View::Agent(_) | View::Absent => committed.is_none(),
         })
+    }
+}
+
+impl Agent<'_> {
+    /// Whether each file that `tree`, at `path` in the agent's `HEAD`,
+    /// holds is still there as the agent sees it: one it wrote, or one of
+    /// yours.
+    fn still_there(&self, host: &Host, tree: Id, path: &[u8]) -> Result<bool, git::Error> {
+        for entry in self.object(&tree)?.entries()? {
+            let inner = [path, b"/", &entry.name].concat();
+            let there = match entry.mode {
+                GITLINK => true,
+                TREE => self.still_there(host, entry.id, &inner)?,
+                _ => match self.records.view(&inner) {
+                    View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => true,
+                    View::Yours => host.stat(&inner)?.is_some(),
+                    View::Agent(_) | View::Absent => false,
+                },
+            };
+            if !there {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -482,7 +511,7 @@ impl Share<'_> {
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, .. } => line(&mut applied.text, "skipped", &path, &why),
                 Verdict::Change => {
-                    if !agent.committed(head, &path).map_err(read_failed)? {
+                    if !agent.committed(&host, head, &path).map_err(read_failed)? {
                         return Err(refused(
                             "the agent left files it didn't commit, and `ap apply` can't commit them yet",
                         ));

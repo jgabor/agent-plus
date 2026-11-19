@@ -203,7 +203,13 @@ impl<'a> Agent<'a> {
     }
 
     /// Whether the agent's file at `path` is as `head` holds it.
-    fn committed(&self, host: &Host, head: Option<Id>, path: &[u8]) -> Result<bool, git::Error> {
+    fn committed(
+        &self,
+        host: &Host,
+        ignore: &Gitignore,
+        head: Option<Id>,
+        path: &[u8],
+    ) -> Result<bool, git::Error> {
         let blob = |data: Vec<u8>| {
             Object {
                 kind: Kind::Blob,
@@ -228,7 +234,9 @@ impl<'a> Agent<'a> {
             // checked by itself.
             View::Agent(Entry::Dir { .. }) => match committed {
                 None => true,
-                Some((TREE, tree)) => self.still_there(host, tree, path)?,
+                Some((TREE, tree)) => self.still_there(host, ignore, tree, path)?,
+                // A submodule's commit, whose directory this is.
+                Some((GITLINK, _)) => true,
                 Some(_) => false,
             },
             View::Yours => true,
@@ -241,13 +249,27 @@ impl<'a> Agent<'a> {
 impl Agent<'_> {
     /// Whether each file that `tree`, at `path` in the agent's `HEAD`,
     /// holds is still there as the agent sees it: one it wrote, or one of
-    /// yours.
-    fn still_there(&self, host: &Host, tree: Id, path: &[u8]) -> Result<bool, git::Error> {
+    /// yours. A git-ignored file counts as there, as it does where the agent
+    /// wrote, and a submodule's commit needs a directory.
+    fn still_there(
+        &self,
+        host: &Host,
+        ignore: &Gitignore,
+        tree: Id,
+        path: &[u8],
+    ) -> Result<bool, git::Error> {
         for entry in self.object(&tree)?.entries()? {
             let inner = [path, b"/", &entry.name].concat();
+            if ignore.is_ignored(bytes_path(&inner), entry.mode == TREE) {
+                continue;
+            }
             let there = match entry.mode {
-                GITLINK => true,
-                TREE => self.still_there(host, entry.id, &inner)?,
+                TREE => self.still_there(host, ignore, entry.id, &inner)?,
+                GITLINK => match self.records.view(&inner) {
+                    View::Agent(Entry::Dir { .. }) => true,
+                    View::Yours => host.stat(&inner)?.is_some_and(|m| m.is_dir()),
+                    View::Agent(_) | View::Absent => false,
+                },
                 _ => match self.records.view(&inner) {
                     View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => true,
                     View::Yours => host.stat(&inner)?.is_some(),
@@ -511,7 +533,7 @@ impl Share<'_> {
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, .. } => line(&mut applied.text, "skipped", &path, &why),
                 Verdict::Change => {
-                    if !agent.committed(&host, head, &path).map_err(read_failed)? {
+                    if !(agent.committed(&host, &ignore, head, &path)).map_err(read_failed)? {
                         return Err(refused(
                             "the agent left files it didn't commit, and `ap apply` can't commit them yet",
                         ));

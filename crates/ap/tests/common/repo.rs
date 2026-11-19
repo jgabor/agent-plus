@@ -17,6 +17,9 @@ pub fn git(dir: &Path) -> Command {
     git.arg("-C")
         .arg(dir)
         .args(["-c", "init.defaultBranch=main"])
+        // No git in the background, which could change a `.git` while a
+        // test reads it.
+        .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "A U Thor")

@@ -1623,3 +1623,59 @@ fn a_branch_that_can_t_be_taken_back_is_named() {
     );
     assert!(scratch.runs().has_pending(&run).unwrap());
 }
+
+/// The agent commits a submodule's commit at `deps/vendor`, and `docs`
+/// with a file your `.gitignore` names.
+fn with_submodule_and_ignored(name: &str) -> Repository {
+    let repository = Repository::new(name, true, &[]);
+    fs::write(repository.share().join(".gitignore"), "*.log\n").unwrap();
+    let guest = &repository.guest;
+    let start = repository.start.as_deref().unwrap();
+    let gitlink = format!("160000,{start},deps/vendor");
+    repo::run(guest, &["update-index", "--add", "--cacheinfo", &gitlink]);
+    fs::create_dir_all(guest.join("deps/vendor")).unwrap();
+    repository.commit("docs/guide.md", "read me\n");
+    fs::write(guest.join("docs/debug.log"), "noise\n").unwrap();
+    repo::run(guest, &["add", "-f", "docs/debug.log"]);
+    repo::run(guest, &["commit", "-q", "-m", "log"]);
+    write(&repository.pending, "docs/debug.log", 0o644, b"noise\n");
+    dir(&repository.pending, "deps", 0o755);
+    dir(&repository.pending, "deps/vendor", 0o755);
+    repository.land();
+    repository
+}
+
+/// A submodule's directory gone from a directory the agent made again is
+/// a change it didn't commit.
+#[test]
+fn a_submodule_gone_from_a_directory_made_again_is_uncommitted() {
+    let repository = with_submodule_and_ignored("submodule-gone");
+    record(&repository.pending, "DELETE \"deps\"");
+    record(&repository.pending, "DIR \"deps\" 755");
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    repository.stays_pending(
+        &output,
+        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+        &before,
+    );
+}
+
+/// A submodule's directory, and a git-ignored file the agent deleted in a
+/// directory whose mode it changed, are as its `HEAD` holds them.
+#[test]
+fn a_submodule_s_directory_and_an_ignored_file_land_as_committed() {
+    let repository = with_submodule_and_ignored("submodule-kept");
+    record(&repository.pending, "DELETE \"docs/debug.log\"");
+    record(&repository.pending, "DIR \"docs\" 700");
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        repo::history(repository.share(), &repository.branch()),
+        repo::history(&repository.guest, "HEAD")
+    );
+}

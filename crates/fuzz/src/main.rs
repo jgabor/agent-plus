@@ -29,8 +29,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-/// Network rules join this list when they exist.
-const TARGETS: [Target; 6] = [
+const TARGETS: [Target; 7] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -277,6 +276,65 @@ const TARGETS: [Target; 6] = [
             "\r\n",
         ],
     },
+    Target {
+        name: "net",
+        check: |input| {
+            net_input(input);
+        },
+        corpus: &[
+            "",
+            concat!(
+                "NETWORK -\nNETWORK +github.com\nNETWORK -gist.github.com\n",
+                "NETWORK +https://codeberg.org/forgejo/forgejo\n",
+                "> github.com 100.64.0.1 443 https /torvalds/linux\n",
+                "> codeberg.org 100.64.0.2 443 https /forgejo/forgejo/%2e%2E/x\n",
+                "> gist.github.com 100.64.0.3 22\n",
+            ),
+            concat!(
+                "NETWORK +\nNETWORK -1.1.1.0/24\nNETWORK +1.1.1.1:443\n",
+                "NETWORK -[2606:4700::]/32:443\nNETWORK +[::ffff:10.0.0.0]/104\n",
+                "> - ::ffff:1.1.1.1 443\n> one.one.one.one 1.1.1.1 53\n",
+                "> - 2606:4700::1 443 http /a?b=%2F\n",
+            ),
+        ],
+        words: &[
+            "\n",
+            " ",
+            "NETWORK ",
+            "+",
+            "-",
+            "> ",
+            "- ",
+            "github.com",
+            "api.github.com",
+            "github.com.",
+            "https://",
+            "http://",
+            "https ",
+            "http ",
+            "/",
+            "/jgabor/agent-plus",
+            "?",
+            "#",
+            "%",
+            "%2F",
+            "%2e",
+            "%7E",
+            ".",
+            "..",
+            ":22",
+            ":443",
+            " 443 ",
+            " 80 ",
+            "1.1.1.1",
+            "10.0.0.0/8",
+            "/0",
+            "/32",
+            "[::ffff:1.1.1.1]",
+            "[2606:4700::]/32",
+            "::ffff:1.1.1.1",
+        ],
+    },
 ];
 
 const DEVICE_MEMORY: usize = 1 << 16;
@@ -360,6 +418,64 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
     }
     device.signal_used();
     accepted
+}
+
+/// Decides each `> <name> <address> <port> [<scheme> <target>]` line, with
+/// `-` for no name, under the `NETWORK` lines of the input, and panics if a
+/// decision breaks a promise of the evaluation. Returns how many it made.
+fn net_input(input: &str) -> usize {
+    let (connections, lines): (Vec<&str>, Vec<&str>) =
+        input.lines().partition(|line| line.starts_with("> "));
+    let Ok(instructions) = agentfile::parse(&format!("AGENT claude\n{}", lines.join("\n"))) else {
+        return 0;
+    };
+    let Ok(network) = agentfile::Network::read(&instructions) else {
+        return 0;
+    };
+    let mut reversed = network.rules.clone();
+    reversed.reverse();
+    let mut decided = 0;
+    for line in connections {
+        let words: Vec<&str> = line[2..].split(' ').collect();
+        let (Some(address), Some(port)) = (
+            words.get(1).and_then(|word| word.parse().ok()),
+            words.get(2).and_then(|word| word.parse().ok()),
+        ) else {
+            continue;
+        };
+        let request = match (words.get(3), words.get(4)) {
+            (Some(&"https"), Some(target)) => Some((agentfile::Scheme::Https, *target)),
+            (Some(&"http"), Some(target)) => Some((agentfile::Scheme::Http, *target)),
+            _ => None,
+        };
+        let connection = net::Connection {
+            name: words.first().filter(|name| **name != "-").copied(),
+            address,
+            port,
+            request: request.map(|(scheme, target)| net::Request { scheme, target }),
+        };
+        if let Some((_, target)) = request
+            && let Some(normal) = net::normalize_path(target)
+        {
+            assert_eq!(net::normalize_path(&normal).as_ref(), Some(&normal));
+        }
+        let decision = net::decide(&network.rules, network.default, &connection);
+        match decision.by {
+            net::By::Rule(rule) => assert_eq!(rule.sign, decision.sign),
+            net::By::Default => assert_eq!(decision.sign, network.default),
+            net::By::Path => assert_eq!(decision.sign, agentfile::Sign::Deny),
+        }
+        // Line order never matters, though of equally specific rules that
+        // agree, either can be the one named.
+        let other = net::decide(&reversed, network.default, &connection);
+        assert_eq!(other.sign, decision.sign);
+        match (decision.by, other.by) {
+            (net::By::Rule(one), net::By::Rule(two)) => assert_eq!(one.sign, two.sign),
+            (one, two) => assert_eq!(one, two),
+        }
+        decided += 1;
+    }
+    decided
 }
 
 /// The blob `a\n`, which every ref in the git target's corpus names.

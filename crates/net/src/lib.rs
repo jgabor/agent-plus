@@ -30,7 +30,7 @@ pub struct Request<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum By<'a> {
     /// This rule. When rules disagree and the connection is denied, it is
-    /// a `-` rule.
+    /// a `-` rule. Of equally specific rules that agree, it is one of them.
     Rule(&'a NetworkRule),
     /// The default, because no rule matched.
     Default,

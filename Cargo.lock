@@ -80,6 +80,7 @@ dependencies = [
  "ap",
  "git",
  "miniz_oxide",
+ "net",
  "share",
  "vmm",
 ]

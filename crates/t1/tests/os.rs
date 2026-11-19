@@ -18,11 +18,13 @@ const GRANTS: &str = "NETWORK -\nPOLICY -\n";
 /// The SHA-256 digest of the empty file, which stands in for the harness that
 /// each agent locks. The guest command doesn't start it.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-/// A shell runs git and a coreutils program.
+/// A shell runs git and a coreutils program, and finds the CA bundle that
+/// programs verify HTTPS servers with.
 const COMMAND: &[&str] = &[
     "/bin/sh",
     "-c",
-    "PATH=/usr/bin:/bin && git --version && ls --version",
+    "PATH=/usr/bin:/bin && git --version && ls --version \
+     && test -s /etc/ssl/certs/ca-certificates.crt && echo bundle",
 ];
 
 /// Builds the agent in `dir` with a static `ap`, with only `HOME` in its
@@ -67,6 +69,7 @@ fn project(root: &Path, home: &Path, name: &str) -> PathBuf {
 
 // spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
 // spec(OS): | `minimal` | The harness, a shell, git, and coreutils |
+// spec(OS): `minimal` holds Debian's CA certificates, in `/etc/ssl/certs/ca-certificates.crt`, so programs in the guest can verify HTTPS servers.
 #[test]
 fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("os-{}", process::id()));
@@ -129,4 +132,5 @@ fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
     );
     assert!(stdout.starts_with("git version 2."), "{stdout}");
     assert!(stdout.contains("ls (GNU coreutils) "), "{stdout}");
+    assert!(stdout.ends_with("\nbundle\n"), "{stdout}");
 }

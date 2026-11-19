@@ -136,7 +136,7 @@ pub fn run() -> Result<Verdict, Problem> {
             );
             continue;
         }
-        if let Err(Problem(message)) = hand_back(&gh, pr, &why, &waiting) {
+        if let Err(Problem(message)) = hand_back(&gh, pr, &head, &why, &waiting) {
             eprintln!("refresh: PR {}: {message}", pr.number);
         }
     }
@@ -191,18 +191,61 @@ fn merge_if_armed(
     Ok(None)
 }
 
-/// Tells the PR why it failed, and lets the dispatcher restart its issue.
-/// Its auto-merge stays armed, so the owner's approval stands for the fix.
-fn hand_back(gh: &Gh, pr: &OpenPr, why: &str, waiting: &BTreeSet<u64>) -> Result<(), Problem> {
-    let body = format!(
-        "The refresh couldn't prove this PR: {why}\n\nIts issue no longer has `{LAND_NEEDED}`, so a worker takes it up again. Auto-merge stays armed, and the refresh merges the PR once its fix is proven."
-    );
-    gh.comment_on_pr(pr.number, &body)?;
-    let issues = pr.closing_issues.iter().filter(|n| waiting.contains(n));
-    for issue in issues {
-        gh.remove_label(*issue, LAND_NEEDED)?;
+/// Lets the dispatcher restart the PR's issue, and tells the PR why, once for
+/// each head. The comment comes last, so it says only what was done. Its
+/// auto-merge stays armed, so the owner's approval stands for the fix.
+fn hand_back(
+    gh: &Gh,
+    pr: &OpenPr,
+    head: &str,
+    why: &str,
+    waiting: &BTreeSet<u64>,
+) -> Result<(), Problem> {
+    let mut failed = Vec::new();
+    let mut unlabel = |number: u64| match gh.remove_label(number, LAND_NEEDED) {
+        Ok(()) => true,
+        Err(Problem(message)) => {
+            failed.push(message);
+            false
+        }
+    };
+    unlabel(pr.number);
+    let issues: Vec<u64> = pr
+        .closing_issues
+        .iter()
+        .copied()
+        .filter(|n| waiting.contains(n))
+        .collect();
+    // Every issue gets a try, so this doesn't stop at the first failure.
+    let unlabeled = issues
+        .iter()
+        .map(|n| unlabel(*n))
+        .filter(|done| !done)
+        .count()
+        == 0;
+    let mark = format!("<!-- refresh {head} -->");
+    let commented = gh.comment_bodies(pr.number).and_then(|bodies| {
+        if bodies.contains(&mark) {
+            return Ok(());
+        }
+        let issue = if unlabeled {
+            format!("Its issue no longer has `{LAND_NEEDED}`, so a worker takes it up again. ")
+        } else {
+            String::new()
+        };
+        let body = format!(
+            "The refresh couldn't prove this PR: {why}\n\n{issue}Auto-merge stays armed, and the refresh merges the PR once its fix is proven.\n\n{mark}\n"
+        );
+        gh.comment_on_pr(pr.number, &body)
+    });
+    if let Err(Problem(message)) = commented {
+        failed.push(message);
     }
-    gh.remove_label(pr.number, LAND_NEEDED)
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(Problem(failed.join("\n")))
+    }
 }
 
 /// From the PR and every issue it closes, which `remove_label` allows when

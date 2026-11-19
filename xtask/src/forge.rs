@@ -358,6 +358,12 @@ impl Gh {
         Ok(())
     }
 
+    /// The bodies of every comment on an issue or a PR, one after another.
+    pub fn comment_bodies(&self, number: u64) -> Result<String, Problem> {
+        let path = format!("{ISSUES}/{number}/comments");
+        self.text(&["api", &path, "--paginate", "--jq", ".[].body"], None)
+    }
+
     pub fn open_issues(&self) -> Result<Vec<OpenIssue>, Problem> {
         self.listed("open", "number,title,labels,isPinned")?
             .iter()

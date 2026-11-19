@@ -814,8 +814,11 @@ started.
    proven`.
 6. A proof that failed only because `main` moved keeps `land-needed`, and the
    next run proves it again. Any other failure is the change's. `refresh`
-   comments on the PR with the reason, and removes `land-needed` from the PR
-   and its issue, so the dispatcher restarts the issue. Auto-merge stays
+   removes `land-needed` from the PR and its issue, so the dispatcher
+   restarts the issue. It tries each one, even when one fails, and names
+   each failure. Then it comments on the PR with the reason, and says the
+   issue's label is gone only if it is. It comments once for each head, so a
+   later run that fails the same head again posts nothing. Auto-merge stays
    armed, so the fixed PR merges once a refresh proves it, without another
    approval.
 

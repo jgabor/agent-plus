@@ -386,15 +386,19 @@ maybe_kill before
   esac ;;
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
-  "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
+  "pr comment") if [ -f '{bin}/comment-fails' ]; then echo 'gh: no comment (HTTP 403)' >&2; exit 1; fi
+    cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
     if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi ;;
   "issue view") cat '{bin}/issue.json' ;;
-  "api -X") case "$4" in */labels*) exit 0 ;; esac
+  "api -X") case "$4" in */labels*) n="${{4%/labels*}}"; n="${{n##*/}}"
+      if [ -f "{bin}/refuse-label-$n" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
+      exit 0 ;; esac
     if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
+  "api repos/"*/comments) cat '{bin}/pr-comments' 2>/dev/null; exit 0 ;;
   "api repos/"*) posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
     if [ -f "$posted" ]; then cat "$posted"; else echo '{{"statuses":[]}}'; fi ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
@@ -2934,6 +2938,76 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
         "{calls}"
     );
     assert!(calls.contains(&merged(9, &repo.head_of(BRANCH))), "{calls}");
+}
+
+/// A token that can't write issues can still unlabel the PR, and the comment
+/// says only what was done, once for each failed head.
+#[test]
+fn a_refresh_that_can_not_unlabel_the_issue_unlabels_the_pr_and_comments_once() {
+    let repo = Repo::new("refresh-refused");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    fs::write(repo.bin.join("refuse-label-7"), "").unwrap();
+
+    for run in 1..=2 {
+        let output = repo.refresh();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "run {run}: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        let said = stderr(&output);
+        assert!(
+            said.contains(&format!("`{}` failed", unlabeled(7))),
+            "{said}"
+        );
+        assert!(said.contains("HTTP 403"), "{said}");
+    }
+    let calls = repo.calls();
+    assert_eq!(calls.matches("gh pr comment 9").count(), 1, "{calls}");
+    let line = |call: &str| {
+        calls
+            .find(call)
+            .unwrap_or_else(|| panic!("{call}: {calls}"))
+    };
+    assert!(line(&unlabeled(9)) < line("gh pr comment 9"), "{calls}");
+    assert!(line(&unlabeled(7)) < line("gh pr comment 9"), "{calls}");
+    let comments = repo.pr_comments();
+    assert!(comments.contains("Not proven"), "{comments}");
+    assert!(!comments.contains("no longer has"), "{comments}");
+}
+
+/// A comment that can't be posted hides none of the labels' failures.
+#[test]
+fn a_refresh_names_each_failure_of_a_hand_back() {
+    let repo = Repo::new("refresh-refused-all");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    for name in ["refuse-label-7", "refuse-label-9", "comment-fails"] {
+        fs::write(repo.bin.join(name), "").unwrap();
+    }
+
+    let output = repo.refresh();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let said = stderr(&output);
+    for call in [unlabeled(9), unlabeled(7)] {
+        assert!(said.contains(&format!("`{call}` failed")), "{said}");
+    }
+    assert!(said.contains("no comment (HTTP 403)"), "{said}");
 }
 
 /// A fork's branch isn't in this repository, and `prepare` refuses it.

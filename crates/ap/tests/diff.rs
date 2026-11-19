@@ -594,6 +594,72 @@ fn a_name_the_agent_chose_prints_no_control_characters() {
     assert_eq!(shown.lines().count(), 1, "{shown:?}");
 }
 
+/// A name as a record holds it: in quotes, with each byte that isn't
+/// printable ASCII, and `"` and `\\`, as `\\xNN`.
+fn escaped(name: &str) -> String {
+    let plain = |byte: u8| (0x20..0x7f).contains(&byte) && byte != b'"' && byte != b'\\';
+    let inner: String = (name.bytes())
+        .map(|byte| match plain(byte) {
+            true => char::from(byte).to_string(),
+            false => format!("\\x{byte:02x}"),
+        })
+        .collect();
+    format!("\"{inner}\"")
+}
+
+// spec(Grants): `ap diff` and `ap logs` do the same for names that an agent chose.
+#[test]
+fn a_path_the_agent_chose_prints_with_controls_and_overrides_escaped() {
+    let scratch = Scratch::new("escaped");
+    let (run, pending) = scratch.run("notes", 1);
+    // A name that clears your screen, one that a right-to-left override
+    // shows as `exe.txt`, and an isolate around a binary file's name.
+    for (name, data) in [
+        ("clear\x1b[2J.txt", &b"a\n"[..]),
+        ("\u{202e}txt.exe", b"b\n"),
+        ("\u{2067}bin\u{2069}", b"\0"),
+    ] {
+        fs::write(pending.join("tree").join(name), data).unwrap();
+        record(&pending, &format!("FILE {} 644", escaped(name)));
+    }
+    // A symlink whose name rings the bell, and whose target overrides.
+    fs::write(pending.join("tree/link\x07"), "").unwrap();
+    record(
+        &pending,
+        &format!(
+            "SYMLINK {} {}",
+            escaped("link\x07"),
+            escaped("\u{202d}target")
+        ),
+    );
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let shown = stdout(&output);
+    assert_eq!(
+        shown,
+        concat!(
+            r#"diff --git "a/clear\033[2J.txt" "b/clear\033[2J.txt""#,
+            "\nnew file mode 100644\n--- /dev/null\n",
+            r#"+++ "b/clear\033[2J.txt""#,
+            "\n@@ -0,0 +1 @@\n+a\n",
+            r#"symlink "link\a" -> "\342\200\255target""#,
+            "\n",
+            r#"diff --git "a/\342\200\256txt.exe" "b/\342\200\256txt.exe""#,
+            "\nnew file mode 100644\n--- /dev/null\n",
+            r#"+++ "b/\342\200\256txt.exe""#,
+            "\n@@ -0,0 +1 @@\n+b\n",
+            r#"Binary files /dev/null and "b/\342\201\247bin\342\201\251" differ"#,
+            "\n",
+        )
+    );
+    let bidi = ['\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}'];
+    let isolates = ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'];
+    assert!(!shown.contains(['\x1b', '\x07']), "{shown:?}");
+    assert!(!shown.contains(bidi) && !shown.contains(isolates), "{shown:?}");
+}
+
 #[test]
 fn a_deleted_directory_shows_each_of_your_files_in_it() {
     let scratch = Scratch::new("directory");

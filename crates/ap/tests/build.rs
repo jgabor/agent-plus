@@ -659,6 +659,52 @@ fn a_missing_share_source_is_an_error() {
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
+// spec(SHARE): The image stores the share as a request, never your files.
+#[test]
+fn an_image_stores_a_share_as_a_request() {
+    let scratch = Scratch::new("share-request");
+    let dir = scratch.project(
+        "notes",
+        "AGENT claude\nOS minimal\nSHARE ./notes\nSHARE ./work rw\nSHARE ./todo.md ro\n",
+    );
+    let yours = [
+        ("notes/shared.md", "A note that only your files hold.\n"),
+        ("work/plan.md", "A plan that only your files hold.\n"),
+        ("todo.md", "A list that only your files hold.\n"),
+    ];
+    for (path, text) in yours {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    scratch.build(&dir, &[]);
+    let agent = scratch.agent("notes");
+    for share in [
+        declared("SHARE", &["./notes"]),
+        declared("SHARE", &["./work", "rw"]),
+        declared("SHARE", &["./todo.md", "ro"]),
+    ] {
+        assert!(agent.declared.contains(&share), "{:?}", agent.declared);
+    }
+    // The OS layer is a stand-in that holds nothing of yours.
+    let layers = Layers::new(scratch.store());
+    let os = ap::fetch::os().sha256;
+    for layer in agent.layers.iter().filter(|layer| layer.digest != os) {
+        let image = layers.get(&layer.digest).unwrap();
+        for (path, text) in yours {
+            assert!(!holds(&image, text), "{path} is in {}", layer.digest);
+        }
+    }
+
+    // Your files can change, and no layer does.
+    fs::write(dir.join("notes/shared.md"), "Changed.\n").unwrap();
+    fs::write(dir.join("notes/more.md"), "More.\n").unwrap();
+    fs::write(dir.join("todo.md"), "Changed too.\n").unwrap();
+    let lines = layer_lines(&scratch.build(&dir, &[]));
+    assert!(lines.iter().all(|(status, _)| status == "hit"), "{lines:?}");
+    assert_eq!(scratch.agent("notes").layers, agent.layers);
+}
+
 #[test]
 fn a_missing_add_source_is_an_error() {
     let scratch = Scratch::new("add-missing");

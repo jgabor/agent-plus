@@ -1082,6 +1082,7 @@ fn an_object_fsck_refuses_keeps_everything_pending() {
 }
 
 // spec(SHARE): With no `git` on your host, `ap apply` fails the branch import, says so, and everything stays pending.
+// spec(Host requirements): On every host, `ap apply` needs `git` to import a branch (see [SHARE](#share)).
 #[test]
 fn with_no_git_everything_stays_pending() {
     let repository = Repository::new("no-git", true, &[]);

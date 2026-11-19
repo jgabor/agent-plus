@@ -78,12 +78,20 @@ impl Guest {
         let config = IfaceConfig::new(HardwareAddress::Ethernet(EthernetAddress(GUEST_MAC)));
         let mut iface = Interface::new(config, &mut link, SmolInstant::from_millis(0));
         iface.update_ip_addrs(|addrs| {
-            addrs.push(IpCidr::new(IpAddress::Ipv4(GUEST_V4), 24)).unwrap();
-            addrs.push(IpCidr::new(IpAddress::Ipv6(GUEST_V6), 64)).unwrap();
+            addrs
+                .push(IpCidr::new(IpAddress::Ipv4(GUEST_V4), 24))
+                .unwrap();
+            addrs
+                .push(IpCidr::new(IpAddress::Ipv6(GUEST_V6), 64))
+                .unwrap();
         });
         iface.routes_mut().add_default_ipv4_route(STACK_V4).unwrap();
         iface.routes_mut().add_default_ipv6_route(STACK_V6).unwrap();
-        Guest { iface, sockets: SocketSet::new(Vec::new()), link }
+        Guest {
+            iface,
+            sockets: SocketSet::new(Vec::new()),
+            link,
+        }
     }
 
     fn connect(&mut self, to: SocketAddr, from_port: u16) -> SocketHandle {
@@ -106,6 +114,7 @@ fn stack() -> Stack {
         mac: STACK_MAC,
         ipv4: (STACK_V4, 24),
         ipv6: (STACK_V6, 64),
+        seed: 7,
     })
 }
 
@@ -114,7 +123,11 @@ fn exchange(guest: &mut Guest, stack: &mut Stack, start: Instant) {
     for _ in 0..64 {
         let now = Instant::now();
         let millis = i64::try_from(now.duration_since(start).as_millis()).unwrap();
-        guest.iface.poll(SmolInstant::from_millis(millis), &mut guest.link, &mut guest.sockets);
+        guest.iface.poll(
+            SmolInstant::from_millis(millis),
+            &mut guest.link,
+            &mut guest.sockets,
+        );
         let mut moved = false;
         while let Some(frame) = guest.link.from_guest.pop_front() {
             stack.receive(&frame, now);
@@ -139,8 +152,15 @@ fn connect_and_send(to: SocketAddr, bytes: &[u8]) -> (SocketAddr, SocketAddr, Ve
     let mut stack = stack();
     let handle = guest.connect(to, 49152);
     exchange(&mut guest, &mut stack, start);
-    assert_eq!(guest.sockets.get::<tcp::Socket>(handle).state(), tcp::State::Established);
-    guest.sockets.get_mut::<tcp::Socket>(handle).send_slice(bytes).unwrap();
+    assert_eq!(
+        guest.sockets.get::<tcp::Socket>(handle).state(),
+        tcp::State::Established
+    );
+    guest
+        .sockets
+        .get_mut::<tcp::Socket>(handle)
+        .send_slice(bytes)
+        .unwrap();
     exchange(&mut guest, &mut stack, start);
 
     let connection = stack.accept().expect("the stack accepted the connection");
@@ -179,9 +199,15 @@ fn accepts_two_connections_to_one_destination() {
     let second = guest.connect(to, 49153);
     exchange(&mut guest, &mut stack, start);
     for handle in [first, second] {
-        assert_eq!(guest.sockets.get::<tcp::Socket>(handle).state(), tcp::State::Established);
+        assert_eq!(
+            guest.sockets.get::<tcp::Socket>(handle).state(),
+            tcp::State::Established
+        );
     }
-    let mut ports = [stack.accept().unwrap().source.port(), stack.accept().unwrap().source.port()];
+    let mut ports = [
+        stack.accept().unwrap().source.port(),
+        stack.accept().unwrap().source.port(),
+    ];
     ports.sort_unstable();
     assert_eq!(ports, [49152, 49153]);
 }
@@ -198,7 +224,11 @@ fn the_stack_can_answer_a_connection() {
     assert_eq!(stack.send(connection.id, b"reply"), 5);
     exchange(&mut guest, &mut stack, start);
     let mut read = [0; 16];
-    let n = guest.sockets.get_mut::<tcp::Socket>(handle).recv_slice(&mut read).unwrap();
+    let n = guest
+        .sockets
+        .get_mut::<tcp::Socket>(handle)
+        .recv_slice(&mut read)
+        .unwrap();
     assert_eq!(&read[..n], b"reply");
 }
 
@@ -209,12 +239,19 @@ fn takes_a_udp_datagram_to_any_address() {
     let mut stack = stack();
     let handle = guest.udp(40000);
     let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53);
-    guest.sockets.get_mut::<udp::Socket>(handle).send_slice(b"query", to).unwrap();
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"query", to)
+        .unwrap();
     exchange(&mut guest, &mut stack, start);
 
     let datagram = stack.recv_datagram().expect("the stack took the datagram");
     assert_eq!(datagram.destination, to);
-    assert_eq!(datagram.source, SocketAddr::new(IpAddr::V4(GUEST_V4), 40000));
+    assert_eq!(
+        datagram.source,
+        SocketAddr::new(IpAddr::V4(GUEST_V4), 40000)
+    );
     assert_eq!(datagram.payload, b"query");
     assert!(stack.recv_datagram().is_none());
 }
@@ -226,13 +263,32 @@ fn syn_frame(to: SocketAddr) -> Vec<u8> {
     let mut guest = Guest::new();
     let mut stack = stack();
     guest.connect(to, 49152);
-    guest.iface.poll(SmolInstant::from_millis(0), &mut guest.link, &mut guest.sockets);
-    let arp = guest.link.from_guest.pop_front().expect("the guest asks for the gateway");
+    guest.iface.poll(
+        SmolInstant::from_millis(0),
+        &mut guest.link,
+        &mut guest.sockets,
+    );
+    let arp = guest
+        .link
+        .from_guest
+        .pop_front()
+        .expect("the guest asks for the gateway");
     stack.receive(&arp, now);
     stack.poll(now);
-    guest.link.to_guest.push_back(stack.transmit().expect("the stack answers ARP"));
-    guest.iface.poll(SmolInstant::from_millis(1), &mut guest.link, &mut guest.sockets);
-    guest.link.from_guest.pop_front().expect("the guest sends its SYN")
+    guest
+        .link
+        .to_guest
+        .push_back(stack.transmit().expect("the stack answers ARP"));
+    guest.iface.poll(
+        SmolInstant::from_millis(1),
+        &mut guest.link,
+        &mut guest.sockets,
+    );
+    guest
+        .link
+        .from_guest
+        .pop_front()
+        .expect("the guest sends its SYN")
 }
 
 #[test]

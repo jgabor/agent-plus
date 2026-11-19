@@ -1762,9 +1762,13 @@ Matching follows boundaries:
   that host too.
 - Request paths are normalized (RFC 3986) before matching. Requests whose
   paths contain encoded slashes (`%2F`) or dot segments under a host with
-  URL rules are denied.
+  URL rules are denied. So are paths there that don't start with `/`, and
+  paths with a `%` that two hex digits don't follow.
 - A port suffix limits a host or IP rule to that port. IPv6 addresses go in
   brackets.
+- Names match in any case, with or without a final dot. An IPv4-mapped IPv6
+  address, such as `::ffff:1.1.1.1`, meets the rules for its IPv4 address as
+  well as its own.
 
 **Evaluation.** The most specific matching rule wins, so line order never
 matters. For each connection:

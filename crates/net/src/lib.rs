@@ -137,7 +137,8 @@ fn name_decision<'a>(
                     Scheme::Https => 443,
                     Scheme::Http => 80,
                 };
-                let prefix = normalize_path(prefix).unwrap_or_else(|| prefix.clone());
+                // Only escapes, so a rule's dots never move it elsewhere.
+                let prefix = unescape_unreserved(prefix).unwrap_or_else(|| prefix.clone());
                 let under = path == prefix
                     || path
                         .strip_prefix(prefix.as_str())
@@ -155,10 +156,14 @@ fn name_decision<'a>(
 }
 
 /// The IP rule with the longest prefix that matches a connection to
-/// `address` on `port`. An IPv4-mapped IPv6 address is the IPv4 address it
-/// maps, for the address and for the rules.
+/// `address` on `port`. An IPv4-mapped IPv6 address meets the IPv4 rules for
+/// the address it maps, and the IPv6 rules for itself. Prefixes compare in
+/// IPv6 bits, so an IPv4 `/8` is a `/104`.
 fn address_decision(rules: &[NetworkRule], address: IpAddr, port: u16) -> Option<&NetworkRule> {
-    let address = address.to_canonical();
+    let v4 = match address.to_canonical() {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(_) => None,
+    };
     most_specific(rules.iter().filter_map(|rule| {
         let Destination::Address {
             network,
@@ -168,15 +173,25 @@ fn address_decision(rules: &[NetworkRule], address: IpAddr, port: u16) -> Option
         else {
             return None;
         };
-        let (network, prefix) = match network {
-            IpAddr::V6(v6) if prefix >= 96 => match v6.to_ipv4_mapped() {
-                Some(v4) => (IpAddr::V4(v4), prefix - 96),
-                None => (network, prefix),
-            },
-            _ => (network, prefix),
+        let matches = match (network, address) {
+            (IpAddr::V4(network), _) => {
+                v4.is_some_and(|v4| masked(v4.into(), prefix) == Some(network.into()))
+            }
+            (IpAddr::V6(_), IpAddr::V6(_)) => masked(address, prefix) == Some(network),
+            // A plain IPv4 address meets an IPv6 rule only inside the
+            // IPv4-mapped block.
+            (IpAddr::V6(v6), IpAddr::V4(v4)) => {
+                prefix >= 96
+                    && v6.to_ipv4_mapped().is_some_and(|network| {
+                        masked(v4.into(), prefix - 96) == Some(network.into())
+                    })
+            }
         };
-        (masked(address, prefix) == Some(network) && only.is_none_or(|only| only == port))
-            .then_some(((prefix, only.is_some()), rule))
+        let bits = match network {
+            IpAddr::V4(_) => prefix + 96,
+            IpAddr::V6(_) => prefix,
+        };
+        (matches && only.is_none_or(|only| only == port)).then_some(((bits, only.is_some()), rule))
     }))
 }
 

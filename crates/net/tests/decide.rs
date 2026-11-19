@@ -112,6 +112,7 @@ fn a_host_rule_matches_its_subdomains_on_its_port() {
     decides(rules, request("https://github.com/x"), DENY, "default");
 }
 
+// spec(NETWORK): Names match in any case, with or without a final dot.
 #[test]
 fn names_match_without_case_or_a_trailing_dot() {
     let rules = "NETWORK +\nNETWORK -kagi.com\n";
@@ -163,8 +164,9 @@ fn an_ip_rule_matches_its_addresses_on_its_port() {
     );
 }
 
+// spec(NETWORK): An IPv4-mapped IPv6 address, such as `::ffff:1.1.1.1`, meets the rules for its IPv4 address as well as its own.
 #[test]
-fn an_ipv4_mapped_address_meets_the_ipv4_rules() {
+fn an_ipv4_mapped_address_meets_the_ipv4_rules_and_its_own() {
     let rules = "NETWORK +\nNETWORK -1.1.1.0/24\n";
     decides(
         rules,
@@ -179,6 +181,26 @@ fn an_ipv4_mapped_address_meets_the_ipv4_rules() {
         ALLOW,
         "+[::ffff:10.0.0.0]/104",
     );
+    for v6 in ["[::]/0", "[::fffe:0:0]/95", "[::ffff:0:0]/96"] {
+        let rules = format!("NETWORK +\nNETWORK -{v6}\n");
+        let by = format!("-{v6}");
+        decides(&rules, connection(None, "::ffff:1.1.1.1", 443), DENY, &by);
+    }
+    // An IPv6 rule that holds no IPv4-mapped address isn't an IPv4 rule.
+    let rules = "NETWORK +\nNETWORK -[::]/0\n";
+    decides(rules, connection(None, "1.1.1.1", 443), ALLOW, "default");
+    // The longest prefix still wins, counted in IPv6 bits.
+    let rules = "NETWORK -\nNETWORK -[::]/0\nNETWORK +10.0.0.0/8\n";
+    decides(
+        rules,
+        connection(None, "::ffff:10.0.0.1", 443),
+        ALLOW,
+        "+10.0.0.0/8",
+    );
+    let rules = "NETWORK +\nNETWORK +10.0.0.0/8\nNETWORK -[::ffff:10.1.0.0]/112\n";
+    let by = "-[::ffff:10.1.0.0]/112";
+    decides(rules, connection(None, "10.1.0.1", 443), DENY, by);
+    decides(rules, connection(None, "::ffff:10.1.0.1", 443), DENY, by);
 }
 
 // spec(NETWORK): | URL prefix | `+https://github.com/jgabor/agent-plus` | That scheme and exact host, and paths under that prefix |
@@ -304,6 +326,9 @@ fn request_paths_are_normalized_before_matching() {
         ALLOW,
         "default",
     );
+    // A rule's own escaped dots never move it to another path.
+    let rules = "NETWORK -\nNETWORK +https://a.com/public/%2e%2e/secret\n";
+    decides(rules, request("https://a.com/secret"), DENY, "default");
 }
 
 // spec(NETWORK): Requests whose paths contain encoded slashes (`%2F`) or dot segments under a host with URL rules are denied.

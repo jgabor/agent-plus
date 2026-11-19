@@ -6,6 +6,7 @@ pub mod boot;
 pub mod confine;
 pub mod fs;
 pub mod initramfs;
+pub mod net;
 pub mod serial;
 pub mod virtio;
 pub mod vsock;

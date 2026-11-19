@@ -11,6 +11,7 @@ struct FakeSystem {
     exited: VecDeque<i32>,
     mount_fails: bool,
     stack_fails: bool,
+    link_fails: bool,
     reap_fails: bool,
 }
 
@@ -29,6 +30,14 @@ impl System for FakeSystem {
             return Err(io::Error::from_raw_os_error(2));
         }
         self.log.push("stack layers".to_string());
+        Ok(())
+    }
+
+    fn set_up_link(&mut self) -> io::Result<()> {
+        if self.link_fails {
+            return Err(io::Error::from_raw_os_error(19));
+        }
+        self.log.push("set up link".to_string());
         Ok(())
     }
 
@@ -127,7 +136,7 @@ fn one_wake_reaps_every_exited_child() {
     run(&mut system, &mut channel).unwrap();
 
     assert_eq!(
-        system.log[5..],
+        system.log[6..],
         ["reap 10", "reap 11", "reap 12", "power off"]
     );
 }
@@ -149,15 +158,33 @@ fn the_host_is_not_heard_until_the_last_mount_is_done() {
 }
 
 #[test]
-fn the_layers_are_stacked_after_the_mounts_and_before_the_host_is_heard() {
+fn the_layers_are_stacked_and_the_link_set_up_before_the_host_is_heard() {
     let mut system = FakeSystem::default();
     let mut channel = FakeChannel::new(vec![Ok(Event::PowerOff)]);
 
     run(&mut system, &mut channel).unwrap();
 
     assert_eq!(system.log[..4], MOUNTED);
-    assert_eq!(system.log[4..], ["stack layers", "power off"]);
+    assert_eq!(
+        system.log[4..],
+        ["stack layers", "set up link", "power off"]
+    );
     assert_eq!(channel.reads, 1);
+}
+
+#[test]
+fn a_failed_link_powers_off_before_the_host_is_heard() {
+    let mut system = FakeSystem {
+        link_fails: true,
+        ..FakeSystem::default()
+    };
+    let mut channel = FakeChannel::new(vec![]);
+
+    let error = run(&mut system, &mut channel).unwrap_err();
+
+    assert_eq!(error.raw_os_error(), Some(19));
+    assert_eq!(system.log[4..], ["stack layers", "power off"]);
+    assert_eq!(channel.reads, 0);
 }
 
 #[test]

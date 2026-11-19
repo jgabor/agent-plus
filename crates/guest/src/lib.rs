@@ -2,6 +2,7 @@
 
 pub mod agent;
 pub mod linux;
+pub mod net;
 pub mod protocol;
 pub mod root;
 pub mod share;
@@ -77,6 +78,10 @@ pub trait System {
     /// Makes the agent's layers the root, if the host attached any, and moves
     /// the filesystems in [`MOUNTS`] into it.
     fn stack_layers(&mut self) -> io::Result<()>;
+    /// Sets up the link, if the host attached a network device, as
+    /// [`net`] says, and names `ap` as the only resolver. Without the
+    /// device it does nothing.
+    fn set_up_link(&mut self) -> io::Result<()>;
     /// Collects one exited child and returns its PID, or `None` if no child
     /// has exited.
     fn reap(&mut self) -> io::Result<Option<i32>>;
@@ -99,6 +104,7 @@ fn serve(system: &mut impl System, channel: &mut impl Channel) -> io::Result<()>
         system.mount(mount)?;
     }
     system.stack_layers()?;
+    system.set_up_link()?;
     loop {
         match channel.next_event()? {
             Event::ChildExited => while system.reap()?.is_some() {},

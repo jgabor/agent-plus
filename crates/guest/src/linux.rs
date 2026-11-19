@@ -1,11 +1,12 @@
 //! The real system calls.
 
 use crate::protocol::Size;
-use crate::{MOUNTS, Mount, System, root};
+use crate::{MOUNTS, Mount, System, net, root};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_short, c_ulong, c_void};
 use std::fs::{File, OpenOptions};
 use std::mem::size_of;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{self as unix_fs, OpenOptionsExt};
@@ -14,6 +15,7 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 use std::{env, fs, io, mem, ptr, thread};
 
 const WNOHANG: c_int = 1;
@@ -52,6 +54,72 @@ const COMMAND_LINE: &str = "/proc/cmdline";
 const LAYERS: &str = "/layers";
 const UPPER: &str = "/upper";
 const STACK: &str = "/stack";
+
+const AF_INET: c_int = 2;
+const AF_INET6: c_int = 10;
+const SOCK_DGRAM: c_int = 2;
+const SOCK_CLOEXEC: c_int = 0o2000000;
+const SIOCADDRT: c_ulong = 0x890b;
+const SIOCGIFFLAGS: c_ulong = 0x8913;
+const SIOCSIFFLAGS: c_ulong = 0x8914;
+const SIOCSIFADDR: c_ulong = 0x8916;
+const SIOCSIFNETMASK: c_ulong = 0x891c;
+const SIOCGIFINDEX: c_ulong = 0x8933;
+const IFF_UP: c_short = 1;
+const RTF_UP: u16 = 1;
+const RTF_GATEWAY: u16 = 2;
+const RESOLVER: &str = "/etc/resolv.conf";
+/// How long the link may take to come up, and how often the init looks.
+const LINK_WAIT: Duration = Duration::from_secs(5);
+const LINK_POLL: Duration = Duration::from_millis(1);
+
+/// `struct ifreq`, with its union as bytes.
+#[repr(C)]
+struct InterfaceRequest {
+    name: [u8; 16],
+    data: [u8; 24],
+}
+
+/// `struct rtentry`, with each `struct sockaddr` as bytes.
+#[repr(C)]
+struct RouteEntry {
+    pad1: c_ulong,
+    destination: [u8; 16],
+    gateway: [u8; 16],
+    mask: [u8; 16],
+    flags: u16,
+    pad2: c_short,
+    pad3: c_ulong,
+    pad4: *mut c_void,
+    metric: c_short,
+    device: *const c_char,
+    mtu: c_ulong,
+    window: c_ulong,
+    irtt: u16,
+}
+
+/// `struct in6_ifreq`.
+#[repr(C)]
+struct Ipv6Request {
+    address: [u8; 16],
+    prefix: u32,
+    index: c_int,
+}
+
+/// `struct in6_rtmsg`.
+#[repr(C)]
+struct Ipv6Route {
+    destination: [u8; 16],
+    source: [u8; 16],
+    gateway: [u8; 16],
+    kind: u32,
+    destination_len: u16,
+    source_len: u16,
+    metric: u32,
+    info: c_ulong,
+    flags: u32,
+    index: c_int,
+}
 
 /// `struct sockaddr_vm`.
 #[repr(C)]
@@ -173,6 +241,76 @@ impl System for Linux {
         mount_with(".", "/", "", MS_MOVE, "")?;
         unix_fs::chroot(".")?;
         env::set_current_dir("/")
+    }
+
+    fn set_up_link(&mut self) -> io::Result<()> {
+        if !Path::new("/sys/class/net").join(net::INTERFACE).exists() {
+            return Ok(());
+        }
+        // The guest is alone on its link, so no address can be taken, and
+        // IPv6 needn't wait to find out.
+        let dad = format!("/proc/sys/net/ipv6/conf/{}/accept_dad", net::INTERFACE);
+        fs::write(dad, "0")?;
+        let ipv4 = datagram_socket(AF_INET)?;
+        let mut request = interface_request();
+        ioctl_on(&ipv4, SIOCGIFFLAGS, &mut request)?;
+        let mut flags = [request.data[0], request.data[1]];
+        flags = (c_short::from_ne_bytes(flags) | IFF_UP).to_ne_bytes();
+        request.data[..2].copy_from_slice(&flags);
+        ioctl_on(&ipv4, SIOCSIFFLAGS, &mut request)?;
+
+        let mut request = interface_request();
+        request.data[..16].copy_from_slice(&ipv4_address(net::IPV4));
+        ioctl_on(&ipv4, SIOCSIFADDR, &mut request)?;
+        request.data[..16].copy_from_slice(&ipv4_address(net::ipv4_netmask()));
+        ioctl_on(&ipv4, SIOCSIFNETMASK, &mut request)?;
+        let device = CString::new(net::INTERFACE).map_err(io::Error::other)?;
+        let mut route = RouteEntry {
+            pad1: 0,
+            destination: ipv4_address(Ipv4Addr::UNSPECIFIED),
+            gateway: ipv4_address(net::IPV4_GATEWAY),
+            mask: ipv4_address(Ipv4Addr::UNSPECIFIED),
+            flags: RTF_UP | RTF_GATEWAY,
+            pad2: 0,
+            pad3: 0,
+            pad4: ptr::null_mut(),
+            metric: 0,
+            device: device.as_ptr(),
+            mtu: 0,
+            window: 0,
+            irtt: 0,
+        };
+        ioctl_on(&ipv4, SIOCADDRT, &mut route)?;
+
+        let ipv6 = datagram_socket(AF_INET6)?;
+        let mut request = interface_request();
+        ioctl_on(&ipv6, SIOCGIFINDEX, &mut request)?;
+        let index = c_int::from_ne_bytes(request.data[..4].try_into().unwrap_or_default());
+        let mut address = Ipv6Request {
+            address: net::IPV6.octets(),
+            prefix: u32::from(net::IPV6_PREFIX),
+            index,
+        };
+        ioctl_on(&ipv6, SIOCSIFADDR, &mut address)?;
+        let mut route = Ipv6Route {
+            destination: Ipv6Addr::UNSPECIFIED.octets(),
+            source: Ipv6Addr::UNSPECIFIED.octets(),
+            gateway: net::IPV6_GATEWAY.octets(),
+            kind: 0,
+            destination_len: 0,
+            source_len: 0,
+            metric: 0,
+            info: 0,
+            flags: u32::from(RTF_UP | RTF_GATEWAY),
+            index,
+        };
+        ioctl_on(&ipv6, SIOCADDRT, &mut route)?;
+        wait_for_ipv6()?;
+
+        // A layer's file may be a link to a resolver the guest doesn't run.
+        let _ = fs::remove_file(RESOLVER);
+        fs::create_dir_all("/etc")?;
+        fs::write(RESOLVER, net::resolv_conf())
     }
 
     fn reap(&mut self) -> io::Result<Option<i32>> {
@@ -466,6 +604,60 @@ pub fn take_terminal() -> io::Result<()> {
         checked(setsid())?;
         checked(ioctl(0, TIOCSCTTY, 0 as c_ulong))?;
     }
+    Ok(())
+}
+
+/// Waits until the link's IPv6 address can be used. The kernel finishes
+/// bringing the link up on a worker of its own, and until then the address
+/// is tentative, and nothing can send from it.
+fn wait_for_ipv6() -> io::Result<()> {
+    let started = Instant::now();
+    while net::tentative(&fs::read_to_string("/proc/net/if_inet6")?) != Some(false) {
+        if started.elapsed() > LINK_WAIT {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the link's IPv6 address never became usable",
+            ));
+        }
+        thread::sleep(LINK_POLL);
+    }
+    Ok(())
+}
+
+/// A socket of `family` to configure the link through.
+fn datagram_socket(family: c_int) -> io::Result<File> {
+    // SAFETY: socket takes no pointers.
+    let fd = checked(unsafe { socket(family, SOCK_DGRAM | SOCK_CLOEXEC, 0) })?;
+    // SAFETY: the kernel just returned this descriptor, and nothing else owns
+    // it.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// A `struct ifreq` that names the link's interface.
+fn interface_request() -> InterfaceRequest {
+    let mut request = InterfaceRequest {
+        name: [0; 16],
+        data: [0; 24],
+    };
+    request.name[..net::INTERFACE.len()].copy_from_slice(net::INTERFACE.as_bytes());
+    request
+}
+
+/// A `struct sockaddr_in` for `address`, with no port.
+fn ipv4_address(address: Ipv4Addr) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    bytes[..2].copy_from_slice(&(AF_INET as u16).to_ne_bytes());
+    bytes[4..8].copy_from_slice(&address.octets());
+    bytes
+}
+
+/// An `ioctl` on `socket` whose argument is a `T` that it may read and
+/// write.
+fn ioctl_on<T>(socket: &File, request: c_ulong, argument: &mut T) -> io::Result<()> {
+    // SAFETY: each request this is given takes a pointer to the structure
+    // that `T` declares, which lives across the call. Any pointer inside it
+    // is null or points to memory the caller keeps alive.
+    checked(unsafe { ioctl(socket.as_raw_fd(), request, ptr::from_mut(argument)) })?;
     Ok(())
 }
 

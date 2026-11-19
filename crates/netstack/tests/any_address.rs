@@ -1,12 +1,13 @@
 //! A second `smoltcp` interface plays the guest. It sends Ethernet frames over
 //! an in-memory link to the stack under test, which must end its connections
-//! and take its datagrams to any address and port.
+//! and take its datagrams to any address and port, unless the caller refuses
+//! them.
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
-use netstack::{Config, Stack};
+use netstack::{Config, Flow, Stack};
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
@@ -118,8 +119,37 @@ fn stack() -> Stack {
     })
 }
 
-/// Moves frames both ways until the link is quiet.
+/// Takes every flow.
+fn allow(_: &Flow) -> bool {
+    true
+}
+
+/// Moves frames both ways until the link is quiet, with every flow taken.
 fn exchange(guest: &mut Guest, stack: &mut Stack, start: Instant) {
+    exchange_deciding(guest, stack, start, allow);
+}
+
+/// Whether `frame` is an ICMP or ICMPv6 destination unreachable message.
+fn unreachable(frame: &[u8]) -> bool {
+    match frame[12..14] {
+        [0x08, 0x00] => {
+            let header = usize::from(frame[14] & 0xf) * 4;
+            frame[14 + 9] == 1 && frame[14 + header] == 3
+        }
+        [0x86, 0xdd] => frame[14 + 6] == 58 && frame[14 + 40] == 1,
+        _ => false,
+    }
+}
+
+/// Moves frames both ways until the link is quiet, and returns the frames
+/// the stack sent. `decide` takes or refuses each new flow.
+fn exchange_deciding(
+    guest: &mut Guest,
+    stack: &mut Stack,
+    start: Instant,
+    mut decide: impl FnMut(&Flow) -> bool,
+) -> Vec<Vec<u8>> {
+    let mut sent = Vec::new();
     for _ in 0..64 {
         let now = Instant::now();
         let millis = i64::try_from(now.duration_since(start).as_millis()).unwrap();
@@ -130,16 +160,17 @@ fn exchange(guest: &mut Guest, stack: &mut Stack, start: Instant) {
         );
         let mut moved = false;
         while let Some(frame) = guest.link.from_guest.pop_front() {
-            stack.receive(&frame, now);
+            stack.receive(&frame, now, &mut decide);
             moved = true;
         }
         stack.poll(now);
         while let Some(frame) = stack.transmit() {
+            sent.push(frame.clone());
             guest.link.to_guest.push_back(frame);
             moved = true;
         }
         if !moved {
-            return;
+            return sent;
         }
     }
     panic!("the link never went quiet");
@@ -273,7 +304,7 @@ fn syn_frame(to: SocketAddr) -> Vec<u8> {
         .from_guest
         .pop_front()
         .expect("the guest asks for the gateway");
-    stack.receive(&arp, now);
+    stack.receive(&arp, now, allow);
     stack.poll(now);
     guest
         .link
@@ -300,7 +331,7 @@ fn answers_only_on_its_own_link() {
     // Addressed to the stack, the SYN gets an answer.
     let now = Instant::now();
     let mut ours = stack();
-    ours.receive(&syn, now);
+    ours.receive(&syn, now, allow);
     ours.poll(now);
     assert!(ours.transmit().is_some());
 
@@ -308,8 +339,87 @@ fn answers_only_on_its_own_link() {
     let mut elsewhere = syn.clone();
     elsewhere[..6].copy_from_slice(&[0x02, 0, 0, 0, 0, 0x99]);
     let mut theirs = stack();
-    theirs.receive(&elsewhere, now);
+    theirs.receive(&elsewhere, now, allow);
     theirs.poll(now);
     assert!(theirs.transmit().is_none());
     assert!(theirs.accept().is_none());
+}
+
+/// Connects to `to` with every flow refused, and returns the flows the
+/// stack asked about, and the guest's socket's state.
+fn connect_refused(to: SocketAddr) -> (Vec<String>, tcp::State) {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let handle = guest.connect(to, 49152);
+    let mut asked = Vec::new();
+    exchange_deciding(&mut guest, &mut stack, start, |flow| {
+        asked.push(format!("{flow:?}"));
+        false
+    });
+    assert!(
+        stack.accept().is_none(),
+        "a refused connection isn't accepted"
+    );
+    (asked, guest.sockets.get::<tcp::Socket>(handle).state())
+}
+
+#[test]
+fn a_refused_tcp_connection_to_ipv4_is_reset() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    let (asked, state) = connect_refused(to);
+    assert_eq!(
+        asked,
+        [format!(
+            "Tcp {{ source: {}:49152, destination: {to} }}",
+            GUEST_V4
+        )]
+    );
+    // smoltcp closes a connecting socket that gets a reset.
+    assert_eq!(state, tcp::State::Closed);
+}
+
+#[test]
+fn a_refused_tcp_connection_to_ipv6_is_reset() {
+    let to = SocketAddr::new(IpAddr::V6("2001:db8::1".parse().unwrap()), 80);
+    let (asked, state) = connect_refused(to);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].starts_with("Tcp "), "{asked:?}");
+    assert_eq!(state, tcp::State::Closed);
+}
+
+#[test]
+fn a_refused_udp_datagram_is_dropped_without_an_answer() {
+    for to in [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53),
+        SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 443),
+    ] {
+        let start = Instant::now();
+        let mut guest = Guest::new();
+        let mut stack = stack();
+        let handle = guest.udp(40000);
+        // Resolves the stack's address first, so that every frame it sends
+        // after that would be an answer to the datagram.
+        exchange(&mut guest, &mut stack, start);
+        guest
+            .sockets
+            .get_mut::<udp::Socket>(handle)
+            .send_slice(b"query", to)
+            .unwrap();
+        let mut asked = Vec::new();
+        let sent = exchange_deciding(&mut guest, &mut stack, start, |flow| {
+            asked.push(format!("{flow:?}"));
+            false
+        });
+        assert!(
+            !sent.iter().any(|frame| unreachable(frame)),
+            "the stack answered a refused datagram"
+        );
+        assert!(stack.recv_datagram().is_none());
+        assert!(
+            asked.iter().any(|flow| flow.starts_with("Udp ")),
+            "{asked:?}"
+        );
+        assert!(guest.sockets.get_mut::<udp::Socket>(handle).recv().is_err());
+    }
 }

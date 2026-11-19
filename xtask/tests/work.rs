@@ -172,15 +172,10 @@ esac
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = Command::new(program);
         command
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env_remove("CARGO_TARGET_DIR")

@@ -281,15 +281,10 @@ impl Repo {
     }
 
     fn xtask(&self, args: &[&str]) -> Output {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args(args)
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env_remove("CARGO_TARGET_DIR")
             .env_remove("XTASK_ACTIVITY_HELD")
             .output()

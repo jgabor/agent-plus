@@ -809,6 +809,16 @@ fn prove(
         gate::record("owner", false, &mut failed);
         return Ok(Err(failed));
     }
+    // Before the gate too, because a PR that can't raise a count needs the
+    // line whatever the proof finds.
+    if !declares_no_hill(&pr.body) && !can_raise_a_count(tree, &commit)? {
+        eprintln!(
+            "hills: PR {number} changes only paths that no count comes from, so its body needs a `Hill: none, <reason>` line"
+        );
+        let mut failed = Failed::new();
+        gate::record("hill-line", false, &mut failed);
+        return Ok(Err(failed));
+    }
     placing(true)?;
     let place = lock::place(tree)?;
     placing(false)?;
@@ -939,6 +949,29 @@ fn declares_no_hill(body: &str) -> bool {
     body.lines()
         .filter_map(|line| line.trim().strip_prefix("Hill: none,"))
         .any(|reason| !reason.trim().is_empty())
+}
+
+/// What no count is read from: a path, or a directory that ends in `/`.
+const NO_COUNT: [&str; 5] = [
+    "AGENTS.md",
+    "HARNESS.md",
+    "harness/tasks/",
+    ".github/",
+    "xtask/tests/",
+];
+
+/// Whether the change touches a path that a count can come from.
+fn can_raise_a_count(tree: &Path, commit: &str) -> Result<bool, Problem> {
+    let args = ["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"];
+    let changed = base::git_text(tree, &args)?;
+    Ok(changed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .any(|path| {
+            !NO_COUNT
+                .iter()
+                .any(|quiet| path == *quiet || (quiet.ends_with('/') && path.starts_with(quiet)))
+        }))
 }
 
 /// Whether the change can move a budget: the product's code, what it is built

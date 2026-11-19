@@ -714,10 +714,12 @@ first, and change the file in a later PR.
    affected. If the PR changes `xtask/`, its own xtask then runs them too. A
    lowered count fails `merge`, and passes `prepare`. So does a PR that
    [waits for the owner](#what-waits-for-the-owner), and `merge` fails it
-   before the gate runs. An exact revert under
-   `prepare` skips the bench, because its base may be what doesn't build. If
-   the rebase or this proof fails, the command posts `failure` on the branch's
-   current head and pushes nothing.
+   before the gate runs. A PR with no `Hill: none` line fails before the gate
+   runs too, if it changes only paths that no count comes from: `AGENTS.md`,
+   `HARNESS.md`, `harness/tasks/`, `.github/`, and `xtask/tests/`. An exact
+   revert under `prepare` skips the bench, because its base may be what
+   doesn't build. If the rebase or this proof fails, the command posts
+   `failure` on the branch's current head and pushes nothing.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
    Commit the ledger record, whose `commit` is the gated head and whose `base`
    is the `main` it was tested on, and push with `--force-with-lease`.

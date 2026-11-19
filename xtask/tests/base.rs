@@ -1,7 +1,6 @@
 //! Runs `gate` in real git repositories, to compare a branch with its base.
 //! A fake `gh` on `PATH` stands in for GitHub, so no test reaches it.
 
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -32,6 +31,7 @@ fn isolated(program: impl AsRef<std::ffi::OsStr>, root: &Path) -> Command {
         .current_dir(root)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("PATH", common::path(&[]))
         .env_remove("CARGO_TARGET_DIR");
     command
 }
@@ -129,13 +129,8 @@ impl Repo {
     }
 
     fn gate_command(&self) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = isolated(env!("CARGO_BIN_EXE_xtask"), &self.root);
-        command.arg("gate").env("PATH", path);
+        command.arg("gate").env("PATH", common::path(&[&self.bin]));
         command
     }
 
@@ -324,7 +319,7 @@ fn an_unrelated_history_is_a_problem() {
 /// gate reads no label, and never asks GitHub.
 #[test]
 fn any_path_passes_without_asking_github() {
-    for (index, path) in [
+    let paths: Vec<(usize, &str)> = [
         "SPEC.md",
         "AGENTS.md",
         "HARNESS.md",
@@ -335,11 +330,12 @@ fn any_path_passes_without_asking_github() {
         "xtask/src/gate.rs",
         ".github/workflows/x.yml",
     ]
-    .iter()
+    .into_iter()
     .enumerate()
-    {
+    .collect();
+    common::each(&paths, |&(index, path)| {
         let repo = Repo::new(&format!("any-path-{index}"), NO_CHECK, &[]);
-        let content = if *path == "SPEC.md" {
+        let content = if path == "SPEC.md" {
             format!("{SPEC}\nFour.\n")
         } else {
             "# comment\n".to_string()
@@ -349,7 +345,7 @@ fn any_path_passes_without_asking_github() {
         let output = repo.gate();
         assert_passes(&output);
         assert!(!stdout(&output).contains("labels"), "{}", stdout(&output));
-    }
+    });
 }
 
 fn record_with_proven(proven: u32) -> String {

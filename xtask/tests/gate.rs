@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
 const GOOD: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 
 /// A workspace with one crate, whose `lib.rs` holds `source`.
@@ -28,6 +30,7 @@ fn workspace(name: &str, source: &str) -> PathBuf {
     let output = Command::new("cargo")
         .arg("generate-lockfile")
         .current_dir(&root)
+        .env("PATH", common::path(&[]))
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -38,6 +41,7 @@ fn xtask(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .args(args)
         .current_dir(dir)
+        .env("PATH", common::path(&[]))
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .unwrap()
@@ -141,6 +145,7 @@ fn missing_formatter_is_an_environment_error() {
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("gate")
         .current_dir(&root)
+        .env("PATH", common::path(&[]))
         .env("RUSTFMT", "/nonexistent/rustfmt")
         .env_remove("CARGO_TARGET_DIR")
         .output()
@@ -180,6 +185,7 @@ fn a_test_over_the_memory_limit_is_killed_and_the_gate_fails() {
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("gate")
         .current_dir(&root)
+        .env("PATH", common::path(&[]))
         .env("XTASK_MEMORY_MAX", "512M")
         .env_remove("CARGO_TARGET_DIR")
         .output()

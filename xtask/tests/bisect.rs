@@ -93,11 +93,8 @@ impl Repo {
         common::write_tool(&gh, &format!("#!/bin/sh\n{GH}"));
         // The fixture has no xtask, so a `prepare` that builds the xtask of
         // `main` gets the test's own binary.
-        let real = Command::new("sh")
-            .args(["-c", "command -v cargo"])
-            .output()
-            .unwrap();
-        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        let real = common::toolchain().join("cargo");
+        let real = real.display();
         common::write_tool(
             &repo.bin.join("cargo"),
             &format!(
@@ -153,15 +150,10 @@ impl Repo {
     }
 
     fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
-        let path = format!(
-            "{}:{}",
-            self.bin.display(),
-            env::var("PATH").expect("PATH is set")
-        );
         let mut command = Command::new(program);
         command
             .current_dir(&self.root)
-            .env("PATH", path)
+            .env("PATH", common::path(&[&self.bin]))
             .env("TMPDIR", &self.temp)
             .env("CARGO_HOME", self.temp.join("cargo-home"))
             // The nightly reads the paid checks' key from `HOME`, so a test
@@ -400,19 +392,20 @@ fn a_failed_prepare_leaves_the_response_and_says_how_to_run_it() {
 
 #[test]
 fn the_break_is_found_wherever_it_is() {
-    for (name, count, position) in [
+    let cases = [
         ("first", 3, 0),
         ("last", 3, 2),
         ("only", 1, 0),
         ("long", 6, 4),
-    ] {
+    ];
+    common::each(&cases, |&(name, count, position)| {
         let repo = Repo::new(&format!("where-{name}"), FAST);
         let bad = repo.plant(count, position);
         let output = repo.nightly();
         assert_eq!(output.status.code(), Some(1), "{name}: {}", stderr(&output));
         let comment = repo.comment(78);
         assert!(comment.contains(&format!("`{bad}`")), "{name}: {comment}");
-    }
+    });
 }
 
 #[test]

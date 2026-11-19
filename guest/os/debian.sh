@@ -34,11 +34,14 @@ apt-get -qq -o Acquire::Check-Valid-Until=false update >&2
 /check-releases /
 apt-get -qq -y --no-install-recommends install mmdebstrap > /dev/null
 
-# The essential packages hold a shell and coreutils. Documentation, manuals,
+# The essential packages hold a shell and coreutils. ca-certificates gives
+# git and other programs the CA bundle that verifies HTTPS servers, because
+# git's recommends, which would bring it, are left out. Documentation, manuals,
 # and translations are left out, except for each package's copyright file.
 # mmdebstrap copies the container's resolv.conf and hostname into the root,
 # so the last hook replaces them.
-mmdebstrap --quiet --mode=root --variant=essential --include=git \
+mmdebstrap --quiet --mode=root --variant=essential \
+  --include=git,ca-certificates \
   --aptopt='Acquire::Check-Valid-Until "false"' \
   --extract-hook='/check-releases "$1"' \
   --dpkgopt='path-exclude=/usr/share/doc/*' \

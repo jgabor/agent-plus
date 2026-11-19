@@ -9,6 +9,8 @@
 
 mod common;
 
+use common::repo;
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -470,8 +472,52 @@ fn a_repository_s_own_git_directory_isn_t_shown_as_files() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        "diff --git a/README b/README\nnew file mode 100644\n--- /dev/null\n+++ b/README\n@@ -0,0 +1 @@\n+hi\n"
+        format!(
+            "branch ap/notes/{run} would carry 0 commits\ndiff --git a/README b/README\nnew file mode 100644\n--- /dev/null\n+++ b/README\n@@ -0,0 +1 @@\n+hi\n"
+        )
     );
+}
+
+// spec(SHARE): For a share whose root holds a `.git` directory, the first line says how many commits the branch would carry.
+// spec(SHARE): When `ap` reads git state that an agent wrote, here or in a persisted repository, it reads refs, objects, the index, and ignore files with its own code.
+#[test]
+fn the_first_line_says_how_many_commits_the_branch_would_carry() {
+    let scratch = Scratch::new("commits");
+    let share = &scratch.share;
+    repo::run(share, &["init", "-q"]);
+    repo::commit(share, "README", "hello\n", "start");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::capture(share, &pending);
+    let guest = scratch.root.join("guest");
+    repo::guest(share, &guest);
+    let counts = |expected: &str| {
+        // With no `PATH`, so no `git` to run.
+        let output = scratch.ap(&["diff", &run]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let shown = stdout(&output);
+        let first = shown.lines().next().unwrap_or_default().to_owned();
+        assert_eq!(
+            first,
+            format!("branch ap/notes/{run} would carry {expected}")
+        );
+        shown
+    };
+    counts("0 commits");
+    repo::commit(&guest, "a", "a\n", "one");
+    repo::land(&guest, share, &pending);
+    counts("1 commit");
+    repo::commit(&guest, "b", "b\n", "two");
+    repo::run(&guest, &["repack", "-q", "-d"]);
+    repo::commit(&guest, "c", "c\n", "three");
+    repo::land(&guest, share, &pending);
+    write(&pending, "c", 0o644, b"c\n");
+    let shown = counts("3 commits");
+    let expected = repo::run(
+        &guest,
+        &["rev-list", "--count", "HEAD", "--not", "main@{u}"],
+    );
+    assert_eq!(expected, "3");
+    assert!(shown.ends_with("+++ b/c\n@@ -0,0 +1 @@\n+c\n"), "{shown}");
 }
 
 #[test]

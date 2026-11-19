@@ -3,6 +3,8 @@
 
 #![allow(dead_code)]
 
+pub mod repo;
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;

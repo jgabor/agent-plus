@@ -2,8 +2,8 @@
 //! finished run's pending changes as files, refuses while the run is active,
 //! and leaves pending only what it couldn't apply. [`ap::pending`] says how
 //! it applies each share. A share whose root holds a `.git` directory comes
-//! back as a branch, which isn't built yet, so such a run keeps everything
-//! pending.
+//! back as the branch `ap/<agent>/<run>`. Each branch import is checked
+//! before anything lands, so one that fails keeps everything pending.
 
 use std::io::{self, Write};
 
@@ -43,25 +43,36 @@ fn apply(name: &str) -> Result<u8, String> {
         .collect();
     let failed =
         |share: &Share, error: io::Error| format!("run {run}: {}: {error}", share.root.display());
+    // Every branch import is checked before any share lands.
+    let mut imports = Vec::new();
     for share in &shares {
-        if share
-            .is_repository()
-            .map_err(|error| failed(share, error))?
-        {
-            return Err(failed(
-                share,
-                io::Error::other(
-                    "the share's directory holds a git repository, and `ap apply` can't import a branch yet, so everything stays pending",
-                ),
-            ));
-        }
+        let repository = (share.is_repository()).map_err(|error| failed(share, error))?;
+        imports.push(match repository {
+            false => None,
+            true => {
+                let record = runs.get(&run).map_err(|error| error.to_string())?;
+                let agent = record.ok_or_else(|| {
+                    format!("run {run} has no record, so its branch would have no name")
+                })?;
+                let branch = format!("ap/{}/{run}", agent.agent);
+                Some(
+                    share
+                        .import(&branch)
+                        .map_err(|error| failed(share, error))?,
+                )
+            }
+        });
     }
     let mut out = Vec::new();
     let mut ignored = 0;
     let mut pending = 0;
     let mut error = None;
-    for share in &shares {
-        match share.apply() {
+    for (share, import) in shares.iter().zip(imports) {
+        let applied = match import {
+            Some(import) => import.land(),
+            None => share.apply(),
+        };
+        match applied {
             Ok(applied) => {
                 if shares.len() > 1 && !applied.text.is_empty() {
                     out.extend(pending::root_line(share.root));

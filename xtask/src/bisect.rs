@@ -51,7 +51,7 @@ pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
             issue
         }
     };
-    let hold = lock::shared(root)?;
+    let hold = lock::testing(root)?;
     let tree = Tree::create(root, TREE, head)?;
     let (outcome, revert) = bisect_and_revert(root, &gh, &tree, &hold, head, status, issue)
         .unwrap_or_else(|Problem(message)| (format!("Couldn't bisect or revert: {message}"), None));

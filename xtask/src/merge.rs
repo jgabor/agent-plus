@@ -32,6 +32,10 @@ const MAIN: &str = "refs/remotes/origin/main";
 const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
+/// What the worker tells its supervisor: it holds the slot, which starts the
+/// timeout again, or it waits for a place, which stops it.
+const SLOT: u8 = b's';
+const WAITING: u8 = b'w';
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
 /// or of the worker itself once it runs the xtask of `main`.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
@@ -225,7 +229,7 @@ fn sequence(
     };
     let mut status = Status::begin(&gh, &fetched.branch);
     let starting = |check: &str| status.proving(check);
-    let mut proof = match prove(&tree.path, &scoring, &starting)? {
+    let mut proof = match prove(&tree.path, &scoring, &starting, &report_place)? {
         Ok(proof) => proof,
         Err(failed) => {
             status.failed(&format!("Failed: {}", failed.join(", ")));
@@ -239,8 +243,6 @@ fn sequence(
         && !(mode != Mode::Merge && base::is_exact_revert(&tree.path, &fetched.main)?)
     {
         status.proving("its own xtask");
-        // Each proof can take most of the timeout, so its own gets a new one.
-        report_slot()?;
         match prove_with_its_own(&tree.path, &scoring)? {
             Ok(own) => proof = own.after(proof),
             Err(failed) => {
@@ -456,9 +458,19 @@ fn is_worker() -> bool {
 /// starts. The xtask of `main` says so again, and gets a new timeout, and
 /// again before a PR's own xtask proves it.
 fn report_slot() -> Result<(), Problem> {
+    tell_supervisor(SLOT)
+}
+
+/// Tells the supervisor that the worker waits for a place, or has one. The
+/// timeout stops during the wait, and starts again after it.
+fn report_place(waiting: bool) -> Result<(), Problem> {
+    tell_supervisor(if waiting { WAITING } else { SLOT })
+}
+
+fn tell_supervisor(report: u8) -> Result<(), Problem> {
     let couldnt = |e: io::Error| Problem(format!("couldn't tell the supervisor: {e}"));
     let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
-    fs::File::from(fd).write_all(b"s").map_err(couldnt)
+    fs::File::from(fd).write_all(&[report]).map_err(couldnt)
 }
 
 /// Runs this merge again as a worker in a process group of its own, which
@@ -527,7 +539,8 @@ fn supervised() -> Result<i32, Problem> {
 }
 
 /// Stops the worker's group once the worker has held the slot for the timeout,
-/// because a stuck merge would hold it for every other merge. Says whether it
+/// because a stuck merge would hold it for every other merge. A wait for a
+/// place doesn't count, because other work holds the places. Says whether it
 /// did. Only the caller exits, once the worker is reaped, because this thread
 /// can be slow to go on after the kill lands, and the caller would then see a
 /// killed worker and die as it did.
@@ -539,18 +552,24 @@ fn time_out(reports: io::PipeReader, group: u32, seconds: u64) -> Arc<AtomicBool
         let mut reports = reports;
         let mut report = [0; 1];
         while reports.read(&mut report).is_ok_and(|read| read > 0) {
-            if slot_taken.send(()).is_err() {
+            if slot_taken.send(report[0]).is_err() {
                 break;
             }
         }
     });
     thread::spawn(move || {
-        if taken.recv().is_err() {
+        let Ok(mut last) = taken.recv() else {
             return;
-        }
+        };
         loop {
-            match taken.recv_timeout(Duration::from_secs(seconds)) {
-                Ok(()) => continue,
+            let next = match last {
+                WAITING => taken
+                    .recv()
+                    .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                _ => taken.recv_timeout(Duration::from_secs(seconds)),
+            };
+            match next {
+                Ok(report) => last = report,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
@@ -762,11 +781,13 @@ struct Proof {
 
 /// Runs the gate, the journey, and any bench on the rebased head, saying which
 /// it is on, and returns the record they earn. If any check failed, the merge
-/// must stop, and the reasons have been printed.
+/// must stop, and the reasons have been printed. `placing` hears when the wait
+/// for a place starts and ends.
 fn prove(
     tree: &Path,
     scoring: &Scoring,
     starting: &dyn Fn(&str),
+    placing: &dyn Fn(bool) -> Result<(), Problem>,
 ) -> Result<Result<Proof, Failed>, Problem> {
     let Scoring {
         number, mode, pr, ..
@@ -787,7 +808,10 @@ fn prove(
         gate::record("owner", false, &mut failed);
         return Ok(Err(failed));
     }
-    let hold = lock::shared(tree)?;
+    placing(true)?;
+    let place = lock::place(tree)?;
+    placing(false)?;
+    let hold = place.share()?;
     let merging = Merging { prepare, starting };
     let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
     if !failed.is_empty() {
@@ -939,6 +963,12 @@ fn prove_with_its_own(
     tree: &Path,
     scoring: &Scoring,
 ) -> Result<Result<Proof, Vec<String>>, Problem> {
+    // Each proof can take most of the timeout, so its own gets a new one once
+    // it has a place. The PR's code can't renew the timeout, so the place it
+    // tests in is taken here.
+    report_place(true)?;
+    let place = lock::place(tree)?;
+    report_place(false)?;
     let program = build_xtask(tree, &tree.join("target"))?;
     let own = tree.join(OWN);
     let couldnt = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", own.display()));
@@ -953,6 +983,7 @@ fn prove_with_its_own(
         .args(["prove", &scoring.number.to_string(), scoring.mode.command()])
         .current_dir(tree)
         .stdin(process::Stdio::null());
+    place.pass_to(&mut command);
     if let Some(kept) = scoring.kept {
         let file = own.join("kept.toml");
         ledger::write_file(&file, kept)?;
@@ -1021,7 +1052,7 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
         gated: &gated,
         kept: kept.as_ref(),
     };
-    let (lines, verdict) = match prove(&tree, &scoring, &|_| {})? {
+    let (lines, verdict) = match prove(&tree, &scoring, &|_| {}, &|_| Ok(()))? {
         Ok(Proof { record, accepted }) => {
             ledger::store(&tree, &record)?;
             let lines: Vec<String> = accepted.iter().map(|a| format!("accepted {a}\n")).collect();

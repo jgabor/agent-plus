@@ -27,7 +27,7 @@ pub struct Score {
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::shared(&root)?;
+    let hold = lock::testing(&root)?;
     let results = testrun::run(&root, &hold)?;
     let score = compute(&root, &results)?;
     report_findings(&score);

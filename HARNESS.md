@@ -322,6 +322,15 @@ shared git directory. A nested `xtask` inherits its parent's hold. The kernel
 releases a hold when its process exits. `cargo` builds `xtask` itself before
 it can take the lock, which is one reason `xtask` has no dependencies.
 
+**Places.** A run of the tests also takes one of a set number of places, so
+only that many run at once in a repository, across all its worktrees, and
+the rest wait their turn. The gate, a merge, `prepare`, the nightly job,
+`score`, `gaps`, `record`, `roadmap --details`, and `cargo xtask run` each
+take one, before the activity lock, so a run that waits for a place never
+holds up a bench. A nested `xtask`
+inherits its parent's place, and the kernel frees a place when its holder
+exits. The places live beside the activity lock.
+
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
 matching, and device input from the guest. A target for code with an oracle
 compares the two, and a difference fails like a crash. An oracle kept as a
@@ -519,7 +528,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
-| `cargo xtask run <command>` | Runs a build or test command under a shared hold of the activity lock and a memory limit |
+| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 | `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |
@@ -741,7 +750,8 @@ step. A merge that stops this way can leave `pending` on the PR until the
 next proof.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's
 own xtask starts its proof, so each proof gets all of it. The PR's own xtask
-can't start it again.
+can't start it again. It stops while a proof waits for a place, and starts
+again once the proof has one.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 
@@ -918,6 +928,7 @@ passes. No scheduled work runs on GitHub.
 | Ports | Assigned by the OS |
 | VMs | Each has a timeout and a recorded PID |
 | Builds and VM runs | Shared hold of the activity lock, through `xtask` |
+| Test runs and `cargo xtask run` | A place, then a shared hold of the activity lock |
 | Bench | Exclusive hold of the activity lock |
 | Merge | Exclusive merge slot |
 | GitHub API | One watcher per PR |
@@ -927,6 +938,7 @@ passes. No scheduled work runs on GitHub.
 | Worker slots | 3 |
 | Measuring slots | 1 |
 | Merge slots | 1 |
+| Places for test runs | 2 per repository |
 | Dispatch period | 30 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |

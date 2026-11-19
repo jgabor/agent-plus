@@ -1,30 +1,63 @@
 //! The activity lock: builds and tests share it, and a bench holds it alone.
+//! A run of the tests also takes one of a set number of places, so that only
+//! that many run at once.
 
 use crate::{Problem, Verdict, limit, workspace};
 use std::env;
 use std::ffi::OsStr;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::sync_channel;
+use std::thread;
 
 /// Set to the lock directory on a command that runs under a hold, so a nested
 /// `xtask` doesn't wait behind a pending bench for a lock its parent has.
 const INHERITED: &str = "XTASK_ACTIVITY_HELD";
+/// Set to the lock directory on a command that runs in a place, so a nested
+/// `xtask` doesn't wait for a second one.
+const PLACE_INHERITED: &str = "XTASK_PLACE_HELD";
+/// How many runs of the tests share the machine at once. On 16 CPUs, gates
+/// three at a time failed their tests in 13 of 18 runs, and two at a time in
+/// none of 6.
+const PLACES: usize = 2;
+/// Replaces the number of places, so that a test needs few holders.
+const PLACES_OVERRIDE: &str = "XTASK_PLACES";
 
 /// The kernel drops these locks when the files close, including when the
 /// process is killed.
 pub struct Hold {
     files: Vec<File>,
     directory: PathBuf,
+    activity: bool,
+    place: bool,
 }
 
 impl Hold {
     /// Lets a child process, and any `xtask` it starts, share this hold.
     pub fn pass_to(&self, command: &mut Command) {
-        command.env(INHERITED, &self.directory);
+        if self.activity {
+            command.env(INHERITED, &self.directory);
+        }
+        if self.place {
+            command.env(PLACE_INHERITED, &self.directory);
+        }
+    }
+
+    pub fn has_place(&self) -> bool {
+        self.place
+    }
+
+    /// Adds a shared hold of the activity lock to a place. A place comes
+    /// first, so a holder never waits for a place while a bench waits for it.
+    pub fn share(self) -> Result<Hold, Problem> {
+        let mut shared = shared_in(&self.directory)?;
+        shared.files.extend(self.files);
+        shared.place = self.place;
+        Ok(shared)
     }
 
     /// For a child that must keep this hold until it exits, even if this
@@ -43,23 +76,66 @@ impl Hold {
 }
 
 pub fn shared(root: &Path) -> Result<Hold, Problem> {
-    let directory = directory(root)?;
-    if inherited(&directory) {
-        return Ok(Hold {
-            files: Vec::new(),
-            directory,
-        });
-    }
-    take_shared(&directory)
+    shared_in(&directory(root)?)
 }
 
-fn inherited(directory: &Path) -> bool {
-    env::var_os(INHERITED).is_some_and(|held| Path::new(&held) == directory)
+fn shared_in(directory: &Path) -> Result<Hold, Problem> {
+    if inherited(INHERITED, directory) {
+        return Ok(Hold {
+            files: Vec::new(),
+            directory: directory.to_path_buf(),
+            activity: true,
+            place: false,
+        });
+    }
+    take_shared(directory)
+}
+
+/// For a run of the tests: a place, and then a shared hold.
+pub fn testing(root: &Path) -> Result<Hold, Problem> {
+    place(root)?.share()
+}
+
+/// One of the places, which a caller then shares with `Hold::share`. A merge
+/// waits for its place apart from the rest, so that the wait doesn't count
+/// against its timeout.
+pub fn place(root: &Path) -> Result<Hold, Problem> {
+    let directory = directory(root)?;
+    let mut files = Vec::new();
+    if !inherited(PLACE_INHERITED, &directory) {
+        if inherited(INHERITED, &directory) {
+            return Err(Problem(
+                "the tests can't wait for a place under a hold without one, because a pending bench would wait for them".to_string(),
+            ));
+        }
+        files.push(take_place(&directory, places()?)?);
+    }
+    Ok(Hold {
+        files,
+        directory,
+        activity: false,
+        place: true,
+    })
+}
+
+fn places() -> Result<usize, Problem> {
+    let Some(value) = env::var_os(PLACES_OVERRIDE) else {
+        return Ok(PLACES);
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .filter(|&count| count > 0)
+        .ok_or_else(|| Problem(format!("{PLACES_OVERRIDE} must be a number above 0")))
+}
+
+fn inherited(name: &str, directory: &Path) -> bool {
+    env::var_os(name).is_some_and(|held| Path::new(&held) == directory)
 }
 
 pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
     let directory = directory(root)?;
-    if inherited(&directory) {
+    if inherited(INHERITED, &directory) {
         return Err(Problem(
             "a bench can't run under `cargo xtask run`, because it would wait for its own parent"
                 .to_string(),
@@ -94,6 +170,8 @@ fn slot(root: &Path, name: &str) -> Result<Hold, Problem> {
     Ok(Hold {
         files: vec![file],
         directory,
+        activity: false,
+        place: false,
     })
 }
 
@@ -102,7 +180,7 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
         .split_first()
         .ok_or_else(|| Problem("`run` needs a command to run".to_string()))?;
     let root = workspace::root()?;
-    let hold = shared(&root)?;
+    let hold = testing(&root)?;
     let path = find(program)
         .ok_or_else(|| Problem(format!("couldn't run `{program}`: no such executable")))?;
     if let Some(interpreter) = missing_interpreter(&path) {
@@ -171,6 +249,8 @@ fn take_shared(directory: &Path) -> Result<Hold, Problem> {
     Ok(Hold {
         files: vec![activity],
         directory: directory.to_path_buf(),
+        activity: true,
+        place: false,
     })
 }
 
@@ -182,7 +262,42 @@ fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
     Ok(Hold {
         files: vec![turnstile, activity],
         directory: directory.to_path_buf(),
+        activity: true,
+        place: false,
     })
+}
+
+/// Waiters queue for the first free place one at a time. `flock` can't wait
+/// for any one of several files, so the first in the queue waits on each
+/// place in a thread of its own, and keeps the first it gets. A thread that
+/// gets one later finds nobody to hand it to, and frees it at once.
+fn take_place(directory: &Path, count: usize) -> Result<File, Problem> {
+    let couldnt = |e: std::io::Error| Problem(format!("couldn't take a place: {e}"));
+    let queue = open(directory, "places.lock")?;
+    queue.lock().map_err(couldnt)?;
+    let names: Vec<String> = (0..count).map(|i| format!("place-{i}.lock")).collect();
+    for name in &names {
+        let file = open(directory, name)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(e)) => return Err(couldnt(e)),
+        }
+    }
+    let (taken, first) = sync_channel(0);
+    for name in names {
+        let file = open(directory, &name)?;
+        let taken = taken.clone();
+        thread::spawn(move || {
+            if file.lock().is_ok() {
+                let _ = taken.send(file);
+            }
+        });
+    }
+    drop(taken);
+    first
+        .recv()
+        .map_err(|_| Problem("couldn't take a place: every wait failed".to_string()))
 }
 
 fn failed(error: std::io::Error) -> Problem {

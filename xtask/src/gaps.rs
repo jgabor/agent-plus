@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 /// `score`, because the list can't be trusted while one exists.
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::shared(&root)?;
+    let hold = lock::testing(&root)?;
     let results = testrun::run(&root, &hold)?;
     let score = score::compute(&root, &results)?;
     score::report_findings(&score);

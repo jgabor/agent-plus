@@ -736,6 +736,10 @@ OS minimal | standard | desktop
 | `standard` | `minimal`, plus curated toolchains |
 | `desktop` | `standard`, plus our Wayland compositor, Chromium, and computer-use tools |
 
+`minimal` holds Debian's CA certificates, in
+`/etc/ssl/certs/ca-certificates.crt`, so programs in the guest can verify
+HTTPS servers.
+
 The OS images are not customizable. Every harness gets the same filesystem,
 toolchains, and browser.
 

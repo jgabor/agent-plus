@@ -69,6 +69,7 @@ fn project(root: &Path, home: &Path, name: &str) -> PathBuf {
 
 // spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
 // spec(OS): | `minimal` | The harness, a shell, git, and coreutils |
+// spec(OS): `minimal` holds Debian's CA certificates, in `/etc/ssl/certs/ca-certificates.crt`, so programs in the guest can verify HTTPS servers.
 #[test]
 fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("os-{}", process::id()));

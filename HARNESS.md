@@ -820,12 +820,12 @@ started.
    loses `land-needed` or gets a comment, and `refresh` names what failed on
    stderr and in the run's summary, and exits 1. Otherwise the failure is
    the change's. `refresh` removes `land-needed` from the PR and its issue,
-   so the dispatcher restarts the issue. It tries each one, even when one fails, and names each failure.
-   Then it comments on the PR with the reason, and says the issue's label is
-   gone only if it is. It comments once for each head, so a later run that
-   fails the same head again posts nothing. Either way auto-merge stays
-   armed, so the PR merges once a refresh proves it, without another
-   approval.
+   so the dispatcher restarts the issue. It tries each one, even when one
+   fails, and names each failure. Then it comments on the PR with the
+   reason, and says the issue's label is gone only if it is. It comments
+   once for each head, so a later run that fails the same head again posts
+   nothing. Either way auto-merge stays armed, so the PR merges once a
+   refresh proves it, without another approval.
 
 Before each proof, `refresh` prints `refresh: proving PR 5 (1 of 2)`. In
 Actions, each proof sits in a `::group::PR 5 (1 of 2): <title>` fold, and the

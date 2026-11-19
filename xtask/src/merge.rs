@@ -29,7 +29,7 @@ pub const MAIN_MOVED: &str =
     "`main` moved during the merge, so this head wasn't tested on it. Run it again";
 /// The one status that `main` requires.
 pub const GATE: &str = "xtask/gate";
-const MAIN: &str = "refs/remotes/origin/main";
+pub const MAIN: &str = "refs/remotes/origin/main";
 const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
@@ -680,6 +680,13 @@ impl Tree {
 
     pub fn create(root: &Path, number: u64, commit: &str) -> Result<Tree, Problem> {
         Tree::at(root, Tree::path(root, number)?, commit)
+    }
+
+    /// For a proof of `main` alone, as long as a PR's, so that it fails where
+    /// a PR's would.
+    pub fn of_main(root: &Path, commit: &str) -> Result<Tree, Problem> {
+        let name = format!("xtask-main-{}", repository(root)?);
+        Tree::at(root, long(&bench::temp_outside(root)?, &name), commit)
     }
 
     /// Starts from nothing, because an earlier attempt may have died at any

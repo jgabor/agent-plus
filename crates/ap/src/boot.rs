@@ -9,16 +9,17 @@ use std::io::{self, Write};
 use std::os::fd::{OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
 use guest::protocol::{EXEC_PORT, MAX_BODY, PORT, Start, ToGuest, ToHost};
-use guest::{Channel, Event, agent, root, share};
+use guest::{Channel, Event, agent, net, root, share};
 use vmm::block::{Block, Disk};
 use vmm::fs::{Fs, Relay as ShareRelay};
 use vmm::initramfs::{self, Entry};
+use vmm::net::Net;
 use vmm::serial::Serial;
 use vmm::vsock::{Connection, Vsock};
 use vmm::{GuestMemory, Interrupt, Ports, Stop, Vm, Waker, boot as loader};
@@ -33,8 +34,9 @@ const MEMORY: usize = 256 << 20;
 const DEVICE_ADDRESS: u64 = 0xd000_0000;
 const DEVICE_SIZE: u64 = 0x1000;
 const LINE: u32 = 5;
-/// The vsock device has the first slot, each layer's disk one after it, and
-/// each share's device after those, each with the next interrupt line. The
+/// The vsock device has the first slot, each layer's disk one after it, each
+/// share's device after those, and the network device last, if there is
+/// one, each with the next interrupt line. The
 /// guest has no MP table, so its interrupts are the legacy PIC's, which end
 /// at 15.
 const LAST_LINE: u32 = 15;
@@ -117,7 +119,7 @@ pub struct Input {
     /// Frames for the guest, not yet handed to the vsock device.
     queued: Mutex<Vec<u8>>,
     room: Condvar,
-    waker: Waker,
+    waker: Arc<Waker>,
     /// The descriptor the sender reads its input from. A confined process
     /// may read it, and no other.
     source: RawFd,
@@ -143,7 +145,7 @@ impl Input {
         Input {
             queued: Mutex::new(Vec::new()),
             room: Condvar::new(),
-            waker: Waker::default(),
+            waker: Arc::default(),
             source,
             execs: Mutex::new(BTreeMap::new()),
         }
@@ -491,8 +493,22 @@ pub fn boot_sharing(
     shares: Option<Shares>,
     on_report: impl FnMut(Report),
 ) -> Result<Option<u8>, Error> {
+    boot_linked(guest, shares, None, on_report)
+}
+
+/// Boots `guest` as [`boot_sharing`] does, with a network device if it has a
+/// `link`: a socket that keeps message boundaries, which gets each of the
+/// guest's Ethernet frames as a message, and whose messages reach the guest
+/// as frames. Nothing else gets the guest's frames.
+pub fn boot_linked(
+    guest: Guest,
+    shares: Option<Shares>,
+    link: Option<OwnedFd>,
+    on_report: impl FnMut(Report),
+) -> Result<Option<u8>, Error> {
     let share_count = shares.as_ref().map_or(0, |shares| shares.count);
-    let command_line = command_line(&guest.layers, share_count)?;
+    let devices = share_count + usize::from(link.is_some());
+    let command_line = command_line(&guest.layers, devices)?;
     let run_frame = guest.request.as_ref().map(request_frame).transpose()?;
     let wants_status = run_frame.is_some();
     let mut entries = vec![Entry::File {
@@ -535,6 +551,11 @@ pub fn boot_sharing(
             (device, vm.interrupt(line))
         })
         .collect();
+    let net_line = first_share_line + share_count as u32;
+    let net = link
+        .map(|link| Net::new(link, net::MAC).map(|device| (device, vm.interrupt(net_line))))
+        .transpose()
+        .map_err(|error| failed("can't attach the network", error))?;
     let relay = shares
         .map(|shares| ShareRelay::new(shares.socket, Instant::now() + guest.timeout))
         .transpose()
@@ -549,6 +570,7 @@ pub fn boot_sharing(
         vsock: Vsock::new(GUEST_CID, ports),
         disks,
         shares: devices,
+        net,
         relay,
         memory: vm.memory(),
         interrupt: vm.interrupt(LINE),
@@ -564,9 +586,18 @@ pub fn boot_sharing(
         spares: VecDeque::new(),
         bound: BTreeMap::new(),
     };
+    let waker = guest
+        .input
+        .map_or_else(Arc::default, |input| Arc::clone(&input.waker));
+    if let Some((device, _)) = &machine.net {
+        let receiver = device.receiver();
+        let waker = Arc::clone(&waker);
+        thread::spawn(move || receiver.run(|| waker.wake()));
+    }
     if guest.confine {
         let input = guest.input.map(|input| input.source);
         let share_server = machine.relay.as_ref().map(ShareRelay::descriptor);
+        let link = machine.net.as_ref().map(|(device, _)| device.descriptor());
         let layers = machine
             .disks
             .iter()
@@ -574,14 +605,13 @@ pub fn boot_sharing(
         let readable: Vec<RawFd> = input
             .into_iter()
             .chain(share_server)
+            .chain(link)
             .chain(layers)
             .collect();
         vmm::confine::confine(&readable).map_err(|error| failed("can't confine ap", error))?;
     }
-    let waker = Waker::default();
-    let waker = guest.input.map_or(&waker, |input| &input.waker);
     let stop = vcpu
-        .run_waking(guest.timeout, &mut machine, waker)
+        .run_waking(guest.timeout, &mut machine, &waker)
         .map_err(vm_failed)?;
 
     match (stop, machine.failure, machine.ready) {
@@ -601,13 +631,13 @@ pub fn boot_sharing(
 }
 
 /// The kernel command line: a slot for each layer's disk after the vsock
-/// device's, then one for each share's device, and the order to stack the
-/// layers in.
-fn command_line(layers: &[Layer], shares: usize) -> Result<String, Error> {
-    if layers.len() + shares > MAX_DEVICES {
+/// device's, then one for each of the other `devices`, and the order to stack
+/// the layers in.
+fn command_line(layers: &[Layer], devices: usize) -> Result<String, Error> {
+    if layers.len() + devices > MAX_DEVICES {
         return Err(Error::Failed(format!(
             "a run can have at most {MAX_DEVICES} layers and shares for now, and this one has {}",
-            layers.len() + shares
+            layers.len() + devices
         )));
     }
     let mut line = COMMAND_LINE.to_owned();
@@ -622,7 +652,7 @@ fn command_line(layers: &[Layer], shares: usize) -> Result<String, Error> {
         }
         names.push(name);
     }
-    for slot in 1..=(layers.len() + shares) as u64 {
+    for slot in 1..=(layers.len() + devices) as u64 {
         let address = DEVICE_ADDRESS + slot * DEVICE_SIZE;
         let irq = LINE as u64 + slot;
         line.push_str(&format!(" virtio_mmio.device=4K@{address:#x}:{irq}"));
@@ -647,8 +677,8 @@ fn failed(context: &str, error: io::Error) -> Error {
 }
 
 /// The serial port, the vsock device, the layers' disks, the shares'
-/// devices, and the host's end of the channel. It all runs on the vCPU
-/// thread, during the guest's exits.
+/// devices, the network device, and the host's end of the channel. It all
+/// runs on the vCPU thread, during the guest's exits.
 struct Machine<'vm, F> {
     serial: Serial,
     vsock: Vsock,
@@ -656,6 +686,8 @@ struct Machine<'vm, F> {
     disks: Vec<(Block, Interrupt<'vm>)>,
     /// Each share's device, in share order, and its interrupt.
     shares: Vec<(Fs, Interrupt<'vm>)>,
+    /// The network device and its interrupt, when the guest has a link.
+    net: Option<(Net, Interrupt<'vm>)>,
     /// The share server's socket, when there are shares.
     relay: Option<ShareRelay>,
     memory: &'vm GuestMemory,
@@ -951,6 +983,15 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
             }
             return;
         }
+        if slot == 1 + self.disks.len() + self.shares.len()
+            && let Some((device, interrupt)) = self.net.as_mut()
+        {
+            if device.write(self.memory, offset, data) {
+                // A failed pulse leaves the guest waiting, and the timeout ends it.
+                let _ = interrupt.pulse();
+            }
+            return;
+        }
         if slot != 0 {
             return;
         }
@@ -966,6 +1007,12 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
     }
 
     fn woken(&mut self) {
+        if let Some((device, interrupt)) = self.net.as_mut()
+            && device.service(self.memory)
+        {
+            // A failed pulse leaves the guest waiting, and the timeout ends it.
+            let _ = interrupt.pulse();
+        }
         self.pass_input();
         self.serve_execs();
         if self.vsock.service(self.memory) {
@@ -984,6 +1031,12 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
                 self.shares[slot - 1 - self.disks.len()]
                     .0
                     .read(offset, data);
+            }
+            Some((slot, offset)) if slot == 1 + self.disks.len() + self.shares.len() => {
+                match &self.net {
+                    Some((device, _)) => device.read(offset, data),
+                    None => data.fill(0xff),
+                }
             }
             _ => data.fill(0xff),
         }

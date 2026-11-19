@@ -75,7 +75,10 @@ fn copy_tree(from: &Path, to: &Path, top: bool) {
     for entry in fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();
         let (from, to) = (entry.path(), to.join(entry.file_name()));
-        if entry.file_type().unwrap().is_dir() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&from).unwrap(), &to).unwrap();
+        } else if kind.is_dir() {
             match top && entry.file_name() == "objects" {
                 true => fs::create_dir(&to).unwrap(),
                 false => copy_tree(&from, &to, false),
@@ -117,8 +120,13 @@ fn land_tree(dir: &Path, share: &Path, pending: &Path, path: &str) {
             "" => name,
             _ => format!("{path}/{name}"),
         };
-        if entry.file_type().unwrap().is_dir() {
+        let kind = entry.file_type().unwrap();
+        if kind.is_dir() {
             land_tree(&entry.path(), share, pending, &inner);
+            continue;
+        }
+        // The agent's git writes no symlink, so one is as you had it.
+        if kind.is_symlink() {
             continue;
         }
         let data = fs::read(entry.path()).unwrap();

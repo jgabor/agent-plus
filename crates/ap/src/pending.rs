@@ -23,7 +23,7 @@ use crate::unified;
 
 mod branch;
 
-pub use branch::{Import, commits_line};
+pub use branch::{Import, commits_line, land};
 
 /// How much of a file git reads to decide whether it is binary.
 const BINARY_PROBE: usize = 8000;
@@ -861,7 +861,7 @@ impl Share<'_> {
             true => match self.commits(&records) {
                 Ok(commits) => Some(Ok(commits)),
                 Err(git::Error::Io(error)) => return Err(error),
-                Err(git::Error::Corrupt(why)) => Some(Err(why)),
+                Err(git::Error::Corrupt(why)) => Some(Err(branch::printable(&why))),
             },
             false => None,
         };

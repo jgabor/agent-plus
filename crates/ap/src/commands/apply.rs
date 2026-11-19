@@ -5,6 +5,7 @@
 //! back as the branch `ap/<agent>/<run>`. Each branch import is checked
 //! before anything lands, so one that fails keeps everything pending.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use ap::pending::{self, Share};
@@ -44,32 +45,36 @@ fn apply(name: &str) -> Result<u8, String> {
     let failed =
         |share: &Share, error: io::Error| format!("run {run}: {}: {error}", share.root.display());
     // Every branch import is checked before any share lands.
+    let mut at = Vec::new();
     let mut imports = Vec::new();
-    for share in &shares {
-        let repository = (share.is_repository()).map_err(|error| failed(share, error))?;
-        imports.push(match repository {
-            false => None,
-            true => {
-                let record = runs.get(&run).map_err(|error| error.to_string())?;
-                let agent = record.ok_or_else(|| {
-                    format!("run {run} has no record, so its branch would have no name")
-                })?;
-                let branch = format!("ap/{}/{run}", agent.agent);
-                Some(
-                    share
-                        .import(&branch)
-                        .map_err(|error| failed(share, error))?,
-                )
-            }
-        });
+    for (index, share) in shares.iter().enumerate() {
+        if !(share.is_repository()).map_err(|error| failed(share, error))? {
+            continue;
+        }
+        let record = runs.get(&run).map_err(|error| error.to_string())?;
+        let agent = record
+            .ok_or_else(|| format!("run {run} has no record, so its branch would have no name"))?;
+        let branch = format!("ap/{}/{run}", agent.agent);
+        imports.push(
+            share
+                .import(&branch)
+                .map_err(|error| failed(share, error))?,
+        );
+        at.push(index);
     }
+    // Every branch lands before any file does, so a branch that fails
+    // keeps everything pending.
+    let mut landed: BTreeMap<usize, _> = match pending::land(imports) {
+        Ok(applied) => at.iter().copied().zip(applied).collect(),
+        Err((which, error)) => return Err(failed(&shares[at[which]], error)),
+    };
     let mut out = Vec::new();
     let mut ignored = 0;
     let mut pending = 0;
     let mut error = None;
-    for (share, import) in shares.iter().zip(imports) {
-        let applied = match import {
-            Some(import) => import.land(),
+    for (index, share) in shares.iter().enumerate() {
+        let applied = match landed.remove(&index) {
+            Some(applied) => Ok(applied),
             None => share.apply(),
         };
         match applied {

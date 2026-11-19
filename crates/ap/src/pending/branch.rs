@@ -9,7 +9,7 @@
 //! only on your repository, and on the agent's objects once it has written
 //! them to a quarantine directory.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::path::PathBuf;
@@ -32,6 +32,13 @@ const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
 const TREE: u32 = 0o40000;
 
+/// A file in the agent's `.git`: a regular file's contents, or the target
+/// of a symlink.
+enum Content {
+    File(Vec<u8>),
+    Link(Vec<u8>),
+}
+
 /// The agent's git directory, as the agent's git sees it.
 struct Agent<'a> {
     records: &'a Records,
@@ -53,11 +60,12 @@ impl<'a> Agent<'a> {
     }
 
     /// The agent's file at `path` in its `.git`, or `None` if it has no
-    /// regular file there. Nothing on the way is a symlink.
-    fn file(&self, path: &str) -> io::Result<Option<Vec<u8>>> {
+    /// regular file or symlink there. Nothing on the way is a symlink.
+    fn file(&self, path: &str) -> io::Result<Option<Content>> {
         let inner = format!(".git/{path}");
         match self.records.view(inner.as_bytes()) {
             View::Agent(Entry::File { .. }) => read_beneath(&self.dir.join("tree"), &inner),
+            View::Agent(Entry::Symlink { target }) => Ok(Some(Content::Link(target.clone()))),
             View::Agent(_) | View::Absent => Ok(None),
             View::Yours => read_beneath(&self.dir.join(GIT), path),
         }
@@ -68,9 +76,23 @@ impl<'a> Agent<'a> {
         let mut name = "HEAD".to_owned();
         for _ in 0..MAX_DEPTH {
             let target = match self.file(&name)? {
-                Some(contents) => git::parse_ref(&name, &contents)?,
+                Some(Content::File(contents)) => git::parse_ref(&name, &contents)?,
+                // A symlink is a symbolic ref, as git once wrote them, and
+                // must point under `refs/`. It is never followed.
+                Some(Content::Link(target)) => {
+                    let contents = [&b"ref: "[..], &target].concat();
+                    match git::parse_ref(&name, &contents) {
+                        Ok(Target::Symbolic(next)) if next != "HEAD" => Target::Symbolic(next),
+                        _ => {
+                            return Err(git::Error::Corrupt(format!("{name} links outside refs/")));
+                        }
+                    }
+                }
                 None => {
-                    let packed = self.file("packed-refs")?.unwrap_or_default();
+                    let packed = match self.file("packed-refs")? {
+                        Some(Content::File(contents)) => contents,
+                        _ => Vec::new(),
+                    };
                     match git::parse_packed_refs(&packed)?.remove(&name) {
                         Some(id) => Target::Object(id),
                         None => return Ok(None),
@@ -106,34 +128,55 @@ impl<'a> Agent<'a> {
     }
 
     /// Walks from `head` to the objects your repository already has, and
-    /// gives each other object to `found`, once. Returns how many of them
-    /// are commits.
+    /// gives each other object to `found`, once. Each object must be of the
+    /// type that names it, yours too, because `git fsck` doesn't look at
+    /// yours. Returns how many of the others are commits.
     fn walk(
         &self,
         head: Id,
         found: &mut dyn FnMut(&Object) -> Result<(), git::Error>,
     ) -> Result<usize, git::Error> {
-        let mut seen = HashSet::new();
-        let mut stack = vec![head];
+        let mut seen = HashMap::new();
+        let mut stack = vec![(head, Some(Kind::Commit))];
         let mut commits = 0;
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) || self.yours.contains(&id)? {
+        while let Some((id, named)) = stack.pop() {
+            if let Some(&kind) = seen.get(&id) {
+                check_kind(&id, named, kind)?;
+                continue;
+            }
+            if let Some(kind) = self.yours.kind(&id)? {
+                check_kind(&id, named, kind)?;
+                seen.insert(id, kind);
                 continue;
             }
             let object = self.object(&id)?;
+            check_kind(&id, named, object.kind)?;
+            seen.insert(id, object.kind);
             match object.kind {
                 Kind::Commit => {
                     let commit = object.commit()?;
-                    stack.push(commit.tree);
-                    stack.extend(commit.parents);
+                    stack.push((commit.tree, Some(Kind::Tree)));
+                    stack.extend(
+                        commit
+                            .parents
+                            .into_iter()
+                            .map(|id| (id, Some(Kind::Commit))),
+                    );
                     commits += 1;
                 }
                 Kind::Tree => {
-                    let entries = object.entries()?;
-                    // A submodule's commit is in its own repository.
-                    stack.extend((entries.iter().filter(|e| e.mode != GITLINK)).map(|e| e.id));
+                    for entry in object.entries()? {
+                        match entry.mode {
+                            // A submodule's commit is in its own repository.
+                            GITLINK => {}
+                            TREE => stack.push((entry.id, Some(Kind::Tree))),
+                            _ => stack.push((entry.id, Some(Kind::Blob))),
+                        }
+                    }
                 }
-                Kind::Tag => stack.push(object.tag_target()?),
+                // A tag says the type of what it names, which `git fsck`
+                // checks.
+                Kind::Tag => stack.push((object.tag_target()?, None)),
                 Kind::Blob => {}
             }
             found(&object)?;
@@ -180,7 +223,9 @@ impl<'a> Agent<'a> {
                 .id();
                 Some((SYMLINK, id))
             }
-            View::Agent(Entry::Dir { .. }) | View::Yours => return Ok(true),
+            View::Yours => return Ok(true),
+            // A directory holds only what is beneath it, which is checked
+            // by itself.
             View::Agent(_) | View::Absent => None,
         };
         let committed = match head {
@@ -196,9 +241,20 @@ impl<'a> Agent<'a> {
     }
 }
 
-/// The file at `path` beneath `dir`, reached with no symlink, or `None` if
-/// there is no regular file there.
-fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Vec<u8>>> {
+/// Fails unless `kind`, the type of the object `id`, is the type the object
+/// that names it says, if it says one.
+fn check_kind(id: &Id, named: Option<Kind>, kind: Kind) -> Result<(), git::Error> {
+    match named {
+        Some(named) if named != kind => Err(git::Error::Corrupt(format!(
+            "the agent's history names object {id} as a {named}, but it is a {kind}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// The regular file or symlink at `path` beneath `dir`, reached with no
+/// symlink on the way, or `None` if there is neither there.
+fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     let name = CString::new(dir.as_os_str().as_bytes()).map_err(io::Error::other)?;
     let dir = match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
         Ok(dir) => dir,
@@ -206,7 +262,8 @@ fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Vec<u8>>> {
         Err(error) => return Err(error),
     };
     let name = CString::new(path).map_err(io::Error::other)?;
-    let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+    // With `O_PATH` and `O_NOFOLLOW`, a symlink at the end opens as itself.
+    let flags = libc::O_PATH | libc::O_NOFOLLOW;
     let fd = match openat2(dir.as_raw_fd(), &name, flags, BENEATH) {
         Ok(fd) => fd,
         Err(error) => match error.raw_os_error() {
@@ -214,13 +271,41 @@ fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Vec<u8>>> {
             _ => return Err(error),
         },
     };
-    let mut file = File::from(fd);
-    if !file.metadata()?.is_file() {
+    let metadata = File::from(fd.try_clone()?).metadata()?;
+    if metadata.is_symlink() {
+        let mut target = vec![0; libc::PATH_MAX as usize];
+        // SAFETY: the empty name is NUL-terminated, and `target` has room
+        // for the length passed.
+        let len = unsafe {
+            libc::readlinkat(
+                fd.as_raw_fd(),
+                c"".as_ptr(),
+                target.as_mut_ptr().cast(),
+                target.len(),
+            )
+        };
+        let len = usize::try_from(len).map_err(|_| io::Error::last_os_error())?;
+        target.truncate(len);
+        return Ok(Some(Content::Link(target)));
+    }
+    if !metadata.is_file() {
         return Ok(None);
     }
+    // The descriptor reads nothing, so the file opens again through it.
+    let mut file = File::open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
-    Ok(Some(contents))
+    Ok(Some(Content::File(contents)))
+}
+
+/// `text` with each control character escaped, so that nothing an agent
+/// named, such as a file, can drive your terminal when it is printed.
+pub(super) fn printable(text: &str) -> String {
+    let escape = |c: char| match c.is_control() {
+        true => c.escape_default().to_string(),
+        false => c.to_string(),
+    };
+    text.chars().map(escape).collect()
 }
 
 /// Why a branch import failed, which keeps everything pending.
@@ -231,7 +316,7 @@ fn refused(why: impl fmt::Display) -> io::Error {
 fn read_failed(error: git::Error) -> io::Error {
     match error {
         git::Error::Io(error) => error,
-        git::Error::Corrupt(why) => refused(why),
+        git::Error::Corrupt(why) => refused(printable(&why)),
     }
 }
 
@@ -266,7 +351,7 @@ fn output(mut command: Command) -> io::Result<std::process::Output> {
 
 fn failed_git(what: &str, output: &std::process::Output) -> io::Error {
     let said = String::from_utf8_lossy(&output.stderr);
-    refused(format!("git {what} failed: {}", said.trim_end()))
+    refused(format!("git {what} failed: {}", printable(said.trim_end())))
 }
 
 /// Writes `path` as an entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES`, quoted
@@ -348,7 +433,10 @@ impl Share<'_> {
 
     /// The commit your `HEAD` named when the run started.
     fn start(&self) -> io::Result<Option<Id>> {
-        let text = read_beneath(self.dir, HEAD)?.unwrap_or_default();
+        let text = match read_beneath(self.dir, HEAD)? {
+            Some(Content::File(text)) => text,
+            _ => Vec::new(),
+        };
         Ok(std::str::from_utf8(&text)
             .ok()
             .and_then(|text| Id::from_hex(text.trim_end())))
@@ -412,9 +500,6 @@ impl Share<'_> {
             if (agent.yours.find_ref(&name).map_err(read_failed)?).is_some() {
                 return Err(refused(format!("the branch {branch} already exists")));
             }
-            if agent.object(&head).map_err(read_failed)?.kind != Kind::Commit {
-                return Err(refused("the agent's HEAD doesn't name a commit"));
-            }
             let quarantine = Quarantine::new(self.dir)?;
             let held = Repository::at(&quarantine.0);
             let mut objects = Vec::new();
@@ -471,6 +556,7 @@ fn fsck(root: &Path, quarantine: &Path, head: Id, yours: &Repository) -> io::Res
     let said = String::from_utf8_lossy(&output.stderr);
     let said = (said.lines().chain(stdout.lines()))
         .filter(|line| !yours_missing(line))
+        .map(printable)
         .collect::<Vec<_>>()
         .join("\n");
     Err(io::Error::other(format!(
@@ -478,35 +564,77 @@ fn fsck(root: &Path, quarantine: &Path, head: Id, yours: &Repository) -> io::Res
     )))
 }
 
-impl Import<'_> {
-    /// Moves the agent's objects and the branch into your repository, and
-    /// then keeps nothing of the share pending. Returns what it skipped.
-    pub fn land(self) -> io::Result<Applied> {
-        let share = self.share;
-        if let Some(head) = self.head {
-            let Some(quarantine) = &self.quarantine else {
-                return Err(io::Error::other("the quarantine directory is gone"));
-            };
-            let held = Repository::at(&quarantine.0);
-            let yours = Repository::at(share.root.join(".git"));
-            for id in &self.objects {
-                let object = held.loose_object(id).map_err(read_failed)?;
-                let object = object.ok_or_else(|| refused(format!("object {id} is gone")))?;
-                yours.write(&object).map_err(read_failed)?;
+/// Moves the agent's objects and each branch into your repositories, and
+/// then keeps nothing of their shares pending. If a branch can't be
+/// written, the ones written before it go again, so everything stays
+/// pending. Returns what each import skipped, or which one failed, and why.
+pub fn land(imports: Vec<Import<'_>>) -> Result<Vec<Applied>, (usize, io::Error)> {
+    for (at, import) in imports.iter().enumerate() {
+        import.move_objects().map_err(|error| (at, error))?;
+    }
+    for (at, import) in imports.iter().enumerate() {
+        if let Err(error) = import.write_ref() {
+            for written in &imports[..at] {
+                written.remove_ref();
             }
-            let mut update = your_git(share.root);
-            update
-                .args(["update-ref", "-m", "ap apply"])
-                .arg(format!("refs/heads/{}", self.branch))
-                .arg(head.to_string())
-                .arg("");
-            let updated = output(update)?;
-            if !updated.status.success() {
-                return Err(failed_git("update-ref", &updated));
-            }
+            return Err((at, error));
         }
-        let landed = share.read(LANDED)?.bases;
-        share.keep(&self.records, &landed, &BTreeMap::new())?;
-        Ok(self.applied)
+    }
+    let mut applied = Vec::new();
+    for (at, import) in imports.into_iter().enumerate() {
+        let share = import.share;
+        let landed = share.read(LANDED).map_err(|error| (at, error))?.bases;
+        (share.keep(&import.records, &landed, &BTreeMap::new())).map_err(|error| (at, error))?;
+        applied.push(import.applied);
+    }
+    Ok(applied)
+}
+
+impl Import<'_> {
+    /// Writes the agent's objects into your repository, where nothing
+    /// names them until the branch does.
+    fn move_objects(&self) -> io::Result<()> {
+        let Some(quarantine) = &self.quarantine else {
+            return Ok(());
+        };
+        let held = Repository::at(&quarantine.0);
+        let yours = Repository::at(self.share.root.join(".git"));
+        for id in &self.objects {
+            let object = held.loose_object(id).map_err(read_failed)?;
+            let object = object.ok_or_else(|| refused(format!("object {id} is gone")))?;
+            yours.write(&object).map_err(read_failed)?;
+        }
+        Ok(())
+    }
+
+    /// Makes the branch, which mustn't exist.
+    fn write_ref(&self) -> io::Result<()> {
+        let Some(head) = self.head else {
+            return Ok(());
+        };
+        let mut update = your_git(self.share.root);
+        update
+            .args(["update-ref", "-m", "ap apply"])
+            .arg(format!("refs/heads/{}", self.branch))
+            .arg(head.to_string())
+            .arg("");
+        let updated = output(update)?;
+        if !updated.status.success() {
+            return Err(failed_git("update-ref", &updated));
+        }
+        Ok(())
+    }
+
+    /// Removes the branch this made, if it still names what this made it
+    /// name.
+    fn remove_ref(&self) {
+        if let Some(head) = self.head {
+            let mut update = your_git(self.share.root);
+            update
+                .args(["update-ref", "-d"])
+                .arg(format!("refs/heads/{}", self.branch))
+                .arg(head.to_string());
+            let _ = update.output();
+        }
     }
 }

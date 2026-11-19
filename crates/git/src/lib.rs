@@ -279,6 +279,30 @@ impl Repository {
         Ok(None)
     }
 
+    /// The type of the object named `id`, loose or packed, or `None` if
+    /// there is none. It reads only a loose object's header, and only the
+    /// headers of a packed object's chain of deltas.
+    pub fn kind(&self, id: &Id) -> Result<Option<Kind>, Error> {
+        let hex = id.to_string();
+        let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
+        if let Some(compressed) = read(&path)? {
+            let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
+                Ok(all) => all,
+                Err(e) if e.status == TINFLStatus::HasMoreOutput => e.output,
+                Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
+            };
+            let (kind, _, _) =
+                parse_header(&prefix).ok_or_else(|| corrupt(format!("{hex} has a bad header")))?;
+            return Ok(Some(kind));
+        }
+        for pack in self.packs()? {
+            if let Some(offset) = pack.find(id)? {
+                return pack.kind(offset).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
     /// Whether the repository has the object named `id`, loose or packed,
     /// without reading it.
     pub fn contains(&self, id: &Id) -> Result<bool, Error> {

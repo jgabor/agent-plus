@@ -101,6 +101,8 @@ fn assert_objects_match(root: &Path) -> usize {
             .unwrap()
             .unwrap_or_else(|| panic!("{hex} is missing"));
         assert_eq!(object.kind.to_string(), kind, "the type of {hex}");
+        let found = repo.kind(&id(hex)).unwrap().map(|kind| kind.to_string());
+        assert_eq!(found.as_deref(), Some(kind), "the type of {hex}");
         assert_eq!(
             object.data,
             run(root, &["cat-file", kind, hex]),
@@ -208,6 +210,7 @@ fn an_object_that_is_not_loose_is_missing() {
     let repo = Repository::at(root.join(".git"));
     let absent = id("0123456789abcdef0123456789abcdef01234567");
     assert!(repo.loose_object(&absent).unwrap().is_none());
+    assert!(repo.kind(&absent).unwrap().is_none());
     run(&root, &["gc", "-q", "--prune=now"]);
     let head = text(&root, &["rev-parse", "HEAD"]);
     assert!(repo.loose_object(&id(&head)).unwrap().is_none());
@@ -1237,6 +1240,11 @@ fn assert_links_match(root: &Path) {
     for (hex, kind, _) in listed_objects(root) {
         let object = repo.object(&id(&hex)).unwrap().unwrap();
         assert!(repo.contains(&id(&hex)).unwrap(), "{hex}");
+        assert_eq!(
+            repo.kind(&id(&hex)).unwrap(),
+            Some(kind),
+            "the type of {hex}"
+        );
         match kind {
             Kind::Commit => {
                 let commit = object.commit().unwrap();

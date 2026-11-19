@@ -487,6 +487,12 @@ binary_bytes = 9312000
 A change's base scores are those of the newest record in the history of its
 base, or zero if there is none.
 
+When the bench runs, both budget counts come from that run: the candidate's
+from its values, and the base's from the values measured for the base. A
+budget the base can't be measured for isn't met for the base. When the bench
+doesn't run, both counts come from the ledger, the candidate's from its new
+record.
+
 ### Issue and status comment
 
 The issue body and status comment follow [AGENTS.md](AGENTS.md#issues). `xtask`

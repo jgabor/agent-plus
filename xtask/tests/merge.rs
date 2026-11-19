@@ -18,6 +18,8 @@ const NO_CHECK: &str = "pub fn f() {}\n";
 const FAST: &str = "fn main() {}\n";
 const SLOW: &str =
     "fn main() {\n    std::thread::sleep(std::time::Duration::from_millis(150));\n}\n";
+const NO_BOOT: &str = "fn main() -> std::process::ExitCode {\n    if std::env::args().nth(1).as_deref() == Some(\"--version\") {\n        return std::process::ExitCode::SUCCESS;\n    }\n    eprintln!(\"usage: ap --version\");\n    std::process::ExitCode::from(2)\n}\n";
+const BOOTS: &str = "fn main() {\n    if std::env::args().nth(1).as_deref() == Some(\"boot\") {\n        println!(\"7.3.3-ap.1\");\n    }\n}\n";
 const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n";
 const BUDGETS_EDITED: &str =
     "# edited\n[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
@@ -1143,20 +1145,94 @@ fn a_lowered_journey_count_needs_the_owner() {
     assert_prepared(&repo, &repo.prepare());
 }
 
+/// The base build is fast and the candidate sleeps, in the same run. The
+/// sleep is the target, so the candidate always misses it, and the base has
+/// all of it to spare.
 #[test]
 fn a_lowered_budget_count_needs_the_owner() {
-    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 0.000001\n";
-    let base = record(0, 1, "version_ms = 0\n");
+    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 150.0\n";
+    let base = record(0, 1, "version_ms = 1\n");
     let repo = Repo::with(
         "lower-budget",
         &[
             ("harness/ledger/3.toml", base.as_str()),
             ("harness/budgets.toml", budgets),
         ],
-        &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
+        &[("crates/ap/src/main.rs", SLOW)],
     );
     assert_refused(&repo, &repo.merge(), "budgets");
     assert_prepared(&repo, &repo.prepare());
+}
+
+/// Both builds miss a target that the base's record meets, as on a loaded
+/// machine, so the base is counted from this run and the count holds.
+#[test]
+fn a_target_both_builds_miss_in_one_run_lowers_no_count() {
+    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 0.000001\n";
+    let base = record(0, 1, "version_ms = 0\n");
+    let repo = Repo::with(
+        "loaded-budget",
+        &[
+            ("harness/ledger/3.toml", base.as_str()),
+            ("harness/budgets.toml", budgets),
+        ],
+        &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
+    );
+    let output = repo.merge();
+    assert!(
+        stdout(&output).contains("bench: pass"),
+        "{}",
+        stdout(&output)
+    );
+    assert_merged(&repo, &output);
+}
+
+/// The base can't boot, so this run has no boot value for it, and its record's
+/// value doesn't stand in. The candidate meets the target, so the count rises
+/// and the PR needs no `Hill: none` line.
+#[test]
+fn a_budget_the_base_cant_be_measured_for_isnt_met_for_it() {
+    let budgets = "[[budget]]\nkey = \"boot_ms\"\nname = \"boot\"\ntarget = 10000.0\nband_pct = 10.0\nband_abs = 25.0\n";
+    let base = record(0, 1, "boot_ms = 1\n");
+    let repo = Repo::with(
+        "unmeasured-base",
+        &[
+            ("harness/ledger/3.toml", base.as_str()),
+            ("harness/budgets.toml", budgets),
+            ("crates/ap/src/main.rs", NO_BOOT),
+        ],
+        &[("crates/ap/src/main.rs", BOOTS)],
+    );
+    repo.set_pr(&Pr {
+        body: "Closes #7.\n",
+        ..Pr::default()
+    });
+    let output = repo.merge();
+    assert!(
+        stdout(&output).contains("no-comparison boot_ms"),
+        "{}",
+        stdout(&output)
+    );
+    assert_merged(&repo, &output);
+}
+
+/// With no bench, both counts come from the ledger, and the candidate's
+/// record carries the base's values.
+#[test]
+fn without_a_bench_both_budget_counts_come_from_the_ledger() {
+    let budgets = "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\ntarget = 0.000001\n";
+    let base = record(0, 1, "version_ms = 0\n");
+    let repo = Repo::with(
+        "ledger-budget",
+        &[
+            ("harness/ledger/3.toml", base.as_str()),
+            ("harness/budgets.toml", budgets),
+        ],
+        &[("docs.txt", "x\n")],
+    );
+    let output = repo.merge();
+    assert!(!stdout(&output).contains("bench:"), "{}", stdout(&output));
+    assert_merged(&repo, &output);
 }
 
 #[test]

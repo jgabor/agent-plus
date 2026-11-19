@@ -7,7 +7,7 @@ mod pack;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -238,6 +238,37 @@ fn is_missing(error: &io::Error) -> bool {
     )
 }
 
+/// The type of the loose object at `path`, named `hex`, or `None` if there
+/// is none. Only as much of the file as holds the header is read, a little
+/// more each time, so a large object is never read whole.
+fn loose_kind(path: &Path, hex: &str) -> Result<Option<Kind>, Error> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if is_missing(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut compressed = Vec::new();
+    let mut chunk = 256;
+    loop {
+        let len = match (&mut file).take(chunk).read_to_end(&mut compressed) {
+            Ok(len) => len,
+            Err(e) if is_missing(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
+            Ok(all) => all,
+            Err(e) => e.output,
+        };
+        if let Some((kind, _, _)) = parse_header(&prefix) {
+            return Ok(Some(kind));
+        }
+        if len == 0 {
+            return Err(corrupt(format!("{hex} has a bad header")));
+        }
+        chunk *= 2;
+    }
+}
+
 /// The file at `path`, or `None` if there is none.
 fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
     match fs::read(path) {
@@ -285,14 +316,7 @@ impl Repository {
     pub fn kind(&self, id: &Id) -> Result<Option<Kind>, Error> {
         let hex = id.to_string();
         let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
-        if let Some(compressed) = read(&path)? {
-            let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
-                Ok(all) => all,
-                Err(e) if e.status == TINFLStatus::HasMoreOutput => e.output,
-                Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
-            };
-            let (kind, _, _) =
-                parse_header(&prefix).ok_or_else(|| corrupt(format!("{hex} has a bad header")))?;
+        if let Some(kind) = loose_kind(&path, &hex)? {
             return Ok(Some(kind));
         }
         for pack in self.packs()? {

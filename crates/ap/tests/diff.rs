@@ -529,9 +529,9 @@ fn the_first_line_says_how_many_commits_the_branch_would_carry() {
     assert!(shown.ends_with("+++ b/c\n@@ -0,0 +1 @@\n+c\n"), "{shown}");
 }
 
-// spec(SHARE): If `ap` can't read the agent's history, the line says why instead.
 /// A history `ap` can't read, such as one whose object format isn't
 /// SHA-1, still shows the agent's files.
+// spec(SHARE): If `ap` can't read the agent's history, the line says why instead.
 #[test]
 fn a_history_that_can_t_be_read_still_shows_the_files() {
     let scratch = Scratch::new("sha256");

@@ -1339,10 +1339,10 @@ fn plant_commit(guest: &Path, text: &str) -> String {
     id
 }
 
-// spec(SHARE): Before the agent's objects or the branch move in, `ap apply` writes the objects to a quarantine directory and runs your host's `git fsck --strict` on them, against your repository.
-// spec(SHARE): If the branch import fails, everything stays pending.
 /// An object of yours that the agent's history names as another type, which
 /// `git fsck` doesn't look at, loose or packed.
+// spec(SHARE): Before the agent's objects or the branch move in, `ap apply` writes the objects to a quarantine directory and runs your host's `git fsck --strict` on them, against your repository.
+// spec(SHARE): If the branch import fails, everything stays pending.
 #[test]
 fn an_object_of_yours_named_as_another_type_keeps_everything_pending() {
     for packed in [false, true] {
@@ -1425,9 +1425,9 @@ fn a_directory_in_place_of_a_committed_file_is_uncommitted() {
     assert_eq!(repository.records(), records);
 }
 
-// spec(SHARE): If the branch import fails, everything stays pending.
 /// A branch that git can't write, because a branch of yours is named
 /// where its directory goes, keeps the run's other shares pending too.
+// spec(SHARE): If the branch import fails, everything stays pending.
 #[test]
 fn a_branch_that_can_t_be_written_keeps_every_share_pending() {
     let repository = Repository::with(
@@ -1475,9 +1475,9 @@ fn a_branch_that_can_t_be_written_keeps_every_share_pending() {
     assert_eq!(repo::run(repository.share(), &["for-each-ref"]), refs);
 }
 
-// spec(SHARE): If the branch import fails, everything stays pending.
 /// A run with two repositories, where the second branch can't be written,
 /// takes back the first.
+// spec(SHARE): If the branch import fails, everything stays pending.
 #[test]
 fn a_second_branch_that_can_t_be_written_takes_back_the_first() {
     let scratch = Scratch::new("two-branches");
@@ -1531,4 +1531,81 @@ fn a_second_branch_that_can_t_be_written_takes_back_the_first() {
         })
         .collect();
     assert_eq!(after, before);
+}
+
+/// A file or a directory the agent committed, then deleted without
+/// committing that, is a change it didn't commit, though you never had it.
+#[test]
+fn a_committed_file_deleted_since_is_uncommitted() {
+    for (name, path) in [("deleted-file", "a"), ("deleted-directory", "docs")] {
+        let repository = Repository::new(name, true, &[]);
+        repository.commit("a", "a\n");
+        repository.commit("docs/guide.md", "read me\n");
+        repository.land();
+        if path == "docs" {
+            record(&repository.pending, "DELETE \"docs/guide.md\"");
+        }
+        record(&repository.pending, &format!("DELETE \"{path}\""));
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply();
+
+        repository.stays_pending(
+            &output,
+            "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+            &before,
+        );
+    }
+}
+
+/// When a branch that was written can't be taken back, `ap apply` says
+/// which one stays.
+#[test]
+fn a_branch_that_can_t_be_taken_back_is_named() {
+    let scratch = Scratch::new("rollback-refused");
+    let other = scratch.root.join("other");
+    let runs = scratch.runs();
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    for (root, guest) in [(&scratch.share, "guest"), (&other, "other-guest")] {
+        fs::create_dir_all(root).unwrap();
+        repo::run(root, &["init", "-q"]);
+        repo::commit(root, "README", "hello\n", "start");
+        let pending = runs.create_pending_share(&run, root).unwrap();
+        fs::create_dir(pending.join("tree")).unwrap();
+        fs::write(pending.join("records"), "").unwrap();
+        repo::capture(root, &pending);
+        let guest = scratch.root.join(guest);
+        repo::guest(root, &guest);
+        repo::commit(&guest, "a", "a\n", "one");
+        write(&pending, "a", 0o644, b"a\n");
+        repo::land(&guest, root, &pending);
+    }
+    repo::run(&other, &["branch", "ap"]);
+    // Your hook refuses to delete a branch.
+    let hook = scratch.share.join(".git/hooks/reference-transaction");
+    let zero = "0".repeat(40);
+    let script = format!(
+        "#!/bin/sh\nwhile read old new ref; do [ \"$new\" = {zero} ] && exit 1; done\nexit 0\n"
+    );
+    fs::write(&hook, script).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = (scratch.command(&["apply", &run]))
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let error = stderr(&output);
+    let stays = format!(
+        "the branch ap/notes/{run} stays in {}, because git update-ref couldn't remove it: ",
+        scratch.share.display()
+    );
+    assert!(error.contains(&stays), "{error}");
+    assert!(
+        error.ends_with(", so everything stays pending\n"),
+        "{error}"
+    );
+    assert!(scratch.runs().has_pending(&run).unwrap());
 }

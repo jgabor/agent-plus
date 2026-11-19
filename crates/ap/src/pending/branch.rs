@@ -204,39 +204,31 @@ impl<'a> Agent<'a> {
 
     /// Whether the agent's file at `path` is as `head` holds it.
     fn committed(&self, head: Option<Id>, path: &[u8]) -> Result<bool, git::Error> {
-        let theirs = match self.records.view(path) {
-            View::Agent(Entry::File { mode }) => {
-                let file = self.dir.join("tree").join(bytes_path(path));
-                let data = fs::read(file)?;
-                let id = Object {
-                    kind: Kind::Blob,
-                    data,
-                }
-                .id();
-                Some((git_mode(*mode), id))
+        let blob = |data: Vec<u8>| {
+            Object {
+                kind: Kind::Blob,
+                data,
             }
-            View::Agent(Entry::Symlink { target }) => {
-                let id = Object {
-                    kind: Kind::Blob,
-                    data: target.clone(),
-                }
-                .id();
-                Some((SYMLINK, id))
-            }
-            View::Yours => return Ok(true),
-            // A directory holds only what is beneath it, which is checked
-            // by itself.
-            View::Agent(_) | View::Absent => None,
+            .id()
         };
         let committed = match head {
             Some(head) => self.entry(head, path)?,
             None => None,
         };
-        Ok(match theirs {
-            Some(_) => committed == theirs,
-            // Git keeps no directory, so a tree where the agent has nothing
-            // holds only what it has beneath, which is checked by itself.
-            None => committed.is_none_or(|(mode, _)| mode == TREE),
+        Ok(match self.records.view(path) {
+            View::Agent(Entry::File { mode }) => {
+                let data = fs::read(self.dir.join("tree").join(bytes_path(path)))?;
+                committed == Some((git_mode(*mode), blob(data)))
+            }
+            View::Agent(Entry::Symlink { target }) => {
+                committed == Some((SYMLINK, blob(target.clone())))
+            }
+            // Git keeps no directory, so a tree there holds only what is
+            // beneath it, which is checked by itself.
+            View::Agent(Entry::Dir { .. }) => committed.is_none_or(|(mode, _)| mode == TREE),
+            View::Yours => true,
+            // Nothing is there, so nothing must be beneath it either.
+            View::Agent(_) | View::Absent => committed.is_none(),
         })
     }
 }
@@ -350,8 +342,13 @@ fn output(mut command: Command) -> io::Result<std::process::Output> {
 }
 
 fn failed_git(what: &str, output: &std::process::Output) -> io::Error {
+    refused(git_failure(what, output))
+}
+
+/// What `git <what>` said when it failed.
+fn git_failure(what: &str, output: &std::process::Output) -> String {
     let said = String::from_utf8_lossy(&output.stderr);
-    refused(format!("git {what} failed: {}", printable(said.trim_end())))
+    format!("git {what} failed: {}", printable(said.trim_end()))
 }
 
 /// Writes `path` as an entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES`, quoted
@@ -471,7 +468,15 @@ impl Share<'_> {
             pending: 0,
         };
         let landed = BTreeMap::new();
-        for path in changed(&records, &host)? {
+        // What the agent left differs from its `HEAD` only where it wrote,
+        // and where that hides your files.
+        let mut paths = changed(&records, &host)?;
+        paths.extend(
+            (records.entries.keys())
+                .filter(|path| !path.is_empty())
+                .cloned(),
+        );
+        for path in paths {
             match verdict(&records, &landed, &host, &ignore, true, &path)? {
                 Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
@@ -573,11 +578,17 @@ pub fn land(imports: Vec<Import<'_>>) -> Result<Vec<Applied>, (usize, io::Error)
         import.move_objects().map_err(|error| (at, error))?;
     }
     for (at, import) in imports.iter().enumerate() {
-        if let Err(error) = import.write_ref() {
+        if let Err(mut why) = import.write_ref() {
             for written in &imports[..at] {
-                written.remove_ref();
+                if let Err(cause) = written.remove_ref() {
+                    why.push_str(&format!(
+                        ", and the branch {} stays in {}, because git update-ref couldn't remove it: {cause}",
+                        written.branch,
+                        written.share.root.display()
+                    ));
+                }
             }
-            return Err((at, error));
+            return Err((at, refused(why)));
         }
     }
     let mut applied = Vec::new();
@@ -607,8 +618,8 @@ impl Import<'_> {
         Ok(())
     }
 
-    /// Makes the branch, which mustn't exist.
-    fn write_ref(&self) -> io::Result<()> {
+    /// Makes the branch, which mustn't exist, or says why it couldn't.
+    fn write_ref(&self) -> Result<(), String> {
         let Some(head) = self.head else {
             return Ok(());
         };
@@ -618,23 +629,30 @@ impl Import<'_> {
             .arg(format!("refs/heads/{}", self.branch))
             .arg(head.to_string())
             .arg("");
-        let updated = output(update)?;
-        if !updated.status.success() {
-            return Err(failed_git("update-ref", &updated));
+        let updated = update.output().map_err(|error| error.to_string())?;
+        match updated.status.success() {
+            true => Ok(()),
+            false => Err(git_failure("update-ref", &updated)),
         }
-        Ok(())
     }
 
     /// Removes the branch this made, if it still names what this made it
-    /// name.
-    fn remove_ref(&self) {
-        if let Some(head) = self.head {
-            let mut update = your_git(self.share.root);
-            update
-                .args(["update-ref", "-d"])
-                .arg(format!("refs/heads/{}", self.branch))
-                .arg(head.to_string());
-            let _ = update.output();
+    /// name, or says why it couldn't.
+    fn remove_ref(&self) -> Result<(), String> {
+        let Some(head) = self.head else {
+            return Ok(());
+        };
+        let mut update = your_git(self.share.root);
+        update
+            .args(["update-ref", "-d"])
+            .arg(format!("refs/heads/{}", self.branch))
+            .arg(head.to_string());
+        let updated = update.output().map_err(|error| error.to_string())?;
+        match updated.status.success() {
+            true => Ok(()),
+            false => Err(printable(
+                String::from_utf8_lossy(&updated.stderr).trim_end(),
+            )),
         }
     }
 }

@@ -243,13 +243,14 @@ impl<'a> Agent<'a> {
             false => self.records.view(path),
         };
         let removed = removed || self.records.deleted.contains(path);
-        let below = self.recorded_beneath(path).next().is_some()
-            || self.records.deleted.range(below(path)).next().is_some();
+        let recorded = self.recorded_beneath(path).next().is_some();
+        // Something the agent deleted beneath it may be one of `head`'s.
+        let swept = self.records.deleted.range(below(path)).next().is_some();
         let head_tree = matches!(head, Some((TREE, _)));
         let dir = root
             || match view {
                 View::Agent(Entry::Dir { .. }) => true,
-                View::Yours => below || head_tree,
+                View::Yours => recorded || head_tree,
                 View::Absent => head_tree,
                 View::Agent(_) => false,
             };
@@ -292,7 +293,8 @@ impl<'a> Agent<'a> {
             return Ok(head);
         }
         let yours = matches!(view, View::Yours);
-        if !root && ((yours && !below && !removed) || ignore.is_ignored(bytes_path(path), true)) {
+        let untouched = yours && !recorded && !swept && !removed;
+        if !root && (untouched || ignore.is_ignored(bytes_path(path), true)) {
             return Ok(head);
         }
         let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();

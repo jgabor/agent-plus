@@ -1659,6 +1659,42 @@ fn a_file_the_agent_deleted_with_its_directory_is_gone_from_the_last_commit() {
     repository.assert_last_commit(&tree, during);
 }
 
+/// A file of yours that the agent replaced with a directory, then deleted
+/// with the directory above it, and that you put back, is in the last
+/// commit as the agent's `HEAD` holds it, though the agent deleted a file
+/// beneath its directory there.
+#[test]
+fn a_file_you_put_back_where_the_agent_had_a_directory_is_kept() {
+    let item = |share: &Path| {
+        repo::commit(share, "docs/item", "keep\n", "item");
+    };
+    let repository = Repository::with(
+        "yours-put-back",
+        true,
+        Setup {
+            before: Some(&item),
+            ..Setup::default()
+        },
+    );
+    let (share, pending) = (repository.share(), &repository.pending);
+    delete(share, pending, "docs/item");
+    dir(pending, "docs/item", 0o755);
+    write(pending, "docs/item/temp", 0o644, b"temp\n");
+    record(pending, "DELETE \"docs/item/temp\"");
+    record(pending, "DELETE \"docs/item\"");
+    delete(share, pending, "docs");
+    fs::remove_dir_all(pending.join("tree/docs")).unwrap();
+    fs::remove_dir_all(share.join("docs")).unwrap();
+    dir(pending, "docs", 0o755);
+    fs::create_dir(share.join("docs")).unwrap();
+    fs::write(share.join("docs/item"), "keep\n").unwrap();
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!repository.has_branch());
+}
+
 /// A directory the agent made where its `HEAD` holds a file is a change it
 /// didn't commit, and git keeps no empty directory.
 #[test]

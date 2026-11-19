@@ -345,6 +345,7 @@ fn a_share_source_that_changed_kind_fails_the_run() {
 
 // spec(Grants): The build context is pinned.
 // spec(Grants): `ap build` records its canonical path, and a run with a relative `SHARE` fails if that path no longer canonicalizes to itself, for example because a directory in it became a symlink.
+// spec(SHARE): `<src>` is stored relative to the build context and resolved at run time, against the directory the agent was built from, which is pinned (see [Grants](#grants)).
 #[test]
 fn a_relative_share_fails_once_the_build_context_is_a_link() {
     let scratch = Scratch::new("share-pinned");
@@ -370,6 +371,49 @@ fn a_relative_share_fails_once_the_build_context_is_a_link() {
     );
     // A share that isn't relative doesn't resolve against the build context.
     past_checks(&scratch.ap(&["run", "tilde", "-p", "hi"], &[]));
+}
+
+// spec(SHARE): `<src>` is stored relative to the build context and resolved at run time, against the directory the agent was built from, which is pinned (see [Grants](#grants)).
+#[test]
+fn a_relative_share_resolves_against_the_directory_built_from() {
+    let scratch = Scratch::new("share-relative");
+    let dir = scratch.root.join("built");
+    fs::create_dir_all(dir.join("app")).unwrap();
+    // Where the runs start holds an `app` too, and a sibling of the build
+    // context.
+    let elsewhere = scratch.root.join("elsewhere");
+    fs::create_dir_all(elsewhere.join("app")).unwrap();
+    fs::create_dir_all(scratch.root.join("sibling")).unwrap();
+    scratch.build(
+        "built",
+        &format!("{RUNNABLE}SHARE ./app\nSHARE ../sibling /srv/sibling\n"),
+    );
+    let agent = ::store::Agents::new(scratch.home.join(".local/share/ap"))
+        .get("built")
+        .unwrap()
+        .unwrap();
+    let shares: Vec<&[String]> = (agent.declared.iter())
+        .filter(|declared| declared.name == "SHARE")
+        .map(|declared| declared.arguments.as_slice())
+        .collect();
+    assert_eq!(shares, [&["./app"][..], &["../sibling", "/srv/sibling"]]);
+
+    // The run resolves the shares then, wherever it starts from, and one
+    // made after the build is found.
+    fs::remove_dir(scratch.root.join("sibling")).unwrap();
+    fs::create_dir_all(scratch.root.join("sibling")).unwrap();
+    let output = (scratch.command(&["run", "built", "-p", "hi"], &[]))
+        .current_dir(&elsewhere)
+        .output()
+        .unwrap();
+    past_checks(&output);
+    let runs = ::store::Runs::new(scratch.home.join(".local/share/ap"));
+    let [run] = &runs.list_pending().unwrap()[..] else {
+        panic!("not one run with a pending directory");
+    };
+    let shares = runs.pending_shares(run).unwrap();
+    let roots: Vec<&Path> = shares.iter().map(|share| share.root.as_path()).collect();
+    assert_eq!(roots, [dir.join("app"), scratch.root.join("sibling")]);
 }
 
 // spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.

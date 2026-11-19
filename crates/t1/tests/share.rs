@@ -194,6 +194,10 @@ fn failed(output: &Output, says: &str) {
 // spec(SHARE): `SHARE` gives the agent a live view of a host file or directory while it runs.
 // spec(SHARE): Without `<dest>`, the [mirror rule](#paths) decides the guest path.
 // spec(SHARE): In `rw` shares, the files your host acts on are read-only to the agent.
+// spec(SHARE): | `rw` | Allowed | Changed immediately |
+// spec(SHARE): | `ro` | Fail with a read-only error | Unchanged |
+// spec(SHARE): Edits still work through copy-on-write and `ap apply`.
+// spec(SHARE): Anything else the agent changes in an `rw` share, it changes for real, including files your tools run later, such as build scripts and hooks kept in the working tree.
 #[test]
 fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
     let scratch = Scratch::new("modes");
@@ -204,13 +208,17 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
     fs::write(dir.join("work/read.txt"), "from rw\n").unwrap();
     fs::write(dir.join("work/Agentfile"), "keep\n").unwrap();
     fs::write(dir.join("work/.git/config"), "keep\n").unwrap();
+    fs::write(dir.join("work/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(dir.join("work/build.sh"), "echo build\n").unwrap();
+    fs::create_dir_all(dir.join("site")).unwrap();
+    fs::write(dir.join("site/Agentfile"), "keep\n").unwrap();
     scratch.build(
         "modes",
-        "ENV FAKE_HARNESS_SLEEP 300\nSHARE ./notes /srv/notes ro\nSHARE ./work rw\n",
+        "ENV FAKE_HARNESS_SLEEP 300\nSHARE ./notes /srv/notes ro\nSHARE ./work rw\nSHARE ./site rw\nSHARE ./site /srv/edit\n",
     );
-    let (_run, report, name) = scratch.start("modes");
+    let (run, report, name) = scratch.start("modes");
     let name = name.as_str();
-    // With two shares, the harness starts in the agent's home.
+    // With several shares, the harness starts in the agent's home.
     assert!(report.contains("\"directory\":\"/home/agent\""), "{report}");
 
     // The guest reads both, the `rw` share by the mirror rule.
@@ -225,7 +233,15 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
         &scratch.sh(name, "echo new > /srv/notes/new.txt"),
         "Read-only file system",
     );
+    failed(
+        &scratch.sh(name, "echo new > /srv/notes/read.txt"),
+        "Read-only file system",
+    );
     assert!(!dir.join("notes/new.txt").exists());
+    assert_eq!(
+        fs::read_to_string(dir.join("notes/read.txt")).unwrap(),
+        "changed\n"
+    );
     printed(&scratch.sh(name, "echo new > ~/work/new.txt"), "");
     assert_eq!(
         fs::read_to_string(dir.join("work/new.txt")).unwrap(),
@@ -247,8 +263,53 @@ fn a_run_mounts_its_ro_and_rw_shares_at_their_places() {
         fs::read_to_string(dir.join("work/.git/config")).unwrap(),
         "keep\n"
     );
+
+    // Anything else changes for real, even what your tools run later.
+    printed(
+        &scratch.sh(
+            name,
+            "cd ~/work && echo 'echo agent' > build.sh && mkdir .githooks && echo 'echo hook' > .githooks/pre-commit && echo 'ref: refs/heads/agent' > .git/HEAD",
+        ),
+        "",
+    );
+    for (path, text) in [
+        ("build.sh", "echo agent\n"),
+        (".githooks/pre-commit", "echo hook\n"),
+        (".git/HEAD", "ref: refs/heads/agent\n"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(dir.join("work").join(path)).unwrap(),
+            text
+        );
+    }
+
+    // An Agentfile that `rw` protects can still be edited through a
+    // copy-on-write share of its directory, and `ap apply` brings the edit
+    // back.
+    failed(
+        &scratch.sh(name, "echo bad > ~/site/Agentfile"),
+        "Operation not permitted",
+    );
+    printed(
+        &scratch.sh(
+            name,
+            "echo edited > /srv/edit/Agentfile && cat /srv/edit/Agentfile",
+        ),
+        "edited\n",
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("site/Agentfile")).unwrap(),
+        "keep\n"
+    );
     let stopped = scratch.ap(&["stop", name]);
     assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+    let applied = scratch.ap(&["apply", name]);
+    assert_eq!(applied.status.code(), Some(0), "{applied:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("site/Agentfile")).unwrap(),
+        "edited\n"
+    );
 }
 
 // spec(Run): **Working directory.** The harness starts in the first of these that applies.
@@ -471,4 +532,114 @@ fn a_run_with_share_starts_in_it_and_keeps_its_changes_pending() {
     let stopped = scratch.ap(&["stop", &name]);
     assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
     drop(run);
+}
+
+/// Runs `git` in `dir` with none of your configuration, and returns what it
+/// printed.
+fn git(scratch: &Scratch, dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &scratch.home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "You")
+        .env("GIT_AUTHOR_EMAIL", "you@example.com")
+        .env("GIT_COMMITTER_NAME", "You")
+        .env("GIT_COMMITTER_EMAIL", "you@example.com")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+// spec(SHARE): In a linked worktree, `.git` is a file that points outside the share, so git doesn't work inside the guest, and `ap apply` applies files rather than a branch.
+// spec(SHARE): Share the main working tree if the agent needs git.
+#[test]
+fn a_linked_worktree_gets_files_and_the_main_working_tree_a_branch() {
+    let scratch = Scratch::new("worktree");
+    let dir = scratch.dir("worktree");
+    let (main, linked) = (dir.join("main"), dir.join("linked"));
+    fs::create_dir_all(&main).unwrap();
+    git(&scratch, &main, &["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "hello\n").unwrap();
+    git(&scratch, &main, &["add", "README"]);
+    git(&scratch, &main, &["commit", "-q", "-m", "start"]);
+    git(
+        &scratch,
+        &main,
+        &["worktree", "add", "-q", "-b", "side", "../linked"],
+    );
+    scratch.build(
+        "worktree",
+        "ENV FAKE_HARNESS_SLEEP 300\nSHARE ./main\nSHARE ./linked\n",
+    );
+    let (run, _, name) = scratch.start("worktree");
+    let name = name.as_str();
+
+    // The linked worktree's `.git` names a directory on your host, which
+    // the guest doesn't have.
+    let gitdir = main.join(".git/worktrees/linked");
+    printed(
+        &scratch.sh(name, "cat ~/linked/.git"),
+        &format!("gitdir: {}\n", gitdir.display()),
+    );
+    failed(
+        &scratch.sh(
+            name,
+            "cd ~/linked && read -r _ gitdir < .git && ls \"$gitdir\"",
+        ),
+        "No such file or directory",
+    );
+    failed(
+        &scratch.sh(name, "cd ~/linked && git status"),
+        "not a git repository",
+    );
+    // The main working tree's `.git` is the repository itself, and git
+    // works in it.
+    printed(
+        &scratch.sh(name, "cd ~/main && git log --format=%s"),
+        "start\n",
+    );
+    printed(
+        &scratch.sh(
+            name,
+            "cd ~/main && echo main > new.txt && git add new.txt && git -c user.name=Agent -c user.email=agent@example.com commit -q -m agent && echo linked > ~/linked/new.txt",
+        ),
+        "",
+    );
+    let stopped = scratch.ap(&["stop", name]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    drop(run);
+
+    let applied = (scratch.command(&["apply", name]))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .output()
+        .unwrap();
+    assert_eq!(applied.status.code(), Some(0), "{applied:?}");
+    // The linked worktree gets the file itself.
+    assert_eq!(
+        fs::read_to_string(linked.join("new.txt")).unwrap(),
+        "linked\n"
+    );
+    // The main working tree gets a branch, and its files stay as they were.
+    assert!(!main.join("new.txt").exists());
+    let branch = format!("ap/worktree/{name}");
+    assert_eq!(
+        git(
+            &scratch,
+            &main,
+            &["branch", "--list", "ap/*", "--format=%(refname:short)"]
+        ),
+        format!("{branch}\n")
+    );
+    assert_eq!(
+        git(&scratch, &main, &["log", "--format=%s", &branch]),
+        "agent\nstart\n"
+    );
+    assert_eq!(
+        git(&scratch, &main, &["show", &format!("{branch}:new.txt")]),
+        "main\n"
+    );
 }

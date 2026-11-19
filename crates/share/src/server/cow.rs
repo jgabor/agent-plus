@@ -167,6 +167,7 @@ enum Handle {
 
 pub(super) struct Cow {
     root: OwnedFd,
+    owner: Owner,
     pending: OwnedFd,
     /// The copy of your `.git`, if the root held one when the run started.
     git: Option<OwnedFd>,
@@ -512,7 +513,7 @@ fn finish(copy: BorrowedFd, stat: &libc::stat) -> io::Result<()> {
 impl Cow {
     /// A share of `root` that keeps its changes in `pending`, which must be
     /// empty, so a run never takes over another's changes.
-    pub(super) fn new(root: OwnedFd, pending: OwnedFd) -> io::Result<Self> {
+    pub(super) fn new(root: OwnedFd, pending: OwnedFd, owner: Owner) -> io::Result<Self> {
         for fd in [&root, &pending] {
             if !is(sys::fstat(fd.as_fd())?.st_mode, libc::S_IFDIR) {
                 return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
@@ -525,6 +526,7 @@ impl Cow {
         let git = capture(root.as_fd(), pending.as_fd())?;
         Ok(Self {
             root,
+            owner,
             pending,
             git,
             tree,
@@ -884,7 +886,7 @@ impl Cow {
                 node
             }
         };
-        Ok(entry(node, &self.attributes(node, &view)?))
+        Ok(entry(node, &self.attributes(node, &view)?, self.owner))
     }
 
     fn lookup(&mut self, parent: u64, body: &[u8]) -> Answer {
@@ -915,7 +917,10 @@ impl Cow {
     /// handle holds open.
     fn getattr(&self, node: u64, body: &[u8]) -> Answer {
         match self.path(node) {
-            Ok(path) => Ok(attr_out(&self.attributes(node, &self.view(&path)?)?)),
+            Ok(path) => Ok(attr_out(
+                &self.attributes(node, &self.view(&path)?)?,
+                self.owner,
+            )),
             Err(libc::ENOENT) if u32_at(body, 0).ok_or(libc::EINVAL)? & GETATTR_FH != 0 => {
                 let Some(Handle::File { fd, mode, .. }) =
                     self.handles.get(&u64_at(body, 8).ok_or(libc::EINVAL)?)
@@ -925,7 +930,7 @@ impl Cow {
                 let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
                 stat.st_mode = *mode;
                 stat.st_ino = node;
-                Ok(attr_out(&stat))
+                Ok(attr_out(&stat, self.owner))
             }
             Err(error) => Err(error),
         }
@@ -1422,7 +1427,10 @@ impl Cow {
             let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
             sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
         }
-        Ok(attr_out(&self.attributes(node, &self.view(&path)?)?))
+        Ok(attr_out(
+            &self.attributes(node, &self.view(&path)?)?,
+            self.owner,
+        ))
     }
 
     /// `SETATTR` for a node that is gone, through the agent's copy that a
@@ -1463,7 +1471,7 @@ impl Cow {
             return Err(libc::EIO);
         };
         stat.st_mode = *mode;
-        Ok(attr_out(&stat))
+        Ok(attr_out(&stat, self.owner))
     }
 
     /// Gives each handle the guest has open on `node` the mode `mode`, for

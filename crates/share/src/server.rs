@@ -275,6 +275,7 @@ struct Handle {
 /// One share: its root, and what the guest holds of it.
 struct Share {
     root: Rc<OwnedFd>,
+    owner: Owner,
     read_only: bool,
     /// For a file share, the file's name in the root, and the file, opened
     /// with `O_PATH`. The share shows that file alone, and no other the
@@ -325,8 +326,40 @@ fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
+/// The agent's uid and gid in the guest.
+const AGENT: u32 = 1000;
+/// `nobody`, the owner the guest sees for every other uid and gid.
+const NOBODY: u32 = 65534;
+
+/// Who owns a file, as the guest sees it. The guest checks each access
+/// against the owner the server reports, so the server's own user and
+/// group appear as the agent's. Every other owner appears as `nobody`, as
+/// in a user namespace, so none of them passes for the agent.
+#[derive(Clone, Copy)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+}
+
+impl Owner {
+    fn of_server() -> Self {
+        // SAFETY: both calls take nothing, and can't fail.
+        unsafe {
+            Self {
+                uid: libc::geteuid(),
+                gid: libc::getegid(),
+            }
+        }
+    }
+
+    fn guest(self, stat: &libc::stat) -> (u32, u32) {
+        let one = |host: u32, mine: u32| if host == mine { AGENT } else { NOBODY };
+        (one(stat.st_uid, self.uid), one(stat.st_gid, self.gid))
+    }
+}
+
 /// `struct fuse_attr`.
-fn attr(stat: &libc::stat) -> Vec<u8> {
+fn attr(stat: &libc::stat, owner: Owner) -> Vec<u8> {
     let mut out = Vec::with_capacity(88);
     out.extend(stat.st_ino.to_le_bytes());
     out.extend((stat.st_size as u64).to_le_bytes());
@@ -339,8 +372,9 @@ fn attr(stat: &libc::stat) -> Vec<u8> {
     out.extend((stat.st_ctime_nsec as u32).to_le_bytes());
     out.extend(stat.st_mode.to_le_bytes());
     out.extend((stat.st_nlink as u32).to_le_bytes());
-    out.extend(stat.st_uid.to_le_bytes());
-    out.extend(stat.st_gid.to_le_bytes());
+    let (uid, gid) = owner.guest(stat);
+    out.extend(uid.to_le_bytes());
+    out.extend(gid.to_le_bytes());
     out.extend((stat.st_rdev as u32).to_le_bytes());
     out.extend((stat.st_blksize as u32).to_le_bytes());
     out.extend(0u32.to_le_bytes());
@@ -349,17 +383,17 @@ fn attr(stat: &libc::stat) -> Vec<u8> {
 
 /// `struct fuse_entry_out` or `struct fuse_attr_out`, with no time to
 /// cache, so the guest asks again each time and sees the host's changes.
-fn entry(node: u64, stat: &libc::stat) -> Vec<u8> {
+fn entry(node: u64, stat: &libc::stat, owner: Owner) -> Vec<u8> {
     let mut out = Vec::with_capacity(128);
     out.extend(node.to_le_bytes());
     out.extend([0; 32]);
-    out.extend(attr(stat));
+    out.extend(attr(stat, owner));
     out
 }
 
-fn attr_out(stat: &libc::stat) -> Vec<u8> {
+fn attr_out(stat: &libc::stat, owner: Owner) -> Vec<u8> {
     let mut out = vec![0; 16];
-    out.extend(attr(stat));
+    out.extend(attr(stat, owner));
     out
 }
 
@@ -467,6 +501,7 @@ impl Share {
         file: Option<CString>,
         read_only: bool,
         place: Place,
+        owner: Owner,
     ) -> io::Result<Self> {
         let stat = sys::fstat(root.as_fd())?;
         if !is(stat.st_mode, libc::S_IFDIR) {
@@ -497,6 +532,7 @@ impl Share {
         };
         Ok(Self {
             root,
+            owner,
             read_only,
             only,
             nodes: BTreeMap::from([(ROOT, node)]),
@@ -573,7 +609,7 @@ impl Share {
                     node.place = place;
                 }
             }
-            return Ok(entry(found, &stat));
+            return Ok(entry(found, &stat, self.owner));
         }
         let id = self.next_node;
         self.next_node += 1;
@@ -591,7 +627,7 @@ impl Share {
                 place,
             },
         );
-        Ok(entry(id, &stat))
+        Ok(entry(id, &stat, self.owner))
     }
 
     /// Answers with the entry for `name` in the directory `parent`.
@@ -836,7 +872,7 @@ impl Share {
             let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
             sys::futimens(fd, &[access, modify]).map_err(errno)?;
         }
-        Ok(attr_out(&sys::fstat(fd).map_err(errno)?))
+        Ok(attr_out(&sys::fstat(fd).map_err(errno)?, self.owner))
     }
 
     /// `struct fuse_mkdir_in`, then the name.
@@ -1136,6 +1172,7 @@ impl Server {
     /// Call it before the process is confined, because it reads where each
     /// root is.
     pub fn new(roots: Vec<Root>) -> io::Result<Self> {
+        let owner = Owner::of_server();
         let shares = roots
             .into_iter()
             .map(
@@ -1148,12 +1185,12 @@ impl Server {
                         "a copy-on-write file share is not built yet",
                     )),
                     Mode::CopyOnWrite(pending) => {
-                        cow::Cow::new(directory, pending).map(Served::CopyOnWrite)
+                        cow::Cow::new(directory, pending, owner).map(Served::CopyOnWrite)
                     }
                     mode => {
                         let place = root_place(&directory);
                         let read_only = matches!(mode, Mode::ReadOnly);
-                        Share::new(directory, file, read_only, place).map(Served::Direct)
+                        Share::new(directory, file, read_only, place, owner).map(Served::Direct)
                     }
                 },
             )
@@ -1283,7 +1320,7 @@ fn dispatch(share: &mut Share, request: &Request) -> Option<Answer> {
         GETATTR => share
             .node(node)
             .and_then(|found| sys::fstat(found.fd.as_fd()).map_err(errno))
-            .map(|stat| attr_out(&stat)),
+            .map(|stat| attr_out(&stat, share.owner)),
         SETATTR => share.setattr(node, body),
         READLINK => share.readlink(node),
         SYMLINK => share.symlink(node, body),

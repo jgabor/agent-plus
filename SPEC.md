@@ -1762,7 +1762,8 @@ Matching follows boundaries:
   that host too.
 - Request paths are normalized (RFC 3986) before matching. Requests whose
   paths contain encoded slashes (`%2F`) or dot segments under a host with
-  URL rules are denied.
+  URL rules are denied. So are paths there that don't start with `/`, and
+  paths with a `%` that two hex digits don't follow.
 - A port suffix limits a host or IP rule to that port. IPv6 addresses go in
   brackets.
 

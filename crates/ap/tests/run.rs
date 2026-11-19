@@ -345,6 +345,7 @@ fn a_share_source_that_changed_kind_fails_the_run() {
 
 // spec(Grants): The build context is pinned.
 // spec(Grants): `ap build` records its canonical path, and a run with a relative `SHARE` fails if that path no longer canonicalizes to itself, for example because a directory in it became a symlink.
+// spec(SHARE): `<src>` is stored relative to the build context and resolved at run time, against the directory the agent was built from, which is pinned (see [Grants](#grants)).
 #[test]
 fn a_relative_share_fails_once_the_build_context_is_a_link() {
     let scratch = Scratch::new("share-pinned");

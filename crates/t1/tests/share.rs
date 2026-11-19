@@ -592,15 +592,20 @@ fn a_linked_worktree_gets_files_and_the_main_working_tree_a_branch() {
         ),
         "No such file or directory",
     );
-    // The main working tree's `.git` is the repository itself.
+    failed(
+        &scratch.sh(name, "cd ~/linked && git status"),
+        "not a git repository",
+    );
+    // The main working tree's `.git` is the repository itself, and git
+    // works in it.
     printed(
-        &scratch.sh(name, "cat ~/main/.git/HEAD"),
-        "ref: refs/heads/main\n",
+        &scratch.sh(name, "cd ~/main && git log --format=%s"),
+        "start\n",
     );
     printed(
         &scratch.sh(
             name,
-            "echo main > ~/main/new.txt && echo linked > ~/linked/new.txt",
+            "cd ~/main && echo main > new.txt && git add new.txt && git -c user.name=Agent -c user.email=agent@example.com commit -q -m agent && echo linked > ~/linked/new.txt",
         ),
         "",
     );
@@ -628,6 +633,10 @@ fn a_linked_worktree_gets_files_and_the_main_working_tree_a_branch() {
             &["branch", "--list", "ap/*", "--format=%(refname:short)"]
         ),
         format!("{branch}\n")
+    );
+    assert_eq!(
+        git(&scratch, &main, &["log", "--format=%s", &branch]),
+        "agent\nstart\n"
     );
     assert_eq!(
         git(&scratch, &main, &["show", &format!("{branch}:new.txt")]),

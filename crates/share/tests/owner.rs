@@ -90,6 +90,11 @@ fn a_host_user_whose_uid_isn_t_1000_reads_and_writes_its_own_files() {
     }
     let host = fs::metadata(&root).unwrap();
     let host = (host.uid(), host.gid());
+    // SAFETY: both calls take nothing, and can't fail.
+    let me = unsafe { (libc::geteuid(), libc::getegid()) };
+    // A tree in a setgid directory takes that directory's group, which
+    // isn't the server's, so it appears as `nobody`'s.
+    let agent = (AGENT.0, if host.1 == me.1 { AGENT.1 } else { NOBODY.1 });
 
     let (mine, theirs) = UnixStream::pair().unwrap();
     let roots = [&tree.root, &other.root].map(|root| File::open(root).unwrap());
@@ -106,8 +111,8 @@ fn a_host_user_whose_uid_isn_t_1000_reads_and_writes_its_own_files() {
     let setgroups = CString::new("/proc/self/setgroups").unwrap();
     let uid_map = CString::new("/proc/self/uid_map").unwrap();
     let gid_map = CString::new("/proc/self/gid_map").unwrap();
-    let uid_line = format!("{OTHER} {} 1\n", host.0);
-    let gid_line = format!("{OTHER} {} 1\n", host.1);
+    let uid_line = format!("{OTHER} {} 1\n", me.0);
+    let gid_line = format!("{OTHER} {} 1\n", me.1);
     let mut command = Command::new(env::current_exe().unwrap());
     command
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
@@ -132,9 +137,9 @@ fn a_host_user_whose_uid_isn_t_1000_reads_and_writes_its_own_files() {
     let mut guest = Guest::over(OwnedFd::from(mine));
 
     // The server's own files appear as the agent's, with their modes.
-    assert_eq!(guest.owner("").0, AGENT);
-    assert_eq!(guest.owner("open"), (AGENT, 0o755));
-    assert_eq!(guest.owner("private.txt"), (AGENT, 0o700));
+    assert_eq!(guest.owner("").0, agent);
+    assert_eq!(guest.owner("open"), (agent, 0o755));
+    assert_eq!(guest.owner("private.txt"), (agent, 0o700));
 
     // So the agent reads a mode-0700 file and writes in a mode-0755
     // directory, and the server does both as this user.
@@ -143,14 +148,14 @@ fn a_host_user_whose_uid_isn_t_1000_reads_and_writes_its_own_files() {
     let (_, handle) = guest.create(open, b"new.txt", 0).unwrap();
     assert_eq!(guest.write(handle, 0, b"from the agent"), Ok(14));
     guest.release(handle);
-    assert_eq!(guest.owner("open/new.txt").0, AGENT);
+    assert_eq!(guest.owner("open/new.txt").0, agent);
     guest.overwrite("private.txt", b"changed").unwrap();
     assert_eq!(fs::read(root.join("private.txt")).unwrap(), b"changed");
 
     // The `ro` share beside it shows the same owner.
     let (error, entry) = guest.call_share(1, LOOKUP, 1, b"private.txt\0");
     assert_eq!(error, 0);
-    assert_eq!(owner_at(&entry, 40), AGENT);
+    assert_eq!(owner_at(&entry, 40), agent);
 
     drop(guest);
     assert!(server.wait().unwrap().success());

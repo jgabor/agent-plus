@@ -3,3 +3,5 @@
 getrandom 0.4.3 Reads CARGO_CFG_SANITIZE and sets one cfg for memory sanitizer builds. Compiles and runs nothing.
 libc 0.2.191 Sets cfgs from the target and the rustc version. Runs only rustc, and freebsd-version or emcc on those targets. Compiles nothing.
 rustls 0.23.46 An empty main, unless the nightly-only read_buf feature sets one cfg. ap doesn't enable it.
+heapless 0.9.3 Sets cfgs from the target name, and runs only rustc on a Rust probe for the ARM clrex instruction. Compiles no C.
+smoltcp 0.14.0 Writes a config.rs of size constants from its defaults, SMOLTCP_ variables, and features. Runs and compiles nothing.

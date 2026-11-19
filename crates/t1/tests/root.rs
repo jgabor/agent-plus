@@ -150,6 +150,12 @@ fn the_guest_runs_from_its_layers_under_a_tmpfs_upper_layer() {
     assert_eq!(seen["remade"], "true", "{seen:?}");
     assert_eq!(seen["script"], "ran", "{seen:?}");
     assert_eq!(seen["inotify"], "true", "{seen:?}");
+    assert_eq!(seen["loopback"], "true", "{seen:?}");
+    assert_eq!(seen["ipv4"], "true", "{seen:?}");
+    assert_eq!(seen["ipv6"], "true", "{seen:?}");
+    assert_eq!(seen["virtio_net"], "true", "{seen:?}");
+    assert_eq!(seen["proc_net"], "true", "{seen:?}");
+    assert_eq!(seen["netfilter"], "false", "{seen:?}");
 
     let again = boot_with(&init, &kernel, second);
     assert_eq!(

@@ -240,8 +240,13 @@ impl<'a> Agent<'a> {
                 Some(_) => false,
             },
             View::Yours => true,
-            // Nothing is there, so nothing must be beneath it either.
-            View::Agent(_) | View::Absent => committed.is_none(),
+            // Nothing is there, so nothing but git-ignored files may be
+            // beneath it either.
+            View::Agent(_) | View::Absent => match committed {
+                None => true,
+                Some((TREE, tree)) => self.still_there(host, ignore, tree, path)?,
+                Some(_) => false,
+            },
         })
     }
 }

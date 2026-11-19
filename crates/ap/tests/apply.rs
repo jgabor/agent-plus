@@ -1679,3 +1679,27 @@ fn a_submodule_s_directory_and_an_ignored_file_land_as_committed() {
         repo::history(&repository.guest, "HEAD")
     );
 }
+
+/// A directory the agent deleted, which held only git-ignored files in its
+/// `HEAD`, leaves out what was in it, as each file is left out.
+#[test]
+fn a_deleted_directory_of_ignored_files_lands_as_committed() {
+    let repository = Repository::new("ignored-directory", true, &[]);
+    fs::write(repository.share().join(".gitignore"), "*.log\n").unwrap();
+    let guest = &repository.guest;
+    fs::create_dir(guest.join("logs")).unwrap();
+    fs::write(guest.join("logs/debug.log"), "noise\n").unwrap();
+    repo::run(guest, &["add", "-f", "logs/debug.log"]);
+    repo::run(guest, &["commit", "-q", "-m", "log"]);
+    write(&repository.pending, "logs/debug.log", 0o644, b"noise\n");
+    repository.land();
+    record(&repository.pending, "DELETE \"logs\"");
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        repo::history(repository.share(), &repository.branch()),
+        repo::history(guest, "HEAD")
+    );
+}

@@ -3,7 +3,7 @@ set -eu
 
 release=$(ap boot --timeout 30)
 case "$release" in
-  *-ap.5) ;;
+  *-ap.6) ;;
   *)
     echo "unexpected guest kernel release: $release" >&2
     exit 1

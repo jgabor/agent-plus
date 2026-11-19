@@ -1,0 +1,17 @@
+issue = 536
+pr = 539
+commit = "ab19d7f650c986fcaad6c01207bc22d1fe2bf4c5"
+base = "05d6734dda79afd80c834d67e3e2a83dd03a4d80"
+date = "2026-11-19"
+host = "linux-x86_64"
+spec = { proven = 395, promises = 863 }
+journey = { passing = 9, steps = 19 }
+reason = "the IPv4 and IPv6 stacks the network milestone needs grow vmlinux from 12.8 MB to 15.3 MB, which costs about 2.7 MiB of idle memory and 5 to 10 ms of boot, all still well under their targets."
+
+[budgets]
+binary_bytes = 6960048
+boot_ms = 82.23
+idle_mib = 37.94
+noop_build_ms = 1.25
+run_ms = 118.83
+version_ms = 0.24

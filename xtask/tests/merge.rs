@@ -2860,7 +2860,10 @@ fn a_refresh_in_actions_folds_each_proof_and_sums_them_up() {
     assert!(proving < opened && opened < proved, "{out}");
     assert!(proved < out.rfind("::endgroup::\n").unwrap(), "{out}");
     // PR 5 failed, so `main` was proven in a fold of its own.
-    assert!(line("::group::PR 5 (1 of 2): t") < line("::group::`main`"), "{out}");
+    assert!(
+        line("::group::PR 5 (1 of 2): t") < line("::group::`main`"),
+        "{out}"
+    );
     assert!(line("::group::`main`") < proving, "{out}");
     assert_eq!(out.matches("::group::").count(), 3, "{out}");
     assert_eq!(out.matches("::endgroup::").count(), 3, "{out}");
@@ -2943,7 +2946,7 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
         "{calls}"
     );
     assert!(calls.contains(&merged(9, &repo.head_of(BRANCH))), "{calls}");
-    // `main` was proven before the PR was handed back.
+    // `main` was proven, and was sound, so the PR was handed back.
     let out = stdout(&output);
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
 }
@@ -3106,7 +3109,10 @@ fn a_refresh_runs_nothing_from_a_fork() {
     let unproven = format!("{} -f description=Not proven\n", status(&head, "failure"));
     assert!(calls.contains(&unproven), "{calls}");
     // Only `main` is checked out, to tell the runner's faults from the PR's.
-    let added: Vec<&str> = calls.lines().filter(|l| l.contains("worktree add")).collect();
+    let added: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.contains("worktree add"))
+        .collect();
     assert_eq!(added.len(), 1, "{calls}");
     assert!(added[0].contains("xtask-main-"), "{calls}");
 }

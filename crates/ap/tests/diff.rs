@@ -657,7 +657,10 @@ fn a_path_the_agent_chose_prints_with_controls_and_overrides_escaped() {
     let bidi = ['\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}'];
     let isolates = ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'];
     assert!(!shown.contains(['\x1b', '\x07']), "{shown:?}");
-    assert!(!shown.contains(bidi) && !shown.contains(isolates), "{shown:?}");
+    assert!(
+        !shown.contains(bidi) && !shown.contains(isolates),
+        "{shown:?}"
+    );
 }
 
 #[test]

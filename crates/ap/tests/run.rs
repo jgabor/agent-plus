@@ -383,7 +383,10 @@ fn a_relative_share_resolves_against_the_directory_built_from() {
     let elsewhere = scratch.root.join("elsewhere");
     fs::create_dir_all(elsewhere.join("app")).unwrap();
     fs::create_dir_all(scratch.root.join("sibling")).unwrap();
-    scratch.build("built", &format!("{RUNNABLE}SHARE ./app\nSHARE ../sibling /srv/sibling\n"));
+    scratch.build(
+        "built",
+        &format!("{RUNNABLE}SHARE ./app\nSHARE ../sibling /srv/sibling\n"),
+    );
     let agent = ::store::Agents::new(scratch.home.join(".local/share/ap"))
         .get("built")
         .unwrap()

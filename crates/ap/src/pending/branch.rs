@@ -284,13 +284,14 @@ fn alternate(path: &Path) -> std::ffi::OsString {
     OsStr::from_bytes(&out).to_owned()
 }
 
-/// How many commits the branch would carry, as `ap diff` counts them.
-pub fn commits_line(agent: &str, run: &str, commits: usize) -> String {
-    let commits = match commits {
-        1 => "1 commit".to_owned(),
-        n => format!("{n} commits"),
-    };
-    format!("branch ap/{agent}/{run} would carry {commits}\n")
+/// The line of `ap diff` that says how many commits the branch would
+/// carry, or why they can't be counted.
+pub fn commits_line(agent: &str, run: &str, commits: &Result<usize, String>) -> String {
+    match commits {
+        Ok(1) => format!("branch ap/{agent}/{run} would carry 1 commit\n"),
+        Ok(n) => format!("branch ap/{agent}/{run} would carry {n} commits\n"),
+        Err(why) => format!("branch ap/{agent}/{run}: its commits can't be counted: {why}\n"),
+    }
 }
 
 /// A branch import, checked and ready to move in.

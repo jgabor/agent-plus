@@ -520,6 +520,32 @@ fn the_first_line_says_how_many_commits_the_branch_would_carry() {
     assert!(shown.ends_with("+++ b/c\n@@ -0,0 +1 @@\n+c\n"), "{shown}");
 }
 
+/// A history `ap` can't read, such as one whose object format isn't
+/// SHA-1, still shows the agent's files, after a line that says why.
+#[test]
+fn a_history_that_can_t_be_read_still_shows_the_files() {
+    let scratch = Scratch::new("sha256");
+    let share = &scratch.share;
+    repo::run(share, &["init", "-q", "--object-format=sha256"]);
+    repo::commit(share, "README", "hello\n", "start");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::capture(share, &pending);
+    let guest = scratch.root.join("guest");
+    repo::guest(share, &guest);
+    repo::commit(&guest, "a", "a\n", "one");
+    repo::land(&guest, share, &pending);
+    write(&pending, "a", 0o644, b"a\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let shown = stdout(&output);
+    let first = shown.lines().next().unwrap();
+    let expected = format!("branch ap/notes/{run}: its commits can't be counted: ");
+    assert!(first.starts_with(&expected), "{shown}");
+    assert!(shown.ends_with("+++ b/a\n@@ -0,0 +1 @@\n+a\n"), "{shown}");
+}
+
 #[test]
 fn a_deleted_directory_shows_each_of_your_files_in_it() {
     let scratch = Scratch::new("directory");

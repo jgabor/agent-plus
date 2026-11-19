@@ -48,7 +48,7 @@ fn diff(name: &str) -> Result<(), String> {
         if shares.len() > 1 && (!shown.text.is_empty() || shown.commits.is_some()) {
             out.extend(pending::root_line(&share.root));
         }
-        if let Some(commits) = shown.commits {
+        if let Some(commits) = &shown.commits {
             let record = runs.get(&run).map_err(|error| error.to_string())?;
             let agent = record.ok_or_else(|| {
                 format!("run {run} has no record, so its branch would have no name")

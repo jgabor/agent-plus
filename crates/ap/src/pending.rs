@@ -809,11 +809,11 @@ pub struct Share<'a> {
 
 /// What `ap diff` prints for one share, how many git-ignored files it left
 /// out, and, for a share whose root holds a `.git` directory, how many
-/// commits the branch would carry.
+/// commits the branch would carry, or why they can't be counted.
 pub struct Shown {
     pub text: Vec<u8>,
     pub ignored: usize,
-    pub commits: Option<usize>,
+    pub commits: Option<Result<usize, String>>,
 }
 
 impl Share<'_> {
@@ -846,8 +846,8 @@ impl Share<'_> {
     }
 
     /// The share's changes, or why they couldn't be read this time: a file
-    /// its records name was gone, or the agent's history couldn't be read,
-    /// as while its git writes an object.
+    /// its records name was gone. Git moves each object and ref into place
+    /// whole, so history it can't read now is no better a moment later.
     fn attempt(&self) -> io::Result<Result<Shown, String>> {
         let records = self.read(RECORDS)?;
         let landed = self.read(LANDED)?.bases;
@@ -859,9 +859,9 @@ impl Share<'_> {
         let repository = host.stat(b".git")?.is_some_and(|m| m.is_dir());
         let commits = match repository {
             true => match self.commits(&records) {
-                Ok(commits) => Some(commits),
+                Ok(commits) => Some(Ok(commits)),
                 Err(git::Error::Io(error)) => return Err(error),
-                Err(git::Error::Corrupt(why)) => return Ok(Err(why)),
+                Err(git::Error::Corrupt(why)) => Some(Err(why)),
             },
             false => None,
         };

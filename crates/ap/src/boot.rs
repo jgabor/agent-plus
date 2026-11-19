@@ -337,31 +337,49 @@ pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
         }
         Report::Exec(..) | Report::ExecTook(_) => {}
     };
-    relayed(timeout, Vec::new(), None, request, None, print)
+    let devices = Devices {
+        layers: Vec::new(),
+        shares: None,
+        link: None,
+    };
+    relayed(timeout, devices, request, None, print)
 }
 
-/// A run's machine: the agent's layers and `shares`, with its harness
-/// started as `start` says, and sent `input` while it runs. It hands the harness's output to
-/// `output`, unfiltered, on a thread of its own, and returns the harness's
-/// status.
+/// A run's machine: the agent's layers and `shares`, and a network device
+/// on `link`, as [`boot_linked`] takes it, with its harness started as
+/// `start` says, and sent `input` while it runs. It hands the harness's
+/// output to `output`, unfiltered, on a thread of its own, and returns the
+/// harness's status.
 pub fn boot_agent(
     timeout: Duration,
     layers: Vec<Layer>,
     shares: Option<Shares>,
+    link: OwnedFd,
     start: Start,
     input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
 ) -> Result<u8, Error> {
     let request = Some(ToGuest::Start(start));
-    relayed(timeout, layers, shares, request, input, output)
+    let devices = Devices {
+        layers,
+        shares,
+        link: Some(link),
+    };
+    relayed(timeout, devices, request, input, output)
+}
+
+/// What a machine gets beside its kernel and init.
+struct Devices {
+    layers: Vec<Layer>,
+    shares: Option<Shares>,
+    link: Option<OwnedFd>,
 }
 
 /// Boots the pinned kernel with this program as its init, and relays what
 /// the guest reports to `output`.
 fn relayed(
     timeout: Duration,
-    layers: Vec<Layer>,
-    shares: Option<Shares>,
+    devices: Devices,
     request: Option<ToGuest>,
     input: Option<&Input>,
     output: impl FnMut(Report) + Send + 'static,
@@ -385,14 +403,14 @@ fn relayed(
         kernel: kernel.into(),
         init: init.into(),
         files: &files,
-        layers,
+        layers: devices.layers,
         request,
         timeout,
         confine: true,
         input,
     };
     let mut relay = Relay::start(Instant::now() + timeout, output);
-    let result = boot_sharing(guest, shares, |report| match report {
+    let result = boot_linked(guest, devices.shares, devices.link, |report| match report {
         Report::Ready(release) => relay.send(Piece::Release(release.to_owned())),
         Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
         Report::Stderr(bytes) => relay.send(Piece::Stderr(bytes.to_vec())),
@@ -507,8 +525,7 @@ pub fn boot_linked(
     on_report: impl FnMut(Report),
 ) -> Result<Option<u8>, Error> {
     let share_count = shares.as_ref().map_or(0, |shares| shares.count);
-    let devices = share_count + usize::from(link.is_some());
-    let command_line = command_line(&guest.layers, devices)?;
+    let command_line = command_line(&guest.layers, share_count, link.is_some())?;
     let run_frame = guest.request.as_ref().map(request_frame).transpose()?;
     let wants_status = run_frame.is_some();
     let mut entries = vec![Entry::File {
@@ -633,13 +650,16 @@ pub fn boot_linked(
 /// The kernel command line: a slot for each layer's disk after the vsock
 /// device's, then one for each of the other `devices`, and the order to stack
 /// the layers in.
-fn command_line(layers: &[Layer], devices: usize) -> Result<String, Error> {
-    if layers.len() + devices > MAX_DEVICES {
+fn command_line(layers: &[Layer], shares: usize, network: bool) -> Result<String, Error> {
+    // The network device takes a slot of its own.
+    let most = MAX_DEVICES - usize::from(network);
+    if layers.len() + shares > most {
         return Err(Error::Failed(format!(
-            "a run can have at most {MAX_DEVICES} layers and shares for now, and this one has {}",
-            layers.len() + devices
+            "a run can have at most {most} layers and shares for now, and this one has {}",
+            layers.len() + shares
         )));
     }
+    let devices = shares + usize::from(network);
     let mut line = COMMAND_LINE.to_owned();
     let mut names = Vec::new();
     for layer in layers {
@@ -1090,13 +1110,13 @@ mod tests {
 
     #[test]
     fn a_machine_without_layers_keeps_its_command_line() {
-        assert_eq!(command_line(&[], 0).unwrap(), COMMAND_LINE);
+        assert_eq!(command_line(&[], 0, false).unwrap(), COMMAND_LINE);
     }
 
     #[test]
     fn each_layer_gets_the_next_slot_and_line_and_keeps_its_place() {
         let top = "b".repeat(64);
-        let line = command_line(&[layer("a1"), layer(&top)], 0).unwrap();
+        let line = command_line(&[layer("a1"), layer(&top)], 0, false).unwrap();
         assert_eq!(
             line,
             format!(
@@ -1112,27 +1132,38 @@ mod tests {
     fn the_last_line_is_the_pic_s_last() {
         let most: Vec<Layer> = (0..MAX_DEVICES).map(|_| layer("ab")).collect();
         assert!(
-            command_line(&most, 0)
+            command_line(&most, 0, false)
                 .unwrap()
                 .ends_with(":15 ap.layers=ab,ab,ab,ab,ab,ab,ab,ab,ab,ab")
         );
         let too_many: Vec<Layer> = (0..=MAX_DEVICES).map(|_| layer("ab")).collect();
-        let error = command_line(&too_many, 0).unwrap_err().to_string();
+        let error = command_line(&too_many, 0, false).unwrap_err().to_string();
         assert!(error.contains("at most 10 layers and shares"), "{error}");
-        let error = command_line(&most, 1).unwrap_err().to_string();
+        let error = command_line(&most, 1, false).unwrap_err().to_string();
         assert!(error.contains("this one has 11"), "{error}");
+        // The network device takes the last slot.
+        let error = command_line(&most, 0, true).unwrap_err().to_string();
+        assert!(
+            error.contains("at most 9 layers and shares for now, and this one has 10"),
+            "{error}"
+        );
+        assert!(
+            command_line(&most[1..], 0, true)
+                .unwrap()
+                .ends_with(":15 ap.layers=ab,ab,ab,ab,ab,ab,ab,ab,ab")
+        );
     }
 
     #[test]
     fn each_share_gets_a_slot_and_line_after_the_layers() {
         assert_eq!(
-            command_line(&[], 2).unwrap(),
+            command_line(&[], 2, false).unwrap(),
             format!(
                 "{COMMAND_LINE} virtio_mmio.device=4K@0xd0001000:6 \
                  virtio_mmio.device=4K@0xd0002000:7"
             )
         );
-        let line = command_line(&[layer("a1")], 1).unwrap();
+        let line = command_line(&[layer("a1")], 1, false).unwrap();
         assert_eq!(
             line,
             format!(
@@ -1145,7 +1176,10 @@ mod tests {
     #[test]
     fn a_digest_that_could_break_the_command_line_is_refused() {
         for digest in ["", "a b", "a,b", "a=b"] {
-            assert!(command_line(&[layer(digest)], 0).is_err(), "{digest:?}");
+            assert!(
+                command_line(&[layer(digest)], 0, false).is_err(),
+                "{digest:?}"
+            );
         }
     }
 

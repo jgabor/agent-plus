@@ -528,9 +528,10 @@ impl Execs {
 
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
 /// process id is the first argument, for the run named by the second, with
-/// its end of a socket pair with `ap run` as its standard input. A run with
-/// shares has a third argument: the number of an inherited descriptor, the
-/// VMM's end of the share server's socket. It returns
+/// its end of a socket pair with `ap run` as its standard input. The third
+/// argument is the number of an inherited descriptor, the VMM's end of the
+/// network process's link. A run with shares has a fourth: the number of
+/// another, the VMM's end of the share server's socket. It returns
 /// the status to exit with, which nobody reads, because it reports how the
 /// run ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
@@ -542,16 +543,23 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if !(2..=3).contains(&args.len()) || orphaned {
+    if !(3..=4).contains(&args.len()) || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
-    let shares = match args.get(2).map(|fd| fd.to_str()?.parse::<i32>().ok()) {
-        None => None,
+    let inherited = |arg: &OsString| match arg.to_str()?.parse::<i32>().ok()? {
         // SAFETY: `ap run` passed this descriptor for this process alone,
         // and nothing else in it owns it.
-        Some(Some(fd)) if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
-        Some(_) => return 125,
+        fd if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+        _ => None,
+    };
+    let Some(link) = inherited(&args[2]) else {
+        return 125;
+    };
+    let shares = match args.get(3).map(inherited) {
+        None => None,
+        Some(Some(fd)) => Some(fd),
+        Some(None) => return 125,
     };
     // SAFETY: `ap run` passes its socket as standard input, and nothing else
     // in this process uses it.
@@ -565,7 +573,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         return 125;
     };
     let output = Arc::new(ToRun::new(output));
-    let end = match serve(&args[1].to_string_lossy(), &stream, shares, &output) {
+    let end = match serve(&args[1].to_string_lossy(), &stream, link, shares, &output) {
         Ok(status) => End::Exited(status),
         Err(error) => End::Failed(error.exit_code(), error.to_string()),
     };
@@ -607,10 +615,12 @@ fn record_exit(status: u8) {
 
 /// Locks the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, and boots the agent with its output sent to
-/// `output`, and with the shares the server at the end of `shares` serves.
+/// `output`, its network on `link`, and the shares the server at the end of
+/// `shares` serves.
 fn serve(
     name: &str,
     stream: &UnixStream,
+    link: OwnedFd,
     shares: Option<OwnedFd>,
     output: &Arc<ToRun>,
 ) -> Result<u8, Error> {
@@ -707,7 +717,7 @@ fn serve(
         }
         output.send(&message);
     };
-    boot::boot_agent(TIMEOUT, layers, shares, start, Some(&input), report)
+    boot::boot_agent(TIMEOUT, layers, shares, link, start, Some(&input), report)
 }
 
 /// What the run process writes to `ap run`: what the run does, then how it

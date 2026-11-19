@@ -713,8 +713,10 @@ fn closing_the_terminal_of_an_interactive_run_ends_it_and_leaves_nothing() {
     let run = Interactive::start(&scratch, &["open"], size(24, 80));
     run.wait_for("\"user\":");
     assert_eq!(scratch.ps().len(), 1);
+    // The run process, the network process, and the cleanup process.
     let processes = descendants(run.run.0.id());
-    assert_eq!(processes.len(), 2, "{processes:?}");
+    assert_eq!(processes.len(), 3, "{processes:?}");
+    network_process(run.run.0.id());
 
     let mut run = run.close();
     let status = wait_within(&mut run, Duration::from_secs(10));
@@ -774,9 +776,11 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
     assert_eq!(columns[1], "sleepy", "{rows:?}");
     let socket = scratch.runtime.join("ap").join(format!("{name}.sock"));
     assert!(socket.exists(), "{socket:?}");
-    // The run process, which holds the VM, and the cleanup process.
+    // The run process, which holds the VM, the network process, and the
+    // cleanup process.
     let processes = descendants(run.0.id());
-    assert_eq!(processes.len(), 2, "{processes:?}");
+    assert_eq!(processes.len(), 3, "{processes:?}");
+    network_process(run.0.id());
 
     run.0.kill().unwrap();
     run.0.wait().unwrap();
@@ -821,11 +825,21 @@ fn start_headless(scratch: &Scratch, agent: &str) -> (Started, String) {
 
 /// The run process that `ap run` started, which holds the VM.
 fn run_process(ap_run: u32) -> u32 {
+    started_as(ap_run, b"ap-run-process\0")
+}
+
+/// The network process that `ap run` started.
+fn network_process(ap_run: u32) -> u32 {
+    started_as(ap_run, b"ap-network\0")
+}
+
+/// The one process that `ap run` started with this `argv[0]`.
+fn started_as(ap_run: u32, program: &[u8]) -> u32 {
     let found: Vec<u32> = descendants(ap_run)
         .into_iter()
         .filter(|pid| {
             fs::read(format!("/proc/{pid}/cmdline"))
-                .is_ok_and(|cmdline| cmdline.starts_with(b"ap-run-process\0"))
+                .is_ok_and(|cmdline| cmdline.starts_with(program))
         })
         .collect();
     assert_eq!(found.len(), 1, "{found:?}");
@@ -847,6 +861,7 @@ fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
     // 128 + 15.
     let (mut run, name) = start_headless(&scratch, "sleepy");
     let vm = run_process(run.0.id());
+    let network = network_process(run.0.id());
     // An `ap stop` that can't reach the run doesn't say it stopped.
     let elsewhere = scratch.root.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
@@ -864,6 +879,12 @@ fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
     assert!(!running(vm), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");
+    // It reads the end of its link as soon as the run process exits.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(network) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!running(network), "the network process outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
 
     printed(&scratch.ap(&["stop", &name]), "");
@@ -946,15 +967,16 @@ fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
     // As Ctrl-Z would, while the harness finishes.
     signal("-STOP", run.0.id());
     let processes = descendants(run.0.id());
-    assert_eq!(processes.len(), 2, "{processes:?}");
+    assert_eq!(processes.len(), 3, "{processes:?}");
+    let vm = run_process(run.0.id());
+    let network = network_process(run.0.id());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while processes.iter().all(|pid| running(*pid)) && Instant::now() < deadline {
+    while (running(vm) || running(network)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
-    assert!(
-        processes.iter().any(|pid| !running(*pid)),
-        "the run process didn't end"
-    );
+    assert!(!running(vm), "the run process didn't end");
+    // A run that ends stops its network process, even while `ap run` can't.
+    assert!(!running(network), "the network process outlived the run");
     assert_eq!(scratch.ps(), Vec::<String>::new());
 
     signal("-CONT", run.0.id());

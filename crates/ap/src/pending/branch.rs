@@ -217,37 +217,34 @@ impl<'a> Agent<'a> {
     /// Each path the records hold beneath `path`, or beneath the root when
     /// `path` is empty, in order.
     fn recorded_beneath<'b>(&'b self, path: &[u8]) -> impl Iterator<Item = &'b Vec<u8>> {
-        // The paths beneath `a` sort after `a/` and before `a0`.
-        let (from, to) = match path.is_empty() {
-            true => (Bound::Excluded(Vec::new()), Bound::Unbounded),
-            false => (
-                Bound::Excluded([path, b"/"].concat()),
-                Bound::Excluded([path, b"0"].concat()),
-            ),
-        };
-        self.records.entries.range((from, to)).map(|(path, _)| path)
+        self.records
+            .entries
+            .range(below(path))
+            .map(|(path, _)| path)
     }
 
     /// The mode and object at `path` as the agent left it, if it left
     /// anything there that git keeps, where `head` is what its `HEAD` tree
     /// holds there. A file that doesn't land is as `head` holds it, and so
-    /// is one of yours the agent never wrote, unless the agent made or
-    /// removed a directory above it, which holds only what is still there.
-    /// That is `remade`.
+    /// is one of yours the agent never changed. One the agent deleted, or
+    /// deleted a directory above, is there only if you have it now, as the
+    /// agent sees it. That is `removed`.
     fn left_at(
         &self,
         host: &Host,
         ignore: &Gitignore,
         path: &[u8],
         head: Option<(u32, Id)>,
-        remade: bool,
+        removed: bool,
     ) -> Result<Option<(u32, Id)>, git::Error> {
         let root = path.is_empty();
         let view = match root {
             true => View::Yours,
             false => self.records.view(path),
         };
-        let below = self.recorded_beneath(path).next().is_some();
+        let removed = removed || self.records.deleted.contains(path);
+        let below = self.recorded_beneath(path).next().is_some()
+            || self.records.deleted.range(below(path)).next().is_some();
         let head_tree = matches!(head, Some((TREE, _)));
         let dir = root
             || match view {
@@ -258,7 +255,7 @@ impl<'a> Agent<'a> {
             };
         if !dir {
             let there = match view {
-                View::Yours if !remade || ignore.is_ignored(bytes_path(path), false) => {
+                View::Yours if !removed || ignore.is_ignored(bytes_path(path), false) => {
                     return Ok(head);
                 }
                 View::Yours => match head {
@@ -295,20 +292,9 @@ impl<'a> Agent<'a> {
             return Ok(head);
         }
         let yours = matches!(view, View::Yours);
-        if !root && ((yours && !below && !remade) || ignore.is_ignored(bytes_path(path), true)) {
+        if !root && ((yours && !below && !removed) || ignore.is_ignored(bytes_path(path), true)) {
             return Ok(head);
         }
-        // A directory the agent made where you had none holds only what is
-        // still there, and so does one it removed. One it copied from
-        // yours, to change its mode, holds your files.
-        let remade = remade
-            || match view {
-                View::Agent(Entry::Dir { .. }) => {
-                    !matches!(self.records.bases.get(path), Some(Some(_)))
-                }
-                View::Absent => true,
-                _ => false,
-            };
         let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();
         if let Some((TREE, tree)) = head {
             for entry in self.object(&tree)?.entries()? {
@@ -331,7 +317,7 @@ impl<'a> Agent<'a> {
             // Git keeps no `.git`, and the agent's history comes as commits.
             let left = match name.eq_ignore_ascii_case(b".git") {
                 true => head,
-                false => self.left_at(host, ignore, &inner, head, remade)?,
+                false => self.left_at(host, ignore, &inner, head, removed)?,
             };
             if let Some((mode, id)) = left {
                 tree.push(git::TreeEntry { mode, name, id });
@@ -345,6 +331,18 @@ impl<'a> Agent<'a> {
             return Ok(head);
         }
         Ok(Some((TREE, self.make(tree))))
+    }
+}
+
+/// The bounds of the paths beneath `path`, or beneath the root when `path`
+/// is empty. The paths beneath `a` sort after `a/` and before `a0`.
+fn below(path: &[u8]) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
+    match path.is_empty() {
+        true => (Bound::Excluded(Vec::new()), Bound::Unbounded),
+        false => (
+            Bound::Excluded([path, b"/"].concat()),
+            Bound::Excluded([path, b"0"].concat()),
+        ),
     }
 }
 

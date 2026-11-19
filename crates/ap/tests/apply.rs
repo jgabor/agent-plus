@@ -1242,7 +1242,7 @@ fn uncommitted_files_land_as_one_last_commit() {
 /// the last commit, which holds the file as the agent's `HEAD` does, but
 /// it lands on the branch once the agent commits it.
 // spec(SHARE): If the agent commits them, they land on its branch.
-// spec(SHARE): A file the agent never wrote is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
+// spec(SHARE): A file the agent never changed or removed is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
 #[test]
 fn your_change_lands_only_if_the_agent_commits_it() {
     for commits in [false, true] {
@@ -1575,7 +1575,7 @@ fn a_head_that_is_a_symlink_still_names_the_branch() {
 /// A file you removed during the run, beneath your directory whose mode
 /// the agent changed, is in the last commit as the agent's `HEAD` holds it,
 /// and so there is none.
-// spec(SHARE): A file the agent never wrote is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
+// spec(SHARE): A file the agent never changed or removed is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
 #[test]
 fn a_file_you_removed_beneath_your_directory_is_left_as_committed() {
     let keep = |share: &Path| {
@@ -1598,6 +1598,65 @@ fn a_file_you_removed_beneath_your_directory_is_left_as_committed() {
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(!repository.has_branch());
+}
+
+/// A file you removed, with its directory, beneath a directory the agent
+/// wrote in, then changed the mode of, is in the last commit as the agent's
+/// `HEAD` holds it.
+// spec(SHARE): A file the agent never changed or removed is in the last commit as the agent's `HEAD` holds it, so a change you made to it during the run is left out.
+#[test]
+fn a_directory_you_removed_keeps_your_files_in_the_last_commit() {
+    let keep = |share: &Path| {
+        repo::commit(share, "docs/keep", "keep\n", "keep");
+    };
+    let repository = Repository::with(
+        "yours-removed-dir",
+        true,
+        Setup {
+            before: Some(&keep),
+            ..Setup::default()
+        },
+    );
+    let share = repository.share();
+    write(&repository.pending, "docs/new", 0o644, b"new\n");
+    fs::write(repository.guest.join("docs/new"), "new\n").unwrap();
+    fs::remove_dir_all(share.join("docs")).unwrap();
+    record(&repository.pending, "BASE \"docs\" none");
+    record(&repository.pending, "DIR \"docs\" 700");
+    let tree = repository.tree_after(&[&["add", "docs/new"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    repository.assert_last_commit(&tree, during);
+}
+
+/// A file the agent deleted, with its directory, which it made again after
+/// you removed yours, is gone from the last commit.
+#[test]
+fn a_file_the_agent_deleted_with_its_directory_is_gone_from_the_last_commit() {
+    let keep = |share: &Path| {
+        repo::commit(share, "docs/keep", "keep\n", "keep");
+    };
+    let repository = Repository::with(
+        "agent-removed-dir",
+        true,
+        Setup {
+            before: Some(&keep),
+            ..Setup::default()
+        },
+    );
+    let share = repository.share();
+    delete(share, &repository.pending, "docs/keep");
+    delete(share, &repository.pending, "docs");
+    fs::remove_dir_all(share.join("docs")).unwrap();
+    dir(&repository.pending, "docs", 0o755);
+    let tree = repository.tree_after(&[&["rm", "-q", "--cached", "docs/keep"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    repository.assert_last_commit(&tree, during);
 }
 
 /// A directory the agent made where its `HEAD` holds a file is a change it

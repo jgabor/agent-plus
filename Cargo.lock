@@ -18,6 +18,7 @@ version = "0.0.0"
 dependencies = [
  "agentfile",
  "erofs",
+ "git",
  "graviola",
  "guest",
  "libc",

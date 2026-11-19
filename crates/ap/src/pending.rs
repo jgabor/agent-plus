@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString};
+use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -19,6 +20,10 @@ use std::time::{Duration, Instant};
 
 use crate::gitignore::Gitignore;
 use crate::unified;
+
+mod branch;
+
+pub use branch::{Import, commits_line, land};
 
 /// How much of a file git reads to decide whether it is binary.
 const BINARY_PROBE: usize = 8000;
@@ -802,11 +807,13 @@ pub struct Share<'a> {
     pub dir: &'a Path,
 }
 
-/// What `ap diff` prints for one share, and how many git-ignored files it
-/// left out.
+/// What `ap diff` prints for one share, how many git-ignored files it left
+/// out, and, for a share whose root holds a `.git` directory, how many
+/// commits the branch would carry, or why they can't be counted.
 pub struct Shown {
     pub text: Vec<u8>,
     pub ignored: usize,
+    pub commits: Option<Result<usize, String>>,
 }
 
 impl Share<'_> {
@@ -816,13 +823,12 @@ impl Share<'_> {
     pub fn diff(&self) -> io::Result<Shown> {
         let start = Instant::now();
         loop {
-            if let Some(shown) = self.attempt()? {
-                return Ok(shown);
-            }
+            let why = match self.attempt()? {
+                Ok(shown) => return Ok(shown),
+                Err(why) => why,
+            };
             if start.elapsed() > PATIENCE {
-                return Err(io::Error::other(
-                    "the agent kept changing files while they were read, so try again",
-                ));
+                return Err(io::Error::other(why));
             }
             std::thread::sleep(PAUSE);
         }
@@ -839,8 +845,10 @@ impl Share<'_> {
         Records::read(&text).map_err(io::Error::other)
     }
 
-    /// The share's changes, or `None` if a file its records name was gone.
-    fn attempt(&self) -> io::Result<Option<Shown>> {
+    /// The share's changes, or why they couldn't be read this time: a file
+    /// its records name was gone. Git moves each object and ref into place
+    /// whole, so history it can't read now is no better a moment later.
+    fn attempt(&self) -> io::Result<Result<Shown, String>> {
         let records = self.read(RECORDS)?;
         let landed = self.read(LANDED)?.bases;
         let host = Host::new(self.root)?;
@@ -849,9 +857,18 @@ impl Share<'_> {
             _ => Gitignore::default(),
         };
         let repository = host.stat(b".git")?.is_some_and(|m| m.is_dir());
+        let commits = match repository {
+            true => match self.commits(&records) {
+                Ok(commits) => Some(Ok(commits)),
+                Err(git::Error::Io(error)) => return Err(error),
+                Err(git::Error::Corrupt(why)) => Some(Err(branch::printable(&why))),
+            },
+            false => None,
+        };
         let mut shown = Shown {
             text: Vec::new(),
             ignored: 0,
+            commits,
         };
         for path in changed(&records, &host)? {
             match verdict(&records, &landed, &host, &ignore, repository, &path)? {
@@ -877,7 +894,10 @@ impl Share<'_> {
                                 Some(libc::ENOENT | libc::EISDIR | libc::ENOTDIR)
                             ) =>
                         {
-                            return Ok(None);
+                            return Ok(Err(
+                                "the agent kept changing files while they were read, so try again"
+                                    .to_owned(),
+                            ));
                         }
                         Err(error) => return Err(error),
                     }
@@ -887,7 +907,7 @@ impl Share<'_> {
             };
             render(&mut shown.text, &path, host.yours(&path)?, theirs);
         }
-        Ok(Some(shown))
+        Ok(Ok(shown))
     }
 
     /// Whether the share's root on your host holds a `.git` directory, so

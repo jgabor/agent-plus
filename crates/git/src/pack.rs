@@ -181,6 +181,18 @@ impl Pack {
         Ok(Object { kind, data })
     }
 
+    /// The type of the object whose entry starts at `offset`: its own, or
+    /// that of the base its chain of deltas ends in. It inflates nothing.
+    pub(crate) fn kind(&self, mut offset: u64) -> Result<Kind, Error> {
+        for _ in 0..=self.count {
+            match self.entry(offset)?.0 {
+                Entry::Whole(kind) => return Ok(kind),
+                Entry::Delta { base } => offset = base,
+            }
+        }
+        Err(self.bad("has a delta chain that loops"))
+    }
+
     /// The entry at `offset`, its size, and where its zlib data starts.
     fn entry(&self, offset: u64) -> Result<(Entry, usize, u64), Error> {
         if offset < PACK_HEADER || offset >= self.end {

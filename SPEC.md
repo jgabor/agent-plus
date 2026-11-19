@@ -1476,7 +1476,9 @@ attributes, because those can run commands.
     A mode change line shows any change to a file's permission bits.
     A directory gets no line of its own, as in `git diff`.
   - For a share whose root holds a `.git` directory, the first line says how
-    many commits the branch would carry.
+    many commits the branch would carry. It counts the commits the agent's
+    `HEAD` reaches that your repository doesn't have. If `ap` can't read the
+    agent's history, the line says why instead.
   - Each path is relative to its share's root. When a run has more than one
     copy-on-write share, each share's changes start with a line that names
     its root.
@@ -1491,7 +1493,12 @@ attributes, because those can run commands.
     The branch starts from the commit your `HEAD` was at when the run
     started. If the agent's history no longer descends from that commit, or
     the repository had no commits, the branch is the agent's history as it
-    stands. Your working tree, hooks, and config are not touched.
+    stands. When the agent's `HEAD` names no commit, or the commit your
+    `HEAD` was at when the run started, and the agent left no files
+    uncommitted, there is no branch. Your working tree, hooks, and config
+    are not touched. Neither are your `HEAD` and your index. If the branch
+    already exists, `ap apply` refuses the import, says so, and everything
+    stays pending.
   - Before the agent's objects or the branch move in, `ap apply` writes the
     objects to a quarantine directory and runs your host's
     `git fsck --strict` on them, against your repository. It never runs

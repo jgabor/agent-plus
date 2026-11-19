@@ -1,10 +1,12 @@
 //! `ap apply`, from SPEC.md's `SHARE` section, for a share whose root holds
-//! no `.git` directory. Nothing here boots: a test writes a run's pending
+//! a `.git` directory or doesn't. Nothing here boots: a test writes a run's pending
 //! directory the way the share server does, as its `cow` module describes,
 //! and makes a run active the way a run process does, by holding the lock on
 //! its record.
 
 mod common;
+
+use common::repo;
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -686,40 +688,415 @@ fn apply_takes_an_agent_or_a_run_and_lists_several() {
     assert_eq!(stderr(&output), "ap: no agent or run is named nobody\n");
 }
 
-/// The branch import isn't built yet, so a share whose root holds `.git`
-/// keeps everything pending, and so does every other share of the run.
-#[test]
-fn a_repository_s_share_keeps_everything_pending() {
-    let scratch = Scratch::new("repository");
-    let plain = scratch.root.join("plain");
-    fs::create_dir(&plain).unwrap();
-    fs::create_dir(scratch.share.join(".git")).unwrap();
-    let runs = scratch.runs();
-    let run = runs.create("notes", 1).unwrap().name;
-    runs.create_pending(&run).unwrap();
-    for root in [&plain, &scratch.share] {
-        let pending = runs.create_pending_share(&run, root).unwrap();
-        fs::create_dir(pending.join("tree")).unwrap();
-        fs::write(pending.join("records"), "").unwrap();
-        write(&pending, "file", 0o644, b"x\n");
-    }
-    let records = fs::read(runs.pending_shares(&run).unwrap()[1].dir.join("records")).unwrap();
+/// A run of `notes` on a repository: your repository in the share, with a
+/// first commit unless it is to have none, the run's copy of its `.git`,
+/// and the agent's own clone of it, `guest`.
+struct Repository {
+    scratch: Scratch,
+    run: String,
+    pending: PathBuf,
+    guest: PathBuf,
+    /// The commit your `HEAD` was at when the run started, if any.
+    start: Option<String>,
+}
 
-    let output = scratch.ap(&["apply", &run]);
+/// How a test's run on a repository differs from the plain one.
+#[derive(Default)]
+struct Setup<'a> {
+    /// Arguments for `git init`.
+    init: &'a [&'a str],
+    /// The directory of a share without `.git`, which the run shares
+    /// first, with one file the agent wrote.
+    plain: Option<&'a str>,
+    /// What happens to your repository before the run starts.
+    before: Option<&'a dyn Fn(&Path)>,
+}
+
+impl Repository {
+    fn new(name: &str, first: bool, init: &[&str]) -> Repository {
+        Repository::with(
+            name,
+            first,
+            Setup {
+                init,
+                ..Setup::default()
+            },
+        )
+    }
+
+    fn with(name: &str, first: bool, setup: Setup) -> Repository {
+        let scratch = Scratch::new(name);
+        let mut args = vec!["init", "-q"];
+        args.extend(setup.init);
+        repo::run(&scratch.share, &args);
+        let start = first.then(|| repo::commit(&scratch.share, "README", "hello\n", "start"));
+        if let Some(before) = setup.before {
+            before(&scratch.share);
+        }
+        let runs = scratch.runs();
+        let run = runs.create("notes", 1).unwrap().name;
+        runs.create_pending(&run).unwrap();
+        let mut roots = Vec::new();
+        if let Some(plain) = setup.plain {
+            let plain = scratch.root.join(plain);
+            fs::create_dir(&plain).unwrap();
+            roots.push(plain);
+        }
+        roots.push(scratch.share.clone());
+        let mut pending = PathBuf::new();
+        for root in &roots {
+            pending = runs.create_pending_share(&run, root).unwrap();
+            fs::create_dir(pending.join("tree")).unwrap();
+            fs::write(pending.join("records"), "").unwrap();
+            if *root != scratch.share {
+                write(&pending, "file", 0o644, b"x\n");
+            }
+        }
+        repo::capture(&scratch.share, &pending);
+        let guest = scratch.root.join("guest");
+        repo::guest(&scratch.share, &guest);
+        Repository {
+            scratch,
+            run,
+            pending,
+            guest,
+            start,
+        }
+    }
+
+    fn share(&self) -> &Path {
+        &self.scratch.share
+    }
+
+    /// The branch an import makes.
+    fn branch(&self) -> String {
+        format!("ap/notes/{}", self.run)
+    }
+
+    /// The agent commits `data` at `path`, which it writes in the share too.
+    fn commit(&self, path: &str, data: &str) -> String {
+        if self.scratch.exists(path) {
+            record(&self.pending, &base(self.share(), path));
+        }
+        write(&self.pending, path, 0o644, data.as_bytes());
+        repo::commit(&self.guest, path, data, &format!("write {path}"))
+    }
+
+    /// Puts what the agent's git wrote in the pending directory.
+    fn land(&self) {
+        repo::land(&self.guest, self.share(), &self.pending);
+    }
+
+    /// Runs `ap apply` with the `PATH` of the tests, so it finds `git`.
+    fn apply(&self) -> Output {
+        let path = std::env::var_os("PATH").unwrap();
+        let mut command = self.scratch.command(&["apply", &self.run]);
+        command.env("PATH", path).output().unwrap()
+    }
+
+    fn records(&self) -> Vec<u8> {
+        fs::read(self.pending.join("records")).unwrap()
+    }
+
+    /// Your refs, and the name of each object your repository holds.
+    fn objects_and_refs(&self) -> (String, Vec<PathBuf>) {
+        fn files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                match path.is_dir() {
+                    true => files(&path, out),
+                    false => out.push(path),
+                }
+            }
+        }
+        let mut objects = Vec::new();
+        files(&self.share().join(".git/objects"), &mut objects);
+        objects.sort();
+        let refs = repo::run(self.share(), &["for-each-ref"]);
+        (refs, objects)
+    }
+
+    fn has_branch(&self) -> bool {
+        let name = format!("refs/heads/{}", self.branch());
+        (repo::git(self.share()).args(["show-ref", "-q", "--verify", &name]))
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// Checks that everything stays pending, after an `ap apply` that
+    /// printed `error`, with your repository as `before` says.
+    fn stays_pending(&self, output: &Output, error: &str, before: &(String, Vec<PathBuf>)) {
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(output));
+        assert_eq!(stdout(output), "");
+        let share = self.share().display();
+        assert_eq!(
+            stderr(output),
+            format!("ap: run {}: {share}: {error}\n", self.run)
+        );
+        assert_eq!(&self.objects_and_refs(), before);
+        assert!(self.scratch.runs().has_pending(&self.run).unwrap());
+    }
+}
+
+// spec(SHARE): When the share's root on your host holds a `.git` directory, the agent's commits, and the files it wrote but didn't commit, land as a new branch, `ap/<agent>/<run>`, imported as git objects and checked with `git fsck`.
+// spec(SHARE): The branch starts from the commit your `HEAD` was at when the run started.
+// spec(SHARE): Your working tree, hooks, and config are not touched.
+// spec(SHARE): Neither are your `HEAD` and your index.
+// spec(SHARE): When `ap` reads git state that an agent wrote, here or in a persisted repository, it reads refs, objects, the index, and ignore files with its own code.
+// spec(SHARE): It never runs that repository's hooks or uses its config or attributes, because those can run commands.
+#[test]
+fn the_agent_s_commits_land_as_a_branch_from_the_start_commit() {
+    let repository = Repository::new("branch", true, &[]);
+    let share = repository.share();
+    repository.commit("README", "hello, world\n");
+    // A pack holds the first commit, and the second is loose.
+    repo::run(&repository.guest, &["repack", "-q", "-d"]);
+    repository.commit("docs/guide.md", "read me\n");
+    let history = repo::history(&repository.guest, "HEAD");
+    // The agent's config and hooks would leave a mark if git used them.
+    let mark = repository.scratch.root.join("mark");
+    let config = repository.guest.join(".git/config");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!("[core]\n\tfsmonitor = touch {}\n", mark.display()));
+    fs::write(&config, text).unwrap();
+    for hook in ["reference-transaction", "post-checkout", "pre-auto-gc"] {
+        let hook = repository.guest.join(".git/hooks").join(hook);
+        fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", mark.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    repository.land();
+    let yours =
+        || ["HEAD", "index", "config"].map(|path| fs::read(share.join(".git").join(path)).unwrap());
+    let hooks = || repository.scratch.names(".git/hooks");
+    let before = (yours(), hooks());
+
+    let output = repository.apply();
+
+    assert!(!mark.exists());
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    assert_eq!(stderr(&output), "");
+    let branch = repository.branch();
+    assert_eq!(repo::history(share, &branch), history);
+    let start = repository.start.as_deref().unwrap();
+    assert_eq!(
+        repo::run(share, &["rev-parse", &format!("{branch}~2")]),
+        start
+    );
+    repo::run(share, &["fsck", "--strict", "--no-dangling"]);
+    assert_eq!((yours(), hooks()), before);
+    assert_eq!(
+        repo::run(share, &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(repository.scratch.read("README"), "hello\n");
+    assert!(!repository.scratch.exists("docs"));
+    assert!(repository.scratch.runs().list_pending().unwrap().is_empty());
+}
+
+// spec(SHARE): If the agent's history no longer descends from that commit, or the repository had no commits, the branch is the agent's history as it stands.
+#[test]
+fn a_history_that_no_longer_descends_lands_as_it_stands() {
+    let repository = Repository::new("orphan", true, &[]);
+    repo::run(&repository.guest, &["checkout", "-q", "--orphan", "fresh"]);
+    repository.commit("README", "anew\n");
+    repository.land();
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let history = repo::history(repository.share(), &repository.branch());
+    assert_eq!(history, repo::history(&repository.guest, "HEAD"));
+    assert_eq!(history.len(), 1);
+}
+
+// spec(SHARE): If the agent's history no longer descends from that commit, or the repository had no commits, the branch is the agent's history as it stands.
+#[test]
+fn a_repository_with_no_commits_gets_the_agent_s_history() {
+    let repository = Repository::new("empty", false, &[]);
+    assert_eq!(
+        fs::read_to_string(repository.pending.join("head")).unwrap(),
+        "none\n"
+    );
+    repository.commit("README", "one\n");
+    repository.commit("README", "two\n");
+    repository.land();
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let history = repo::history(repository.share(), &repository.branch());
+    assert_eq!(history, repo::history(&repository.guest, "HEAD"));
+    assert_eq!(history.len(), 2);
+    assert!(
+        repo::git(repository.share())
+            .args(["rev-parse", "-q", "--verify", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty()
+    );
+}
+
+// spec(SHARE): When the agent's `HEAD` names no commit, or the commit your `HEAD` was at when the run started, and the agent left no files uncommitted, there is no branch.
+#[test]
+fn a_run_that_made_no_commits_makes_no_branch() {
+    for (name, first) in [("no-commits", true), ("no-commits-empty", false)] {
+        let repository = Repository::new(name, first, &[]);
+        fs::write(repository.share().join(".gitignore"), "*.log\n").unwrap();
+        write(&repository.pending, "debug.log", 0o644, b"noise\n");
+
+        let output = repository.apply();
+
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stdout(&output), "skipped 1 git-ignored file\n");
+        assert!(!repository.has_branch());
+        assert!(repository.scratch.runs().list_pending().unwrap().is_empty());
+    }
+}
+
+// spec(SHARE): Before the agent's objects or the branch move in, `ap apply` writes the objects to a quarantine directory and runs your host's `git fsck --strict` on them, against your repository.
+// spec(SHARE): It never runs `git` on anything else the agent wrote.
+// spec(SHARE): If the branch import fails, everything stays pending.
+#[test]
+fn an_object_fsck_refuses_keeps_everything_pending() {
+    let repository = Repository::new("corrupt", true, &[]);
+    let good = repository.commit("README", "hello, world\n");
+    let guest = &repository.guest;
+    let tree = repo::run(guest, &["rev-parse", "HEAD^{tree}"]);
+    let mut hash = repo::git(guest);
+    hash.args([
+        "hash-object",
+        "-t",
+        "commit",
+        "-w",
+        "--literally",
+        "--stdin",
+    ]);
+    let mut child = (hash.stdin(Stdio::piped()).stdout(Stdio::piped()))
+        .spawn()
+        .unwrap();
+    let bad = format!(
+        "tree {tree}\nparent {good}\nauthor nobody\ncommitter C <c@example.com> 1 +0000\n\nbad\n"
+    );
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), bad.as_bytes()).unwrap();
+    let bad = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    repo::run(guest, &["update-ref", "refs/heads/main", bad.trim()]);
+    repository.land();
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
 
     assert_eq!(output.status.code(), Some(1));
-    assert_eq!(stdout(&output), "");
-    assert_eq!(
-        stderr(&output),
-        format!(
-            "ap: run {run}: {}: the share's directory holds a git repository, and `ap apply` can't import a branch yet, so everything stays pending\n",
-            scratch.share.display()
-        )
+    let error = stderr(&output);
+    let share = repository.share().display();
+    let expected = format!(
+        "ap: run {}: {share}: git fsck --strict refused the agent's objects, so everything stays pending:\n",
+        repository.run
     );
+    assert!(error.starts_with(&expected), "{error}");
+    assert!(error.contains("missingEmail"), "{error}");
+    assert_eq!(repository.objects_and_refs(), before);
+    assert_eq!(repository.records(), records);
+    assert!(!repository.has_branch());
+    assert_eq!(repository.scratch.read("README"), "hello\n");
+}
+
+// spec(SHARE): With no `git` on your host, `ap apply` fails the branch import, says so, and everything stays pending.
+#[test]
+fn with_no_git_everything_stays_pending() {
+    let repository = Repository::new("no-git", true, &[]);
+    repository.commit("README", "hello, world\n");
+    repository.land();
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+    let empty = repository.scratch.root.join("empty");
+    fs::create_dir(&empty).unwrap();
+
+    let output = (repository.scratch.command(&["apply", &repository.run]))
+        .env("PATH", &empty)
+        .output()
+        .unwrap();
+
+    repository.stays_pending(
+        &output,
+        "`ap apply` needs git on your host to import a branch, and there is none, so everything stays pending",
+        &before,
+    );
+    assert_eq!(repository.records(), records);
+}
+
+// spec(SHARE): `ap apply` refuses a branch import into a repository whose object format isn't SHA-1, says so, and everything stays pending.
+#[test]
+fn a_repository_that_isn_t_sha_1_keeps_everything_pending() {
+    let repository = Repository::new("sha256", true, &["--object-format=sha256"]);
+    repository.commit("README", "hello, world\n");
+    repository.land();
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    repository.stays_pending(
+        &output,
+        "the repository's object format is sha256, and `ap apply` imports a branch only into a SHA-1 repository, so everything stays pending",
+        &before,
+    );
+    assert_eq!(repository.records(), records);
+}
+
+// spec(SHARE): If the branch already exists, `ap apply` refuses the import, says so, and everything stays pending.
+#[test]
+fn a_branch_that_exists_is_refused() {
+    let repository = Repository::new("exists", true, &[]);
+    repository.commit("README", "hello, world\n");
+    repository.land();
+    repo::run(repository.share(), &["branch", &repository.branch()]);
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    let error = format!(
+        "the branch {} already exists, so everything stays pending",
+        repository.branch()
+    );
+    repository.stays_pending(&output, &error, &before);
+    assert_eq!(repository.records(), records);
+}
+
+/// The last commit, for files the agent wrote but didn't commit, isn't
+/// built yet, so a run that has some keeps everything pending, and so does
+/// every other share of the run.
+#[test]
+fn uncommitted_files_keep_everything_pending() {
+    let repository = Repository::with(
+        "uncommitted",
+        true,
+        Setup {
+            plain: Some("plain"),
+            ..Setup::default()
+        },
+    );
+    repository.commit("README", "hello, world\n");
+    repository.land();
+    write(&repository.pending, "notes.txt", 0o644, b"not committed\n");
+    let plain = repository.scratch.root.join("plain");
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    repository.stays_pending(
+        &output,
+        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+        &before,
+    );
+    assert_eq!(repository.records(), records);
     assert!(!plain.join("file").exists());
-    assert!(!scratch.exists("file"));
-    let after = fs::read(runs.pending_shares(&run).unwrap()[1].dir.join("records")).unwrap();
-    assert_eq!(after, records);
+    assert!(!repository.scratch.exists("notes.txt"));
 }
 
 #[test]
@@ -938,4 +1315,391 @@ fn an_interrupted_write_leaves_your_file_as_it_was() {
     assert_eq!(scratch.read("b/file"), "b\n");
     assert_eq!(sealed, 0o555);
     assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
+/// Writes `text` as a commit object in the agent's repository, without the
+/// checks git makes, and points its `main` at it.
+fn plant_commit(guest: &Path, text: &str) -> String {
+    let mut hash = repo::git(guest);
+    hash.args([
+        "hash-object",
+        "-t",
+        "commit",
+        "-w",
+        "--literally",
+        "--stdin",
+    ]);
+    let mut child = (hash.stdin(Stdio::piped()).stdout(Stdio::piped()))
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), text.as_bytes()).unwrap();
+    let id = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    let id = id.trim().to_owned();
+    repo::run(guest, &["update-ref", "refs/heads/main", &id]);
+    id
+}
+
+/// An object of yours that the agent's history names as another type, which
+/// `git fsck` doesn't look at, loose or packed.
+// spec(SHARE): Before the agent's objects or the branch move in, `ap apply` writes the objects to a quarantine directory and runs your host's `git fsck --strict` on them, against your repository.
+// spec(SHARE): If the branch import fails, everything stays pending.
+#[test]
+fn an_object_of_yours_named_as_another_type_keeps_everything_pending() {
+    for packed in [false, true] {
+        let name = format!("wrong-type-{packed}");
+        let repository = Repository::new(&name, true, &[]);
+        let share = repository.share();
+        if packed {
+            repo::run(share, &["gc", "-q", "--prune=now"]);
+        }
+        let start = repository.start.as_deref().unwrap();
+        let blob = repo::run(share, &["rev-parse", "HEAD:README"]);
+        let text = format!(
+            "tree {blob}\nparent {start}\nauthor A <a@example.com> 1 +0000\ncommitter C <c@example.com> 1 +0000\n\nwrong\n"
+        );
+        plant_commit(&repository.guest, &text);
+        repository.land();
+        let records = repository.records();
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply();
+
+        let error = format!(
+            "the agent's history names object {blob} as a tree, but it is a blob, so everything stays pending"
+        );
+        repository.stays_pending(&output, &error, &before);
+        assert_eq!(repository.records(), records);
+    }
+}
+
+/// Git once wrote a symbolic ref as a symlink, and the run's copy of your
+/// `.git` keeps one as it is.
+#[test]
+fn a_head_that_is_a_symlink_still_names_the_branch() {
+    let symlinked = |dir: &Path| {
+        let link = ["-c", "core.preferSymlinkRefs=true", "symbolic-ref"];
+        repo::run(dir, &[&link[..], &["HEAD", "refs/heads/main"]].concat());
+        assert!(dir.join(".git/HEAD").is_symlink());
+    };
+    let repository = Repository::with(
+        "symlinked-head",
+        true,
+        Setup {
+            before: Some(&symlinked),
+            ..Setup::default()
+        },
+    );
+    assert!(repository.pending.join("git/HEAD").is_symlink());
+    symlinked(&repository.guest);
+    repository.commit("README", "hello, world\n");
+    repository.land();
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        repo::history(repository.share(), &repository.branch()),
+        repo::history(&repository.guest, "HEAD")
+    );
+}
+
+/// A directory the agent made where its `HEAD` holds a file is a change it
+/// didn't commit.
+#[test]
+fn a_directory_in_place_of_a_committed_file_is_uncommitted() {
+    let repository = Repository::new("directory-for-file", true, &[]);
+    repository.commit("docs/guide.md", "read me\n");
+    repository.land();
+    delete(repository.share(), &repository.pending, "README");
+    dir(&repository.pending, "README", 0o755);
+    let records = repository.records();
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    repository.stays_pending(
+        &output,
+        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+        &before,
+    );
+    assert_eq!(repository.records(), records);
+}
+
+/// A branch that git can't write, because a branch of yours is named
+/// where its directory goes, keeps the run's other shares pending too.
+// spec(SHARE): If the branch import fails, everything stays pending.
+#[test]
+fn a_branch_that_can_t_be_written_keeps_every_share_pending() {
+    let repository = Repository::with(
+        "branch-blocked",
+        true,
+        Setup {
+            plain: Some("plain"),
+            ..Setup::default()
+        },
+    );
+    repository.commit("README", "hello, world\n");
+    repository.land();
+    repo::run(repository.share(), &["branch", "ap"]);
+    let plain = repository.scratch.root.join("plain");
+    let shares = repository
+        .scratch
+        .runs()
+        .pending_shares(&repository.run)
+        .unwrap();
+    assert_eq!(shares[0].root, plain);
+    let plain_records = fs::read(shares[0].dir.join("records")).unwrap();
+    let records = repository.records();
+    let refs = repo::run(repository.share(), &["for-each-ref"]);
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let share = repository.share().display();
+    let error = stderr(&output);
+    let expected = format!(
+        "ap: run {}: {share}: git update-ref failed: ",
+        repository.run
+    );
+    assert!(error.starts_with(&expected), "{error}");
+    assert!(
+        error.ends_with(", so everything stays pending\n"),
+        "{error}"
+    );
+    assert!(!plain.join("file").exists());
+    assert_eq!(
+        fs::read(shares[0].dir.join("records")).unwrap(),
+        plain_records
+    );
+    assert_eq!(repository.records(), records);
+    assert_eq!(repo::run(repository.share(), &["for-each-ref"]), refs);
+}
+
+/// A run with two repositories, where the second branch can't be written,
+/// takes back the first.
+// spec(SHARE): If the branch import fails, everything stays pending.
+#[test]
+fn a_second_branch_that_can_t_be_written_takes_back_the_first() {
+    let scratch = Scratch::new("two-branches");
+    let other = scratch.root.join("other");
+    let runs = scratch.runs();
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    let mut repositories = Vec::new();
+    for (root, guest) in [(&scratch.share, "guest"), (&other, "other-guest")] {
+        fs::create_dir_all(root).unwrap();
+        repo::run(root, &["init", "-q"]);
+        repo::commit(root, "README", "hello\n", "start");
+        let pending = runs.create_pending_share(&run, root).unwrap();
+        fs::create_dir(pending.join("tree")).unwrap();
+        fs::write(pending.join("records"), "").unwrap();
+        repo::capture(root, &pending);
+        let guest = scratch.root.join(guest);
+        repo::guest(root, &guest);
+        repo::commit(&guest, "a", "a\n", "one");
+        write(&pending, "a", 0o644, b"a\n");
+        repo::land(&guest, root, &pending);
+        repositories.push((root.clone(), pending));
+    }
+    repo::run(&other, &["branch", "ap"]);
+    let before: Vec<_> = (repositories.iter())
+        .map(|(root, pending)| {
+            let refs = repo::run(root, &["for-each-ref"]);
+            (refs, fs::read(pending.join("records")).unwrap())
+        })
+        .collect();
+
+    let output = (scratch.command(&["apply", &run]))
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let expected = format!(
+        "ap: run {run}: {}: git update-ref failed: ",
+        other.display()
+    );
+    assert!(
+        stderr(&output).starts_with(&expected),
+        "{}",
+        stderr(&output)
+    );
+    let after: Vec<_> = (repositories.iter())
+        .map(|(root, pending)| {
+            let refs = repo::run(root, &["for-each-ref"]);
+            (refs, fs::read(pending.join("records")).unwrap())
+        })
+        .collect();
+    assert_eq!(after, before);
+}
+
+/// A file or a directory the agent committed, then deleted without
+/// committing that, is a change it didn't commit, though you never had it,
+/// and so is a directory it made again without what it committed there.
+#[test]
+fn a_committed_file_deleted_since_is_uncommitted() {
+    let cases = [
+        ("deleted-file", &["DELETE \"a\""][..]),
+        (
+            "deleted-directory",
+            &["DELETE \"docs/guide.md\"", "DELETE \"docs\""],
+        ),
+        // The agent makes the directory again, empty, with and without
+        // hiding yours.
+        ("remade-directory", &["DELETE \"docs\"", "DIR \"docs\" 755"]),
+        (
+            "remade-opaque",
+            &["DELETE \"docs\"", "DIR \"docs\" 755 opaque"],
+        ),
+    ];
+    for (name, lines) in cases {
+        let repository = Repository::new(name, true, &[]);
+        repository.commit("a", "a\n");
+        repository.commit("docs/guide.md", "read me\n");
+        repository.land();
+        for line in lines {
+            record(&repository.pending, line);
+        }
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply();
+
+        repository.stays_pending(
+            &output,
+            "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+            &before,
+        );
+    }
+}
+
+/// When a branch that was written can't be taken back, `ap apply` says
+/// which one stays.
+#[test]
+fn a_branch_that_can_t_be_taken_back_is_named() {
+    let scratch = Scratch::new("rollback-refused");
+    let other = scratch.root.join("other");
+    let runs = scratch.runs();
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    for (root, guest) in [(&scratch.share, "guest"), (&other, "other-guest")] {
+        fs::create_dir_all(root).unwrap();
+        repo::run(root, &["init", "-q"]);
+        repo::commit(root, "README", "hello\n", "start");
+        let pending = runs.create_pending_share(&run, root).unwrap();
+        fs::create_dir(pending.join("tree")).unwrap();
+        fs::write(pending.join("records"), "").unwrap();
+        repo::capture(root, &pending);
+        let guest = scratch.root.join(guest);
+        repo::guest(root, &guest);
+        repo::commit(&guest, "a", "a\n", "one");
+        write(&pending, "a", 0o644, b"a\n");
+        repo::land(&guest, root, &pending);
+    }
+    repo::run(&other, &["branch", "ap"]);
+    // Your hook refuses to delete a branch.
+    let hook = scratch.share.join(".git/hooks/reference-transaction");
+    let zero = "0".repeat(40);
+    let script = format!(
+        "#!/bin/sh\nwhile read old new ref; do [ \"$new\" = {zero} ] && exit 1; done\nexit 0\n"
+    );
+    fs::write(&hook, script).unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = (scratch.command(&["apply", &run]))
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let error = stderr(&output);
+    let stays = format!(
+        "the branch ap/notes/{run} stays in {}, because git update-ref couldn't remove it: ",
+        scratch.share.display()
+    );
+    assert!(error.contains(&stays), "{error}");
+    assert!(
+        error.ends_with(", so everything stays pending\n"),
+        "{error}"
+    );
+    assert!(scratch.runs().has_pending(&run).unwrap());
+}
+
+/// The agent commits a submodule's commit at `deps/vendor`, and `docs`
+/// with a file your `.gitignore` names.
+fn with_submodule_and_ignored(name: &str) -> Repository {
+    let repository = Repository::new(name, true, &[]);
+    fs::write(repository.share().join(".gitignore"), "*.log\n").unwrap();
+    let guest = &repository.guest;
+    let start = repository.start.as_deref().unwrap();
+    let gitlink = format!("160000,{start},deps/vendor");
+    repo::run(guest, &["update-index", "--add", "--cacheinfo", &gitlink]);
+    fs::create_dir_all(guest.join("deps/vendor")).unwrap();
+    repository.commit("docs/guide.md", "read me\n");
+    fs::write(guest.join("docs/debug.log"), "noise\n").unwrap();
+    repo::run(guest, &["add", "-f", "docs/debug.log"]);
+    repo::run(guest, &["commit", "-q", "-m", "log"]);
+    write(&repository.pending, "docs/debug.log", 0o644, b"noise\n");
+    dir(&repository.pending, "deps", 0o755);
+    dir(&repository.pending, "deps/vendor", 0o755);
+    repository.land();
+    repository
+}
+
+/// A submodule's directory gone from a directory the agent made again is
+/// a change it didn't commit.
+#[test]
+fn a_submodule_gone_from_a_directory_made_again_is_uncommitted() {
+    let repository = with_submodule_and_ignored("submodule-gone");
+    record(&repository.pending, "DELETE \"deps\"");
+    record(&repository.pending, "DIR \"deps\" 755");
+    let before = repository.objects_and_refs();
+
+    let output = repository.apply();
+
+    repository.stays_pending(
+        &output,
+        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
+        &before,
+    );
+}
+
+/// A submodule's directory, and a git-ignored file the agent deleted in a
+/// directory whose mode it changed, are as its `HEAD` holds them.
+#[test]
+fn a_submodule_s_directory_and_an_ignored_file_land_as_committed() {
+    let repository = with_submodule_and_ignored("submodule-kept");
+    record(&repository.pending, "DELETE \"docs/debug.log\"");
+    record(&repository.pending, "DIR \"docs\" 700");
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        repo::history(repository.share(), &repository.branch()),
+        repo::history(&repository.guest, "HEAD")
+    );
+}
+
+/// A directory the agent deleted, which held only git-ignored files in its
+/// `HEAD`, leaves out what was in it, as each file is left out.
+#[test]
+fn a_deleted_directory_of_ignored_files_lands_as_committed() {
+    let repository = Repository::new("ignored-directory", true, &[]);
+    fs::write(repository.share().join(".gitignore"), "*.log\n").unwrap();
+    let guest = &repository.guest;
+    fs::create_dir(guest.join("logs")).unwrap();
+    fs::write(guest.join("logs/debug.log"), "noise\n").unwrap();
+    repo::run(guest, &["add", "-f", "logs/debug.log"]);
+    repo::run(guest, &["commit", "-q", "-m", "log"]);
+    write(&repository.pending, "logs/debug.log", 0o644, b"noise\n");
+    repository.land();
+    record(&repository.pending, "DELETE \"logs\"");
+
+    let output = repository.apply();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        repo::history(repository.share(), &repository.branch()),
+        repo::history(guest, "HEAD")
+    );
 }

@@ -34,8 +34,8 @@ fn diff(name: &str) -> Result<(), String> {
     let Some(run) = run else {
         return Ok(());
     };
-    let shares =
-        (Runs::new(&root).pending_shares(&run)).map_err(|error| format!("run {run}: {error}"))?;
+    let runs = Runs::new(&root);
+    let shares = (runs.pending_shares(&run)).map_err(|error| format!("run {run}: {error}"))?;
     let mut out = Vec::new();
     let mut ignored = 0;
     for share in &shares {
@@ -45,8 +45,15 @@ fn diff(name: &str) -> Result<(), String> {
         }
         .diff()
         .map_err(|error| format!("run {run}: {}: {error}", share.root.display()))?;
-        if shares.len() > 1 && !shown.text.is_empty() {
+        if shares.len() > 1 && (!shown.text.is_empty() || shown.commits.is_some()) {
             out.extend(pending::root_line(&share.root));
+        }
+        if let Some(commits) = &shown.commits {
+            let record = runs.get(&run).map_err(|error| error.to_string())?;
+            let agent = record.ok_or_else(|| {
+                format!("run {run} has no record, so its branch would have no name")
+            })?;
+            out.extend(pending::commits_line(&agent.agent, &run, commits).bytes());
         }
         out.extend(shown.text);
         ignored += shown.ignored;

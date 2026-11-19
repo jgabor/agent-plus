@@ -7,7 +7,7 @@ mod pack;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -99,6 +99,85 @@ impl Object {
     fn header(&self) -> Vec<u8> {
         format!("{} {}\0", self.kind, self.data.len()).into_bytes()
     }
+
+    /// The tree and parents a commit names, from the lines that start it,
+    /// as git's `parse_commit_buffer` reads them.
+    pub fn commit(&self) -> Result<Commit, Error> {
+        let bad = || corrupt("a commit has a bad header");
+        if self.kind != Kind::Commit {
+            return Err(corrupt(format!("a {} isn't a commit", self.kind)));
+        }
+        let mut lines = self.data.split(|&b| b == b'\n');
+        let tree = (lines.next().and_then(|line| line.strip_prefix(b"tree ")))
+            .and_then(hex_id)
+            .ok_or_else(bad)?;
+        let mut parents = Vec::new();
+        for line in lines {
+            match line.strip_prefix(b"parent ") {
+                Some(hex) => parents.push(hex_id(hex).ok_or_else(bad)?),
+                None => break,
+            }
+        }
+        Ok(Commit { tree, parents })
+    }
+
+    /// The entries of a tree, in its order.
+    pub fn entries(&self) -> Result<Vec<TreeEntry>, Error> {
+        let bad = || corrupt("a tree has a bad entry");
+        if self.kind != Kind::Tree {
+            return Err(corrupt(format!("a {} isn't a tree", self.kind)));
+        }
+        let mut entries = Vec::new();
+        let mut rest = &self.data[..];
+        while !rest.is_empty() {
+            let space = rest.iter().position(|&b| b == b' ').ok_or_else(bad)?;
+            let mode = &rest[..space];
+            if mode.is_empty() || !mode.iter().all(|b| (b'0'..=b'7').contains(b)) {
+                return Err(bad());
+            }
+            let mode = u32::from_str_radix(std::str::from_utf8(mode).map_err(|_| bad())?, 8)
+                .map_err(|_| bad())?;
+            rest = &rest[space + 1..];
+            let nul = rest.iter().position(|&b| b == 0).ok_or_else(bad)?;
+            let name = rest[..nul].to_vec();
+            let id = rest.get(nul + 1..nul + 21).ok_or_else(bad)?;
+            entries.push(TreeEntry {
+                mode,
+                name,
+                id: Id(id.try_into().map_err(|_| bad())?),
+            });
+            rest = &rest[nul + 21..];
+        }
+        Ok(entries)
+    }
+
+    /// The object a tag names.
+    pub fn tag_target(&self) -> Result<Id, Error> {
+        if self.kind != Kind::Tag {
+            return Err(corrupt(format!("a {} isn't a tag", self.kind)));
+        }
+        (self.data.split(|&b| b == b'\n').next())
+            .and_then(|line| line.strip_prefix(b"object "))
+            .and_then(hex_id)
+            .ok_or_else(|| corrupt("a tag has a bad header"))
+    }
+}
+
+/// What a commit names in the lines that start it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Commit {
+    pub tree: Id,
+    pub parents: Vec<Id>,
+}
+
+/// One entry of a tree.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TreeEntry {
+    /// Its mode, such as `0o100644`, `0o40000` for a tree, or `0o160000`
+    /// for a submodule's commit.
+    pub mode: u32,
+    pub name: Vec<u8>,
+    pub id: Id,
 }
 
 /// What a ref points at.
@@ -159,6 +238,37 @@ fn is_missing(error: &io::Error) -> bool {
     )
 }
 
+/// The type of the loose object at `path`, named `hex`, or `None` if there
+/// is none. Only as much of the file as holds the header is read, a little
+/// more each time, so a large object is never read whole.
+fn loose_kind(path: &Path, hex: &str) -> Result<Option<Kind>, Error> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if is_missing(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut compressed = Vec::new();
+    let mut chunk = 256;
+    loop {
+        let len = match (&mut file).take(chunk).read_to_end(&mut compressed) {
+            Ok(len) => len,
+            Err(e) if is_missing(&e) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
+            Ok(all) => all,
+            Err(e) => e.output,
+        };
+        if let Some((kind, _, _)) = parse_header(&prefix) {
+            return Ok(Some(kind));
+        }
+        if len == 0 {
+            return Err(corrupt(format!("{hex} has a bad header")));
+        }
+        chunk *= 2;
+    }
+}
+
 /// The file at `path`, or `None` if there is none.
 fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
     match fs::read(path) {
@@ -198,6 +308,34 @@ impl Repository {
             }
         }
         Ok(None)
+    }
+
+    /// The type of the object named `id`, loose or packed, or `None` if
+    /// there is none. It reads only a loose object's header, and only the
+    /// headers of a packed object's chain of deltas.
+    pub fn kind(&self, id: &Id) -> Result<Option<Kind>, Error> {
+        let hex = id.to_string();
+        let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
+        if let Some(kind) = loose_kind(&path, &hex)? {
+            return Ok(Some(kind));
+        }
+        for pack in self.packs()? {
+            if let Some(offset) = pack.find(id)? {
+                return pack.kind(offset).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether the repository has the object named `id`, loose or packed,
+    /// without reading it.
+    pub fn contains(&self, id: &Id) -> Result<bool, Error> {
+        let hex = id.to_string();
+        let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
+        if fs::symlink_metadata(&path).is_ok() {
+            return Ok(true);
+        }
+        self.is_packed(id)
     }
 
     /// Whether a pack holds the object named `id`.
@@ -416,74 +554,81 @@ impl Repository {
         Ok(())
     }
 
-    /// The refs in `packed-refs` under `refs/`, by name. It parses records
-    /// as git's `next_record` does: an id, one whitespace byte other than a
-    /// newline, and a name up to a newline, with an optional `^` line that peels it. A name git
-    /// calls dangerous refuses the file, and any other bad name is left out.
+    /// The refs in `packed-refs` under `refs/`, by name, as
+    /// [`parse_packed_refs`] reads them.
     fn packed_refs(&self) -> Result<BTreeMap<String, Id>, Error> {
-        let mut refs = BTreeMap::new();
-        let Some(contents) = read(&self.git_dir.join("packed-refs"))? else {
-            return Ok(refs);
-        };
-        let mut rest = &contents[..];
-        let mut sorted = false;
-        if let Some(traits) = rest.strip_prefix(b"# pack-refs with: ") {
-            let eol = traits.iter().position(|&b| b == b'\n');
-            let eol = eol.ok_or_else(|| corrupt("packed-refs has an unterminated header"))?;
-            sorted = traits[..eol].split(|&b| b == b' ').any(|t| t == b"sorted");
-            rest = &traits[eol + 1..];
+        match read(&self.git_dir.join("packed-refs"))? {
+            Some(contents) => parse_packed_refs(&contents),
+            None => Ok(BTreeMap::new()),
         }
-        // A file that doesn't say it is sorted, git sorts first, and that
-        // takes every line but a `^` one to be long enough for a record.
-        if !sorted {
-            let mut lines = rest.split(|&b| b == b'\n');
-            while let Some(line) = lines.next() {
-                if line.is_empty() && lines.clone().next().is_none() {
-                    break;
-                }
-                if line.len() < 42 {
-                    return Err(corrupt("packed-refs has a short line"));
-                }
-                if lines
-                    .clone()
-                    .next()
-                    .is_some_and(|next| next.starts_with(b"^"))
-                {
-                    lines.next();
-                }
+    }
+}
+
+/// The refs under `refs/` that `contents`, a `packed-refs` file, holds, by
+/// name. It parses records as git's `next_record` does: an id, one
+/// whitespace byte other than a newline, and a name up to a newline, with an
+/// optional `^` line that peels it. A name git calls dangerous refuses the
+/// file, and any other bad name is left out.
+pub fn parse_packed_refs(contents: &[u8]) -> Result<BTreeMap<String, Id>, Error> {
+    let mut refs = BTreeMap::new();
+    let mut rest = contents;
+    let mut sorted = false;
+    if let Some(traits) = rest.strip_prefix(b"# pack-refs with: ") {
+        let eol = traits.iter().position(|&b| b == b'\n');
+        let eol = eol.ok_or_else(|| corrupt("packed-refs has an unterminated header"))?;
+        sorted = traits[..eol].split(|&b| b == b' ').any(|t| t == b"sorted");
+        rest = &traits[eol + 1..];
+    }
+    // A file that doesn't say it is sorted, git sorts first, and that
+    // takes every line but a `^` one to be long enough for a record.
+    if !sorted {
+        let mut lines = rest.split(|&b| b == b'\n');
+        while let Some(line) = lines.next() {
+            if line.is_empty() && lines.clone().next().is_none() {
+                break;
+            }
+            if line.len() < 42 {
+                return Err(corrupt("packed-refs has a short line"));
+            }
+            if lines
+                .clone()
+                .next()
+                .is_some_and(|next| next.starts_with(b"^"))
+            {
+                lines.next();
             }
         }
-        while !rest.is_empty() {
-            let bad = || corrupt("packed-refs has a bad line");
-            // Git finds records by line, so the space can't be a newline.
-            if rest.len() < 42 || !is_git_space(rest[40]) || rest[40] == b'\n' {
+    }
+    while !rest.is_empty() {
+        let bad = || corrupt("packed-refs has a bad line");
+        // Git finds records by line, so the space can't be a newline.
+        if rest.len() < 42 || !is_git_space(rest[40]) || rest[40] == b'\n' {
+            return Err(bad());
+        }
+        let id = hex_id(&rest[..40]).ok_or_else(bad)?;
+        rest = &rest[41..];
+        let eol = rest.iter().position(|&b| b == b'\n');
+        let eol = eol.ok_or_else(|| corrupt("packed-refs ends without a newline"))?;
+        let name = &rest[..eol];
+        rest = &rest[eol + 1..];
+        if name.contains(&0) || (!format_ok(name) && !is_safe(name)) {
+            return Err(corrupt("packed-refs holds a dangerous name"));
+        }
+        if let Some(peeled) = rest.strip_prefix(b"^") {
+            if peeled.len() < 41 || hex_id(&peeled[..40]).is_none() || peeled[40] != b'\n' {
                 return Err(bad());
             }
-            let id = hex_id(&rest[..40]).ok_or_else(bad)?;
-            rest = &rest[41..];
-            let eol = rest.iter().position(|&b| b == b'\n');
-            let eol = eol.ok_or_else(|| corrupt("packed-refs ends without a newline"))?;
-            let name = &rest[..eol];
-            rest = &rest[eol + 1..];
-            if name.contains(&0) || (!format_ok(name) && !is_safe(name)) {
-                return Err(corrupt("packed-refs holds a dangerous name"));
-            }
-            if let Some(peeled) = rest.strip_prefix(b"^") {
-                if peeled.len() < 41 || hex_id(&peeled[..40]).is_none() || peeled[40] != b'\n' {
-                    return Err(bad());
-                }
-                rest = &peeled[41..];
-            }
-            // A name that isn't UTF-8 can't be asked for, so it is left out.
-            if let Ok(name) = std::str::from_utf8(name)
-                && name.starts_with("refs/")
-                && format_ok(name.as_bytes())
-            {
-                refs.insert(name.to_string(), id);
-            }
+            rest = &peeled[41..];
         }
-        Ok(refs)
+        // A name that isn't UTF-8 can't be asked for, so it is left out.
+        if let Ok(name) = std::str::from_utf8(name)
+            && name.starts_with("refs/")
+            && format_ok(name.as_bytes())
+        {
+            refs.insert(name.to_string(), id);
+        }
     }
+    Ok(refs)
 }
 
 /// A new file in `dir`, named as git names its temporary objects, and
@@ -542,6 +687,13 @@ fn is_safe(name: &[u8]) -> bool {
 /// The bytes git's `isspace` takes as whitespace.
 fn is_git_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// What `contents`, the file of the loose ref `name`, says, as
+/// [`Repository::find_ref`] reads it.
+pub fn parse_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
+    check_name(name)?;
+    parse_loose_ref(name, contents)
 }
 
 /// What a loose ref file says: 40 hex digits, or `ref:` and another ref.

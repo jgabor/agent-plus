@@ -4,6 +4,7 @@ use git::{Id, Kind, Object, Repository, Target, TreeEntry};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,9 +15,9 @@ const IDENTITY: &str = "Fake Harness <fake-harness@localhost>";
 /// first one that fails. A line that starts with no step's word is left
 /// alone, so a prompt can say other things too.
 pub fn take(prompt: &str) -> Result<(), String> {
-    // What changed since the last commit, by path: new contents, or `None`
-    // for a deleted file.
-    let mut changes: BTreeMap<Vec<String>, Option<Vec<u8>>> = BTreeMap::new();
+    // What changed since the last commit, by path: a file's mode in git and
+    // its new contents, or `None` for a deleted file.
+    let mut changes: Changes = BTreeMap::new();
     for line in prompt.lines() {
         let line = line.trim_end_matches('\r');
         let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -32,8 +33,19 @@ pub fn take(prompt: &str) -> Result<(), String> {
                     fs::create_dir_all(parent)
                         .map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
                 }
-                fs::write(path, &contents).map_err(|e| format!("couldn't put {path}: {e}"))?;
-                changes.insert(parts, Some(contents));
+                let mode = fs::write(path, &contents)
+                    .and_then(|()| fs::metadata(path))
+                    .map_err(|e| format!("couldn't put {path}: {e}"))?
+                    .permissions()
+                    .mode();
+                // `put` keeps the mode of a file it replaces, and git keeps
+                // only whether it is executable.
+                let mode = if mode & 0o111 == 0 {
+                    0o100644
+                } else {
+                    0o100755
+                };
+                changes.insert(parts, Some((mode, contents)));
             }
             "delete" => {
                 let parts = parts(rest)?;
@@ -63,10 +75,13 @@ fn parts(path: &str) -> Result<Vec<String>, String> {
     Ok(parts)
 }
 
+/// The files changed since the last commit.
+type Changes = BTreeMap<Vec<String>, Option<(u32, Vec<u8>)>>;
+
 /// Commits `changes` on top of the commit `HEAD` names, in `.git` in the
 /// working directory, and moves `HEAD`, or the branch it names, to it. The
 /// index stays as it was, as nothing reads it here.
-fn commit(changes: &BTreeMap<Vec<String>, Option<Vec<u8>>>, message: &str) -> Result<(), String> {
+fn commit(changes: &Changes, message: &str) -> Result<(), String> {
     if changes.is_empty() {
         return Err("nothing changed since the last commit".to_string());
     }
@@ -93,14 +108,13 @@ fn commit(changes: &BTreeMap<Vec<String>, Option<Vec<u8>>>, message: &str) -> Re
     for (parts, contents) in changes {
         let blob = match contents {
             None => None,
-            Some(contents) => Some(write(
-                &git_dir,
-                &repository,
-                &Object {
+            Some((mode, contents)) => {
+                let blob = Object {
                     kind: Kind::Blob,
                     data: contents.clone(),
-                },
-            )?),
+                };
+                Some((*mode, write(&git_dir, &repository, &blob)?))
+            }
         };
         tree = edit(&git_dir, &repository, tree, parts, blob)?;
     }
@@ -118,14 +132,15 @@ fn commit(changes: &BTreeMap<Vec<String>, Option<Vec<u8>>>, message: &str) -> Re
         .map_err(|e| format!("couldn't move {name}: {e}"))
 }
 
-/// The tree `tree` with the file at `parts` set to `blob`, or removed for
+/// The tree `tree` with the file at `parts` set to `blob`, a mode and an
+/// object, or removed for
 /// `None`. An empty tree is `None`, because git keeps no empty directory.
 fn edit(
     git_dir: &Path,
     repository: &Repository,
     tree: Option<Id>,
     parts: &[String],
-    blob: Option<Id>,
+    blob: Option<(u32, Id)>,
 ) -> Result<Option<Id>, String> {
     let mut entries = match tree {
         None => Vec::new(),
@@ -137,7 +152,7 @@ fn edit(
     let old = entries.iter().position(|entry| entry.name == name);
     let old = old.map(|at| entries.remove(at));
     let new = if parts.len() == 1 {
-        blob.map(|id| (0o100644, id))
+        blob
     } else {
         let below = old.filter(|old| old.mode == 0o40000).map(|old| old.id);
         edit(git_dir, repository, below, &parts[1..], blob)?.map(|id| (0o40000, id))

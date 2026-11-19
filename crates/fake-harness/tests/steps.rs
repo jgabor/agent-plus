@@ -168,3 +168,25 @@ fn it_commits_again_on_its_own_commit() {
     );
     git(&directory, &["fsck", "--strict", "--no-dangling"]);
 }
+
+#[test]
+fn it_commits_an_executable_file_as_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = empty_directory("executable");
+    git(&directory, &["init", "-q"]);
+    fs::write(directory.join("run.sh"), "yours\n").unwrap();
+    fs::set_permissions(directory.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    git(&directory, &["add", "."]);
+    git(&directory, &["commit", "-qm", "Start"]);
+    steps(
+        &directory,
+        "put run.sh agent's\nput plain.txt plain\ncommit Change run.sh",
+    );
+    assert_eq!(
+        git(
+            &directory,
+            &["ls-tree", "HEAD", "--format=%(objectmode) %(path)"]
+        ),
+        "100644 plain.txt\n100755 run.sh\n"
+    );
+}

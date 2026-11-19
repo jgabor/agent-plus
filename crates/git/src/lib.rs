@@ -151,6 +151,51 @@ impl Object {
         Ok(entries)
     }
 
+    /// A tree of `entries`, in the order git keeps them: by name, where a
+    /// tree's name ends in `/`.
+    pub fn tree(mut entries: Vec<TreeEntry>) -> Object {
+        entries.sort_by_cached_key(|entry| {
+            let mut key = entry.name.clone();
+            if entry.mode == 0o40000 {
+                key.push(b'/');
+            }
+            key
+        });
+        let mut data = Vec::new();
+        for entry in entries {
+            data.extend(format!("{:o} ", entry.mode).bytes());
+            data.extend(&entry.name);
+            data.push(0);
+            data.extend(entry.id.0);
+        }
+        Object {
+            kind: Kind::Tree,
+            data,
+        }
+    }
+
+    /// A commit of `tree` with `parents`, whose author and committer are
+    /// both `identity`, a name and an email in `<>`, at `time`, in seconds
+    /// since the epoch in UTC, with `message`.
+    pub fn new_commit(
+        tree: Id,
+        parents: &[Id],
+        identity: &str,
+        time: i64,
+        message: &str,
+    ) -> Object {
+        let mut data = format!("tree {tree}\n");
+        for parent in parents {
+            data.push_str(&format!("parent {parent}\n"));
+        }
+        data.push_str(&format!("author {identity} {time} +0000\n"));
+        data.push_str(&format!("committer {identity} {time} +0000\n\n{message}"));
+        Object {
+            kind: Kind::Commit,
+            data: data.into_bytes(),
+        }
+    }
+
     /// The object a tag names.
     pub fn tag_target(&self) -> Result<Id, Error> {
         if self.kind != Kind::Tag {

@@ -8,6 +8,21 @@
 //! `FAKE_HARNESS_STATUS`, or 0. With `FAKE_HARNESS_IGNORE_TERM` set, it
 //! ignores `SIGTERM`.
 //!
+//! Its prompt, the last argument, steers it too. After those writes, it
+//! takes each line of the prompt that starts with a step's word, in order:
+//!
+//! - `put <path> <text>` puts `<text>` and a newline in the file at
+//!   `<path>`, making the directories above it, and replacing what it held.
+//! - `delete <path>` deletes the file at `<path>`.
+//! - `commit <message>` commits every file that `put` or `delete` changed
+//!   since the last commit, on top of the commit `HEAD` names in `.git`, and
+//!   moves `HEAD`, or the branch it names, to the new commit. It writes the
+//!   objects itself, because a guest may have no `git`, and leaves the index
+//!   as it was.
+//!
+//! Each path is relative to the working directory. Other lines are left
+//! alone, and the first step that fails stops it with status 1.
+//!
 //! In a terminal, as an interactive harness is, its report has the
 //! terminal's size, and before it exits it answers each line typed: `size`
 //! with the size again, and anything else with the line itself, unescaped.
@@ -21,6 +36,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::thread;
+
+mod steps;
 use std::time::Duration;
 
 const TIOCGWINSZ: c_ulong = 0x5413;
@@ -84,6 +101,12 @@ fn main() -> ExitCode {
             eprintln!("fake-harness: couldn't write {}: {e}", path.display());
             return ExitCode::FAILURE;
         }
+    }
+    if let Some(prompt) = arguments.last()
+        && let Err(e) = steps::take(prompt)
+    {
+        eprintln!("fake-harness: {e}");
+        return ExitCode::FAILURE;
     }
     if let Ok(seconds) = env::var("FAKE_HARNESS_SLEEP") {
         let Ok(seconds) = seconds.parse() else {

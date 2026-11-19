@@ -54,6 +54,10 @@ version = "0.0.0"
 [[package]]
 name = "fake-harness"
 version = "0.0.0"
+dependencies = [
+ "git",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fake-vm"

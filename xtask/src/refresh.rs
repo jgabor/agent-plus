@@ -224,7 +224,10 @@ fn hand_back(
         .count()
         == 0;
     let mark = format!("<!-- refresh {head} -->");
-    if !gh.comment_bodies(pr.number)?.contains(&mark) {
+    let commented = gh.comment_bodies(pr.number).and_then(|bodies| {
+        if bodies.contains(&mark) {
+            return Ok(());
+        }
         let issue = if unlabeled {
             format!("Its issue no longer has `{LAND_NEEDED}`, so a worker takes it up again. ")
         } else {
@@ -233,7 +236,10 @@ fn hand_back(
         let body = format!(
             "The refresh couldn't prove this PR: {why}\n\n{issue}Auto-merge stays armed, and the refresh merges the PR once its fix is proven.\n\n{mark}\n"
         );
-        gh.comment_on_pr(pr.number, &body)?;
+        gh.comment_on_pr(pr.number, &body)
+    });
+    if let Err(Problem(message)) = commented {
+        failed.push(message);
     }
     if failed.is_empty() {
         Ok(())

@@ -386,7 +386,8 @@ maybe_kill before
   esac ;;
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
-  "pr comment") cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
+  "pr comment") if [ -f '{bin}/comment-fails' ]; then echo 'gh: no comment (HTTP 403)' >&2; exit 1; fi
+    cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
     if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi ;;
@@ -2982,6 +2983,31 @@ fn a_refresh_that_can_not_unlabel_the_issue_unlabels_the_pr_and_comments_once() 
     let comments = repo.pr_comments();
     assert!(comments.contains("Not proven"), "{comments}");
     assert!(!comments.contains("no longer has"), "{comments}");
+}
+
+/// A comment that can't be posted hides none of the labels' failures.
+#[test]
+fn a_refresh_names_each_failure_of_a_hand_back() {
+    let repo = Repo::new("refresh-refused-all");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    for name in ["refuse-label-7", "refuse-label-9", "comment-fails"] {
+        fs::write(repo.bin.join(name), "").unwrap();
+    }
+
+    let output = repo.refresh();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let said = stderr(&output);
+    for call in [unlabeled(9), unlabeled(7)] {
+        assert!(said.contains(&format!("`{call}` failed")), "{said}");
+    }
+    assert!(said.contains("no comment (HTTP 403)"), "{said}");
 }
 
 /// A fork's branch isn't in this repository, and `prepare` refuses it.

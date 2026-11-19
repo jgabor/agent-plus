@@ -9,11 +9,14 @@
 //! only on your repository, and on the agent's objects once it has written
 //! them to a quarantine directory.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
+use std::ops::Bound;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use git::{Id, Kind, Object, Repository, Target};
 
@@ -31,6 +34,8 @@ const MAX_DEPTH: usize = 5;
 const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
 const TREE: u32 = 0o40000;
+/// The author and committer of the last commit.
+const IDENTITY: &str = "Agent+ <ap@localhost>";
 
 /// A file in the agent's `.git`: a regular file's contents, or the target
 /// of a symlink.
@@ -47,6 +52,9 @@ struct Agent<'a> {
     /// The objects the agent wrote, in the tree.
     written: Repository,
     yours: Repository,
+    /// The trees and blobs of the last commit, and the commit, which are
+    /// nowhere else until they go in quarantine.
+    made: RefCell<HashMap<Id, Object>>,
 }
 
 impl<'a> Agent<'a> {
@@ -56,7 +64,16 @@ impl<'a> Agent<'a> {
             dir: share.dir,
             written: Repository::at(share.dir.join("tree").join(".git")),
             yours: Repository::at(share.root.join(".git")),
+            made: RefCell::default(),
         }
+    }
+
+    /// Keeps `object` with the ones the agent's history has, and returns
+    /// its name.
+    fn make(&self, object: Object) -> Id {
+        let id = object.id();
+        self.made.borrow_mut().entry(id).or_insert(object);
+        id
     }
 
     /// The agent's file at `path` in its `.git`, or `None` if it has no
@@ -112,9 +129,13 @@ impl<'a> Agent<'a> {
     /// The object named `id`, from the agent's objects or yours. Its
     /// contents must have that name.
     fn object(&self, id: &Id) -> Result<Object, git::Error> {
-        let object = match self.written.object(id)? {
+        let made = self.made.borrow().get(id).cloned();
+        let object = match made {
             Some(object) => Some(object),
-            None => self.yours.object(id)?,
+            None => match self.written.object(id)? {
+                Some(object) => Some(object),
+                None => self.yours.object(id)?,
+            },
         };
         let object = object.ok_or_else(|| {
             git::Error::Corrupt(format!("the agent's history is missing object {id}"))
@@ -184,108 +205,136 @@ impl<'a> Agent<'a> {
         Ok(commits)
     }
 
-    /// The mode and object at `path` in the tree of `commit`, if it has
-    /// anything there.
-    fn entry(&self, commit: Id, path: &[u8]) -> Result<Option<(u32, Id)>, git::Error> {
-        let mut id = self.object(&commit)?.commit()?.tree;
-        let mut mode = TREE;
-        for name in path.split(|&b| b == b'/') {
-            if mode != TREE {
-                return Ok(None);
-            }
-            let entries = self.object(&id)?.entries()?;
-            let Some(entry) = entries.into_iter().find(|e| e.name == name) else {
-                return Ok(None);
-            };
-            (mode, id) = (entry.mode, entry.id);
+    /// The tree of the files as the agent left them: the tree of its `HEAD`,
+    /// `tree`, with every file put in, changed, or removed that lands.
+    fn left(&self, host: &Host, ignore: &Gitignore, tree: Option<Id>) -> Result<Id, git::Error> {
+        match self.left_at(host, ignore, b"", tree.map(|tree| (TREE, tree)), false)? {
+            Some((_, tree)) => Ok(tree),
+            None => Ok(self.make(Object::tree(Vec::new()))),
         }
-        Ok(Some((mode, id)))
     }
 
-    /// Whether the agent's file at `path` is as `head` holds it.
-    fn committed(
+    /// Each path the records hold beneath `path`, or beneath the root when
+    /// `path` is empty, in order.
+    fn recorded_beneath<'b>(&'b self, path: &[u8]) -> impl Iterator<Item = &'b Vec<u8>> {
+        // The paths beneath `a` sort after `a/` and before `a0`.
+        let (from, to) = match path.is_empty() {
+            true => (Bound::Excluded(Vec::new()), Bound::Unbounded),
+            false => (
+                Bound::Excluded([path, b"/"].concat()),
+                Bound::Excluded([path, b"0"].concat()),
+            ),
+        };
+        self.records.entries.range((from, to)).map(|(path, _)| path)
+    }
+
+    /// The mode and object at `path` as the agent left it, if it left
+    /// anything there that git keeps, where `head` is what its `HEAD` tree
+    /// holds there. A file that doesn't land is as `head` holds it, and so
+    /// is one of yours the agent never wrote, unless the agent made the
+    /// directory above it again, which holds only what is still there.
+    /// That is `remade`.
+    fn left_at(
         &self,
         host: &Host,
         ignore: &Gitignore,
-        head: Option<Id>,
         path: &[u8],
-    ) -> Result<bool, git::Error> {
-        let blob = |data: Vec<u8>| {
-            Object {
-                kind: Kind::Blob,
-                data,
-            }
-            .id()
+        head: Option<(u32, Id)>,
+        remade: bool,
+    ) -> Result<Option<(u32, Id)>, git::Error> {
+        let root = path.is_empty();
+        let view = match root {
+            true => View::Yours,
+            false => self.records.view(path),
         };
-        let committed = match head {
-            Some(head) => self.entry(head, path)?,
-            None => None,
-        };
-        Ok(match self.records.view(path) {
-            View::Agent(Entry::File { mode }) => {
-                let data = fs::read(self.dir.join("tree").join(bytes_path(path)))?;
-                committed == Some((git_mode(*mode), blob(data)))
-            }
-            View::Agent(Entry::Symlink { target }) => {
-                committed == Some((SYMLINK, blob(target.clone())))
-            }
-            // Git keeps no directory, so a tree there must hold only what
-            // is still beneath it. Each file the agent wrote there is
-            // checked by itself.
-            View::Agent(Entry::Dir { .. }) => match committed {
-                None => true,
-                Some((TREE, tree)) => self.still_there(host, ignore, tree, path)?,
-                // A submodule's commit, whose directory this is.
-                Some((GITLINK, _)) => true,
-                Some(_) => false,
-            },
-            View::Yours => true,
-            // Nothing is there, so nothing but git-ignored files may be
-            // beneath it either.
-            View::Agent(_) | View::Absent => match committed {
-                None => true,
-                Some((TREE, tree)) => self.still_there(host, ignore, tree, path)?,
-                Some(_) => false,
-            },
-        })
-    }
-}
-
-impl Agent<'_> {
-    /// Whether each file that `tree`, at `path` in the agent's `HEAD`,
-    /// holds is still there as the agent sees it: one it wrote, or one of
-    /// yours. A git-ignored file counts as there, as it does where the agent
-    /// wrote, and a submodule's commit needs a directory.
-    fn still_there(
-        &self,
-        host: &Host,
-        ignore: &Gitignore,
-        tree: Id,
-        path: &[u8],
-    ) -> Result<bool, git::Error> {
-        for entry in self.object(&tree)?.entries()? {
-            let inner = [path, b"/", &entry.name].concat();
-            if ignore.is_ignored(bytes_path(&inner), entry.mode == TREE) {
-                continue;
-            }
-            let there = match entry.mode {
-                TREE => self.still_there(host, ignore, entry.id, &inner)?,
-                GITLINK => match self.records.view(&inner) {
-                    View::Agent(Entry::Dir { .. }) => true,
-                    View::Yours => host.stat(&inner)?.is_some_and(|m| m.is_dir()),
-                    View::Agent(_) | View::Absent => false,
-                },
-                _ => match self.records.view(&inner) {
-                    View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => true,
-                    View::Yours => host.stat(&inner)?.is_some(),
-                    View::Agent(_) | View::Absent => false,
-                },
+        let below = self.recorded_beneath(path).next().is_some();
+        let head_tree = matches!(head, Some((TREE, _)));
+        let dir = root
+            || match view {
+                View::Agent(Entry::Dir { .. }) => true,
+                View::Yours => below || head_tree,
+                View::Absent => head_tree,
+                View::Agent(_) => false,
             };
-            if !there {
-                return Ok(false);
+        if !dir {
+            let there = match view {
+                View::Yours if !remade || ignore.is_ignored(bytes_path(path), false) => {
+                    return Ok(head);
+                }
+                View::Yours => match head {
+                    Some((GITLINK, _)) => host.stat(path)?.is_some_and(|m| m.is_dir()),
+                    _ => host.stat(path)?.is_some(),
+                },
+                _ => {
+                    let landed = BTreeMap::new();
+                    match verdict(self.records, &landed, host, ignore, true, path)? {
+                        Verdict::Change => true,
+                        _ => return Ok(head),
+                    }
+                }
+            };
+            let blob = |data| {
+                self.make(Object {
+                    kind: Kind::Blob,
+                    data,
+                })
+            };
+            return Ok(match view {
+                View::Yours => head.filter(|_| there),
+                View::Agent(Entry::File { mode }) => {
+                    let data = fs::read(self.dir.join("tree").join(bytes_path(path)))?;
+                    Some((git_mode(*mode), blob(data)))
+                }
+                View::Agent(Entry::Symlink { target }) => Some((SYMLINK, blob(target.clone()))),
+                _ => None,
+            });
+        }
+        // What the agent did beneath a submodule's directory is in the
+        // submodule's own repository.
+        if !root && matches!(head, Some((GITLINK, _))) && !matches!(view, View::Absent) {
+            return Ok(head);
+        }
+        let yours = matches!(view, View::Yours);
+        if !root && ((yours && !below && !remade) || ignore.is_ignored(bytes_path(path), true)) {
+            return Ok(head);
+        }
+        let remade = remade || (!root && !yours);
+        let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();
+        if let Some((TREE, tree)) = head {
+            for entry in self.object(&tree)?.entries()? {
+                entries.insert(entry.name, Some((entry.mode, entry.id)));
             }
         }
-        Ok(true)
+        let start = path.len() + usize::from(!root);
+        for other in self.recorded_beneath(path) {
+            let name = other[start..].split(|&b| b == b'/').next();
+            entries
+                .entry(name.unwrap_or_default().to_vec())
+                .or_insert(None);
+        }
+        let mut tree = Vec::new();
+        for (name, head) in entries {
+            let inner = match root {
+                true => name.clone(),
+                false => [path, b"/", &name].concat(),
+            };
+            // Git keeps no `.git`, and the agent's history comes as commits.
+            let left = match name.eq_ignore_ascii_case(b".git") {
+                true => head,
+                false => self.left_at(host, ignore, &inner, head, remade)?,
+            };
+            if let Some((mode, id)) = left {
+                tree.push(git::TreeEntry { mode, name, id });
+            }
+        }
+        if tree.is_empty() {
+            return Ok(None);
+        }
+        let tree = Object::tree(tree);
+        if head == Some((TREE, tree.id())) {
+            return Ok(head);
+        }
+        Ok(Some((TREE, self.make(tree))))
     }
 }
 
@@ -495,11 +544,13 @@ impl Share<'_> {
             .and_then(|text| Id::from_hex(text.trim_end())))
     }
 
-    /// Checks a branch import of this share, `branch`, while the run isn't
-    /// active, and writes its objects to quarantine, where `git fsck`
-    /// checks them. Nothing of yours changes, and nothing stays pending
+    /// Checks a branch import of this share, `ap/<agent_name>/<run>`, while
+    /// the run isn't active, and writes its objects to quarantine, where
+    /// `git fsck` checks them. The files the agent didn't commit come as
+    /// one last commit. Nothing of yours changes, and nothing stays pending
     /// once it moves in.
-    pub fn import<'a>(&'a self, branch: &str) -> io::Result<Import<'a>> {
+    pub fn import<'a>(&'a self, agent_name: &str, run: &str) -> io::Result<Import<'a>> {
+        let branch = &format!("ap/{agent_name}/{run}");
         let root = self.root;
         let mut check = your_git(root);
         check.args(["rev-parse", "--show-object-format"]);
@@ -537,12 +588,44 @@ impl Share<'_> {
                 Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, .. } => line(&mut applied.text, "skipped", &path, &why),
-                Verdict::Change => {
-                    if !(agent.committed(&host, &ignore, head, &path)).map_err(read_failed)? {
-                        return Err(refused(
-                            "the agent left files it didn't commit, and `ap apply` can't commit them yet",
-                        ));
-                    }
+                Verdict::Change => {}
+            }
+        }
+        // The agent's history, checked as it is walked, then the files it
+        // didn't commit, as one last commit on it.
+        let quarantine = Quarantine::new(self.dir)?;
+        let held = Repository::at(&quarantine.0);
+        let mut objects = Vec::new();
+        let mut tree = None;
+        if let Some(head) = head {
+            (agent.walk(head, &mut |object| {
+                objects.push(held.write(object)?);
+                Ok(())
+            }))
+            .map_err(read_failed)?;
+            tree = Some(
+                agent
+                    .object(&head)
+                    .and_then(|commit| commit.commit())
+                    .map_err(read_failed)?
+                    .tree,
+            );
+        }
+        let left = agent.left(&host, &ignore, tree).map_err(read_failed)?;
+        let empty = Object::tree(Vec::new()).id();
+        let last = (tree.unwrap_or(empty) != left).then(|| {
+            let time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let time = i64::try_from(time.as_secs()).unwrap_or(i64::MAX);
+            let message = format!("Uncommitted changes from {agent_name}/{run}\n");
+            let parents: Vec<Id> = head.into_iter().collect();
+            agent.make(Object::new_commit(left, &parents, IDENTITY, time, &message))
+        });
+        if last.is_some() {
+            for (id, object) in agent.made.borrow().iter() {
+                if !agent.yours.contains(id).map_err(read_failed)? {
+                    objects.push(held.write(object).map_err(read_failed)?);
                 }
             }
         }
@@ -556,23 +639,15 @@ impl Share<'_> {
             quarantine: None,
         };
         let start = self.start()?;
-        if let Some(head) = head.filter(|&head| Some(head) != start) {
+        if let Some(tip) = last.or(head.filter(|&head| Some(head) != start)) {
             let name = format!("refs/heads/{branch}");
             if (agent.yours.find_ref(&name).map_err(read_failed)?).is_some() {
                 return Err(refused(format!("the branch {branch} already exists")));
             }
-            let quarantine = Quarantine::new(self.dir)?;
-            let held = Repository::at(&quarantine.0);
-            let mut objects = Vec::new();
-            (agent.walk(head, &mut |object| {
-                objects.push(held.write(object)?);
-                Ok(())
-            }))
-            .map_err(read_failed)?;
             if !objects.is_empty() {
-                fsck(root, &quarantine.0, head, &agent.yours)?;
+                fsck(root, &quarantine.0, tip, &agent.yours)?;
             }
-            import.head = Some(head);
+            import.head = Some(tip);
             import.objects = objects;
             import.quarantine = Some(quarantine);
         }

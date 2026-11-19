@@ -837,6 +837,77 @@ impl Repository {
         assert_eq!(&self.objects_and_refs(), before);
         assert!(self.scratch.runs().has_pending(&self.run).unwrap());
     }
+
+    /// The tree the agent's git would commit from its index, once `change`
+    /// has changed it, which leaves the agent's history as it was.
+    fn tree_after(&self, change: &[&[&str]]) -> String {
+        for args in change {
+            repo::run(&self.guest, args);
+        }
+        let tree = repo::run(&self.guest, &["write-tree"]);
+        repo::run(&self.guest, &["reset", "-q"]);
+        tree
+    }
+
+    /// Checks that the branch ends in the one last commit of the files the
+    /// agent didn't commit, which holds `tree`, comes after the agent's
+    /// `HEAD`, if it names a commit, and was made between `from` and `to`,
+    /// in seconds since the epoch.
+    fn assert_last_commit(&self, tree: &str, (from, to): (u64, u64)) {
+        let share = self.share();
+        let branch = self.branch();
+        let format = "%an <%ae>%n%cn <%ce>%n%s%n%b%n%at%n%ct%n%P";
+        let log = repo::run(
+            share,
+            &["log", "-1", &format!("--format={format}"), &branch],
+        );
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(
+            lines[..3],
+            [
+                "Agent+ <ap@localhost>",
+                "Agent+ <ap@localhost>",
+                &*format!("Uncommitted changes from notes/{}", self.run)
+            ]
+        );
+        assert_eq!(lines[3], "", "a commit with a body: {log}");
+        for time in &lines[4..6] {
+            let time: u64 = time.parse().unwrap();
+            assert!((from..=to).contains(&time), "{time} isn't in {from}..={to}");
+        }
+        let head = repo::git(&self.guest)
+            .args(["rev-parse", "-q", "--verify", "HEAD"])
+            .output()
+            .unwrap();
+        let head = String::from_utf8(head.stdout).unwrap();
+        assert_eq!(lines.get(6).copied().unwrap_or(""), head.trim());
+        assert_eq!(
+            repo::run(share, &["rev-parse", &format!("{branch}^{{tree}}")]),
+            tree
+        );
+        if !head.is_empty() {
+            let parent = format!("{branch}~1");
+            assert_eq!(
+                repo::history(share, &parent),
+                repo::history(&self.guest, "HEAD")
+            );
+        }
+        repo::run(share, &["fsck", "--strict", "--no-dangling"]);
+        assert!(self.scratch.runs().list_pending().unwrap().is_empty());
+    }
+
+    /// Runs `ap apply`, and returns what it printed, and the seconds since
+    /// the epoch before and after it ran.
+    fn apply_timed(&self) -> (Output, (u64, u64)) {
+        let now = || {
+            (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .unwrap()
+                .as_secs()
+        };
+        let from = now();
+        let output = self.apply();
+        (output, (from, now()))
+    }
 }
 
 // spec(SHARE): When the share's root on your host holds a `.git` directory, the agent's commits, and the files it wrote but didn't commit, land as a new branch, `ap/<agent>/<run>`, imported as git objects and checked with `git fsck`.
@@ -845,6 +916,7 @@ impl Repository {
 // spec(SHARE): Neither are your `HEAD` and your index.
 // spec(SHARE): When `ap` reads git state that an agent wrote, here or in a persisted repository, it reads refs, objects, the index, and ignore files with its own code.
 // spec(SHARE): It never runs that repository's hooks or uses its config or attributes, because those can run commands.
+// spec(SHARE): When nothing is uncommitted, there is no such commit.
 #[test]
 fn the_agent_s_commits_land_as_a_branch_from_the_start_commit() {
     let repository = Repository::new("branch", true, &[]);
@@ -1067,36 +1139,126 @@ fn a_branch_that_exists_is_refused() {
     assert_eq!(repository.records(), records);
 }
 
-/// The last commit, for files the agent wrote but didn't commit, isn't
-/// built yet, so a run that has some keeps everything pending, and so does
-/// every other share of the run.
+// spec(SHARE): When the share's root on your host holds a `.git` directory, the agent's commits, and the files it wrote but didn't commit, land as a new branch, `ap/<agent>/<run>`, imported as git objects and checked with `git fsck`.
+// spec(SHARE): The files the agent wrote but didn't commit land as one last commit on the branch.
+// spec(SHARE): Its author and committer are `Agent+ <ap@localhost>`, its subject is `Uncommitted changes from <agent>/<run>`, and its time is when `ap apply` ran.
 #[test]
-fn uncommitted_files_keep_everything_pending() {
-    let repository = Repository::with(
-        "uncommitted",
-        true,
-        Setup {
-            plain: Some("plain"),
-            ..Setup::default()
-        },
-    );
-    repository.commit("README", "hello, world\n");
-    repository.land();
-    write(&repository.pending, "notes.txt", 0o644, b"not committed\n");
-    let plain = repository.scratch.root.join("plain");
-    let records = repository.records();
-    let before = repository.objects_and_refs();
+fn uncommitted_files_land_as_one_last_commit() {
+    // Your repository has commits or none, and the agent commits or doesn't.
+    for (name, first, commits) in [
+        ("uncommitted", true, true),
+        ("uncommitted-only", true, false),
+        ("uncommitted-empty", false, false),
+        ("uncommitted-empty-commits", false, true),
+    ] {
+        let old = |share: &Path| {
+            repo::commit(share, "old.txt", "old\n", "old");
+        };
+        let repository = Repository::with(
+            name,
+            first,
+            Setup {
+                plain: Some("plain"),
+                before: first.then_some(&old as &dyn Fn(&Path)),
+                ..Setup::default()
+            },
+        );
+        let (share, pending, guest) = (repository.share(), &repository.pending, &repository.guest);
+        if commits {
+            repository.commit("docs/guide.md", "read me\n");
+            repository.commit("docs/old.md", "gone soon\n");
+        }
+        repository.land();
+        // A file put in, in a directory the agent made, an executable, and
+        // a symlink to the file.
+        dir(pending, "notes", 0o755);
+        write(pending, "notes/new.txt", 0o644, b"new\n");
+        fs::create_dir(guest.join("notes")).unwrap();
+        fs::write(guest.join("notes/new.txt"), "new\n").unwrap();
+        write(pending, "run.sh", 0o755, b"#!/bin/sh\n");
+        fs::write(guest.join("run.sh"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(guest.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        link(pending, "latest", "notes/new.txt");
+        symlink("notes/new.txt", guest.join("latest")).unwrap();
+        // A file changed, and one removed, of yours and of the agent's.
+        let mut changed = Vec::new();
+        if first {
+            changed.push(("README", "old.txt"));
+        }
+        if commits {
+            changed.push(("docs/guide.md", "docs/old.md"));
+        }
+        for (change_it, remove_it) in changed {
+            change(share, pending, change_it, 0o644, b"changed\n");
+            fs::write(guest.join(change_it), "changed\n").unwrap();
+            delete(share, pending, remove_it);
+            fs::remove_file(guest.join(remove_it)).unwrap();
+        }
+        let tree = repository.tree_after(&[&["add", "-A"]]);
 
-    let output = repository.apply();
+        let (output, during) = repository.apply_timed();
 
-    repository.stays_pending(
-        &output,
-        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
-        &before,
-    );
-    assert_eq!(repository.records(), records);
-    assert!(!plain.join("file").exists());
-    assert!(!repository.scratch.exists("notes.txt"));
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stdout(&output), "");
+        repository.assert_last_commit(&tree, during);
+        let files = repo::run(
+            share,
+            &[
+                "ls-tree",
+                "-r",
+                &repository.branch(),
+                "--",
+                "run.sh",
+                "latest",
+            ],
+        );
+        let blob = repo::run(
+            share,
+            &["rev-parse", &format!("{}:latest", repository.branch())],
+        );
+        assert_eq!(
+            repo::run(share, &["cat-file", "blob", &blob]),
+            "notes/new.txt"
+        );
+        assert!(files.starts_with("120000 blob "), "{files}");
+        assert!(files.contains("\n100755 blob "), "{files}");
+        // Your working tree is as it was, and the run's other share lands.
+        assert!(!repository.scratch.exists("notes"));
+        assert!(repository.scratch.root.join("plain/file").exists());
+        if first {
+            assert_eq!(repository.scratch.read("README"), "hello\n");
+            assert_eq!(repository.scratch.read("old.txt"), "old\n");
+        }
+    }
+}
+
+/// A change on your side to a file the agent never wrote doesn't land in
+/// the last commit, which holds the file as the agent's `HEAD` does, but
+/// it lands on the branch once the agent commits it.
+// spec(SHARE): If the agent commits them, they land on its branch.
+#[test]
+fn your_change_lands_only_if_the_agent_commits_it() {
+    for commits in [false, true] {
+        let name = ["yours-uncommitted", "yours-committed"][usize::from(commits)];
+        let repository = Repository::new(name, true, &[]);
+        let share = repository.share();
+        fs::write(share.join("README"), "yours\n").unwrap();
+        write(&repository.pending, "notes.txt", 0o644, b"mine\n");
+        fs::write(repository.guest.join("notes.txt"), "mine\n").unwrap();
+        if commits {
+            fs::write(repository.guest.join("README"), "yours\n").unwrap();
+            repo::run(&repository.guest, &["commit", "-q", "-am", "yours"]);
+            repository.land();
+        }
+        let tree = repository.tree_after(&[&["add", "notes.txt"]]);
+
+        let (output, during) = repository.apply_timed();
+
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        repository.assert_last_commit(&tree, during);
+        let readme = repo::run(share, &["show", &format!("{}:README", repository.branch())]);
+        assert_eq!(readme, ["hello", "yours"][usize::from(commits)]);
+    }
 }
 
 #[test]
@@ -1404,7 +1566,7 @@ fn a_head_that_is_a_symlink_still_names_the_branch() {
 }
 
 /// A directory the agent made where its `HEAD` holds a file is a change it
-/// didn't commit.
+/// didn't commit, and git keeps no empty directory.
 #[test]
 fn a_directory_in_place_of_a_committed_file_is_uncommitted() {
     let repository = Repository::new("directory-for-file", true, &[]);
@@ -1412,17 +1574,12 @@ fn a_directory_in_place_of_a_committed_file_is_uncommitted() {
     repository.land();
     delete(repository.share(), &repository.pending, "README");
     dir(&repository.pending, "README", 0o755);
-    let records = repository.records();
-    let before = repository.objects_and_refs();
+    let tree = repository.tree_after(&[&["rm", "-q", "--cached", "README"]]);
 
-    let output = repository.apply();
+    let (output, during) = repository.apply_timed();
 
-    repository.stays_pending(
-        &output,
-        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
-        &before,
-    );
-    assert_eq!(repository.records(), records);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    repository.assert_last_commit(&tree, during);
 }
 
 /// A branch that git can't write, because a branch of yours is named
@@ -1560,15 +1717,16 @@ fn a_committed_file_deleted_since_is_uncommitted() {
         for line in lines {
             record(&repository.pending, line);
         }
-        let before = repository.objects_and_refs();
+        let gone = match name {
+            "deleted-file" => "a",
+            _ => "docs",
+        };
+        let tree = repository.tree_after(&[&["rm", "-q", "-r", "--cached", gone]]);
 
-        let output = repository.apply();
+        let (output, during) = repository.apply_timed();
 
-        repository.stays_pending(
-            &output,
-            "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
-            &before,
-        );
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        repository.assert_last_commit(&tree, during);
     }
 }
 
@@ -1652,19 +1810,17 @@ fn a_submodule_gone_from_a_directory_made_again_is_uncommitted() {
     let repository = with_submodule_and_ignored("submodule-gone");
     record(&repository.pending, "DELETE \"deps\"");
     record(&repository.pending, "DIR \"deps\" 755");
-    let before = repository.objects_and_refs();
+    let tree = repository.tree_after(&[&["rm", "-q", "--cached", "deps/vendor"]]);
 
-    let output = repository.apply();
+    let (output, during) = repository.apply_timed();
 
-    repository.stays_pending(
-        &output,
-        "the agent left files it didn't commit, and `ap apply` can't commit them yet, so everything stays pending",
-        &before,
-    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    repository.assert_last_commit(&tree, during);
 }
 
 /// A submodule's directory, and a git-ignored file the agent deleted in a
 /// directory whose mode it changed, are as its `HEAD` holds them.
+// spec(SHARE): When nothing is uncommitted, there is no such commit.
 #[test]
 fn a_submodule_s_directory_and_an_ignored_file_land_as_committed() {
     let repository = with_submodule_and_ignored("submodule-kept");
@@ -1682,6 +1838,7 @@ fn a_submodule_s_directory_and_an_ignored_file_land_as_committed() {
 
 /// A directory the agent deleted, which held only git-ignored files in its
 /// `HEAD`, leaves out what was in it, as each file is left out.
+// spec(SHARE): When nothing is uncommitted, there is no such commit.
 #[test]
 fn a_deleted_directory_of_ignored_files_lands_as_committed() {
     let repository = Repository::new("ignored-directory", true, &[]);

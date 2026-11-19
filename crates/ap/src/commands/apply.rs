@@ -54,12 +54,7 @@ fn apply(name: &str) -> Result<u8, String> {
         let record = runs.get(&run).map_err(|error| error.to_string())?;
         let agent = record
             .ok_or_else(|| format!("run {run} has no record, so its branch would have no name"))?;
-        let branch = format!("ap/{}/{run}", agent.agent);
-        imports.push(
-            share
-                .import(&branch)
-                .map_err(|error| failed(share, error))?,
-        );
+        imports.push((share.import(&agent.agent, &run)).map_err(|error| failed(share, error))?);
         at.push(index);
     }
     // Every branch lands before any file does, so a branch that fails

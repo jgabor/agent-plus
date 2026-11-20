@@ -132,6 +132,7 @@ dependencies = [
  "git",
  "miniz_oxide",
  "net",
+ "netstack",
  "share",
  "vmm",
 ]

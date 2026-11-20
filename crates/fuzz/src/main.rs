@@ -29,7 +29,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 7] = [
+const TARGETS: [Target; 8] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -335,6 +335,41 @@ const TARGETS: [Target; 7] = [
             "::ffff:1.1.1.1",
         ],
     },
+    Target {
+        name: "dns",
+        check: |input| {
+            dns_input(input);
+        },
+        corpus: &[
+            "",
+            // An `A` query for `kagi.com`, as a stub resolver sends it.
+            "\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x04kagi\x03com\x00\x00\x01\x00\x01",
+            // `AAAA` for `api.kagi.com`, with an EDNS record.
+            concat!(
+                "\x00\x07\x01\x00\x00\x01\x00\x00\x00\x00\x00\x01",
+                "\x03api\x04kagi\x03com\x00\x00\x1c\x00\x01",
+                "\x00\x00\x29\x04\x00\x00\x00\x00\x00\x00\x00",
+            ),
+            // `HTTPS` for a name no rule allows.
+            "\x00\x08\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07example\x03com\x00\x00\x41\x00\x01",
+        ],
+        words: &[
+            "\x00",
+            "\x01",
+            "\x00\x01",
+            "\x00\x1c",
+            "\x00\x40",
+            "\x00\x41",
+            "\x00\x10",
+            "\x01\x00",
+            "\x04kagi\x03com\x00",
+            "\x03api",
+            "\x08kagi.com",
+            "\x3f",
+            "\x00\x00\x29",
+            "\x7f",
+        ],
+    },
 ];
 
 const DEVICE_MEMORY: usize = 1 << 16;
@@ -418,6 +453,27 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
     }
     device.signal_used();
     accepted
+}
+
+/// Asks a resolver that allows `kagi.com` and its subdomains, from a pool
+/// of two addresses, the input as one query, twice, and panics if an answer
+/// isn't a reply to it, or the second differs. Returns whether it answered.
+fn dns_input(input: &str) -> bool {
+    let at = [std::net::IpAddr::from([10, 0, 2, 2])];
+    let pool = netstack::Pool::new([198, 18, 0, 0].into(), 30);
+    let mut resolver = netstack::Resolver::new(&at, pool, |name| {
+        name == "kagi.com" || name.ends_with(".kagi.com")
+    });
+    let query = input.as_bytes();
+    let Some(answer) = resolver.answer(query) else {
+        return false;
+    };
+    // The same id, a response, and the one question.
+    assert_eq!(answer.get(..2), query.get(..2), "{answer:?}");
+    assert_eq!(answer[2] & 0x80, 0x80, "{answer:?}");
+    assert_eq!(answer.get(4..6), Some(&[0, 1][..]), "{answer:?}");
+    assert_eq!(resolver.answer(query), Some(answer));
+    true
 }
 
 /// Decides each `> <name> <address> <port> [<scheme> <target>]` line, with
@@ -1347,6 +1403,15 @@ mod tests {
     #[should_panic(expected = "differ from git's")]
     fn a_hunk_git_prints_differently_is_found() {
         same_hunks("planted", b"@@ -1 +1 @@\n-a\n+b\n", b"");
+    }
+
+    #[test]
+    fn the_dns_corpus_gets_answers() {
+        let corpus = TARGETS[7].corpus;
+        assert!(!dns_input(corpus[0]));
+        for input in &corpus[1..] {
+            assert!(dns_input(input), "{input:?}");
+        }
     }
 
     #[test]

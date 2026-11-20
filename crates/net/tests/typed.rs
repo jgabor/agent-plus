@@ -61,32 +61,56 @@ fn a_typed_bare_rule_replaces_the_default() {
 #[test]
 fn a_typed_rule_wins_a_tie_against_an_agentfile_rule() {
     assert_eq!(
-        sign("NETWORK +\nNETWORK +example.com\n", &["-example.com"], "example.com"),
+        sign(
+            "NETWORK +\nNETWORK +example.com\n",
+            &["-example.com"],
+            "example.com"
+        ),
         Sign::Deny
     );
     // Two equally specific rules in the Agentfile would deny, so this one
     // shows the typed rule winning, not deny winning.
     assert_eq!(
-        sign("NETWORK -\nNETWORK -example.com\n", &["+example.com"], "example.com"),
+        sign(
+            "NETWORK -\nNETWORK -example.com\n",
+            &["+example.com"],
+            "example.com"
+        ),
         Sign::Allow
     );
     assert_eq!(
-        sign("NETWORK -\nNETWORK -192.0.2.0/24\n", &["+192.0.2.0/24"], "x.org"),
+        sign(
+            "NETWORK -\nNETWORK -192.0.2.0/24\n",
+            &["+192.0.2.0/24"],
+            "x.org"
+        ),
         Sign::Allow
     );
     // A more specific Agentfile rule still beats a typed one.
     assert_eq!(
-        sign("NETWORK -\nNETWORK -api.example.com\n", &["+example.com"], "api.example.com"),
+        sign(
+            "NETWORK -\nNETWORK -api.example.com\n",
+            &["+example.com"],
+            "api.example.com"
+        ),
         Sign::Deny
     );
     // A rule for another port is no tie.
     assert_eq!(
-        sign("NETWORK -\nNETWORK +example.com:443\n", &["-example.com"], "example.com"),
+        sign(
+            "NETWORK -\nNETWORK +example.com:443\n",
+            &["-example.com"],
+            "example.com"
+        ),
         Sign::Allow
     );
     // Typed rules that tie with each other deny, as Agentfile rules do.
     assert_eq!(
-        sign("NETWORK -\n", &["+example.com", "-example.com"], "example.com"),
+        sign(
+            "NETWORK -\n",
+            &["+example.com", "-example.com"],
+            "example.com"
+        ),
         Sign::Deny
     );
 }
@@ -111,7 +135,9 @@ fn the_build_checks_run_on_the_merged_rules() {
     );
     assert_eq!(
         refused("NETWORK -\n", &["example.com"]),
-        ["`--network=example.com`: a `NETWORK` rule starts with `+` or `-`, but found `example.com`"]
+        [
+            "`--network=example.com`: a `NETWORK` rule starts with `+` or `-`, but found `example.com`"
+        ]
     );
     let [message] = &refused("NETWORK -\n", &["+[::1"])[..] else {
         panic!("not one error");

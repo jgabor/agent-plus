@@ -135,9 +135,15 @@ impl Scratch {
     /// Runs `name` headless, and returns the run once its harness reported,
     /// with the run's name.
     fn run(&self, name: &str) -> (Started, String) {
+        self.run_with(name, &[])
+    }
+
+    /// Runs `name` as [`Scratch::run`] does, with `flags` too.
+    fn run_with(&self, name: &str, flags: &[&str]) -> (Started, String) {
         let mut run = Started(
             self.command()
                 .args(["run", name, "-p", "Try the network."])
+                .args(flags)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .spawn()
@@ -294,6 +300,30 @@ fn a_rule_for_your_host_reaches_its_loopback_over_tcp_and_udp() {
     // listener.
     assert_eq!(settled(&tcp_seen, 2), ["tcp ping", "closed"]);
     assert_eq!(settled(&udp_seen, 1), ["udp ping"]);
+    scratch.stop(&name, run);
+}
+
+// spec(NETWORK): **Command line.** `ap run --network=<rule>` adds rules for a single run.
+// spec(Run): Of these, only `-p`, `--share`, and `--network` change what the Agentfile says, and only for that run.
+#[test]
+fn a_rule_from_the_command_line_reaches_your_host_for_that_run_only() {
+    let scratch = Scratch::new("typed");
+    scratch.build("closed", "NETWORK -\n");
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let seen = tcp_echo(tcp, "host");
+    let attempt = format!("tcp tcp host.ap.internal {port}\n");
+
+    let (run, name) = scratch.run_with("closed", &["--network=+host.ap.internal"]);
+    assert_eq!(scratch.try_network(&name, &attempt), ["tcp host:ping"]);
+    scratch.stop(&name, run);
+    assert_eq!(settled(&seen, 2), ["tcp ping", "closed"]);
+
+    // The next run of the same image has only the Agentfile's rules.
+    let (run, name) = scratch.run("closed");
+    assert_eq!(scratch.try_network(&name, &attempt), ["tcp failed"]);
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(seen.lock().unwrap().len(), 2, "{seen:?}");
     scratch.stop(&name, run);
 }
 

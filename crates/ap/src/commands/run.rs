@@ -1,10 +1,9 @@
 //! `ap run <agent> [-i] [-p <prompt>] [--network=<rule>]...`, from SPEC.md's
 //! Run section. It names the run, and starts a run process that boots the
 //! agent's layers in a new microVM and starts the harness there as the user
-//! `agent`, as
-//! [`ap::runs`] says. It streams the harness's output and exits with its
-//! status, or with 125 if the harness never started. What it shows of the
-//! output, it also writes to the run's log.
+//! `agent`, as [`ap::runs`] says. It streams the harness's output and exits
+//! with its status, or with 125 if the harness never started. What it shows
+//! of the output, it also writes to the run's log.
 //!
 //! A run with a prompt is headless, and the harness gets pipes. Any other
 //! run, or one with `-i`, is interactive: the harness gets a terminal in the
@@ -685,7 +684,10 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     let rules: Vec<String> = (args.network.iter())
         .map(|rule| {
             rule.to_str().map(str::to_owned).ok_or_else(|| {
-                fail(format!("`--network={}` isn't UTF-8", rule.to_string_lossy()))
+                fail(format!(
+                    "`--network={}` isn't UTF-8",
+                    rule.to_string_lossy()
+                ))
             })
         })
         .collect::<Result<_, _>>()?;

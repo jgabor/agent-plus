@@ -302,7 +302,10 @@ fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
     past_checks(&scratch.ap(&["run", "closed", typed[0], typed[2], "-p", "hi"], &[]));
     assert_eq!(approvals(&scratch.home), before);
     refused(
-        &scratch.ap(&["run", "closed", "--network=+", "--network=-", "-p", "hi"], &[]),
+        &scratch.ap(
+            &["run", "closed", "--network=+", "--network=-", "-p", "hi"],
+            &[],
+        ),
         "`--network=-` disagrees with `--network=+`",
     );
     refused(
@@ -313,7 +316,13 @@ fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
     // decrypts.
     refused(
         &scratch.ap(
-            &["run", "closed", "--network=+https://codeberg.org/forgejo", "-p", "hi"],
+            &[
+                "run",
+                "closed",
+                "--network=+https://codeberg.org/forgejo",
+                "-p",
+                "hi",
+            ],
             &[],
         ),
         "URL rules in `NETWORK` are not built yet",

@@ -361,9 +361,9 @@ pub fn with_typed_network(
         match line(instruction, rule) {
             Err(message) => fail(format!("`--network={shown}`: {message}")),
             Ok(Line::Bare(sign)) => match bare {
-                Some((first, other)) if other != sign => {
-                    fail(format!("`--network={shown}` disagrees with `--network={first}`"))
-                }
+                Some((first, other)) if other != sign => fail(format!(
+                    "`--network={shown}` disagrees with `--network={first}`"
+                )),
                 Some(_) => {}
                 None => bare = Some((shown, sign)),
             },

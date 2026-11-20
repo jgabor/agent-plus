@@ -85,6 +85,15 @@ fn a_hello_for_the_name_passes_and_one_for_another_is_refused() {
 }
 
 #[test]
+fn nothing_passes_after_a_refusal() {
+    let mut check = NameCheck::new(NAME);
+    let mut out = Vec::new();
+    assert_eq!(check.feed(&hello("example.com"), &mut out), Err(Refused));
+    assert_eq!(check.feed(b"more", &mut out), Err(Refused));
+    assert!(out.is_empty());
+}
+
+#[test]
 fn what_follows_an_agreeing_hello_passes_unread() {
     let mut input = hello(NAME);
     input.extend_from_slice(b"\x17\x03\x03\x00\x02hi GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");

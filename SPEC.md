@@ -1850,7 +1850,8 @@ allow one.
   `NETWORK +`, clients that resolve names on their own (DNS over HTTPS,
   hard-coded addresses) keep working. For an address from the pool, the
   proxy resolves the name itself and connects only to the addresses it
-  gets.
+  gets. It resolves through your host's resolver configuration as it is at
+  each connection, so a run follows your host to another network.
 - **Decryption.** The proxy decrypts TLS, with the per-run certificate
   authority, only where it must.
   - on hosts with URL rules, because the rules need the request path

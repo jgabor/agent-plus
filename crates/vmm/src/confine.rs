@@ -12,7 +12,8 @@
 //!
 //! The share server, which reaches a run's shared files for its guest, has a
 //! filter of its own, in [`confine_share_server`], and so does the network
-//! process, which runs the guest's network, in [`confine_network`].
+//! process, which runs the guest's network, in [`confine_network`], or in
+//! [`confine_network_connecting`] once it may connect out.
 
 use std::ffi::{c_int, c_long, c_ulong};
 use std::io;
@@ -98,6 +99,16 @@ const EXIT_GROUP: u32 = 231;
 const TGKILL: u32 = 234;
 const SET_ROBUST_LIST: u32 = 273;
 const RSEQ: u32 = 334;
+const POLL: u32 = 7;
+const SOCKET: u32 = 41;
+const CONNECT: u32 = 42;
+const SENDTO: u32 = 44;
+const RECVFROM: u32 = 45;
+const SHUTDOWN: u32 = 48;
+const GETSOCKOPT: u32 = 55;
+const PPOLL: u32 = 271;
+const AF_INET: u32 = 2;
+const AF_INET6: u32 = 10;
 const CLONE3: u32 = 435;
 
 /// One BPF instruction, as `struct sock_filter`.
@@ -261,13 +272,40 @@ fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
 
 /// The calls the network process makes while it passes the guest's frames
 /// through its stack. It has one thread, so it starts none. It reads and
-/// writes frames on `link`, and writes to standard error. It holds no other
-/// socket, and makes none, so nothing it does reaches past the link.
+/// writes frames on `link`, waits on it, and writes to standard error. It
+/// holds no other socket, and makes none, so nothing it does reaches past
+/// the link.
 fn network_rules(link: RawFd) -> Vec<Rule> {
+    let mut rules = vec![Rule::AllowIf(RECVFROM, 0, vec![link as u32])];
+    rules.extend(network_common_rules(link));
+    rules
+}
+
+/// The calls of [`network_rules`], and those that connect out: it makes
+/// internet sockets, and connects, reads, writes, and shuts them. It still
+/// can't start a process, or open a file, and the only sockets it can make
+/// are IPv4 and IPv6 ones.
+fn network_connecting_rules(link: RawFd) -> Vec<Rule> {
+    use Rule::{Allow, AllowIf};
+    let mut rules = vec![
+        AllowIf(SOCKET, 0, vec![AF_INET, AF_INET6]),
+        Allow(CONNECT),
+        Allow(SENDTO),
+        Allow(RECVFROM),
+        Allow(GETSOCKOPT),
+        Allow(SHUTDOWN),
+    ];
+    rules.extend(network_common_rules(link));
+    rules
+}
+
+fn network_common_rules(link: RawFd) -> Vec<Rule> {
     use Rule::{Allow, AllowIf, AllowIfSet};
     vec![
         AllowIf(READ, 0, vec![link as u32]),
         AllowIf(WRITE, 0, vec![link as u32, STDERR]),
+        Allow(POLL),
+        Allow(PPOLL),
         Allow(CLOCK_GETTIME),
         Allow(CLOSE),
         AllowIf(FCNTL, 1, vec![F_GETFD]),
@@ -371,6 +409,12 @@ pub fn confine_share_server(socket: RawFd, writes: bool) -> io::Result<()> {
 /// back on it.
 pub fn confine_network(link: RawFd) -> io::Result<()> {
     install(&network_rules(link))
+}
+
+/// Confines the network process as [`confine_network`] does, but lets it
+/// make IPv4 and IPv6 sockets, and connect out on them.
+pub fn confine_network_connecting(link: RawFd) -> io::Result<()> {
+    install(&network_connecting_rules(link))
 }
 
 fn install(rules: &[Rule]) -> io::Result<()> {
@@ -746,6 +790,70 @@ mod tests {
         );
         assert_eq!(
             network_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+    }
+
+    fn connecting_call(number: u32, args: [u32; 6]) -> u32 {
+        run_rules(
+            &network_connecting_rules(SOCKET as RawFd),
+            AUDIT_ARCH_X86_64,
+            number,
+            args,
+        )
+    }
+
+    #[test]
+    fn the_network_process_waits_on_its_link() {
+        assert_eq!(network_call(RECVFROM, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(network_call(RECVFROM, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(network_call(POLL, [0; 6]), RET_ALLOW);
+        assert_eq!(network_call(PPOLL, [0; 6]), RET_ALLOW);
+    }
+
+    #[test]
+    fn a_connecting_network_process_makes_only_internet_sockets() {
+        for domain in [AF_INET, AF_INET6] {
+            assert_eq!(
+                connecting_call(super::SOCKET, [domain, 1, 0, 0, 0, 0]),
+                RET_ALLOW
+            );
+        }
+        const AF_UNIX: u32 = 1;
+        const AF_NETLINK: u32 = 16;
+        const AF_PACKET: u32 = 17;
+        for domain in [AF_UNIX, AF_NETLINK, AF_PACKET] {
+            assert_eq!(
+                connecting_call(super::SOCKET, [domain, 1, 0, 0, 0, 0]),
+                RET_KILL_PROCESS,
+                "{domain}"
+            );
+        }
+        for number in [CONNECT, SENDTO, RECVFROM, GETSOCKOPT, SHUTDOWN, POLL] {
+            assert_eq!(connecting_call(number, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        }
+    }
+
+    #[test]
+    fn a_connecting_network_process_still_can_t_start_anything_or_open_a_file() {
+        const SENDMSG: u32 = 46;
+        const SOCKETPAIR: u32 = 53;
+        const BIND: u32 = 49;
+        const LISTEN: u32 = 50;
+        for number in [
+            OPENAT, 2, OPENAT2, FORK, VFORK, EXECVE, EXECVEAT, CLONE, CLONE3, SENDMSG, SOCKETPAIR,
+            BIND, LISTEN, IOCTL, PREAD64,
+        ] {
+            assert_eq!(
+                connecting_call(number, [0; 6]),
+                RET_KILL_PROCESS,
+                "{number}"
+            );
+        }
+        assert_eq!(connecting_call(READ, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(connecting_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            connecting_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
             RET_KILL_PROCESS
         );
     }

@@ -258,17 +258,27 @@ fn a_flag_that_isnt_built_yet_is_named() {
 }
 
 #[test]
-fn an_agent_with_any_network_but_none_fails_before_its_vm_starts() {
+fn an_agent_with_host_and_ip_rules_runs_and_one_with_a_url_rule_fails_before_its_vm_starts() {
     let scratch = Scratch::new("network");
     for (name, network) in [
         ("open", "NETWORK +\n"),
         ("default", ""),
-        ("rule", "NETWORK -\nNETWORK +example.com\n"),
+        (
+            "rule",
+            "NETWORK -\nNETWORK +example.com\nNETWORK +192.0.2.0/24\n",
+        ),
     ] {
         scratch.build(name, &format!("AGENT claude:0.0.0\nOS minimal\n{network}"));
-        let output = scratch.ap(&["run", name, "-p", "hi"], &[]);
-        refused(&output, "network rules are not built yet");
+        past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[]));
     }
+    scratch.build(
+        "url",
+        "AGENT claude:0.0.0\nOS minimal\nNETWORK -\nNETWORK +https://codeberg.org/forgejo\n",
+    );
+    refused(
+        &scratch.ap(&["run", "url", "-p", "hi"], &[]),
+        "URL rules in `NETWORK` are not built yet",
+    );
 }
 
 #[test]

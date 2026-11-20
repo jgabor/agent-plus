@@ -17,8 +17,9 @@
 //! makes in the store and leaves there when it ends. The guest mounts each
 //! share at the place SPEC.md's Paths section gives it.
 //!
-//! Only an agent with `NETWORK -` runs. Everything else on #297's list of
-//! what isn't built yet fails with 125 and says so, before any VM starts.
+//! The guest's network follows the agent's host and IP rules in `NETWORK`.
+//! A URL rule, and everything else on #297's list of what isn't built yet,
+//! fails with 125 and says so, before any VM starts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsString};
@@ -37,8 +38,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentfile::{
-    Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, ShareMode,
-    Sign,
+    Destination, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings,
+    Share, ShareMode,
 };
 use ap::boot::Error;
 use ap::filter::Filter;
@@ -201,6 +202,12 @@ fn run_agent(
     // which holds the only other end of each one's socket, does.
     let network =
         ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
+    let ap::network::Started {
+        process: network_process,
+        link: network_link,
+        lookups,
+    } = network;
+    ap::network::answer_lookups(lookups);
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -213,9 +220,10 @@ fn run_agent(
     };
     // Made after the share server starts, so that only the run process
     // inherits it.
-    let link = share::inheritable(network.link.as_fd())
+    let link = share::inheritable(network_link.as_fd())
         .map_err(fail("can't start the network process"))?;
-    drop(network);
+    drop(network_link);
+    drop(network_process);
     let mut command = Command::new(exe);
     command
         .arg0(runs::RUN_PROCESS)
@@ -664,10 +672,10 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         return Err(fail(format!("`OS {tier}` is not built yet")));
     }
     let network = Network::read(&instructions).map_err(unreadable)?;
-    if network.default != Sign::Deny || !network.rules.is_empty() {
-        return Err(fail(
-            "network rules are not built yet, so the guest has no network, and `ap run` starts only an agent with `NETWORK -`".to_owned(),
-        ));
+    let url_rule =
+        (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
+    if url_rule {
+        return Err(fail("URL rules in `NETWORK` are not built yet".to_owned()));
     }
     // A build records that the agent has a `PROMPT`, though not the text,
     // which only the guest reads.

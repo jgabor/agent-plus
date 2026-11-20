@@ -6,41 +6,61 @@
 //! either process is confined. This process runs the stack from
 //! [`netstack`] as the guest's gateway and resolver, and ends each of the
 //! guest's TCP connections and UDP flows there. It answers the guest's DNS
-//! queries itself, from the run's `NETWORK` rules and its harness's hosts,
-//! and refuses every other flow: a connection gets a reset, and a datagram
-//! is dropped. It confines itself before it reads a frame, so it can't start
-//! a process, open a host file, or make a socket. It ends when the other end
-//! of its socket closes.
+//! queries itself, from the run's `NETWORK` rules and its harness's hosts.
+//!
+//! Every other flow is decided by [`net::proxied`]. A refused connection
+//! gets a reset, and a refused datagram is dropped. An allowed one gets a
+//! connection of its own to its real destination: the address the guest
+//! named, the addresses that `ap run` looks up for a name from the pool,
+//! or your host's loopback for [`net::YOUR_HOST`]. The guest's SYN waits
+//! until that connection opens, so a destination that refuses looks refused
+//! to the guest. The bytes then pass both ways unchanged.
+//!
+//! It confines itself before it reads a frame. It can then make IPv4 and
+//! IPv6 sockets, unless its rules can reach nothing, but it can't start a
+//! process or open a host file. So it can't read your host's resolver
+//! configuration either, and asks `ap run` for each lookup instead, over a
+//! socket on its standard output. It ends when the other end of its link
+//! closes.
+
+mod lookup;
+mod proxy;
+
+pub use lookup::answer_lookups;
+pub use proxy::Proxy;
 
 use std::collections::hash_map::RandomState;
 use std::ffi::{OsString, c_int};
 use std::fs::File;
 use std::hash::BuildHasher;
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command};
+use std::time::Duration;
 
-use agentfile::{Destination, Instruction, Network};
+use agentfile::{Destination, Instruction, Network, Sign};
 use guest::net;
 use netstack::{Config, Pool, Resolver, Stack};
-use vmm::net::MAX_FRAME;
 
 /// The `argv[0]` that `ap` starts the network process with.
 pub const PROGRAM: &str = "ap-network";
 const STDIN: c_int = 0;
+const STDOUT: c_int = 1;
 /// How long a read waits for a frame before the stack's timers run.
 const RECEIVE_WAIT: Duration = Duration::from_millis(50);
 /// How long a frame for the guest waits for room, before it is dropped,
 /// as on a real link.
 const SEND_WAIT: Duration = Duration::from_millis(10);
 
-/// A network process that has started, and the VMM's end of its link.
+/// A network process that has started, the VMM's end of its link, and the
+/// end that its lookups come in on, for [`answer_lookups`].
 pub struct Started {
     pub process: Child,
     pub link: OwnedFd,
+    pub lookups: OwnedFd,
 }
 
 /// Divides the harness's hosts from the `NETWORK` rules in the network
@@ -67,15 +87,17 @@ pub fn arguments(harness: &[&str], instructions: &[Instruction]) -> Vec<OsString
 /// ends once every copy of the link is closed.
 pub fn start(program: &Path, args: &[OsString]) -> io::Result<Started> {
     let (mine, theirs) = link()?;
+    let (answers, asks) = link()?;
     let process = Command::new(program)
         .arg0(PROGRAM)
         .args(args)
         .stdin(theirs)
-        .stdout(Stdio::null())
+        .stdout(asks)
         .spawn()?;
     Ok(Started {
         process,
         link: mine,
+        lookups: answers,
     })
 }
 
@@ -99,11 +121,16 @@ fn link() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-/// The network process's main: its standard input is its link, and `args`
-/// are the ones [`arguments`] made. It returns the status to exit with.
+/// The network process's main: its standard input is its link, its
+/// standard output is where it asks for lookups, and `args` are the ones
+/// [`arguments`] made. It returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
-    let mut resolver = match resolver(args) {
-        Ok(resolver) => resolver,
+    let ready = rules(args).and_then(|(network, harness)| {
+        let resolver = resolver_for(&network, &harness)?;
+        Ok((resolver, network, harness))
+    });
+    let (mut resolver, network, harness) = match ready {
+        Ok(ready) => ready,
         Err(Unready::Usage) => {
             eprintln!("usage: ap-network <harness host>... -- <NETWORK rule>...");
             return 125;
@@ -113,11 +140,25 @@ pub fn main(args: &[OsString]) -> u8 {
             return 1;
         }
     };
-    // SAFETY: standard input is the link that `start` passed, and nothing
-    // else in this process owns it.
-    let link = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
+    // SAFETY: standard input and output are the sockets that `start`
+    // passed, and nothing else in this process owns them.
+    let (link, lookups) = unsafe {
+        (
+            File::from(OwnedFd::from_raw_fd(STDIN)),
+            UnixDatagram::from(OwnedFd::from_raw_fd(STDOUT)),
+        )
+    };
     let mut stack = stack();
-    let served = confine(link.as_fd()).and_then(|()| serve(&link, &mut stack, &mut resolver));
+    // A proxy that can reach nothing asks for no lookups, so it needs no
+    // socket but its link.
+    let (mut proxy, confined) = match reaches_nothing(&network, &harness) {
+        true => (Proxy::refusing(), confine(link.as_fd())),
+        false => (
+            Proxy::new(network, harness, lookups),
+            confine_connecting(link.as_fd()),
+        ),
+    };
+    let served = confined.and_then(|()| proxy.serve(&link, &mut stack, &mut resolver));
     match served {
         Ok(()) => 0,
         Err(error) => {
@@ -125,6 +166,17 @@ pub fn main(args: &[OsString]) -> u8 {
             1
         }
     }
+}
+
+/// Whether `network`, with `harness` as the harness's hosts, can allow no
+/// connection at all.
+fn reaches_nothing(network: &Network, harness: &[String]) -> bool {
+    let hosts: Vec<&str> = harness.iter().map(String::as_str).collect();
+    network.default == Sign::Deny
+        && network.rules.iter().all(|rule| rule.sign == Sign::Deny)
+        && hosts
+            .iter()
+            .all(|host| !::net::could_allow(network, &hosts, host))
 }
 
 /// The guest's gateway, at the addresses the guest's init gives it.
@@ -138,11 +190,9 @@ pub fn stack() -> Stack {
     })
 }
 
-/// The guest's resolver, at the gateway's addresses, for the `args` that
-/// [`arguments`] made. It answers a name that the rules, the default, or a
-/// harness host could allow, from a pool that overlaps no IP rule and not
-/// the guest's link.
-pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
+/// The rules and the harness's hosts in the `args` that [`arguments`]
+/// made.
+fn rules(args: &[OsString]) -> Result<(Network, Vec<String>), Unready> {
     let args: Vec<&str> = (args.iter().map(|arg| arg.to_str()))
         .collect::<Option<_>>()
         .ok_or(Unready::Usage)?;
@@ -158,6 +208,19 @@ pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
         })
         .collect();
     let network = Network::read(&lines).map_err(|_| Unready::Usage)?;
+    Ok((network, harness))
+}
+
+/// The guest's resolver, at the gateway's addresses, for the `args` that
+/// [`arguments`] made. It answers a name that the rules, the default, or a
+/// harness host could allow, from a pool that overlaps no IP rule and not
+/// the guest's link.
+pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
+    let (network, harness) = rules(args)?;
+    resolver_for(&network, &harness)
+}
+
+fn resolver_for(network: &Network, harness: &[String]) -> Result<Resolver, Unready> {
     let blocks: Vec<_> = network
         .rules
         .iter()
@@ -171,6 +234,8 @@ pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
     let pool =
         Pool::choose((net::IPV4_GATEWAY, net::IPV4_PREFIX), &blocks).ok_or(Unready::NoPool)?;
     let at = [net::IPV4_GATEWAY.into(), net::IPV6_GATEWAY.into()];
+    let network = network.clone();
+    let harness = harness.to_vec();
     Ok(Resolver::new(&at, pool, move |name| {
         let harness: Vec<&str> = harness.iter().map(String::as_str).collect();
         ::net::could_allow(&network, &harness, name)
@@ -187,39 +252,30 @@ pub enum Unready {
 }
 
 /// Confines this process for the rest of its life, as the network process
-/// on `link`. It sets the link's timeouts first, which it can't once
-/// confined.
+/// on `link`, which can't make a socket. It sets the link's timeouts first,
+/// which it can't once confined.
 pub fn confine(link: BorrowedFd) -> io::Result<()> {
-    set_timeout(link, libc::SO_RCVTIMEO, RECEIVE_WAIT)?;
-    set_timeout(link, libc::SO_SNDTIMEO, SEND_WAIT)?;
+    set_timeouts(link)?;
     vmm::confine::confine_network(link.as_raw_fd())
+}
+
+/// Confines this process as [`confine`] does, except that it can make IPv4
+/// and IPv6 sockets, and connect out on them.
+pub fn confine_connecting(link: BorrowedFd) -> io::Result<()> {
+    set_timeouts(link)?;
+    vmm::confine::confine_network_connecting(link.as_raw_fd())
 }
 
 /// Passes frames between `link` and `stack` until the link's other end
 /// closes. `resolver` answers the guest's queries, and every other flow the
 /// guest opens is refused.
 pub fn serve(link: &File, stack: &mut Stack, resolver: &mut Resolver) -> io::Result<()> {
-    // One byte more than a frame, so that a longer message is seen.
-    let mut buffer = vec![0; MAX_FRAME + 1];
-    loop {
-        match (&*link).read(&mut buffer) {
-            Ok(0) => return Ok(()),
-            Ok(len) if len > MAX_FRAME => {}
-            Ok(len) => stack.receive(&buffer[..len], Instant::now(), |flow| resolver.takes(flow)),
-            Err(error) if waited(&error) => {}
-            Err(error) => return Err(error),
-        }
-        resolver.serve(stack);
-        stack.poll(Instant::now());
-        while let Some(frame) = stack.transmit() {
-            match (&*link).write(&frame) {
-                Ok(_) => {}
-                Err(error) if waited(&error) => {}
-                Err(error) if hung_up(&error) => return Ok(()),
-                Err(error) => return Err(error),
-            }
-        }
-    }
+    Proxy::refusing().serve(link, stack, resolver)
+}
+
+fn set_timeouts(link: BorrowedFd) -> io::Result<()> {
+    set_timeout(link, libc::SO_RCVTIMEO, RECEIVE_WAIT)?;
+    set_timeout(link, libc::SO_SNDTIMEO, SEND_WAIT)
 }
 
 fn set_timeout(socket: BorrowedFd, option: c_int, wait: Duration) -> io::Result<()> {
@@ -239,20 +295,4 @@ fn set_timeout(socket: BorrowedFd, option: c_int, wait: Duration) -> io::Result<
         0 => Ok(()),
         _ => Err(io::Error::last_os_error()),
     }
-}
-
-/// Whether a socket call only ran out of time, or was interrupted.
-fn waited(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-    )
-}
-
-/// Whether the link's other end has closed.
-fn hung_up(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
-    )
 }

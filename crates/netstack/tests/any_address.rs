@@ -580,3 +580,132 @@ fn a_flow_sent_to_every_station_is_never_taken_unasked() {
         assert!(stack.recv_datagram().is_none(), "{station:?}");
     }
 }
+
+#[test]
+fn answers_a_udp_datagram_from_the_address_it_was_sent_to() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let handle = guest.udp(40000);
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 9000);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"ping", to)
+        .unwrap();
+    exchange(&mut guest, &mut stack, start);
+    let datagram = stack.recv_datagram().expect("the stack took the datagram");
+    assert!(stack.send_datagram(datagram.destination, datagram.source, b"pong"));
+    exchange(&mut guest, &mut stack, start);
+    let (payload, meta) = guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .recv()
+        .expect("the guest got the answer");
+    assert_eq!(payload, b"pong");
+    assert_eq!(SocketAddr::from(meta.endpoint), to);
+}
+
+#[test]
+fn an_abandoned_connection_is_reset_and_its_next_syn_asked_about_again() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    let syn = syn_frame(to);
+    let now = Instant::now();
+    let mut stack = introduced();
+    let mut flows = Vec::new();
+    stack.receive(&syn, now, |flow| {
+        flows.push(*flow);
+        true
+    });
+    let answer = stack.transmit().expect("the stack answers the SYN");
+    assert_eq!(tcp_flags(&answer), Some((true, true, false)));
+    // The guest never sends its ACK.
+    stack.abandon(flows[0]);
+    stack.poll(now);
+    let reset = stack.transmit().expect("the stack resets the connection");
+    assert_eq!(tcp_flags(&reset).map(|flags| flags.2), Some(true));
+    let mut asked = 0;
+    stack.receive(&syn, now, |_| {
+        asked += 1;
+        false
+    });
+    assert_eq!(asked, 1, "the SYN still belongs to the abandoned socket");
+}
+
+#[test]
+fn an_unbound_port_takes_no_answer() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let handle = guest.udp(40000);
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 9000);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"ping", to)
+        .unwrap();
+    exchange(&mut guest, &mut stack, start);
+    let datagram = stack.recv_datagram().unwrap();
+    stack.unbind(9000);
+    stack.poll(Instant::now());
+    assert!(!stack.send_datagram(datagram.destination, datagram.source, b"pong"));
+}
+
+#[test]
+fn a_connection_aborted_and_forgotten_still_sends_its_reset() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    guest.connect(to, 49152);
+    exchange(&mut guest, &mut stack, start);
+    let connection = stack.accept().unwrap();
+    // As a pipe does when its destination resets, with nothing more from
+    // the guest.
+    stack.abort(connection.id);
+    stack.forget(connection.id);
+    stack.poll(Instant::now());
+    let mut resets = 0;
+    while let Some(frame) = stack.transmit() {
+        resets += usize::from(tcp_flags(&frame).is_some_and(|flags| flags.2));
+    }
+    assert_eq!(resets, 1);
+}
+
+/// The guest's answer to the stack's ARP request for the guest's address.
+fn arp_reply() -> Vec<u8> {
+    let mut frame = STACK_MAC.to_vec();
+    frame.extend(GUEST_MAC);
+    frame.extend([0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 2]);
+    frame.extend(GUEST_MAC);
+    frame.extend(GUEST_V4.octets());
+    frame.extend(STACK_MAC);
+    frame.extend(STACK_V4.octets());
+    frame
+}
+
+#[test]
+fn a_forgotten_connection_sends_its_reset_once_the_guest_s_address_is_known_again() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    guest.connect(to, 49152);
+    exchange(&mut guest, &mut stack, start);
+    let connection = stack.accept().unwrap();
+    // Long enough that the stack has forgotten the guest's MAC address.
+    let later = start + std::time::Duration::from_secs(61);
+    stack.abort(connection.id);
+    stack.forget(connection.id);
+    stack.poll(later);
+    let asked = stack.transmit().expect("the stack asks for the guest");
+    assert_eq!(&asked[12..14], &[0x08, 0x06], "an ARP request");
+    while stack.transmit().is_some() {}
+    stack.receive(&arp_reply(), later, |flow| panic!("ARP opened {flow:?}"));
+    stack.poll(later);
+    let mut resets = 0;
+    while let Some(frame) = stack.transmit() {
+        resets += usize::from(tcp_flags(&frame).is_some_and(|flags| flags.2));
+    }
+    assert_eq!(resets, 1);
+}

@@ -671,3 +671,41 @@ fn a_connection_aborted_and_forgotten_still_sends_its_reset() {
     }
     assert_eq!(resets, 1);
 }
+
+/// The guest's answer to the stack's ARP request for the guest's address.
+fn arp_reply() -> Vec<u8> {
+    let mut frame = STACK_MAC.to_vec();
+    frame.extend(GUEST_MAC);
+    frame.extend([0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 2]);
+    frame.extend(GUEST_MAC);
+    frame.extend(GUEST_V4.octets());
+    frame.extend(STACK_MAC);
+    frame.extend(STACK_V4.octets());
+    frame
+}
+
+#[test]
+fn a_forgotten_connection_sends_its_reset_once_the_guest_s_address_is_known_again() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    guest.connect(to, 49152);
+    exchange(&mut guest, &mut stack, start);
+    let connection = stack.accept().unwrap();
+    // Long enough that the stack has forgotten the guest's MAC address.
+    let later = start + std::time::Duration::from_secs(61);
+    stack.abort(connection.id);
+    stack.forget(connection.id);
+    stack.poll(later);
+    let asked = stack.transmit().expect("the stack asks for the guest");
+    assert_eq!(&asked[12..14], &[0x08, 0x06], "an ARP request");
+    while stack.transmit().is_some() {}
+    stack.receive(&arp_reply(), later, |flow| panic!("ARP opened {flow:?}"));
+    stack.poll(later);
+    let mut resets = 0;
+    while let Some(frame) = stack.transmit() {
+        resets += usize::from(tcp_flags(&frame).is_some_and(|flags| flags.2));
+    }
+    assert_eq!(resets, 1);
+}

@@ -33,6 +33,8 @@ const TCP_BUFFER: usize = 64 * 1024;
 /// Datagrams, and their bytes, each UDP port buffers in each direction.
 const UDP_DATAGRAMS: usize = 32;
 const UDP_BUFFER: usize = 64 * 1024;
+/// How long a forgotten connection may wait to send its reset.
+const FORGET_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The largest Ethernet frame on the link, without its check sequence.
 const MAX_FRAME: usize = 1514;
 
@@ -103,9 +105,10 @@ pub struct Stack {
     udp: BTreeMap<u16, SocketHandle>,
     /// The SYN of each connection the caller holds.
     held: Vec<(Flow, Vec<u8>)>,
-    /// Sockets the caller is done with, freed once the next poll has sent
-    /// what they queued, such as a reset.
-    forgotten: Vec<SocketHandle>,
+    /// TCP sockets the caller is done with, and the first poll since. Each
+    /// is freed once it has sent the reset that an abort queued, or after a
+    /// while if it never can.
+    forgotten: Vec<(SocketHandle, Option<Instant>)>,
 }
 
 impl Stack {
@@ -207,9 +210,21 @@ impl Stack {
             &mut self.link,
             &mut self.sockets,
         );
-        for handle in self.forgotten.drain(..) {
-            self.sockets.remove(handle);
-        }
+        let sockets = &mut self.sockets;
+        self.forgotten.retain_mut(|(handle, since)| {
+            let handle = *handle;
+            let since = *since.get_or_insert(now);
+            let socket = sockets.get::<tcp::Socket>(handle);
+            // smoltcp keeps the endpoint of an aborted socket until its
+            // reset has gone out, which waits for the guest's address.
+            let resetting =
+                socket.state() == tcp::State::Closed && socket.remote_endpoint().is_some();
+            let keep = resetting && now.saturating_duration_since(since) < FORGET_WAIT;
+            if !keep {
+                sockets.remove(handle);
+            }
+            keep
+        });
         let sockets = &mut self.sockets;
         let accepted = &mut self.accepted;
         self.opening.retain(|&handle| {
@@ -304,7 +319,7 @@ impl Stack {
     /// Frees a connection, which the caller must not use again, once the
     /// next [`Stack::poll`] has sent what it queued.
     pub fn forget(&mut self, id: ConnectionId) {
-        self.forgotten.push(id.0);
+        self.forgotten.push((id.0, None));
     }
 
     /// Resets and frees a connection that the stack took for `flow` but
@@ -325,7 +340,7 @@ impl Stack {
                 && socket.remote_endpoint().map(SocketAddr::from) == Some(source);
             if ours {
                 socket.abort();
-                forgotten.push(handle);
+                forgotten.push((handle, None));
             }
             !ours
         });
@@ -335,7 +350,7 @@ impl Stack {
     /// there is a new flow to decide.
     pub fn unbind(&mut self, port: u16) {
         if let Some(handle) = self.udp.remove(&port) {
-            self.forgotten.push(handle);
+            self.sockets.remove(handle);
         }
     }
 

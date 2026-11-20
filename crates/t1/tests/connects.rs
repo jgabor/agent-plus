@@ -368,6 +368,59 @@ fn an_ip_rule_can_t_reach_your_host_s_loopback() {
     );
 }
 
+/// The processes `pid` started, and theirs, as `/proc` lists them.
+fn descendants(pid: u32) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut next = vec![pid];
+    while let Some(pid) = next.pop() {
+        let tasks = fs::read_dir(format!("/proc/{pid}/task"));
+        for task in tasks.into_iter().flatten() {
+            let children = fs::read_to_string(task.unwrap().path().join("children"));
+            for child in children.unwrap_or_default().split_whitespace() {
+                let child = child.parse().unwrap();
+                found.push(child);
+                next.push(child);
+            }
+        }
+    }
+    found
+}
+
+/// Whether a process under `root` that started as the network process
+/// still runs, and isn't a zombie.
+fn network_process_runs(root: u32) -> bool {
+    descendants(root).into_iter().any(|pid| {
+        let started = fs::read(format!("/proc/{pid}/cmdline"))
+            .is_ok_and(|cmdline| cmdline.starts_with(b"ap-network\0"));
+        let state = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+        let alive = state
+            .and_then(|stat| Some(stat.rsplit_once(") ")?.1.chars().next()? != 'Z'))
+            .unwrap_or(false);
+        started && alive
+    })
+}
+
+#[test]
+fn a_network_that_reaches_nothing_still_answers_the_guest() {
+    let scratch = Scratch::new("nothing");
+    scratch.build(
+        "nothing",
+        "NETWORK -\nNETWORK -api.anthropic.com\nNETWORK -claude.ai\n\
+         NETWORK -console.anthropic.com\nNETWORK -platform.claude.com\n",
+    );
+    let (run, name) = scratch.run("nothing");
+    let lines = scratch.try_network(
+        &name,
+        "timeout 10 getent ahostsv4 api.anthropic.com; echo \"lookup $?\"\n\
+         tcp tcp 192.0.2.1 443\n",
+    );
+    // getent's status for a name that doesn't exist, which the resolver
+    // said at once, and not the timeout's.
+    assert_eq!(lines, ["lookup 2", "tcp failed"]);
+    assert!(network_process_runs(run.0.id()), "the network process died");
+    scratch.stop(&name, run);
+}
+
 /// The port every listener in the namespace takes.
 const PORT: u16 = 8000;
 /// The host's DNS servers in the namespace, before and after the change.
@@ -380,6 +433,7 @@ const SECOND: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 11);
 const DENIED: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 12);
 
 // spec(NETWORK): For an address from the pool, the proxy resolves the name itself and connects only to the addresses it gets.
+// spec(NETWORK): It resolves through your host's resolver configuration as it is at each connection, so a run follows your host to another network.
 // spec(NETWORK): **IP rules** are checked against the real destination address.
 #[test]
 fn a_run_keeps_resolving_after_the_host_s_resolver_configuration_changes() {

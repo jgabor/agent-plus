@@ -149,11 +149,14 @@ pub fn main(args: &[OsString]) -> u8 {
         )
     };
     let mut stack = stack();
-    let reaches_nothing = reaches_nothing(&network, &harness);
-    let mut proxy = Proxy::new(network, harness, lookups);
-    let confined = match reaches_nothing {
-        true => confine(link.as_fd()),
-        false => confine_connecting(link.as_fd()),
+    // A proxy that can reach nothing asks for no lookups, so it needs no
+    // socket but its link.
+    let (mut proxy, confined) = match reaches_nothing(&network, &harness) {
+        true => (Proxy::refusing(), confine(link.as_fd())),
+        false => (
+            Proxy::new(network, harness, lookups),
+            confine_connecting(link.as_fd()),
+        ),
     };
     let served = confined.and_then(|()| proxy.serve(&link, &mut stack, &mut resolver));
     match served {

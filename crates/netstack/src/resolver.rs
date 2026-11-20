@@ -155,6 +155,11 @@ impl Resolver {
         address.to_bits() & mask(self.pool.prefix) == self.pool.network.to_bits()
     }
 
+    /// The port it answers on.
+    pub fn port(&self) -> u16 {
+        PORT
+    }
+
     /// Whether a datagram to `destination` is a query for this resolver.
     pub fn serves(&self, destination: SocketAddr) -> bool {
         destination.port() == PORT && self.at.contains(&destination.ip())

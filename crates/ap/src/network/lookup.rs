@@ -17,28 +17,34 @@ use std::thread;
 
 /// The longest name a question holds.
 const LONGEST_NAME: usize = 253;
+/// The threads that answer at once.
+const WORKERS: usize = 4;
 /// The most addresses an answer holds.
 const MOST_ADDRESSES: usize = 16;
 /// The longest message either way.
 pub(super) const LONGEST: usize = 4 + MOST_ADDRESSES * 17;
 
 /// Answers the network process's questions on `socket`, the
-/// [`super::Started::lookups`] of its start, each in a thread of its own,
-/// until the network process ends.
+/// [`super::Started::lookups`] of its start, until the network process
+/// ends. A few threads answer at once, each one question at a time, so a
+/// slow name doesn't hold up the others, and the network process can't
+/// make `ap run` start more.
 pub fn answer_lookups(socket: OwnedFd) {
     let socket = Arc::new(UnixDatagram::from(socket));
-    thread::spawn(move || {
-        let mut buffer = [0; 4 + LONGEST_NAME + 1];
-        while let Ok(len @ 1..) = socket.recv(&mut buffer) {
-            let Some((id, name)) = read_question(&buffer[..len]) else {
-                continue;
-            };
-            let socket = Arc::clone(&socket);
-            thread::spawn(move || {
-                let _ = socket.send(&write_answer(id, &look_up(&name)));
-            });
-        }
-    });
+    for _ in 0..WORKERS {
+        let socket = Arc::clone(&socket);
+        let started = thread::Builder::new().spawn(move || {
+            let mut buffer = [0; 4 + LONGEST_NAME + 1];
+            while let Ok(len @ 1..) = socket.recv(&mut buffer) {
+                if let Some((id, name)) = read_question(&buffer[..len]) {
+                    let _ = socket.send(&write_answer(id, &look_up(&name)));
+                }
+            }
+        });
+        // With no thread to answer, a connection to a name fails, as it
+        // would with no resolver.
+        drop(started);
+    }
 }
 
 /// The addresses your host's resolver has for `name`, in its order, each

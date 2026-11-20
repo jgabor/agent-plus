@@ -425,8 +425,14 @@ impl Proxy {
                 }
             }
         }
-        self.waiting
-            .retain(|waiting| now.duration_since(waiting.since) < ACCEPT_WAIT);
+        // The guest never finished its handshake.
+        self.waiting.retain(|waiting| {
+            let late = now.duration_since(waiting.since) >= ACCEPT_WAIT;
+            if late {
+                stack.abandon(waiting.flow);
+            }
+            !late
+        });
     }
 
     /// Answers the guest's queries, and passes its other datagrams, and the
@@ -462,8 +468,17 @@ impl Proxy {
                 stack.send_datagram(flow.destination, flow.guest, &buffer[..len]);
             }
         }
-        self.flows
-            .retain(|flow| now.duration_since(flow.used) < UDP_IDLE);
+        let (live, idle): (Vec<_>, Vec<_>) =
+            (self.flows.drain(..)).partition(|flow| now.duration_since(flow.used) < UDP_IDLE);
+        self.flows = live;
+        // A port that no flow uses any longer gives its buffers back.
+        for flow in idle {
+            let port = flow.destination.port();
+            let used = (self.flows.iter()).any(|other| other.destination.port() == port);
+            if !used && port != resolver.port() {
+                stack.unbind(port);
+            }
+        }
     }
 }
 

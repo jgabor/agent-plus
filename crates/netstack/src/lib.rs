@@ -103,6 +103,9 @@ pub struct Stack {
     udp: BTreeMap<u16, SocketHandle>,
     /// The SYN of each connection the caller holds.
     held: Vec<(Flow, Vec<u8>)>,
+    /// Sockets the caller is done with, freed once the next poll has sent
+    /// what they queued, such as a reset.
+    forgotten: Vec<SocketHandle>,
 }
 
 impl Stack {
@@ -133,6 +136,7 @@ impl Stack {
             accepted: VecDeque::new(),
             udp: BTreeMap::new(),
             held: Vec::new(),
+            forgotten: Vec::new(),
         }
     }
 
@@ -203,6 +207,9 @@ impl Stack {
             &mut self.link,
             &mut self.sockets,
         );
+        for handle in self.forgotten.drain(..) {
+            self.sockets.remove(handle);
+        }
         let sockets = &mut self.sockets;
         let accepted = &mut self.accepted;
         self.opening.retain(|&handle| {
@@ -294,9 +301,42 @@ impl Stack {
         )
     }
 
-    /// Frees a connection, which the caller must not use again.
+    /// Frees a connection, which the caller must not use again, once the
+    /// next [`Stack::poll`] has sent what it queued.
     pub fn forget(&mut self, id: ConnectionId) {
-        self.sockets.remove(id.0);
+        self.forgotten.push(id.0);
+    }
+
+    /// Resets and frees a connection that the stack took for `flow` but
+    /// hasn't accepted yet, because the guest never finished opening it.
+    pub fn abandon(&mut self, flow: Flow) {
+        let Flow::Tcp {
+            source,
+            destination,
+        } = flow
+        else {
+            return;
+        };
+        let sockets = &mut self.sockets;
+        let forgotten = &mut self.forgotten;
+        self.opening.retain(|&handle| {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            let ours = socket.local_endpoint().map(SocketAddr::from) == Some(destination)
+                && socket.remote_endpoint().map(SocketAddr::from) == Some(source);
+            if ours {
+                socket.abort();
+                forgotten.push(handle);
+            }
+            !ours
+        });
+    }
+
+    /// Frees the socket that takes datagrams to `port`, so the next one
+    /// there is a new flow to decide.
+    pub fn unbind(&mut self, port: u16) {
+        if let Some(handle) = self.udp.remove(&port) {
+            self.forgotten.push(handle);
+        }
     }
 
     /// The next datagram the guest sent.

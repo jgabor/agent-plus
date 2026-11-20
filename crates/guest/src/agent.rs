@@ -255,7 +255,7 @@ pub fn trust(root: &Path, authority: &[u8]) -> io::Result<()> {
         .custom_flags(O_NOFOLLOW)
         .open(&path)?;
     let len = bundle.metadata()?.len();
-    let mut last = [b'\n'];
+    let mut last = *b"\n";
     if len > 0 {
         bundle.read_exact_at(&mut last, len - 1)?;
     }

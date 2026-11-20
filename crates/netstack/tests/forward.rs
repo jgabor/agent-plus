@@ -158,11 +158,11 @@ impl Net {
         if let Some(id) = self.pending.take_if(|_| self.upstream.is_some()) {
             self.pipe = Some(Pipe::new(id, self.upstream.take().unwrap()));
         }
-        if let Some(pipe) = &mut self.pipe {
-            if !pipe.pump(&mut self.stack) {
-                self.pipe = None;
-                self.ended = true;
-            }
+        if let Some(pipe) = &mut self.pipe
+            && !pipe.pump(&mut self.stack)
+        {
+            self.pipe = None;
+            self.ended = true;
         }
         self.stack.poll(now);
         while let Some(frame) = self.stack.transmit() {

@@ -92,7 +92,8 @@ mod tests {
     use super::*;
 
     // spec(ap logs): `ap logs <run>` shows a run's output and its network decisions.
-    // spec(ap logs): It prints the run's network decisions after its output, on standard error. Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+    // spec(ap logs): It prints the run's network decisions after its output, on standard error.
+    // spec(ap logs): Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
     #[test]
     fn decisions_follow_the_output_on_standard_error() {
         let mut log = Vec::new();

@@ -573,7 +573,8 @@ fn a_run_that_ends_lists_the_hosts_it_blocked() {
 }
 
 // spec(ap logs): `ap logs <run>` shows a run's output and its network decisions.
-// spec(ap logs): It prints the run's network decisions after its output, on standard error. Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+// spec(ap logs): It prints the run's network decisions after its output, on standard error.
+// spec(ap logs): Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
 #[test]
 fn ap_logs_shows_the_run_s_network_decisions() {
     let scratch = Scratch::new("logs");

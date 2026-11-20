@@ -1421,6 +1421,44 @@ fn a_kill_at_each_step_resumes() {
     });
 }
 
+/// A killed run leaves its tree, and a later merge of another PR removes it,
+/// but not the tree of a run that still holds it.
+#[test]
+fn a_merge_removes_trees_no_live_run_holds() {
+    let repo = Repo::new("sweep");
+    let killed = repo.merge_killed("git rebase", "after");
+    assert_eq!(killed.status.code(), None, "{}", stderr(&killed));
+    let left = repo.merge_trees();
+    let [left] = &left
+        .iter()
+        .filter(|n| !n.ends_with(".lock"))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{left:?}");
+    };
+    // The PR number ends the name, before any padding.
+    let at = left.rfind("-9").unwrap();
+    let dead = format!("{}-8{}", &left[..at], &left[at + 2..]);
+    let live = format!("{}-7{}", &left[..at], &left[at + 2..]);
+    let moved = [
+        "worktree",
+        "move",
+        &repo.temp.join(left).display().to_string(),
+        &repo.temp.join(&dead).display().to_string(),
+    ];
+    repo.git(&moved);
+    fs::create_dir(repo.temp.join(&live)).unwrap();
+    let held = fs::File::create(repo.temp.join(format!("{live}.lock"))).unwrap();
+    held.lock().unwrap();
+
+    assert_merged(&repo, &repo.merge());
+    let mut left = repo.merge_trees();
+    left.sort();
+    assert_eq!(left, [live.clone(), format!("{live}.lock")]);
+    assert_eq!(repo.git(&["worktree", "list"]).lines().count(), 1);
+    drop(held);
+}
+
 #[test]
 fn a_tool_just_written_can_run_while_other_threads_start_processes() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("merge/fresh-tool");

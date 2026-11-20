@@ -1353,9 +1353,9 @@ fn layers(scratch: &Scratch) -> Vec<(PathBuf, String)> {
 fn every_run_trusts_a_certificate_authority_of_its_own() {
     let scratch = Scratch::new("trust");
     scratch.build("trusting", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
-    let first = trusted(&scratch, "trusting");
     let image = layers(&scratch);
     assert!(!image.is_empty());
+    let first = trusted(&scratch, "trusting");
     let second = trusted(&scratch, "trusting");
     // Debian's roots, then the run's authority, which the image doesn't
     // keep: the second run's bundle has one more than the image's, not two.
@@ -1366,9 +1366,9 @@ fn every_run_trusts_a_certificate_authority_of_its_own() {
     assert_eq!(first_roots, second_roots);
     assert_ne!(first_authority, second_authority);
     assert!(!first_roots.contains(first_authority));
-    assert_eq!(
-        layers(&scratch),
-        image,
-        "a run changed a layer in the store"
-    );
+    // A run may unpack a layer, but changes none the store had.
+    let after = layers(&scratch);
+    for kept in &image {
+        assert!(after.contains(kept), "a run changed {}", kept.0.display());
+    }
 }

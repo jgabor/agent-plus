@@ -12,7 +12,9 @@ use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use smoltcp::wire::{
+    EthernetAddress, EthernetFrame, HardwareAddress, IpAddress, IpCidr, Ipv4Packet, TcpPacket,
+};
 
 const GUEST_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x15];
 const STACK_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x02];
@@ -421,5 +423,160 @@ fn a_refused_udp_datagram_is_dropped_without_an_answer() {
             "{asked:?}"
         );
         assert!(guest.sockets.get_mut::<udp::Socket>(handle).recv().is_err());
+    }
+}
+
+/// The flags of the TCP segment in a frame the stack sent, as `(syn, ack,
+/// rst)`, or `None` if it isn't TCP over IPv4.
+fn tcp_flags(frame: &[u8]) -> Option<(bool, bool, bool)> {
+    let ethernet = EthernetFrame::new_checked(frame).ok()?;
+    let ip = Ipv4Packet::new_checked(ethernet.payload()).ok()?;
+    let tcp = TcpPacket::new_checked(ip.payload()).ok()?;
+    Some((tcp.syn(), tcp.ack(), tcp.rst()))
+}
+
+/// A stack that knows the guest's MAC address, from the guest's ARP request
+/// for the stack's address, as a real link starts.
+fn introduced() -> Stack {
+    let mut arp = vec![0xff; 6];
+    arp.extend(GUEST_MAC);
+    arp.extend([0x08, 0x06, 0, 1, 8, 0, 6, 4, 0, 1]);
+    arp.extend(GUEST_MAC);
+    arp.extend(GUEST_V4.octets());
+    arp.extend([0; 6]);
+    arp.extend(STACK_V4.octets());
+    let mut stack = stack();
+    stack.receive(&arp, Instant::now(), |flow| panic!("ARP opened {flow:?}"));
+    assert!(stack.transmit().is_some(), "the stack answers ARP");
+    stack
+}
+
+/// `syn` turned into the guest's reset of the connection it opens.
+fn reset_of(syn: &[u8]) -> Vec<u8> {
+    let mut frame = syn.to_vec();
+    let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..]);
+    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+    let (source, destination) = (ip.src_addr(), ip.dst_addr());
+    let mut tcp = TcpPacket::new_unchecked(ip.payload_mut());
+    tcp.set_seq_number(tcp.seq_number() + 1);
+    tcp.set_syn(false);
+    tcp.set_rst(true);
+    tcp.fill_checksum(&source.into(), &destination.into());
+    frame
+}
+
+#[test]
+fn a_refused_syn_is_reset_after_an_earlier_one_to_its_destination_was_taken() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    let syn = syn_frame(to);
+    let now = Instant::now();
+    let mut stack = introduced();
+    stack.receive(&syn, now, allow);
+    let answer = stack.transmit().expect("the stack answers the SYN");
+    assert_eq!(tcp_flags(&answer), Some((true, true, false)));
+    // The guest gives up on that connection before it opens.
+    stack.receive(&reset_of(&syn), now, allow);
+    while stack.transmit().is_some() {}
+
+    let mut asked = 0;
+    stack.receive(&syn, now, |_| {
+        asked += 1;
+        false
+    });
+    assert_eq!(asked, 1);
+    let answer = stack.transmit().expect("the stack answers the SYN");
+    assert_eq!(tcp_flags(&answer), Some((false, true, true)), "not a reset");
+    assert!(stack.accept().is_none());
+}
+
+#[test]
+fn a_retransmitted_syn_of_a_taken_connection_is_not_asked_about_again() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    let syn = syn_frame(to);
+    let now = Instant::now();
+    let mut stack = introduced();
+    stack.receive(&syn, now, allow);
+    while stack.transmit().is_some() {}
+    stack.receive(&syn, now, |flow| panic!("asked again about {flow:?}"));
+    // The connection it opened goes on.
+    while let Some(frame) = stack.transmit() {
+        assert_ne!(tcp_flags(&frame).map(|flags| flags.2), Some(true), "reset");
+    }
+}
+
+/// The guest's UDP datagram to `to`, as the frame it sends once the stack's
+/// address is resolved.
+fn datagram_frame(to: SocketAddr) -> Vec<u8> {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let handle = guest.udp(40000);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"query", to)
+        .unwrap();
+    // Resolves the stack's address, and refuses the datagram.
+    exchange_deciding(&mut guest, &mut stack, start, |_| false);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"query", to)
+        .unwrap();
+    let millis = i64::try_from(start.elapsed().as_millis()).unwrap() + 1;
+    guest.iface.poll(
+        SmolInstant::from_millis(millis),
+        &mut guest.link,
+        &mut guest.sockets,
+    );
+    let frame = guest.link.from_guest.pop_front().expect("the guest sends");
+    assert_eq!(&frame[..6], &STACK_MAC, "{frame:?}");
+    frame
+}
+
+/// `frame`, an IPv6 datagram, with an empty hop-by-hop header before its
+/// UDP header. The UDP checksum covers neither, so it still holds.
+fn with_hop_by_hop(frame: &[u8]) -> Vec<u8> {
+    let mut out = frame[..14 + 40].to_vec();
+    let next = out[14 + 6];
+    out[14 + 6] = 0;
+    let length = u16::from_be_bytes([out[14 + 4], out[14 + 5]]) + 8;
+    out[14 + 4..14 + 6].copy_from_slice(&length.to_be_bytes());
+    out.extend([next, 0, 1, 4, 0, 0, 0, 0]);
+    out.extend(&frame[14 + 40..]);
+    out
+}
+
+#[test]
+fn a_flow_behind_an_ipv6_extension_header_is_never_taken_unasked() {
+    let to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
+    let plain = datagram_frame(to);
+    let hidden = with_hop_by_hop(&plain);
+    let now = Instant::now();
+    let mut stack = stack();
+    // An earlier datagram to the port was taken, so a socket holds it.
+    stack.receive(&plain, now, allow);
+    assert!(stack.recv_datagram().is_some());
+    stack.receive(&hidden, now, |_| false);
+    assert!(
+        stack.recv_datagram().is_none(),
+        "a refused datagram was taken"
+    );
+    assert!(!std::iter::from_fn(|| stack.transmit()).any(|frame| unreachable(&frame)));
+}
+
+#[test]
+fn a_flow_sent_to_every_station_is_never_taken_unasked() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53);
+    let plain = datagram_frame(to);
+    let now = Instant::now();
+    let mut stack = stack();
+    stack.receive(&plain, now, allow);
+    assert!(stack.recv_datagram().is_some());
+    for station in [[0xff; 6], [0x01, 0x00, 0x5e, 0, 0, 1]] {
+        let mut sent = plain.clone();
+        sent[..6].copy_from_slice(&station);
+        stack.receive(&sent, now, |_| false);
+        assert!(stack.recv_datagram().is_none(), "{station:?}");
     }
 }

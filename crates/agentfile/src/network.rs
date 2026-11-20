@@ -326,6 +326,67 @@ fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
     }
 }
 
+/// The instructions with `typed`, the rules from `ap run --network`, merged
+/// into their `NETWORK` lines, by the command line under NETWORK in SPEC.md.
+/// A typed bare rule replaces the Agentfile's, and a typed rule replaces an
+/// Agentfile rule it ties with: one for the same destination, which is the
+/// only rule that is as specific and matches the same connections. The typed
+/// rules come last, on lines past the Agentfile's. It returns the errors that
+/// `ap build`'s checks of `NETWORK` and `SECRET` find in the merged rules.
+pub fn with_typed_network(
+    instructions: &[Instruction],
+    typed: &[String],
+) -> Result<Vec<Instruction>, Vec<Error>> {
+    let next = (instructions.iter().map(|instruction| instruction.line)).max();
+    let typed: Vec<Instruction> = (next.unwrap_or(0) + 1..)
+        .zip(typed)
+        .map(|(line, rule)| Instruction {
+            line,
+            name: "NETWORK".to_owned(),
+            arguments: vec![rule.clone()],
+            text: None,
+        })
+        .collect();
+    let mut errors = Vec::new();
+    let mut bare: Option<(&str, Sign)> = None;
+    let mut replaced = Vec::new();
+    for instruction in &typed {
+        let shown = instruction.arguments[0].as_str();
+        let mut fail = |message: String| {
+            errors.push(Error {
+                line: instruction.line,
+                message,
+            })
+        };
+        match line(instruction, rule) {
+            Err(message) => fail(format!("`--network={shown}`: {message}")),
+            Ok(Line::Bare(sign)) => match bare {
+                Some((first, other)) if other != sign => {
+                    fail(format!("`--network={shown}` disagrees with `--network={first}`"))
+                }
+                Some(_) => {}
+                None => bare = Some((shown, sign)),
+            },
+            Ok(Line::Rule(rule)) => replaced.push(rule.destination),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let kept = instructions.iter().filter(|instruction| {
+        instruction.name != "NETWORK"
+            || match line(instruction, rule) {
+                Ok(Line::Bare(_)) => bare.is_none(),
+                Ok(Line::Rule(rule)) => !replaced.contains(&rule.destination),
+                Err(_) => true,
+            }
+    });
+    let merged: Vec<Instruction> = kept.chain(&typed).cloned().collect();
+    Network::read(&merged)?;
+    crate::Secrets::read(&merged)?;
+    Ok(merged)
+}
+
 /// The `POLICY` rules of an Agentfile: which agents this one may call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Policy {

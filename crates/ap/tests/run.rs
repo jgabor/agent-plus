@@ -159,6 +159,7 @@ fn bad_arguments_print_usage_and_exit_2() {
         &["run", "a", "-p", "x", "-p", "y"],
         &["run", "a", "-i", "-i"],
         &["run", "--nope", "a"],
+        &["run", "a", "--network", "+"],
     ] {
         let output = scratch.ap(args, &[]);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
@@ -250,7 +251,7 @@ fn a_run_without_a_prompt_or_with_i_is_interactive_and_needs_a_terminal() {
 fn a_flag_that_isnt_built_yet_is_named() {
     let scratch = Scratch::new("flags");
     scratch.build("runnable", RUNNABLE);
-    for flag in ["-t", "--network", "--resume", "--gui", "--approve=grants"] {
+    for flag in ["-t", "--resume", "--gui", "--approve=grants"] {
         let output = scratch.ap(&["run", "runnable", flag, "-p", "hi"], &[]);
         let name = flag.split('=').next().unwrap();
         refused(&output, &format!("`ap run {name}` is not built yet"));
@@ -277,6 +278,44 @@ fn an_agent_with_host_and_ip_rules_runs_and_one_with_a_url_rule_fails_before_its
     );
     refused(
         &scratch.ap(&["run", "url", "-p", "hi"], &[]),
+        "URL rules in `NETWORK` are not built yet",
+    );
+}
+
+// spec(Grants): Options you type on the command line (for example, `ap run --share .`) are already your decision and need no approval.
+// spec(NETWORK): **Command line.** `ap run --network=<rule>` adds rules for a single run.
+// spec(NETWORK): The checks that `ap build` runs on `NETWORK` and `SECRET` rules run again on the merged rules, and a failure fails the run.
+#[test]
+fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
+    let scratch = Scratch::new("run-network");
+    scratch.build("closed", RUNNABLE);
+    let before = approvals(&scratch.home);
+    // Standard input is no terminal, so a question would fail the run.
+    let typed = [
+        "--network=+host.ap.internal",
+        "--network=+",
+        "--network=-example.com",
+    ];
+    for flag in typed {
+        past_checks(&scratch.ap(&["run", "closed", flag, "-p", "hi"], &[]));
+    }
+    past_checks(&scratch.ap(&["run", "closed", typed[0], typed[2], "-p", "hi"], &[]));
+    assert_eq!(approvals(&scratch.home), before);
+    refused(
+        &scratch.ap(&["run", "closed", "--network=+", "--network=-", "-p", "hi"], &[]),
+        "`--network=-` disagrees with `--network=+`",
+    );
+    refused(
+        &scratch.ap(&["run", "closed", "--network=example.com", "-p", "hi"], &[]),
+        "`--network=example.com`: a `NETWORK` rule starts with `+` or `-`",
+    );
+    // A URL rule fails here as it does in the Agentfile, until the proxy
+    // decrypts.
+    refused(
+        &scratch.ap(
+            &["run", "closed", "--network=+https://codeberg.org/forgejo", "-p", "hi"],
+            &[],
+        ),
         "URL rules in `NETWORK` are not built yet",
     );
 }

@@ -31,7 +31,7 @@ const USAGE: &str = "usage: ap --version
        ap ls
        ap inspect [--grants] agent
        ap rm [--force] agent
-       ap run [-i] [-p prompt] agent
+       ap run [-i] [-p prompt] [--network=rule]... agent
        ap ps [-a]
        ap logs run
        ap exec run command [arg...]

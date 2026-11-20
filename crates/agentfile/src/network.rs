@@ -330,7 +330,8 @@ fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
 /// into their `NETWORK` lines, by the command line under NETWORK in SPEC.md.
 /// A typed bare rule replaces the Agentfile's, and a typed rule replaces an
 /// Agentfile rule it ties with: one for the same destination, which is the
-/// only rule that is as specific and matches the same connections. The typed
+/// only rule that is as specific and matches the same connections. An IPv4
+/// block is the same destination as its IPv4-mapped form. The typed
 /// rules come last, on lines past the Agentfile's. It returns the errors that
 /// `ap build`'s checks of `NETWORK` and `SECRET` find in the merged rules.
 pub fn with_typed_network(
@@ -367,7 +368,7 @@ pub fn with_typed_network(
                 Some(_) => {}
                 None => bare = Some((shown, sign)),
             },
-            Ok(Line::Rule(rule)) => replaced.push(rule.destination),
+            Ok(Line::Rule(rule)) => replaced.push(canonical(rule.destination)),
         }
     }
     if !errors.is_empty() {
@@ -377,7 +378,7 @@ pub fn with_typed_network(
         instruction.name != "NETWORK"
             || match line(instruction, rule) {
                 Ok(Line::Bare(_)) => bare.is_none(),
-                Ok(Line::Rule(rule)) => !replaced.contains(&rule.destination),
+                Ok(Line::Rule(rule)) => !replaced.contains(&canonical(rule.destination)),
                 Err(_) => true,
             }
     });
@@ -385,6 +386,23 @@ pub fn with_typed_network(
     Network::read(&merged)?;
     crate::Secrets::read(&merged)?;
     Ok(merged)
+}
+
+/// `destination` with an IPv4 block in its IPv4-mapped form, which the proxy
+/// gives the same specificity.
+fn canonical(destination: Destination) -> Destination {
+    match destination {
+        Destination::Address {
+            network: IpAddr::V4(v4),
+            prefix,
+            port,
+        } => Destination::Address {
+            network: IpAddr::V6(v4.to_ipv6_mapped()),
+            prefix: prefix + 96,
+            port,
+        },
+        other => other,
+    }
 }
 
 /// The `POLICY` rules of an Agentfile: which agents this one may call.

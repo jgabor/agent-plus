@@ -86,6 +86,15 @@ fn a_typed_rule_wins_a_tie_against_an_agentfile_rule() {
         ),
         Sign::Allow
     );
+    // An IPv4 rule ties with the same block written IPv4-mapped.
+    assert_eq!(
+        sign(
+            "NETWORK -\nNETWORK -192.0.2.0/24\n",
+            &["+[::ffff:192.0.2.0]/120"],
+            "x.org"
+        ),
+        Sign::Allow
+    );
     // A more specific Agentfile rule still beats a typed one.
     assert_eq!(
         sign(

@@ -307,7 +307,17 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
             "the harness didn't see {seen}: {first}"
         );
     }
-    assert_eq!(array(&first, "interfaces"), ["\"lo\""], "{first}");
+    // Every run has a network, whose only resolver is `ap`.
+    assert_eq!(
+        array(&first, "interfaces"),
+        ["\"eth0\"", "\"lo\""],
+        "{first}"
+    );
+    assert_eq!(
+        array(&first, "resolvers"),
+        ["\"10.0.2.2\"", "\"fd61:7000::2\""],
+        "{first}"
+    );
 
     // Without `-p`, the prompt is the one the agent was built with, and the
     // file the first run wrote is gone with its overlay.

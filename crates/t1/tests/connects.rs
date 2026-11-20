@@ -398,6 +398,148 @@ fn an_ip_rule_can_t_reach_your_host_s_loopback() {
     );
 }
 
+/// What a listener received on each connection, once the connection ended.
+type Received = Arc<Mutex<Vec<Vec<u8>>>>;
+
+/// Reads each TCP connection to its end, and notes what came.
+fn receiver(listener: TcpListener) -> Received {
+    let received = Received::default();
+    let noted = Arc::clone(&received);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let noted = Arc::clone(&noted);
+            thread::spawn(move || {
+                stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                let mut bytes = Vec::new();
+                let _ = stream.read_to_end(&mut bytes);
+                noted.lock().unwrap().push(bytes);
+            });
+        }
+    });
+    received
+}
+
+/// What a receiver received, once `want` connections ended or a few
+/// seconds passed, in order.
+fn received(received: &Received, want: usize) -> Vec<Vec<u8>> {
+    for _ in 0..200 {
+        if received.lock().unwrap().len() >= want {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // Long enough for one more to show up, if one would.
+    thread::sleep(Duration::from_millis(500));
+    let mut all = received.lock().unwrap().clone();
+    all.sort();
+    all
+}
+
+/// The TLS client hello that rustls' client sends to `server`.
+fn hello(server: &str) -> Vec<u8> {
+    use rustls::pki_types::ServerName;
+    use rustls::{ClientConfig, ClientConnection, RootCertStore};
+
+    let provider = Arc::new(rustls_graviola::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(RootCertStore::empty())
+        .with_no_client_auth();
+    let server = ServerName::try_from(server.to_owned()).unwrap();
+    let mut client = ClientConnection::new(Arc::new(config), server).unwrap();
+    let mut bytes = Vec::new();
+    while client.wants_write() {
+        client.write_tls(&mut bytes).unwrap();
+    }
+    bytes
+}
+
+/// A line of the guest's script that connects to `host` on `port`, sends
+/// each of `parts` a second apart, and closes a second after the last.
+fn send(host: &str, port: u16, parts: &[&[u8]]) -> String {
+    let parts: Vec<String> = parts
+        .iter()
+        .map(|part| part.iter().map(|byte| format!("\\x{byte:02x}")).collect())
+        .collect();
+    let sends: Vec<String> = parts
+        .iter()
+        .map(|part| format!("printf \"{part}\" >&3 && sleep 1"))
+        .collect();
+    format!(
+        "timeout 20 bash -c 'exec 3<>/dev/tcp/{host}/{port} && {}' 2>/dev/null; true\n",
+        sends.join(" && ")
+    )
+}
+
+const AGREES: &[u8] = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
+const DISAGREES: &[u8] = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+
+// spec(NETWORK): **Name checks.** When a host or URL rule decides a connection, the attributed name must agree with whatever the protocol shows without decrypting: the TLS server name (SNI), or the `Host` header of plain HTTP.
+#[test]
+fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() {
+    let scratch = Scratch::new("agrees");
+    scratch.build("agrees", "NETWORK -\nNETWORK +host.ap.internal\n");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = receiver(listener);
+    let host = "host.ap.internal";
+    let mine = hello(host);
+    let other = hello("example.com");
+
+    let (run, name) = scratch.run("agrees");
+    let script = [
+        send(host, port, &[&other]),
+        send(host, port, &[DISAGREES]),
+        send(host, port, &[AGREES, DISAGREES]),
+        send(host, port, &[&mine]),
+        send(host, port, &[AGREES]),
+    ];
+    scratch.try_network(&name, &script.concat());
+    // The hello for another name, and the request for one, never reached
+    // the listener. The second request on a connection didn't either.
+    let mut want = vec![mine, AGREES.to_vec(), AGREES.to_vec()];
+    want.sort();
+    assert_eq!(received(&seen, want.len()), want);
+    scratch.stop(&name, run);
+}
+
+/// This host's address on its route out, which isn't a loopback address.
+fn outward_address() -> Ipv4Addr {
+    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+    socket
+        .connect("192.0.2.1:9")
+        .expect("this host has a route out");
+    match socket.local_addr().unwrap().ip() {
+        std::net::IpAddr::V4(address) => address,
+        address => panic!("an IPv4 route out, not {address}"),
+    }
+}
+
+// spec(NETWORK): A connection that no name rule decides skips this check, so under `NETWORK +`, clients that resolve names on their own (DNS over HTTPS, hard-coded addresses) keep working.
+#[test]
+fn a_connection_no_name_rule_decides_skips_the_name_check() {
+    let scratch = Scratch::new("unnamed");
+    scratch.build("unnamed", "NETWORK +\n");
+    let address = outward_address();
+    let listener = TcpListener::bind((address, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = receiver(listener);
+    let other = hello("example.com");
+
+    let (run, name) = scratch.run("unnamed");
+    let script = [
+        send(&address.to_string(), port, &[&other]),
+        send(&address.to_string(), port, &[DISAGREES]),
+    ];
+    scratch.try_network(&name, &script.concat());
+    let mut want = vec![other, DISAGREES.to_vec()];
+    want.sort();
+    assert_eq!(received(&seen, want.len()), want);
+    scratch.stop(&name, run);
+}
+
 /// The processes `pid` started, and theirs, as `/proc` lists them.
 fn descendants(pid: u32) -> Vec<u32> {
     let mut found = Vec::new();

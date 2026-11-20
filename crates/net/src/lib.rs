@@ -200,6 +200,26 @@ pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
     !network.denies(name)
 }
 
+/// What decided that the resolver refuses `name`, which [`could_allow`]
+/// refuses: the most specific `-` host rule that names it on every port,
+/// or else the default.
+pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    // A port that no rule names, so that only a rule for every port matches.
+    let port = (1..=u16::MAX).find(|&port| {
+        !network.rules.iter().any(|rule| match &rule.destination {
+            Destination::Host { port: only, .. }
+            | Destination::Address { port: only, .. }
+            | Destination::Url { port: only, .. } => *only == Some(port),
+        })
+    });
+    match port.and_then(|port| name_decision(&network.rules, name, port, None)) {
+        Some(rule) if rule.sign == Sign::Deny => By::Rule(rule),
+        _ => By::Default,
+    }
+}
+
 /// Something that `NETWORK` blocked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Blocked {

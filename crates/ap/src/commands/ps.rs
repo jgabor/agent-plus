@@ -144,7 +144,7 @@ fn table(mut runs: Vec<Row>, all: bool) -> String {
 }
 
 /// A time in nanoseconds since the Unix epoch, to the second, in UTC.
-fn utc(nanoseconds: u128) -> String {
+pub(super) fn utc(nanoseconds: u128) -> String {
     let seconds = (nanoseconds / 1_000_000_000) as u64;
     let (days, time) = (seconds / 86_400, seconds % 86_400);
     // Howard Hinnant's `civil_from_days`, for days since 1970-01-01.

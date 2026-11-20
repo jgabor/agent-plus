@@ -215,7 +215,6 @@ fn run_agent(
         authority,
     } = ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
     start.authority = authority;
-    let lookups = ap::network::answer_lookups(lookups, ap::network::asks(network));
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -257,6 +256,13 @@ fn run_agent(
     let mut log = runs
         .create_log(&run.name)
         .map_err(fail("can't create the run's log"))?;
+    // The guest starts only once the request is sent, so the network
+    // process decides nothing before its decisions have a log to go to.
+    let keeper = log
+        .try_clone()
+        .map_err(fail("can't create the run's log"))?;
+    let keeper = ap::network::Keeper::new(network, keeper);
+    let lookups = ap::network::answer_lookups(lookups, ap::network::asks(network), Some(keeper));
 
     let interactive = start.terminal.is_some();
     runs::send_request(&mut stream, layers, start).map_err(fail("lost the run"))?;

@@ -1,12 +1,13 @@
 //! `ap logs <run>`, from SPEC.md's `ap logs` section. It reads the run's log
 //! from the store, which `ap run` writes as it shows the run's output, and
-//! writes each part to the stream it was shown on. For an active run, it
-//! stops at what `ap run` has written so far.
+//! writes each part to the stream it was shown on, then the run's network
+//! decisions on standard error. For an active run, it stops at what `ap
+//! run` has written so far.
 
 use std::ffi::OsString;
 use std::io::{self, BufReader, Read, Write};
 
-use ap::runs::{self, FromRun};
+use ap::runs::{self, Logged};
 use store::Runs;
 
 /// Reads `ap logs`'s arguments: one run's name. Anything else is bad usage.
@@ -46,20 +47,69 @@ fn print(name: &str) -> Result<(), String> {
         .ok_or_else(|| format!("the log of run {name} was deleted"))?;
     // An active run's log ends where it was when it was opened.
     let length = log.metadata().map_err(|error| error.to_string())?.len();
-    let mut log = BufReader::new(log).take(length);
-    let (mut stdout, mut stderr) = (io::stdout().lock(), io::stderr().lock());
+    let log = BufReader::new(log).take(length);
     let unreadable = |error: io::Error| format!("can't read the log of run {name}: {error}");
-    // A reader that went away has nothing more to see.
-    while let Some(part) = runs::read_log(&mut log).map_err(unreadable)? {
+    show(log, &mut io::stdout().lock(), &mut io::stderr().lock()).map_err(unreadable)
+}
+
+/// Writes the output in `log` to `stdout` and `stderr`, each part where it
+/// was shown, then the network decisions to `stderr`, each on a line with
+/// its time. A reader that went away has nothing more to see.
+fn show(mut log: impl Read, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<()> {
+    let mut decisions = Vec::new();
+    while let Some(part) = runs::read_log(&mut log)? {
         let written = match part {
-            FromRun::Stdout(bytes) => stdout.write_all(&bytes),
-            FromRun::Stderr(bytes) => stdout.flush().and_then(|()| stderr.write_all(&bytes)),
-            _ => Ok(()),
+            Logged::Stdout(bytes) => stdout.write_all(&bytes),
+            Logged::Stderr(bytes) => stdout.flush().and_then(|()| stderr.write_all(&bytes)),
+            Logged::Decision(at, line) => {
+                decisions.push(format!("{}  {line}\n", super::ps::utc(at.into())));
+                Ok(())
+            }
         };
         if written.is_err() {
             return Ok(());
         }
     }
-    let _ = stdout.flush();
+    if stdout.flush().is_err() {
+        return Ok(());
+    }
+    let _ = stderr.write_all(decisions.concat().as_bytes());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // spec(ap logs): `ap logs <run>` shows a run's output and its network decisions.
+    // spec(ap logs): It prints the run's network decisions after its output, on standard error. Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+    #[test]
+    fn decisions_follow_the_output_on_standard_error() {
+        let mut log = Vec::new();
+        runs::write_log(&mut log, false, b"out\n").unwrap();
+        let at = 1_794_567_729_123_456_789;
+        let allowed = "allow  host.ap.internal:8080  NETWORK +host.ap.internal";
+        runs::write_decision(&mut log, at, allowed).unwrap();
+        runs::write_log(&mut log, true, b"err\n").unwrap();
+        runs::write_decision(
+            &mut log,
+            at + 1_000_000_000,
+            "deny   denied.example  the default",
+        )
+        .unwrap();
+        let finished = log.len();
+        // An active run's log can end in a message still being written.
+        runs::write_log(&mut log, false, b"more").unwrap();
+        for log in [&log[..finished], &log[..log.len() - 1]] {
+            let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+            show(log, &mut stdout, &mut stderr).unwrap();
+            assert_eq!(String::from_utf8(stdout).unwrap(), "out\n");
+            assert_eq!(
+                String::from_utf8(stderr).unwrap(),
+                "err\n\
+                 2026-11-13T11:02:09Z  allow  host.ap.internal:8080  NETWORK +host.ap.internal\n\
+                 2026-11-13T11:02:10Z  deny   denied.example  the default\n"
+            );
+        }
+    }
 }

@@ -289,6 +289,9 @@ impl Proxy {
                     report(reporter, name.as_deref(), addresses[0], destination.port());
                     return Verdict::Refuse;
                 }
+                if let Some(reporter) = reporter {
+                    reporter.decided(true, name.as_deref(), allowed[0], destination.port());
+                }
                 (name, Err(allowed))
             }
         };
@@ -339,10 +342,13 @@ impl Proxy {
                 let opening = &mut self.opening[at];
                 let port = flow_destination(&opening.flow).port();
                 let allowed = allowed(network, &hosts, opening.name.as_deref(), port, &addresses);
-                if allowed.is_empty() && !addresses.is_empty() {
-                    let reporter = self.reporter.as_deref();
-                    report(reporter, opening.name.as_deref(), addresses[0], port);
-                }
+                answered(
+                    self.reporter.as_deref(),
+                    opening.name.as_deref(),
+                    port,
+                    &addresses,
+                    &allowed,
+                );
                 match connecting(allowed, port, now) {
                     Some(step) => opening.step = step,
                     None => {
@@ -357,10 +363,13 @@ impl Proxy {
             if let Some(flow) = flow {
                 let port = flow.destination.port();
                 let allowed = allowed(network, &hosts, flow.name.as_deref(), port, &addresses);
-                if allowed.is_empty() && !addresses.is_empty() {
-                    let reporter = self.reporter.as_deref();
-                    report(reporter, flow.name.as_deref(), addresses[0], port);
-                }
+                answered(
+                    self.reporter.as_deref(),
+                    flow.name.as_deref(),
+                    port,
+                    &addresses,
+                    &allowed,
+                );
                 let waiting = match std::mem::replace(&mut flow.state, UdpState::Failed) {
                     UdpState::Asking(_, waiting) => waiting,
                     _ => Vec::new(),
@@ -509,6 +518,24 @@ impl Proxy {
                 stack.unbind(port);
             }
         }
+    }
+}
+
+/// Reports to `reporter`, if there is one, how the rules decided a
+/// connection to `name` on `port` once its lookup found `addresses`, of
+/// which it may connect to `allowed`. A name with no addresses is no
+/// decision.
+fn answered(
+    reporter: Option<&Reporter>,
+    name: Option<&str>,
+    port: u16,
+    addresses: &[IpAddr],
+    allowed: &[IpAddr],
+) {
+    match (reporter, allowed.first(), addresses.first()) {
+        (Some(reporter), Some(&address), _) => reporter.decided(true, name, address, port),
+        (_, None, Some(&address)) => report(reporter, name, address, port),
+        _ => {}
     }
 }
 

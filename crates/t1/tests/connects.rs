@@ -452,9 +452,14 @@ fn a_network_that_reaches_nothing_still_answers_the_guest() {
 }
 
 /// Runs `agent` headless, as [`Scratch::run`] does, tries `script` in its
-/// guest, and stops it. Returns the run's standard output after its
-/// harness's report, and its standard error.
-fn run_to_end(scratch: &Scratch, agent: &str, script: &str) -> (Vec<String>, String, String) {
+/// guest, and stops it. Returns the lines the script printed, the run's
+/// standard output after its harness's report, its standard error, and
+/// the run's name.
+fn run_to_end(
+    scratch: &Scratch,
+    agent: &str,
+    script: &str,
+) -> (Vec<String>, String, String, String) {
     let mut run = Started(
         scratch
             .command()
@@ -480,7 +485,7 @@ fn run_to_end(scratch: &Scratch, agent: &str, script: &str) -> (Vec<String>, Str
     let mut errors = String::new();
     stderr.read_to_string(&mut errors).unwrap();
     println!("{errors}");
-    (lines, rest, errors)
+    (lines, rest, errors, name)
 }
 
 /// The hosts and rules that a run's standard error lists, after the line
@@ -535,7 +540,7 @@ fn a_run_that_ends_lists_the_hosts_it_blocked() {
 
     for (agent, allowed) in [("closed", "failed"), ("opened", "host:ping")] {
         let before = unchanged(agent);
-        let (lines, stdout, stderr) = run_to_end(&scratch, agent, &script);
+        let (lines, stdout, stderr, _) = run_to_end(&scratch, agent, &script);
         assert_eq!(
             lines,
             [
@@ -562,9 +567,64 @@ fn a_run_that_ends_lists_the_hosts_it_blocked() {
 
     // A run that blocks nothing lists nothing.
     let quiet = format!("tcp allowed host.ap.internal {port}\n");
-    let (lines, _, stderr) = run_to_end(&scratch, "opened", &quiet);
+    let (lines, _, stderr, _) = run_to_end(&scratch, "opened", &quiet);
     assert_eq!(lines, ["allowed host:ping"]);
     assert!(!stderr.contains("NETWORK"), "{stderr}");
+}
+
+// spec(ap logs): `ap logs <run>` shows a run's output and its network decisions.
+// spec(ap logs): It prints the run's network decisions after its output, on standard error. Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+#[test]
+fn ap_logs_shows_the_run_s_network_decisions() {
+    let scratch = Scratch::new("logs");
+    scratch.build("logged", "NETWORK -\nNETWORK +host.ap.internal\n");
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let seen = tcp_echo(tcp, "host");
+    let script = format!(
+        "tcp allowed host.ap.internal {port}\n\
+         tcp denied denied.example 443\n"
+    );
+    let (lines, _, _, name) = run_to_end(&scratch, "logged", &script);
+    assert_eq!(lines, ["allowed host:ping", "denied failed"]);
+    assert_eq!(settled(&seen, 2), ["tcp ping", "closed"]);
+    let logs = scratch.ap(&["logs", &name]);
+    assert_eq!(logs.status.code(), Some(0), "{logs:?}");
+    let stdout = String::from_utf8(logs.stdout).unwrap();
+    let stderr = String::from_utf8(logs.stderr).unwrap();
+    // Each decision is a line of its own on standard error: the time, then
+    // the decision, the destination, and the rule, apart by two spaces.
+    let decisions: Vec<Vec<String>> = (stderr.lines())
+        .filter_map(|line| {
+            let (time, rest) = line.split_once("  ")?;
+            let timed = time.len() == 20 && time.ends_with('Z') && time.as_bytes()[10] == b'T';
+            timed.then(|| {
+                rest.split("  ")
+                    .map(|part| part.trim().to_owned())
+                    .collect()
+            })
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            [
+                "allow".to_owned(),
+                format!("host.ap.internal:{port}"),
+                "NETWORK +host.ap.internal".to_owned()
+            ],
+            [
+                "deny".to_owned(),
+                "denied.example".to_owned(),
+                "the default".to_owned()
+            ],
+        ],
+        "{stderr}"
+    );
+    assert!(
+        !stdout.contains("allow") && !stdout.contains("deny"),
+        "{stdout}"
+    );
 }
 
 /// The port every listener in the namespace takes.

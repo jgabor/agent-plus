@@ -156,3 +156,52 @@ fn an_address_or_an_empty_name_never_resolves() {
         ],
     );
 }
+
+/// The rule that `refusing` names for `name` under `lines`, as written
+/// after `NETWORK`, or `None` for the default.
+#[track_caller]
+fn refused_by(lines: &str, name: &str) -> Option<String> {
+    let network = network(lines);
+    assert!(!could_allow(&network, HARNESS, name), "{name} resolves");
+    match net::refusing(&network, name) {
+        net::By::Rule(rule) => {
+            let at = network
+                .rules
+                .iter()
+                .position(|known| known == rule)
+                .unwrap();
+            Some(
+                lines
+                    .lines()
+                    .filter(|line| line.len() > "NETWORK -".len())
+                    .nth(at)
+                    .unwrap()["NETWORK ".len()..]
+                    .to_owned(),
+            )
+        }
+        net::By::Default => None,
+        net::By::Path => panic!("a lookup has no path"),
+    }
+}
+
+#[test]
+fn a_refused_name_is_refused_by_its_most_specific_rule_or_the_default() {
+    assert_eq!(refused_by("NETWORK -\n", "example.com"), None);
+    assert_eq!(
+        refused_by("NETWORK +\nNETWORK -evil.net\n", "api.evil.net"),
+        Some("-evil.net".to_owned())
+    );
+    assert_eq!(
+        refused_by(
+            "NETWORK +\nNETWORK -evil.net\nNETWORK -api.evil.net\n",
+            "API.evil.net."
+        ),
+        Some("-api.evil.net".to_owned())
+    );
+    // A rule for one port refuses no name.
+    assert_eq!(
+        refused_by("NETWORK -\nNETWORK -example.com:22\n", "example.com"),
+        None
+    );
+    assert_eq!(refused_by("NETWORK -\n", "host.ap.internal"), None);
+}

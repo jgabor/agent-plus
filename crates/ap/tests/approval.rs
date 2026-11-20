@@ -263,6 +263,8 @@ fn a_wider_grant_asks_again_and_shows_only_the_change() {
 }
 
 // spec(Grants): any network change other than removing a `+` rule or adding a `-` rule, including a change in the harness hosts that stay allowed under `NETWORK -`
+// spec(NETWORK): The hosts follow from `AGENT`, so the grants you approve name the harness, not its hosts.
+// spec(NETWORK): A build that changes the harness under `NETWORK -` asks again, and names the hosts the new harness adds.
 #[test]
 fn another_harness_under_network_deny_asks_again_and_lists_its_hosts() {
     let scratch = Scratch::new("harness");

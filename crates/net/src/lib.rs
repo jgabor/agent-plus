@@ -105,6 +105,83 @@ pub fn decide<'a>(
     }
 }
 
+/// The name that the guest reaches your host's loopback by.
+pub const YOUR_HOST: &str = "host.ap.internal";
+
+/// How the proxy decides a connection it would open to the real
+/// destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Proxied<'a> {
+    /// The rules, or the default.
+    Decided(Decision<'a>),
+    /// Allowed, because the name is a harness host that no rule decides.
+    Harness,
+    /// Refused, because the real destination is a loopback or unspecified
+    /// address that no `+` rule for [`YOUR_HOST`] reaches.
+    Loopback,
+}
+
+impl Proxied<'_> {
+    pub fn allows(&self) -> bool {
+        match self {
+            Proxied::Decided(decision) => decision.sign == Sign::Allow,
+            Proxied::Harness => true,
+            Proxied::Loopback => false,
+        }
+    }
+}
+
+/// Decides `connection` as the proxy does, where its address is the real
+/// destination: by `network`'s rules and default, with `harness` as the
+/// harness's hosts. A harness host is allowed wherever no rule decides. A
+/// loopback or unspecified address is refused, unless the connection is to
+/// [`YOUR_HOST`] and a `+` rule for that name decides it.
+pub fn proxied<'a>(
+    network: &'a Network,
+    harness: &[&str],
+    connection: &Connection,
+) -> Proxied<'a> {
+    let name = connection.name.map(|name| {
+        let name = name.to_ascii_lowercase();
+        name.strip_suffix('.').map(str::to_owned).unwrap_or(name)
+    });
+    let loopback = refused(connection.address);
+    if name.as_deref() == Some(YOUR_HOST) {
+        let decision = decide(&network.rules, Sign::Deny, connection);
+        return match decision.by {
+            By::Rule(_) if decision.sign == Sign::Deny => Proxied::Decided(decision),
+            By::Rule(rule) if !matches!(rule.destination, Destination::Address { .. }) => {
+                Proxied::Decided(decision)
+            }
+            _ if loopback => Proxied::Loopback,
+            _ => Proxied::Decided(Decision {
+                sign: Sign::Deny,
+                by: By::Default,
+            }),
+        };
+    }
+    if loopback {
+        return Proxied::Loopback;
+    }
+    let decision = decide(&network.rules, network.default, connection);
+    let harness_host = name
+        .as_deref()
+        .is_some_and(|name| harness.iter().any(|host| host.eq_ignore_ascii_case(name)));
+    match decision.by {
+        By::Default if harness_host => Proxied::Harness,
+        _ => Proxied::Decided(decision),
+    }
+}
+
+/// Whether `address` is a loopback or unspecified address, in either family
+/// or IPv4-mapped.
+fn refused(address: IpAddr) -> bool {
+    match address.to_canonical() {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+    }
+}
+
 /// Whether `network`, with `harness` as the harness's hosts, could allow a
 /// connection to `name`, so that the resolver answers it. A harness host is
 /// allowed wherever no rule decides, so only an explicit `-` rule takes it

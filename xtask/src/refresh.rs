@@ -3,13 +3,13 @@
 
 use crate::forge::{Gh, OpenPr};
 use crate::work::LAND_NEEDED;
-use crate::{Problem, Verdict, lock, merge, workspace};
+use crate::{Problem, Verdict, base, lock, merge, workspace};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub fn run() -> Result<Verdict, Problem> {
@@ -60,6 +60,8 @@ pub fn run() -> Result<Verdict, Problem> {
         rows.push(row);
     }
     let mut proofs = 0;
+    // Found at the first PR that fails, and only then.
+    let mut main_proof: Option<Result<(), String>> = None;
     for (at, pr) in &ready {
         let row = &mut rows[*at];
         // A merge earlier in this run can leave this PR behind.
@@ -136,16 +138,33 @@ pub fn run() -> Result<Verdict, Problem> {
             );
             continue;
         }
+        // A runner that can't prove `main` says nothing about the PR.
+        if main_proof
+            .get_or_insert_with(|| prove_main(&root, actions))
+            .is_err()
+        {
+            println!(
+                "refresh: PR {} keeps `{LAND_NEEDED}`, because `main` can't be proven on the runner either",
+                pr.number
+            );
+            continue;
+        }
         if let Err(Problem(message)) = hand_back(&gh, pr, &head, &why, &waiting) {
             eprintln!("refresh: PR {}: {message}", pr.number);
         }
+    }
+    let mut table = summary(&rows);
+    if let Some(Err(why)) = &main_proof {
+        let said = format!("`main` can't be proven on the runner: {why}");
+        eprintln!("refresh: {said}");
+        table.push_str(&format!("\n{said}\n"));
     }
     if actions && let Ok(path) = env::var("GITHUB_STEP_SUMMARY") {
         let appended = OpenOptions::new()
             .append(true)
             .create(true)
             .open(&path)
-            .and_then(|mut file| file.write_all(summary(&rows).as_bytes()));
+            .and_then(|mut file| file.write_all(table.as_bytes()));
         if let Err(e) = appended {
             eprintln!("refresh: couldn't write the summary to {path}: {e}");
         }
@@ -347,6 +366,56 @@ fn current_head(root: &Path, pr: &OpenPr) -> String {
         .ok()
         .flatten()
         .unwrap_or_else(|| pr.head.clone())
+}
+
+/// Runs the gate on the newest `main`, in a tree of its own, and says what
+/// failed if it didn't pass.
+fn prove_main(root: &Path, actions: bool) -> Result<(), String> {
+    println!("refresh: proving `main`, to tell a fault of the runner from the PR's");
+    if actions {
+        println!("::group::`main`");
+    }
+    let proven = gate_main(root).and_then(|why| why.map_or(Ok(()), |why| Err(Problem(why))));
+    if actions {
+        println!("::endgroup::");
+    }
+    proven.map_err(|Problem(why)| why)
+}
+
+/// What failed in the gate of `main`, if anything did.
+fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
+    let spec = format!("+refs/heads/main:{}", merge::MAIN);
+    base::git_text(root, &["fetch", "-q", "origin", &spec])?;
+    let main = base::git_text(root, &["rev-parse", merge::MAIN])?;
+    let tree = merge::Tree::of_main(root, main.trim())?;
+    let program =
+        env::current_exe().map_err(|e| Problem(format!("couldn't find this program: {e}")))?;
+    let mut child = Command::new(program)
+        .arg("gate")
+        .current_dir(&tree.path)
+        // Rustup sets this for its children, and it would outrank the
+        // toolchain file of `main`.
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| Problem(format!("couldn't start the gate: {e}")))?;
+    let mut failed = Vec::new();
+    if let Some(out) = child.stdout.take() {
+        for line in BufReader::new(out).lines().map_while(Result::ok) {
+            println!("{line}");
+            if let Some(check) = line.strip_prefix("fail ") {
+                failed.push(check.to_string());
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
+    Ok(match (status.success(), failed.is_empty()) {
+        (true, _) => None,
+        (false, false) => Some(format!("Failed: {}", failed.join(", "))),
+        (false, true) => Some(format!("its gate stopped: {status}")),
+    })
 }
 
 /// Its own process, so that one PR's timeout or crash ends only that PR.

@@ -2791,6 +2791,8 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     assert!(line("refresh: proving PR 5 (1 of 2)") < line("refresh: proving PR 9 (2 of 2)"));
     // Outside Actions, a fold marker is noise.
     assert!(!out.contains("::"), "{out}");
+    // Every PR was proven, so `main` needn't be.
+    assert!(!out.contains("proving `main`"), "{out}");
 }
 
 /// In Actions, each proof folds under its PR, and the run's page sums them up.
@@ -2857,8 +2859,14 @@ fn a_refresh_in_actions_folds_each_proof_and_sums_them_up() {
     assert!(line("::group::PR 5 (1 of 2): t") < proving, "{out}");
     assert!(proving < opened && opened < proved, "{out}");
     assert!(proved < out.rfind("::endgroup::\n").unwrap(), "{out}");
-    assert_eq!(out.matches("::group::").count(), 2, "{out}");
-    assert_eq!(out.matches("::endgroup::").count(), 2, "{out}");
+    // PR 5 failed, so `main` was proven in a fold of its own.
+    assert!(
+        line("::group::PR 5 (1 of 2): t") < line("::group::`main`"),
+        "{out}"
+    );
+    assert!(line("::group::`main`") < proving, "{out}");
+    assert_eq!(out.matches("::group::").count(), 3, "{out}");
+    assert_eq!(out.matches("::endgroup::").count(), 3, "{out}");
 
     let summary = fs::read_to_string(&summary).unwrap();
     let rows: Vec<&str> = summary.lines().collect();
@@ -2938,6 +2946,71 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
         "{calls}"
     );
     assert!(calls.contains(&merged(9, &repo.head_of(BRANCH))), "{calls}");
+    // `main` was proven, and was sound, so the PR was handed back.
+    let out = stdout(&output);
+    assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
+}
+
+/// A runner that can't prove `main` either says nothing about the PR, so the
+/// refresh hands no PR back, and the next run proves them again.
+#[test]
+fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
+    let repo = Repo::new("refresh-main-fails");
+    repo.other_pr(
+        5,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            reviews: &[("a", "CHANGES_REQUESTED")],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    repo.prepared("8-y", 8, "");
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    repo.advance_main("crates/demo/src/lib.rs", "pub fn f(  ) {}\n");
+    let (nine, five) = (repo.head_of(BRANCH), repo.head_of("8-y"));
+    repo.set_open_prs(&[
+        listed(5, "8-y", &five, 8, false),
+        listed(9, BRANCH, &nine, 7, false),
+    ]);
+    repo.set_land_needed(&[7, 8]);
+    let summary = repo.temp.join("summary.md");
+    repo.git(&["checkout", "-q", "main"]);
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("GITHUB_ACTIONS", "true")
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    // Once per run, however many PRs fail.
+    assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
+    let said = stderr(&output);
+    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    assert!(said.contains(why), "{said}");
+    let calls = repo.calls();
+    for number in [5, 8, 9, 7] {
+        assert!(!calls.contains(&unlabeled(number)), "{calls}");
+    }
+    assert!(!calls.contains("pr comment"), "{calls}");
+    assert!(!calls.contains("--disable-auto"), "{calls}");
+    let summary = fs::read_to_string(&summary).unwrap();
+    assert!(
+        summary.contains("`main` can't be proven on the runner: Failed: format"),
+        "{summary}"
+    );
 }
 
 /// A token that can't write issues can still unlabel the PR, and the comment
@@ -3035,7 +3108,13 @@ fn a_refresh_runs_nothing_from_a_fork() {
     assert!(calls.contains(&status(&head, "pending")), "{calls}");
     let unproven = format!("{} -f description=Not proven\n", status(&head, "failure"));
     assert!(calls.contains(&unproven), "{calls}");
-    assert!(!calls.contains("worktree add"), "{calls}");
+    // Only `main` is checked out, to tell the runner's faults from the PR's.
+    let added: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.contains("worktree add"))
+        .collect();
+    assert_eq!(added.len(), 1, "{calls}");
+    assert!(added[0].contains("xtask-main-"), "{calls}");
 }
 
 #[test]

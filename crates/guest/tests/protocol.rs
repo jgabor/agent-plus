@@ -58,8 +58,19 @@ fn start(prompt: Option<&[u8]>) -> ToGuest {
                 file: Some(b"notes.txt".to_vec()),
             },
         ],
+        authority: b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".to_vec(),
         prompt: prompt.map(<[u8]>::to_vec),
         terminal: None,
+    })
+}
+
+fn without_authority(message: ToGuest) -> ToGuest {
+    let ToGuest::Start(start) = message else {
+        panic!("not a start");
+    };
+    ToGuest::Start(Start {
+        authority: Vec::new(),
+        ..start
     })
 }
 
@@ -96,6 +107,7 @@ fn every_message_survives_the_wire() {
         start(None),
         start(Some(b"Say what you can see.")),
         start(Some(b"")),
+        without_authority(start(Some(b"Hi"))),
         in_terminal(start(None), 24, 80),
         in_terminal(start(Some(b"Hi")), u16::MAX, 0),
         ToGuest::Input(b"\x03q\r".to_vec()),
@@ -207,17 +219,19 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
         env: vec![(b"K".to_vec(), b"v".to_vec())],
         directory: b"/d".to_vec(),
         shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
+        authority: b"a".to_vec(),
         prompt: Some(b"p".to_vec()),
         terminal: None,
     })
     .write(&mut wire)
     .unwrap();
-    // Each share's guest path, then its file's name, empty for a directory.
+    // Each share's guest path, then its file's name, empty for a directory,
+    // and the authority after the directory.
     let payload = [
         &1u32.to_le_bytes()[..],
         &1u32.to_le_bytes(),
         &2u32.to_le_bytes(),
-        b"h\0K=v\0/s\0\0/f\0n\0/d\0p\0",
+        b"h\0K=v\0/s\0\0/f\0n\0/d\0a\0p\0",
     ]
     .concat();
     assert_eq!(wire, frame(&[&[START][..], &payload].concat()));
@@ -230,6 +244,7 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
             env: vec![(b"K".to_vec(), b"v".to_vec())],
             directory: b"/d".to_vec(),
             shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
+            authority: b"a".to_vec(),
             prompt: Some(b"p".to_vec()),
             terminal: None,
         }),
@@ -260,6 +275,7 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         env: Vec::new(),
         directory: b"/".to_vec(),
         shares: Vec::new(),
+        authority: Vec::new(),
         prompt: None,
         terminal: None,
     };
@@ -311,6 +327,10 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         },
         Start {
             shares: vec![file_share(b"/f", b"n\0")],
+            ..base.clone()
+        },
+        Start {
+            authority: b"a\0".to_vec(),
             ..base.clone()
         },
         Start {

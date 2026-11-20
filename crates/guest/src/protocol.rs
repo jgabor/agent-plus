@@ -115,6 +115,9 @@ pub struct Start {
     /// share at index `i` is the device that [`crate::share::tag`] names
     /// for `i`.
     pub shares: Vec<Share>,
+    /// The run's certificate authority, in PEM, which the guest trusts as
+    /// [`crate::agent`] says. Empty when there is none.
+    pub authority: Vec<u8>,
     /// The prompt, which follows the last argument. `None` takes the one the
     /// agent was built with.
     pub prompt: Option<Vec<u8>>,
@@ -249,9 +252,8 @@ fn read_argv(payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
 /// A start's payload: the number of arguments, of variables, and of shares,
 /// each a little-endian `u32`, then the arguments, the variables as
 /// `key=value`, each share's guest path and its file's name, which is empty
-/// for a directory, the directory, and the prompt if there is one. Every
-/// string
-/// ends with a NUL. A start in a terminal has its own tag, and the terminal's
+/// for a directory, the directory, the run's certificate authority, and the
+/// prompt if there is one. Every string ends with a NUL. A start in a terminal has its own tag, and the terminal's
 /// rows and columns, each a little-endian `u16`, before the payload.
 fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
     if start.argv.is_empty()
@@ -277,7 +279,7 @@ fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
                 .iter()
                 .flat_map(|share| [share.path.clone(), share.file.clone().unwrap_or_default()]),
         )
-        .chain([start.directory.clone()])
+        .chain([start.directory.clone(), start.authority.clone()])
         .chain(start.prompt.clone());
     for text in strings {
         if text.contains(&0) {
@@ -320,6 +322,7 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         shares.push(Share { path, file });
     }
     let directory = strings.next().ok_or(ProtocolError::Malformed)?;
+    let authority = strings.next().ok_or(ProtocolError::Malformed)?;
     let prompt = strings.next();
     let complete = argv.len() == argc as usize
         && env.len() == envc as usize
@@ -335,6 +338,7 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         env,
         directory,
         shares,
+        authority,
         prompt,
         terminal,
     })

@@ -16,6 +16,10 @@
 //! until that connection opens, so a destination that refuses looks refused
 //! to the guest. The bytes then pass both ways unchanged.
 //!
+//! Before it confines itself, it makes the run's certificate authority, as
+//! [`Authority`] says, and sends `ap run` the authority's certificate, in
+//! PEM, as the first message on its standard output. The key stays here.
+//!
 //! It confines itself before it reads a frame. It can then make IPv4 and
 //! IPv6 sockets, unless its rules can reach nothing, but it can't start a
 //! process or open a host file. So it can't read your host's resolver
@@ -23,9 +27,11 @@
 //! socket on its standard output. It ends when the other end of its link
 //! closes.
 
+mod authority;
 mod lookup;
 mod proxy;
 
+pub use authority::{Authority, Leaf};
 pub use lookup::answer_lookups;
 pub use proxy::Proxy;
 
@@ -39,7 +45,7 @@ use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use agentfile::{Destination, Instruction, Network, Sign};
 use guest::net;
@@ -55,13 +61,20 @@ const RECEIVE_WAIT: Duration = Duration::from_millis(50);
 /// as on a real link.
 const SEND_WAIT: Duration = Duration::from_millis(10);
 
-/// A network process that has started, the VMM's end of its link, and the
-/// end that its lookups come in on, for [`answer_lookups`].
+/// A network process that has started, the VMM's end of its link, the end
+/// that its lookups come in on, for [`answer_lookups`], and the run's
+/// certificate authority, in PEM.
 pub struct Started {
     pub process: Child,
     pub link: OwnedFd,
     pub lookups: OwnedFd,
+    pub authority: Vec<u8>,
 }
+
+/// How long `ap run` waits for the network process's authority.
+const AUTHORITY_WAIT: Duration = Duration::from_secs(10);
+/// The longest authority certificate, in PEM, that `ap run` takes.
+const LONGEST_AUTHORITY: usize = 4096;
 
 /// Divides the harness's hosts from the `NETWORK` rules in the network
 /// process's arguments.
@@ -83,8 +96,9 @@ pub fn arguments(harness: &[&str], instructions: &[Instruction]) -> Vec<OsString
 
 /// Starts `program`, a build of `ap`, as a run's network process, with the
 /// `args` that [`arguments`] made. The link it returns is a socket that
-/// keeps message boundaries, for [`crate::boot::boot_linked`]. The process
-/// ends once every copy of the link is closed.
+/// keeps message boundaries, for [`crate::boot::boot_linked`]. It returns
+/// once the process has sent its authority. The process ends once every
+/// copy of the link is closed.
 pub fn start(program: &Path, args: &[OsString]) -> io::Result<Started> {
     let (mine, theirs) = link()?;
     let (answers, asks) = link()?;
@@ -94,11 +108,44 @@ pub fn start(program: &Path, args: &[OsString]) -> io::Result<Started> {
         .stdin(theirs)
         .stdout(asks)
         .spawn()?;
+    let authority = receive_authority(answers.as_fd())?;
     Ok(Started {
         process,
         link: mine,
         lookups: answers,
+        authority,
     })
+}
+
+/// The first message on `lookups`: the authority's certificate. The wait
+/// ends with it, so the lookups that follow can wait as long as they need.
+fn receive_authority(lookups: BorrowedFd) -> io::Result<Vec<u8>> {
+    set_timeout(lookups, libc::SO_RCVTIMEO, AUTHORITY_WAIT)?;
+    let mut buffer = vec![0; LONGEST_AUTHORITY + 1];
+    // SAFETY: `buffer` has room for the bytes the call writes.
+    let read = unsafe {
+        libc::recv(
+            lookups.as_raw_fd(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            0,
+        )
+    };
+    let read = match read {
+        -1 => return Err(io::Error::last_os_error()),
+        read => read as usize,
+    };
+    set_timeout(lookups, libc::SO_RCVTIMEO, Duration::ZERO)?;
+    buffer.truncate(read);
+    let pem = buffer.starts_with(b"-----BEGIN CERTIFICATE-----")
+        && read <= LONGEST_AUTHORITY
+        && !buffer.contains(&0);
+    match pem {
+        true => Ok(buffer),
+        false => Err(io::Error::other(
+            "the network process sent no certificate authority",
+        )),
+    }
 }
 
 /// A pair of connected sockets that keep message boundaries, and that a
@@ -148,6 +195,18 @@ pub fn main(args: &[OsString]) -> u8 {
             UnixDatagram::from(OwnedFd::from_raw_fd(STDOUT)),
         )
     };
+    // Made before the filter, which has no call for the random source.
+    let authority = match Authority::generate(SystemTime::now()) {
+        Ok(authority) => authority,
+        Err(error) => {
+            eprintln!("ap: can't make the run's certificate authority: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = lookups.send(authority.certificate_pem().as_bytes()) {
+        eprintln!("ap: can't send the run's certificate authority: {error}");
+        return 1;
+    }
     let mut stack = stack();
     // A proxy that can reach nothing asks for no lookups, so it needs no
     // socket but its link.
@@ -159,6 +218,8 @@ pub fn main(args: &[OsString]) -> u8 {
         ),
     };
     let served = confined.and_then(|()| proxy.serve(&link, &mut stack, &mut resolver));
+    // The key lives as long as the process serves.
+    drop(authority);
     match served {
         Ok(()) => 0,
         Err(error) => {

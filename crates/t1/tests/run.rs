@@ -811,6 +811,13 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
 /// Starts a headless run of `agent`, and returns it and its name, once the
 /// harness has reported, which the fake one does before it sleeps.
 fn start_headless(scratch: &Scratch, agent: &str) -> (Started, String) {
+    let (run, name, _) = start_reporting(scratch, agent);
+    (run, name)
+}
+
+/// Starts a headless run of `agent`, as [`start_headless`] does, and also
+/// returns the harness's report.
+fn start_reporting(scratch: &Scratch, agent: &str) -> (Started, String, String) {
     let mut run = Started(
         Command::new(&shared().0)
             .args(["run", agent, "-p", PROMPT])
@@ -830,7 +837,7 @@ fn start_headless(scratch: &Scratch, agent: &str) -> (Started, String) {
     let rows = scratch.ps();
     assert_eq!(rows.len(), 1, "{rows:?}");
     let name = rows[0].split_whitespace().next().unwrap().to_owned();
-    (run, name)
+    (run, name, report)
 }
 
 /// The run process that `ap run` started, which holds the VM.
@@ -1267,5 +1274,101 @@ fn an_interactive_run_s_log_holds_what_your_terminal_showed() {
     assert_eq!(
         scratch.status_of(&name).as_deref(),
         Some(&*format!("exited {STATUS}"))
+    );
+}
+
+/// The variables that SPEC.md's SECRET section says name the bundle.
+const BUNDLE_VARIABLES: [&str; 5] = [
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+];
+const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+/// What one run trusts: the certificates in its bundle, in order.
+fn trusted(scratch: &Scratch, agent: &str) -> Vec<String> {
+    let (run, name, report) = start_reporting(scratch, agent);
+    for variable in BUNDLE_VARIABLES {
+        let seen = format!("\"{variable}\":\"{BUNDLE}\"");
+        assert!(
+            report.contains(&seen),
+            "the harness didn't see {seen}: {report}"
+        );
+    }
+    let bundle = scratch.exec(&name, &["cat", BUNDLE], b"");
+    assert_eq!(bundle.status.code(), Some(0), "{bundle:?}");
+    let bundle = String::from_utf8(bundle.stdout).unwrap();
+    // The key stays in the network process, so no file the agent can read
+    // holds one.
+    let keys = scratch.exec(
+        &name,
+        &[
+            "grep",
+            "-rlsI",
+            "--exclude-dir=proc",
+            "--exclude-dir=sys",
+            "--exclude-dir=dev",
+            "PRIVATE KEY",
+            "/",
+        ],
+        b"",
+    );
+    assert_eq!(String::from_utf8_lossy(&keys.stdout), "", "{keys:?}");
+    drop(run);
+    let certificates: Vec<String> = bundle
+        .split_inclusive("-----END CERTIFICATE-----")
+        .map(str::trim)
+        .filter(|block| !block.is_empty())
+        .map(str::to_owned)
+        .collect();
+    for certificate in &certificates {
+        assert!(
+            certificate.starts_with("-----BEGIN CERTIFICATE-----"),
+            "{bundle}"
+        );
+    }
+    certificates
+}
+
+/// Each file of the layers in the store, and its digest.
+fn layers(scratch: &Scratch) -> Vec<(PathBuf, String)> {
+    let store = scratch.home.join(".local/share/ap");
+    let mut files = Vec::new();
+    for dir in ["zstd-layers", "plain-layers"] {
+        for entry in fs::read_dir(store.join(dir)).into_iter().flatten() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                files.push((path.clone(), sha256(&path)));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+// spec(SECRET): The guest trusts a certificate authority generated for each run.
+#[test]
+fn every_run_trusts_a_certificate_authority_of_its_own() {
+    let scratch = Scratch::new("trust");
+    scratch.build("trusting", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let first = trusted(&scratch, "trusting");
+    let image = layers(&scratch);
+    assert!(!image.is_empty());
+    let second = trusted(&scratch, "trusting");
+    // Debian's roots, then the run's authority, which the image doesn't
+    // keep: the second run's bundle has one more than the image's, not two.
+    assert!(first.len() > 100, "{} certificates", first.len());
+    assert_eq!(first.len(), second.len());
+    let (first_authority, first_roots) = first.split_last().unwrap();
+    let (second_authority, second_roots) = second.split_last().unwrap();
+    assert_eq!(first_roots, second_roots);
+    assert_ne!(first_authority, second_authority);
+    assert!(!first_roots.contains(first_authority));
+    assert_eq!(
+        layers(&scratch),
+        image,
+        "a run changed a layer in the store"
     );
 }

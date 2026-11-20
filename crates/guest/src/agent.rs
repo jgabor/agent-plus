@@ -9,7 +9,9 @@
 //! adds to the guest's root first, with the environment and directory the
 //! host gives it. Each share the host serves is mounted first, where the
 //! host says. Its prompt is its last argument: the host's, or else the
-//! one the agent was built with.
+//! one the agent was built with. Before any share is mounted, the run's
+//! certificate authority joins the end of the root's [`BUNDLE`], and each of
+//! [`BUNDLE_VARIABLES`] names the bundle, in place of any value `ENV` gave.
 //!
 //! A start with a terminal runs the harness in a new one, which it gets as
 //! its controlling terminal, and owns. What the terminal shows goes to the
@@ -39,7 +41,7 @@ use std::fs::{self, File};
 use std::io::{self, IsTerminal, PipeReader, PipeWriter, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, chown, fchown};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, chown, fchown};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{ChildStdin, Command, ExitStatus, Stdio};
@@ -60,6 +62,20 @@ const PASSWD: &str = "agent:x:1000:1000:agent:/home/agent:/bin/sh";
 const GROUP: &str = "agent:x:1000:";
 /// Where the build puts the agent's prompt.
 const PROMPT: &str = "/etc/ap/prompt";
+/// The bundle of certificate authorities that Debian's `ca-certificates`
+/// keeps, which the run's authority joins.
+pub const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+/// The variables that SPEC.md's SECRET section names, which each name
+/// [`BUNDLE`], because many tools ignore the system store.
+pub const BUNDLE_VARIABLES: [&str; 5] = [
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+];
+/// Linux's `O_NOFOLLOW` on x86_64.
+const O_NOFOLLOW: i32 = 0o400000;
 /// The name the init's own program runs under to start the harness.
 pub const AS_AGENT: &str = "ap-as-agent";
 /// The name the init's own program runs under to start a command beside the
@@ -123,8 +139,8 @@ pub fn serve(channel: &mut impl Split, connect: Option<Connect>) -> Result<(), P
                 command.args(args.iter().map(|arg| OsStr::from_bytes(arg)));
                 run(command, channel, FromHost::Nothing, exec_refused)?;
             }
-            ToGuest::Start(start) => {
-                let command = harness(&start);
+            ToGuest::Start(mut start) => {
+                let command = trusted(&mut start).and_then(|()| harness(&start));
                 if let (Ok(_), Some(connect)) = (&command, connect) {
                     let context = Context {
                         env: start.env.clone(),
@@ -208,6 +224,52 @@ fn exec_refused(error: &io::Error) -> ToHost {
 
 fn harness_refused(error: &io::Error) -> ToHost {
     ToHost::Failed(format!("can't start the harness: {error}").into_bytes())
+}
+
+/// Adds the run's authority, if `start` has one, to the guest's bundle, and
+/// names the bundle in the harness's environment. It runs before any share
+/// is mounted, so the bundle can only be in the run's own root.
+fn trusted(start: &mut Start) -> Result<(), String> {
+    if start.authority.is_empty() {
+        return Ok(());
+    }
+    trust(Path::new("/"), &start.authority)
+        .map_err(|error| format!("can't add the run's certificate authority: {error}"))?;
+    name_bundle(&mut start.env);
+    Ok(())
+}
+
+/// Adds `authority`, a certificate in PEM, to the end of [`BUNDLE`] in the
+/// root at `root`, and makes the bundle if it has none. A bundle that is a
+/// symlink is refused.
+pub fn trust(root: &Path, authority: &[u8]) -> io::Result<()> {
+    let path = root.join(BUNDLE.trim_start_matches('/'));
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let bundle = File::options()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW)
+        .open(&path)?;
+    let len = bundle.metadata()?.len();
+    let mut last = [b'\n'];
+    if len > 0 {
+        bundle.read_exact_at(&mut last, len - 1)?;
+    }
+    let newline: &[u8] = if last[0] == b'\n' { b"" } else { b"\n" };
+    (&bundle).write_all(&[newline, authority].concat())
+}
+
+/// Sets each of [`BUNDLE_VARIABLES`] in `env` to [`BUNDLE`], in place of
+/// any value it had.
+pub fn name_bundle(env: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+    env.retain(|(key, _)| !BUNDLE_VARIABLES.iter().any(|name| key == name.as_bytes()));
+    for name in BUNDLE_VARIABLES {
+        env.push((name.as_bytes().to_vec(), BUNDLE.as_bytes().to_vec()));
+    }
 }
 
 /// The harness's command, as `agent`, or why it can't start.

@@ -32,8 +32,8 @@ const TIMEOUT: Duration = Duration::from_secs(60);
 const START: &str = "--- probe output\n";
 const END: &str = "--- probe end\n";
 
-/// The MAC address the peer answers from, as `ap` will.
-const GATEWAY_MAC: [u8; 6] = [0x02, 0x61, 0x70, 0x00, 0x00, 0x02];
+/// The MAC address the peer answers from, as `ap` does.
+const GATEWAY_MAC: [u8; 6] = net::GATEWAY_MAC;
 const ARP: u16 = 0x0806;
 const IPV4: u16 = 0x0800;
 const IPV6: u16 = 0x86dd;

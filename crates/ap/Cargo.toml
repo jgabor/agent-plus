@@ -12,6 +12,7 @@ agentfile = { path = "../agentfile" }
 erofs = { path = "../erofs" }
 git = { path = "../git" }
 guest = { path = "../guest" }
+netstack = { path = "../netstack" }
 share = { path = "../share" }
 store = { path = "../store" }
 ruzstd = "0.9"

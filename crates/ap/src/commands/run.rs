@@ -195,8 +195,9 @@ fn run_agent(
         .map_err(fail("can't start the run's cleanup"))?;
     let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
     let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
-    // The share server ends once the run process, which holds the only
-    // other end of its socket, does.
+    // The network process and the share server end once the run process,
+    // which holds the only other end of each one's socket, does.
+    let network = ap::network::start(exe).map_err(fail("can't start the network process"))?;
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -207,11 +208,17 @@ fn run_agent(
             Some(inherited)
         }
     };
+    // Made after the share server starts, so that only the run process
+    // inherits it.
+    let link = share::inheritable(network.link.as_fd())
+        .map_err(fail("can't start the network process"))?;
+    drop(network);
     let mut command = Command::new(exe);
     command
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
-        .arg(&run.name);
+        .arg(&run.name)
+        .arg(link.as_raw_fd().to_string());
     if let Some(socket) = &share_socket {
         command.arg(socket.as_raw_fd().to_string());
     }
@@ -224,6 +231,7 @@ fn run_agent(
     // The command holds this process's copy of the run process's end of the
     // socket, which must close so that the run's end reads as an end.
     drop(command);
+    drop(link);
     drop(share_socket);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.

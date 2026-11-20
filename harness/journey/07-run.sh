@@ -72,10 +72,19 @@ case "$(array first arguments)" in
     exit 1
     ;;
 esac
+# Every run has a network, whose only resolver is ap.
 case "$(array first interfaces)" in
-  '"lo"') ;;
+  '"eth0","lo"') ;;
   *)
-    echo "the harness sees a network interface besides loopback, or none:" >&2
+    echo "the harness doesn't see the run's network and loopback alone:" >&2
+    cat first >&2
+    exit 1
+    ;;
+esac
+case "$(array first resolvers)" in
+  '"10.0.2.2","fd61:7000::2"') ;;
+  *)
+    echo "the harness sees a resolver other than ap:" >&2
     cat first >&2
     exit 1
     ;;

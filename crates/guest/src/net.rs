@@ -10,6 +10,9 @@ pub const INTERFACE: &str = "eth0";
 /// vendor's.
 pub const MAC: [u8; 6] = [0x02, 0x61, 0x70, 0x00, 0x00, 0x0f];
 
+/// `ap`'s MAC address, the gateway's. It is locally administered too.
+pub const GATEWAY_MAC: [u8; 6] = [0x02, 0x61, 0x70, 0x00, 0x00, 0x02];
+
 pub const IPV4: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 15);
 pub const IPV4_PREFIX: u8 = 24;
 /// `ap`'s address, the guest's gateway and resolver.

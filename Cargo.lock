@@ -22,6 +22,7 @@ dependencies = [
  "graviola",
  "guest",
  "libc",
+ "netstack",
  "rustls",
  "rustls-graviola",
  "ruzstd",

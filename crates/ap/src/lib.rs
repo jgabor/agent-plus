@@ -11,6 +11,7 @@ pub mod filter;
 pub mod gitignore;
 pub mod json;
 pub mod lock;
+pub mod network;
 pub mod paths;
 pub mod pending;
 pub mod runs;

@@ -11,7 +11,8 @@
 //! as the kernel reads them.
 //!
 //! The share server, which reaches a run's shared files for its guest, has a
-//! filter of its own, in [`confine_share_server`].
+//! filter of its own, in [`confine_share_server`], and so does the network
+//! process, which runs the guest's network, in [`confine_network`].
 
 use std::ffi::{c_int, c_long, c_ulong};
 use std::io;
@@ -258,6 +259,33 @@ fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
     rules
 }
 
+/// The calls the network process makes while it passes the guest's frames
+/// through its stack. It has one thread, so it starts none. It reads and
+/// writes frames on `link`, and writes to standard error. It holds no other
+/// socket, and makes none, so nothing it does reaches past the link.
+fn network_rules(link: RawFd) -> Vec<Rule> {
+    use Rule::{Allow, AllowIf, AllowIfSet};
+    vec![
+        AllowIf(READ, 0, vec![link as u32]),
+        AllowIf(WRITE, 0, vec![link as u32, STDERR]),
+        Allow(CLOCK_GETTIME),
+        Allow(CLOSE),
+        AllowIf(FCNTL, 1, vec![F_GETFD]),
+        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
+        Allow(MUNMAP),
+        Allow(MREMAP),
+        Allow(MADVISE),
+        Allow(BRK),
+        Allow(FUTEX),
+        Allow(RT_SIGPROCMASK),
+        Allow(RT_SIGACTION),
+        Allow(RT_SIGRETURN),
+        Allow(SIGALTSTACK),
+        Allow(EXIT),
+        Allow(EXIT_GROUP),
+    ]
+}
+
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
     let kill = op(RETURN, 0, 0, RET_KILL_PROCESS);
     let allow = op(RETURN, 0, 0, RET_ALLOW);
@@ -336,6 +364,13 @@ pub fn confine(readable: &[RawFd]) -> io::Result<()> {
 /// root is open. Requests come from `socket`, and answers go back on it.
 pub fn confine_share_server(socket: RawFd, writes: bool) -> io::Result<()> {
     install(&share_server_rules(socket, writes))
+}
+
+/// Confines the network process, which has one thread, for the rest of its
+/// life. Call it once its stack is set up. Frames come from `link`, and go
+/// back on it.
+pub fn confine_network(link: RawFd) -> io::Result<()> {
+    install(&network_rules(link))
 }
 
 fn install(rules: &[Rule]) -> io::Result<()> {
@@ -648,6 +683,69 @@ mod tests {
         );
         assert_eq!(
             share_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+    }
+
+    fn network_call(number: u32, args: [u32; 6]) -> u32 {
+        run_rules(
+            &network_rules(SOCKET as RawFd),
+            AUDIT_ARCH_X86_64,
+            number,
+            args,
+        )
+    }
+
+    #[test]
+    fn the_network_process_passes_frames_on_its_link() {
+        assert_eq!(network_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(network_call(WRITE, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(network_call(WRITE, [STDERR, 0, 0, 0, 0, 0]), RET_ALLOW);
+        for number in [CLOCK_GETTIME, CLOSE, FUTEX, MUNMAP, BRK, EXIT_GROUP] {
+            assert_eq!(network_call(number, [0; 6]), RET_ALLOW, "{number}");
+        }
+        let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+        assert_eq!(
+            network_call(MMAP, [0, 4096, 3, anonymous, u32::MAX, 0]),
+            RET_ALLOW
+        );
+    }
+
+    #[test]
+    fn the_network_process_can_t_start_anything_open_a_file_or_make_a_socket() {
+        const SOCKET_CALL: u32 = 41;
+        const CONNECT: u32 = 42;
+        const SENDTO: u32 = 44;
+        const SENDMSG: u32 = 46;
+        const SOCKETPAIR: u32 = 53;
+        for number in [
+            OPENAT,
+            2,
+            OPENAT2,
+            FORK,
+            VFORK,
+            EXECVE,
+            EXECVEAT,
+            CLONE,
+            CLONE3,
+            SOCKET_CALL,
+            CONNECT,
+            SENDTO,
+            SENDMSG,
+            SOCKETPAIR,
+            IOCTL,
+            PREAD64,
+        ] {
+            assert_eq!(network_call(number, [0; 6]), RET_KILL_PROCESS, "{number}");
+        }
+        assert_eq!(network_call(READ, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(network_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        assert_eq!(
+            network_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(
+            network_call(FCNTL, [4, F_SETOWN, 1, 0, 0, 0]),
             RET_KILL_PROCESS
         );
     }

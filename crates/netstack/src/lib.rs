@@ -1,8 +1,10 @@
 //! The network process's TCP/IP stack: one Ethernet interface on the guest's
 //! link that ends every TCP connection, and takes every UDP datagram, to any
 //! address and port. It routes nothing and opens no socket on the host. Frames
-//! come in through [`Stack::receive`] and go out through [`Stack::transmit`],
-//! and the caller decides what to do with each connection and datagram.
+//! come in through [`Stack::receive`] and go out through [`Stack::transmit`].
+//! The caller takes or refuses each new [`Flow`]: a refused TCP connection
+//! gets a reset, and a refused datagram is dropped, with no answer. It
+//! decides what to do with each connection and datagram it takes.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -14,7 +16,7 @@ use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, IpAddress, IpCidr,
-    IpListenEndpoint, IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
+    IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
 };
 
 /// Bytes each TCP connection buffers in each direction.
@@ -44,6 +46,20 @@ pub struct Connection {
     pub id: ConnectionId,
     pub source: SocketAddr,
     pub destination: SocketAddr,
+}
+
+/// What the guest opens, for the caller to take or refuse: a TCP connection,
+/// at its SYN, or one UDP datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Tcp {
+        source: SocketAddr,
+        destination: SocketAddr,
+    },
+    Udp {
+        source: SocketAddr,
+        destination: SocketAddr,
+    },
 }
 
 /// A UDP datagram from the guest, and the destination it was sent to.
@@ -97,16 +113,26 @@ impl Stack {
         }
     }
 
-    /// Takes one Ethernet frame from the guest, and handles it.
-    pub fn receive(&mut self, frame: &[u8], now: Instant) {
-        if let Some(flow) = self.new_flow(frame) {
-            match flow {
-                Flow::Syn {
-                    source,
-                    destination,
-                } => self.listen(source, destination),
-                Flow::Udp { port } => self.bind(port),
-            }
+    /// Takes one Ethernet frame from the guest, and handles it. If it opens a
+    /// [`Flow`], `take` decides whether the stack takes it.
+    pub fn receive(&mut self, frame: &[u8], now: Instant, take: impl FnOnce(&Flow) -> bool) {
+        match self.classify(frame) {
+            Seen::Drop => return,
+            Seen::Other => {}
+            // A SYN sent again is no new flow.
+            Seen::Flow(Flow::Tcp {
+                source,
+                destination,
+            }) if self.holds(source, destination) => {}
+            Seen::Flow(flow) => match (take(&flow), flow) {
+                (true, Flow::Tcp { destination, .. }) => self.listen(destination),
+                (true, Flow::Udp { destination, .. }) => self.bind(destination.port()),
+                // With no socket to take it, smoltcp answers a SYN with a
+                // reset.
+                (false, Flow::Tcp { .. }) => {}
+                // smoltcp would answer it with a port unreachable message.
+                (false, Flow::Udp { .. }) => return,
+            },
         }
         self.link.rx.push_back(frame.to_vec());
         self.poll(now);
@@ -126,8 +152,11 @@ impl Stack {
         self.opening.retain(|&handle| {
             let socket = sockets.get::<tcp::Socket>(handle);
             match socket.state() {
-                tcp::State::Listen | tcp::State::SynReceived => true,
-                tcp::State::Closed => {
+                tcp::State::SynReceived => true,
+                // A socket that took no SYN, or went back to listening when
+                // its connection was reset, would take a SYN nobody asked
+                // about.
+                tcp::State::Listen | tcp::State::Closed => {
                     sockets.remove(handle);
                     false
                 }
@@ -192,17 +221,30 @@ impl Stack {
         None
     }
 
-    /// A TCP SYN or a UDP datagram, sent to this stack, that may need a new
-    /// socket before smoltcp sees it.
-    fn new_flow(&self, frame: &[u8]) -> Option<Flow> {
-        let ethernet = EthernetFrame::new_checked(frame).ok()?;
-        if ethernet.dst_addr() != self.mac {
-            return None;
+    /// What `frame` is to the stack. Only a frame the stack can decide on
+    /// reaches smoltcp: a flow sent to the stack, or a frame that opens
+    /// none. A frame that hides its transport, such as behind an IPv6
+    /// extension header or in a fragment, or a flow sent to every station,
+    /// is dropped, because smoltcp would take it without asking.
+    fn classify(&self, frame: &[u8]) -> Seen {
+        let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
+            return Seen::Drop;
+        };
+        let to = ethernet.dst_addr();
+        let ours = to == self.mac;
+        if !ours && !to.is_broadcast() && !to.is_multicast() {
+            return Seen::Drop;
         }
         let (source, destination, protocol, payload): (IpAddr, IpAddr, IpProtocol, &[u8]) =
             match ethernet.ethertype() {
+                EthernetProtocol::Arp => return Seen::Other,
                 EthernetProtocol::Ipv4 => {
-                    let ip = Ipv4Packet::new_checked(ethernet.payload()).ok()?;
+                    let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload()) else {
+                        return Seen::Drop;
+                    };
+                    if ip.more_frags() || ip.frag_offset() != 0 {
+                        return Seen::Drop;
+                    }
                     (
                         IpAddr::V4(ip.src_addr()),
                         IpAddr::V4(ip.dst_addr()),
@@ -211,7 +253,9 @@ impl Stack {
                     )
                 }
                 EthernetProtocol::Ipv6 => {
-                    let ip = Ipv6Packet::new_checked(ethernet.payload()).ok()?;
+                    let Ok(ip) = Ipv6Packet::new_checked(ethernet.payload()) else {
+                        return Seen::Drop;
+                    };
                     (
                         IpAddr::V6(ip.src_addr()),
                         IpAddr::V6(ip.dst_addr()),
@@ -219,43 +263,44 @@ impl Stack {
                         ip.payload(),
                     )
                 }
-                _ => return None,
+                _ => return Seen::Drop,
             };
         match protocol {
-            IpProtocol::Tcp => {
-                let tcp = TcpPacket::new_checked(payload).ok()?;
-                (tcp.syn() && !tcp.ack()).then(|| Flow::Syn {
+            // Neighbor discovery, and the stack's own ICMP.
+            IpProtocol::Icmp | IpProtocol::Icmpv6 => Seen::Other,
+            IpProtocol::Tcp if ours => match TcpPacket::new_checked(payload) {
+                Ok(tcp) if tcp.syn() && !tcp.ack() => Seen::Flow(Flow::Tcp {
                     source: SocketAddr::new(source, tcp.src_port()),
                     destination: SocketAddr::new(destination, tcp.dst_port()),
-                })
-            }
-            IpProtocol::Udp => {
-                let udp = UdpPacket::new_checked(payload).ok()?;
-                Some(Flow::Udp {
-                    port: udp.dst_port(),
-                })
-            }
-            _ => None,
+                }),
+                // smoltcp gives a segment of no connection a reset.
+                Ok(_) => Seen::Other,
+                Err(_) => Seen::Drop,
+            },
+            IpProtocol::Udp if ours => match UdpPacket::new_checked(payload) {
+                Ok(udp) => Seen::Flow(Flow::Udp {
+                    source: SocketAddr::new(source, udp.src_port()),
+                    destination: SocketAddr::new(destination, udp.dst_port()),
+                }),
+                Err(_) => Seen::Drop,
+            },
+            _ => Seen::Drop,
         }
     }
 
-    /// Makes sure a socket will take a SYN from `source` to `destination`.
-    fn listen(&mut self, source: SocketAddr, destination: SocketAddr) {
-        let taken = self.opening.iter().any(|&handle| {
+    /// Whether a connection the stack is still opening is the one from
+    /// `source` to `destination`.
+    fn holds(&self, source: SocketAddr, destination: SocketAddr) -> bool {
+        self.opening.iter().any(|&handle| {
             let socket = self.sockets.get::<tcp::Socket>(handle);
-            match socket.state() {
-                tcp::State::Listen => {
-                    socket.listen_endpoint() == IpListenEndpoint::from(destination)
-                }
-                _ => {
-                    socket.local_endpoint().map(SocketAddr::from) == Some(destination)
-                        && socket.remote_endpoint().map(SocketAddr::from) == Some(source)
-                }
-            }
-        });
-        if taken {
-            return;
-        }
+            socket.local_endpoint().map(SocketAddr::from) == Some(destination)
+                && socket.remote_endpoint().map(SocketAddr::from) == Some(source)
+        })
+    }
+
+    /// Opens a socket that takes the next SYN to `destination`. The stack
+    /// polls before it returns, so the SYN is the one it was opened for.
+    fn listen(&mut self, destination: SocketAddr) {
         let buffer = || tcp::SocketBuffer::new(vec![0; TCP_BUFFER]);
         let mut socket = tcp::Socket::new(buffer(), buffer());
         if socket.listen(destination).is_ok() {
@@ -281,14 +326,14 @@ impl Stack {
     }
 }
 
-enum Flow {
-    Syn {
-        source: SocketAddr,
-        destination: SocketAddr,
-    },
-    Udp {
-        port: u16,
-    },
+/// What a frame from the guest is to the stack.
+enum Seen {
+    /// It opens a flow, for the caller to take or refuse.
+    Flow(Flow),
+    /// It opens none, and goes to smoltcp.
+    Other,
+    /// It goes nowhere.
+    Drop,
 }
 
 /// The stack's side of the link: frames from the guest, and frames for it.

@@ -4,7 +4,7 @@
 
 use std::net::IpAddr;
 
-use agentfile::{Destination, NetworkRule, Scheme, Sign};
+use agentfile::{Destination, Network, NetworkRule, Scheme, Sign};
 
 /// A connection the agent makes.
 #[derive(Clone, Copy, Debug)]
@@ -103,6 +103,28 @@ pub fn decide<'a>(
         sign: rule.sign,
         by: By::Rule(rule),
     }
+}
+
+/// Whether `network`, with `harness` as the harness's hosts, could allow a
+/// connection to `name`, so that the resolver answers it. A harness host is
+/// allowed wherever no rule decides, so only an explicit `-` rule takes it
+/// away. A name is in any case, with or without a final dot. An address, or
+/// an empty name, is never one to answer.
+pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    if name.is_empty() || name.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+    let harness_host = harness.iter().any(|host| host.eq_ignore_ascii_case(name));
+    if harness_host && network.default == Sign::Deny {
+        let opened = Network {
+            default: Sign::Allow,
+            rules: network.rules.clone(),
+        };
+        return !opened.denies(name);
+    }
+    !network.denies(name)
 }
 
 /// The most specific URL or host rule that matches a connection to `name`

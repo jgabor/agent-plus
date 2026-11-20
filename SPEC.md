@@ -526,8 +526,7 @@ file changes nothing.
 
 `ap inspect <agent>` shows an agent's layers and its approved grants: shares,
 host environment variables, secrets, git credentials, network policy, and the
-agents it may call. [Grants](#grants) specifies `ap inspect --grants`, and
-[NETWORK](#network) names hosts that it also shows.
+agents it may call. [Grants](#grants) specifies `ap inspect --grants`.
 
 ### ap rm
 
@@ -1815,9 +1814,11 @@ rules, and a failure fails the run.
 
 **Harness hosts.** The hosts the harness needs for its model API and
 sign-in stay allowed under `NETWORK -`, so an agent never loses its own
-model. An explicit `-` rule for such a host still wins. `ap build` lists
-these hosts, and `ap inspect` shows them. They are an exfiltration path:
-code in the agent can send data to them with a key it brought itself.
+model. An explicit `-` rule for such a host still wins. The hosts follow
+from `AGENT`, so the grants you approve name the harness, not its hosts. A
+build that changes the harness under `NETWORK -` asks again, and names the
+hosts the new harness adds. These hosts are an exfiltration path: code in
+the agent can send data to them with a key it brought itself.
 With `AUTH key`, the proxy allows only requests that carry the key's
 placeholder on the key's hosts. The other harness hosts stay an exfiltration
 path.

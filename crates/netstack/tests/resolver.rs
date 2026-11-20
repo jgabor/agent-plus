@@ -145,8 +145,7 @@ impl Net {
             let mut moved = false;
             while let Some(frame) = self.link.from_guest.pop_front() {
                 let resolver = &self.resolver;
-                self.stack
-                    .receive(&frame, now, |flow| resolver.takes(flow));
+                self.stack.receive(&frame, now, |flow| resolver.takes(flow));
                 moved = true;
             }
             self.resolver.serve(&mut self.stack);
@@ -159,7 +158,11 @@ impl Net {
                 let mut got = Vec::new();
                 let socket = self.sockets.get_mut::<udp::Socket>(self.socket);
                 while let Ok((payload, meta)) = socket.recv() {
-                    assert_eq!(SocketAddr::from(meta.endpoint), to, "answered from elsewhere");
+                    assert_eq!(
+                        SocketAddr::from(meta.endpoint),
+                        to,
+                        "answered from elsewhere"
+                    );
                     got.push(payload.to_vec());
                 }
                 return got;
@@ -217,7 +220,7 @@ fn in_pool(address: Ipv4Addr) -> bool {
     address.octets()[..2] == [198, 18]
 }
 
-// spec(NETWORK): The resolver answers each name with its own address from a private pool that `ap` chooses to overlap no IP rule, so `ap` knows which name every address belongs to.
+// spec(NETWORK): **Attribution.** The resolver answers each name with its own address from a private pool that `ap` chooses to overlap no IP rule, so `ap` knows which name every address belongs to.
 #[test]
 fn an_allowed_name_gets_its_own_pool_address_every_time() {
     let mut net = Net::new(&["kagi.com", "api.kagi.com"], pool());
@@ -251,6 +254,7 @@ fn the_resolver_answers_on_its_ipv6_address_too() {
 }
 
 // spec(NETWORK): It answers a name only if some rule, or the default, could allow a connection to it.
+// spec(NETWORK): For a name it doesn't answer, it says that the name doesn't exist.
 #[test]
 fn a_name_no_rule_could_allow_gets_no_address() {
     let mut net = Net::new(&["kagi.com"], pool());
@@ -316,6 +320,7 @@ fn a_query_to_any_other_address_is_not_the_resolver_s() {
     assert!(net.send(other_port, &query(31, "kagi.com", A)).is_empty());
 }
 
+// spec(NETWORK): If the pool runs out, a name that has no address yet gets a server failure, and every name keeps the address it has.
 #[test]
 fn a_full_pool_fails_new_names_and_keeps_answering_old_ones() {
     // A `/30` has two addresses for hosts.
@@ -325,7 +330,10 @@ fn a_full_pool_fails_new_names_and_keeps_answering_old_ones() {
     let (_, b) = read(&net.ask(&query(41, "b.test", A)), 41);
     let mut both = [a[0], b[0]];
     both.sort();
-    assert_eq!(both, [Ipv4Addr::new(198, 18, 0, 1), Ipv4Addr::new(198, 18, 0, 2)]);
+    assert_eq!(
+        both,
+        [Ipv4Addr::new(198, 18, 0, 1), Ipv4Addr::new(198, 18, 0, 2)]
+    );
     let (code, addresses) = read(&net.ask(&query(42, "c.test", A)), 42);
     assert_eq!(code, RCODE::ServerFailure);
     assert!(addresses.is_empty());
@@ -347,7 +355,7 @@ fn overlaps(pool: &Pool, (network, prefix): (IpAddr, u8)) -> bool {
     start.to_bits() & mask == network.to_bits() & mask
 }
 
-// spec(NETWORK): The resolver answers each name with its own address from a private pool that `ap` chooses to overlap no IP rule, so `ap` knows which name every address belongs to.
+// spec(NETWORK): **Attribution.** The resolver answers each name with its own address from a private pool that `ap` chooses to overlap no IP rule, so `ap` knows which name every address belongs to.
 #[test]
 fn the_pool_overlaps_no_ip_rule_and_no_address_on_the_link() {
     let link = (STACK_V4, 24);
@@ -363,7 +371,11 @@ fn the_pool_overlaps_no_ip_rule_and_no_address_on_the_link() {
     ];
     let pushed = Pool::choose(link, &rules).unwrap();
     for rule in rules {
-        assert!(!overlaps(&pushed, rule), "{:?} overlaps {rule:?}", pushed.network());
+        assert!(
+            !overlaps(&pushed, rule),
+            "{:?} overlaps {rule:?}",
+            pushed.network()
+        );
     }
     // So does the link, wherever it is.
     let on_the_pool = (alone.network().0, 24);
@@ -371,7 +383,10 @@ fn the_pool_overlaps_no_ip_rule_and_no_address_on_the_link() {
     assert!(!overlaps(&moved, (IpAddr::V4(on_the_pool.0), 24)));
 
     // An IPv6 rule over IPv4-mapped addresses meets IPv4 addresses too.
-    let mapped = (IpAddr::V6(Ipv4Addr::new(198, 18, 0, 0).to_ipv6_mapped()), 111);
+    let mapped = (
+        IpAddr::V6(Ipv4Addr::new(198, 18, 0, 0).to_ipv6_mapped()),
+        111,
+    );
     let past = Pool::choose(link, &[mapped]).unwrap();
     assert!(!overlaps(&past, v4([198, 18, 0, 0], 15)));
     // Any other IPv6 rule doesn't.

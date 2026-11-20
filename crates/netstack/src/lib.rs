@@ -8,7 +8,7 @@
 
 mod resolver;
 
-pub use resolver::{PORT as RESOLVER_PORT, Pool, Resolver};
+pub use resolver::{Pool, Resolver};
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};

@@ -102,16 +102,22 @@ fn link() -> io::Result<(OwnedFd, OwnedFd)> {
 /// The network process's main: its standard input is its link, and `args`
 /// are the ones [`arguments`] made. It returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
-    let Some(mut resolver) = resolver(args) else {
-        eprintln!("usage: ap-network <harness host>... -- <NETWORK rule>...");
-        return 125;
+    let mut resolver = match resolver(args) {
+        Ok(resolver) => resolver,
+        Err(Unready::Usage) => {
+            eprintln!("usage: ap-network <harness host>... -- <NETWORK rule>...");
+            return 125;
+        }
+        Err(Unready::NoPool) => {
+            eprintln!("ap: every private IPv4 block meets an IP rule, so the resolver has no pool");
+            return 1;
+        }
     };
     // SAFETY: standard input is the link that `start` passed, and nothing
     // else in this process owns it.
     let link = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
     let mut stack = stack();
-    let served =
-        confine(link.as_fd()).and_then(|()| serve(&link, &mut stack, &mut resolver));
+    let served = confine(link.as_fd()).and_then(|()| serve(&link, &mut stack, &mut resolver));
     match served {
         Ok(()) => 0,
         Err(error) => {
@@ -135,11 +141,12 @@ pub fn stack() -> Stack {
 /// The guest's resolver, at the gateway's addresses, for the `args` that
 /// [`arguments`] made. It answers a name that the rules, the default, or a
 /// harness host could allow, from a pool that overlaps no IP rule and not
-/// the guest's link. `None` if the arguments don't read, or no such pool is
-/// left.
-pub fn resolver(args: &[OsString]) -> Option<Resolver> {
-    let args: Vec<&str> = args.iter().map(|arg| arg.to_str()).collect::<Option<_>>()?;
-    let at = args.iter().position(|arg| *arg == RULES)?;
+/// the guest's link.
+pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
+    let args: Vec<&str> = (args.iter().map(|arg| arg.to_str()))
+        .collect::<Option<_>>()
+        .ok_or(Unready::Usage)?;
+    let at = (args.iter().position(|arg| *arg == RULES)).ok_or(Unready::Usage)?;
     let harness: Vec<String> = args[..at].iter().map(|host| host.to_string()).collect();
     let lines: Vec<Instruction> = (1..)
         .zip(&args[at + 1..])
@@ -150,7 +157,7 @@ pub fn resolver(args: &[OsString]) -> Option<Resolver> {
             text: None,
         })
         .collect();
-    let network = Network::read(&lines).ok()?;
+    let network = Network::read(&lines).map_err(|_| Unready::Usage)?;
     let blocks: Vec<_> = network
         .rules
         .iter()
@@ -161,12 +168,22 @@ pub fn resolver(args: &[OsString]) -> Option<Resolver> {
             _ => None,
         })
         .collect();
-    let pool = Pool::choose((net::IPV4_GATEWAY, net::IPV4_PREFIX), &blocks)?;
+    let pool =
+        Pool::choose((net::IPV4_GATEWAY, net::IPV4_PREFIX), &blocks).ok_or(Unready::NoPool)?;
     let at = [net::IPV4_GATEWAY.into(), net::IPV6_GATEWAY.into()];
-    Some(Resolver::new(&at, pool, move |name| {
+    Ok(Resolver::new(&at, pool, move |name| {
         let harness: Vec<&str> = harness.iter().map(String::as_str).collect();
         ::net::could_allow(&network, &harness, name)
     }))
+}
+
+/// Why there is no resolver.
+#[derive(Debug)]
+pub enum Unready {
+    /// The arguments don't read.
+    Usage,
+    /// Every private block that the pool could take meets an IP rule.
+    NoPool,
 }
 
 /// Confines this process for the rest of its life, as the network process
@@ -188,9 +205,7 @@ pub fn serve(link: &File, stack: &mut Stack, resolver: &mut Resolver) -> io::Res
         match (&*link).read(&mut buffer) {
             Ok(0) => return Ok(()),
             Ok(len) if len > MAX_FRAME => {}
-            Ok(len) => stack.receive(&buffer[..len], Instant::now(), |flow| {
-                resolver.takes(flow)
-            }),
+            Ok(len) => stack.receive(&buffer[..len], Instant::now(), |flow| resolver.takes(flow)),
             Err(error) if waited(&error) => {}
             Err(error) => return Err(error),
         }

@@ -14,7 +14,7 @@ use simple_dns::{CLASS, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, Resour
 use crate::{Flow, Stack};
 
 /// The port the resolver answers on.
-pub const PORT: u16 = 53;
+const PORT: u16 = 53;
 /// How long, in seconds, a client may keep an answer. The address stays the
 /// name's for the whole run, so this only bounds how often it asks again.
 const TTL: u32 = 300;

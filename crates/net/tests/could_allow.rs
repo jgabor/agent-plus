@@ -90,7 +90,11 @@ fn a_host_rule_covers_its_domain_and_its_subdomains() {
 fn names_resolve_in_any_case_and_with_a_final_dot() {
     resolves(
         "NETWORK -\nNETWORK +kagi.com\n",
-        &[("KaGi.CoM.", true), ("API.kagi.com", true), ("Example.COM.", false)],
+        &[
+            ("KaGi.CoM.", true),
+            ("API.kagi.com", true),
+            ("Example.COM.", false),
+        ],
     );
     resolves("NETWORK -\n", &[("API.Anthropic.com.", true)]);
 }
@@ -109,7 +113,7 @@ fn under_a_closed_network_with_ip_rules_only_the_harness_hosts_resolve() {
     resolves(lines, &names);
 }
 
-// spec(NETWORK): The hosts the harness needs for its model API and sign-in stay allowed under `NETWORK -`, so an agent never loses its own model.
+// spec(NETWORK): **Harness hosts.** The hosts the harness needs for its model API and sign-in stay allowed under `NETWORK -`, so an agent never loses its own model.
 // spec(NETWORK): An explicit `-` rule for such a host still wins.
 #[test]
 fn an_explicit_deny_rule_for_a_harness_host_still_wins() {
@@ -120,7 +124,10 @@ fn an_explicit_deny_rule_for_a_harness_host_still_wins() {
     // A broader rule names the host too.
     resolves(
         "NETWORK -\nNETWORK -anthropic.com\n",
-        &[("api.anthropic.com", false), ("console.anthropic.com", false)],
+        &[
+            ("api.anthropic.com", false),
+            ("console.anthropic.com", false),
+        ],
     );
     resolves(
         "NETWORK +\nNETWORK -claude.ai\n",
@@ -141,6 +148,11 @@ fn your_host_resolves_only_when_a_rule_names_it() {
 fn an_address_or_an_empty_name_never_resolves() {
     resolves(
         "NETWORK +\n",
-        &[("", false), (".", false), ("192.0.2.1", false), ("::1", false)],
+        &[
+            ("", false),
+            (".", false),
+            ("192.0.2.1", false),
+            ("::1", false),
+        ],
     );
 }

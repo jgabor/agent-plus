@@ -232,6 +232,16 @@ impl Stack {
         });
     }
 
+    /// How long the stack can wait for a frame before its timers need
+    /// [`Stack::poll`], or `None` if they never do.
+    pub fn delay(&mut self, now: Instant) -> Option<std::time::Duration> {
+        let millis = i64::try_from(now.saturating_duration_since(self.start).as_millis())
+            .unwrap_or(i64::MAX);
+        self.iface
+            .poll_delay(SmolInstant::from_millis(millis), &self.sockets)
+            .map(|delay| std::time::Duration::from_micros(delay.total_micros()))
+    }
+
     /// The next Ethernet frame for the guest.
     pub fn transmit(&mut self) -> Option<Vec<u8>> {
         self.link.tx.pop_front()

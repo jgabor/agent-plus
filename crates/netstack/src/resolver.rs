@@ -6,14 +6,14 @@
 //! one can be attributed to its name.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use simple_dns::rdata::{A, RData};
 use simple_dns::{
     CLASS, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, ResourceRecord, SimpleDnsError, TYPE,
 };
 
-use crate::{Flow, Stack};
+use crate::{Datagram, Flow, Stack};
 
 /// The port the resolver answers on.
 const PORT: u16 = 53;
@@ -107,6 +107,7 @@ fn mask(prefix: u8) -> u32 {
 
 pub struct Resolver {
     at: Vec<IpAddr>,
+    pool: Pool,
     allows: Box<dyn Fn(&str) -> bool>,
     /// The next address to hand out, and the last there is.
     next: u32,
@@ -123,6 +124,7 @@ impl Resolver {
         let (next, last) = pool.range();
         Resolver {
             at: at.to_vec(),
+            pool,
             allows: Box::new(allows),
             next,
             last,
@@ -134,9 +136,7 @@ impl Resolver {
     /// Whether `flow` is a query to this resolver, for [`Stack::receive`].
     pub fn takes(&self, flow: &Flow) -> bool {
         match flow {
-            Flow::Udp { destination, .. } => {
-                destination.port() == PORT && self.at.contains(&destination.ip())
-            }
+            Flow::Udp { destination, .. } => self.serves(*destination),
             Flow::Tcp { .. } => false,
         }
     }
@@ -144,19 +144,32 @@ impl Resolver {
     /// Answers every query that `stack` took for this resolver.
     pub fn serve(&mut self, stack: &mut Stack) {
         while let Some(datagram) = stack.recv_datagram() {
-            if !self.at.contains(&datagram.destination.ip()) || datagram.destination.port() != PORT
-            {
-                continue;
-            }
-            if let Some(answer) = self.answer(&datagram.payload) {
-                stack.send_datagram(datagram.destination, datagram.source, &answer);
+            if self.serves(datagram.destination) {
+                self.answer_datagram(stack, &datagram);
             }
         }
+    }
+
+    /// Whether `address` is in the resolver's pool, handed out or not.
+    pub fn owns(&self, address: Ipv4Addr) -> bool {
+        address.to_bits() & mask(self.pool.prefix) == self.pool.network.to_bits()
+    }
+
+    /// Whether a datagram to `destination` is a query for this resolver.
+    pub fn serves(&self, destination: SocketAddr) -> bool {
+        destination.port() == PORT && self.at.contains(&destination.ip())
     }
 
     /// The name whose address `address` is, if the resolver handed it out.
     pub fn name_of(&self, address: Ipv4Addr) -> Option<&str> {
         self.names.get(&address).map(String::as_str)
+    }
+
+    /// Answers one query that `stack` took for this resolver.
+    pub fn answer_datagram(&mut self, stack: &mut Stack, datagram: &Datagram) {
+        if let Some(answer) = self.answer(&datagram.payload) {
+            stack.send_datagram(datagram.destination, datagram.source, &answer);
+        }
     }
 
     /// The answer to `query`, or `None` if it isn't a standard query with

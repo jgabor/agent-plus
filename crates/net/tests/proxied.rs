@@ -92,7 +92,11 @@ fn harness_hosts_stay_allowed_unless_a_rule_denies_them() {
         "harness"
     );
     // Only the hosts themselves, not their neighbors.
-    assert!(!allows("NETWORK -\n", Some("anthropic.com"), "160.79.104.10"));
+    assert!(!allows(
+        "NETWORK -\n",
+        Some("anthropic.com"),
+        "160.79.104.10"
+    ));
     assert!(!allows(
         "NETWORK -\nNETWORK -api.anthropic.com\n",
         Some("api.anthropic.com"),
@@ -146,7 +150,11 @@ fn your_host_is_reachable_only_by_its_name_and_a_rule_that_names_it() {
         "127.0.0.1"
     ));
     assert_eq!(
-        decided(&network("NETWORK +\n"), Some("host.ap.internal"), "127.0.0.1"),
+        decided(
+            &network("NETWORK +\n"),
+            Some("host.ap.internal"),
+            "127.0.0.1"
+        ),
         "loopback"
     );
 }
@@ -189,11 +197,7 @@ fn ip_rules_meet_the_real_destination_address() {
     let denied = network(lines);
     assert_eq!(
         decided(&denied, Some("example.com"), "93.184.215.14"),
-        format!(
-            "{:?} by {:?}",
-            Sign::Deny,
-            denied.rules[1].destination
-        )
+        format!("{:?} by {:?}", Sign::Deny, denied.rules[1].destination)
     );
     // A literal address meets only the IP rules.
     assert!(allows(
@@ -201,5 +205,9 @@ fn ip_rules_meet_the_real_destination_address() {
         None,
         "192.0.2.7"
     ));
-    assert!(!allows("NETWORK -\nNETWORK +192.0.2.0/24\n", None, "192.0.3.7"));
+    assert!(!allows(
+        "NETWORK -\nNETWORK +192.0.2.0/24\n",
+        None,
+        "192.0.3.7"
+    ));
 }

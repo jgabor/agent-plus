@@ -136,11 +136,7 @@ impl Proxied<'_> {
 /// harness's hosts. A harness host is allowed wherever no rule decides. A
 /// loopback or unspecified address is refused, unless the connection is to
 /// [`YOUR_HOST`] and a `+` rule for that name decides it.
-pub fn proxied<'a>(
-    network: &'a Network,
-    harness: &[&str],
-    connection: &Connection,
-) -> Proxied<'a> {
+pub fn proxied<'a>(network: &'a Network, harness: &[&str], connection: &Connection) -> Proxied<'a> {
     let name = connection.name.map(|name| {
         let name = name.to_ascii_lowercase();
         name.strip_suffix('.').map(str::to_owned).unwrap_or(name)

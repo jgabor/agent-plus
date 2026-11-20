@@ -65,7 +65,15 @@ pub fn answer_lookups(socket: OwnedFd, answers: bool) -> Lookups {
     let read = Arc::clone(&reports);
     let started = thread::Builder::new().spawn(move || {
         let mut buffer = [0; LONGEST_SENT + 1];
-        while let Ok(len @ 1..) = socket.recv(&mut buffer) {
+        loop {
+            let len = match socket.recv(&mut buffer) {
+                Ok(0) => break,
+                Ok(len) => len,
+                // The network process ended with an answer unread. The
+                // reports it sent before it are still to read.
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => continue,
+                Err(_) => break,
+            };
             let message = &buffer[..len];
             if message.first() == Some(&TAG) {
                 if let Ok(mut reports) = read.lock() {

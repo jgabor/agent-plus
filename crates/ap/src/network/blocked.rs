@@ -131,11 +131,13 @@ impl Reporter {
             MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
             _ => write(&blocked),
         };
-        hosts.insert(host);
-        // The socket doesn't wait, so a report that doesn't fit is lost, as
-        // a frame on a full link is.
+        // The socket doesn't wait. A report that doesn't fit is sent again
+        // the next time the host is blocked.
         // SAFETY: `message` holds the bytes the call reads.
-        let _ = unsafe { libc::write(self.fd, message.as_ptr().cast(), message.len()) };
+        let sent = unsafe { libc::write(self.fd, message.as_ptr().cast(), message.len()) };
+        if sent >= 0 {
+            hosts.insert(host);
+        }
     }
 }
 
@@ -158,11 +160,17 @@ pub fn report(args: &[OsString], reports: &Reports) -> Option<String> {
         let rule = match (net::allowing(&network, &harness, blocked), blocked) {
             (Some(rule), _) => format!("NETWORK {rule}"),
             // SPEC.md's NETWORK, under **Your host**.
-            (None, Blocked::Connection { address, .. }) if loopback(*address) => {
+            (
+                None,
+                Blocked::Connection {
+                    name: None,
+                    address,
+                    ..
+                },
+            ) if loopback(*address) => {
                 "your host's loopback, which only host.ap.internal reaches".to_owned()
             }
-            // A rule for the host alone always beats the default.
-            (None, _) => "a `-` rule denies it".to_owned(),
+            (None, _) => "no rule for this host alone allows it".to_owned(),
         };
         let _ = writeln!(text, "  {host:width$}  {rule}");
     }
@@ -253,6 +261,28 @@ mod tests {
     }
 
     #[test]
+    fn a_report_that_didn_t_fit_is_sent_the_next_time() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let theirs = std::os::unix::net::UnixDatagram::from(theirs);
+        theirs.set_nonblocking(true).unwrap();
+        while theirs.send(b"!filler").is_ok() {}
+        let reporter = Reporter::new(std::os::fd::AsRawFd::as_raw_fd(&theirs));
+        let blocked = Blocked::Lookup("example.com".to_owned());
+        reporter.report(blocked.clone());
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
+        let mut buffer = [0; 512];
+        let mut drained = Vec::new();
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            drained.push(buffer[..len].to_vec());
+        }
+        assert!(drained.iter().all(|message| message == b"!filler"));
+        reporter.report(blocked);
+        let len = mine.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..len], b"!lookup example.com");
+    }
+
+    #[test]
     fn a_host_no_rule_of_its_own_allows_says_why() {
         let args: Vec<OsString> = ["--", "+", "-example.com"].map(OsString::from).to_vec();
         let reports = Reports {
@@ -267,7 +297,10 @@ mod tests {
             more: false,
         };
         let text = report(&args, &reports).unwrap();
-        assert!(text.contains("example.com  a `-` rule denies it"), "{text}");
+        assert!(
+            text.contains("example.com  no rule for this host alone"),
+            "{text}"
+        );
         assert!(text.contains("127.0.0.1    your host's loopback"), "{text}");
         assert_eq!(report(&args, &Reports::default()), None);
     }

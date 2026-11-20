@@ -283,7 +283,9 @@ fn run_agent(
     // the run process has, and its reports end with it.
     let reports = lookups.reports(REPORTS_WAIT);
     if let Some(report) = ap::network::report(network, &reports) {
-        eprint!("{report}");
+        // As with the run's own output, a failed write doesn't change how
+        // the run ends.
+        let _ = io::stderr().write_all(report.as_bytes());
     }
     // A VM that `ap stop` powered off ends the run with no report.
     let killed = exited.is_ok_and(|status| status.code() == Some(runs::KILLED.into()));

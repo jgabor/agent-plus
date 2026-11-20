@@ -421,8 +421,8 @@ fn receiver(listener: TcpListener) -> Received {
 }
 
 /// What a receiver received, once `want` connections ended or a few
-/// seconds passed, in order.
-fn received(received: &Received, want: usize) -> Vec<Vec<u8>> {
+/// seconds passed, by the label of each of `known`, in order.
+fn received(received: &Received, want: usize, known: &[(&str, &[u8])]) -> Vec<String> {
     for _ in 0..200 {
         if received.lock().unwrap().len() >= want {
             break;
@@ -431,7 +431,12 @@ fn received(received: &Received, want: usize) -> Vec<Vec<u8>> {
     }
     // Long enough for one more to show up, if one would.
     thread::sleep(Duration::from_millis(500));
-    let mut all = received.lock().unwrap().clone();
+    let mut all: Vec<String> = (received.lock().unwrap().iter())
+        .map(|bytes| match known.iter().find(|(_, sent)| sent == bytes) {
+            Some((label, _)) => label.to_string(),
+            None => bytes.escape_ascii().to_string(),
+        })
+        .collect();
     all.sort();
     all
 }
@@ -499,9 +504,8 @@ fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() 
     scratch.try_network(&name, &script.concat());
     // The hello for another name, and the request for one, never reached
     // the listener. The second request on a connection didn't either.
-    let mut want = vec![mine, AGREES.to_vec(), AGREES.to_vec()];
-    want.sort();
-    assert_eq!(received(&seen, want.len()), want);
+    let known: [(&str, &[u8]); 2] = [("agrees", AGREES), ("hello", &mine)];
+    assert_eq!(received(&seen, 3, &known), ["agrees", "agrees", "hello"]);
     scratch.stop(&name, run);
 }
 
@@ -534,9 +538,8 @@ fn a_connection_no_name_rule_decides_skips_the_name_check() {
         send(&address.to_string(), port, &[DISAGREES]),
     ];
     scratch.try_network(&name, &script.concat());
-    let mut want = vec![other, DISAGREES.to_vec()];
-    want.sort();
-    assert_eq!(received(&seen, want.len()), want);
+    let known: [(&str, &[u8]); 2] = [("disagrees", DISAGREES), ("hello", &other)];
+    assert_eq!(received(&seen, 2, &known), ["disagrees", "hello"]);
     scratch.stop(&name, run);
 }
 

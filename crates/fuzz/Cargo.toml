@@ -9,6 +9,7 @@ publish.workspace = true
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 git = { path = "../git" }
+httparse = { version = "1", default-features = false }
 net = { path = "../net" }
 netstack = { path = "../netstack" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

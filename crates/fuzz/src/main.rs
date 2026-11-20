@@ -551,6 +551,28 @@ fn name_check_input(input: &str) -> bool {
         }
     }
     assert!(bytes.starts_with(&whole.0), "{:?}", whole.0);
+    // httparse, as a server would, reads the first request on its own. If
+    // it finds one whose `Host` doesn't agree, none of that head passed.
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut request = httparse::Request::new(&mut headers);
+    if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes) {
+        let agrees = |header: &httparse::Header| {
+            let value = header.value.trim_ascii().to_ascii_lowercase();
+            let colon = value.iter().rposition(|&byte| byte == b':');
+            let name = &value[..colon.unwrap_or(value.len())];
+            name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
+        };
+        let hosts: Vec<_> = (request.headers.iter())
+            .filter(|header| header.name.eq_ignore_ascii_case("host"))
+            .collect();
+        if !matches!(hosts[..], [host] if agrees(host)) {
+            assert!(
+                whole.0.len() < head,
+                "a head for another host passed: {:?}",
+                whole.0
+            );
+        }
+    }
     whole.1 && whole.0 == bytes
 }
 

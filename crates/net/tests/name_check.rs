@@ -189,6 +189,7 @@ fn a_chunked_body_is_read_to_its_end() {
     passes(next.as_bytes());
 }
 
+// spec(NETWORK): The proxy refuses plain HTTP that it can't check request by request: a request with no `Host` header or more than one, a `CONNECT` request or one whose target names a host, an `Upgrade` request, and a body whose length a server could read another way.
 #[test]
 fn a_request_the_server_could_read_another_way_is_refused() {
     let head = "POST / HTTP/1.1\r\nHost: host.ap.internal\r\n";
@@ -226,13 +227,21 @@ fn a_request_with_no_host_of_its_own_is_refused() {
 }
 
 #[test]
-fn what_follows_an_upgrade_passes_unread() {
-    let input = concat!(
-        "GET /chat HTTP/1.1\r\nHost: host.ap.internal\r\n",
-        "Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
-        "\u{1}GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
-    );
-    passes(input.as_bytes());
+fn any_method_is_checked() {
+    passes(b"M-SEARCH * HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n");
+    passes(b"x.Y_1 / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n");
+    refused(b"M-SEARCH * HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    refused(b"get / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    refused(b"PROPFIND! / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+}
+
+#[test]
+fn an_upgrade_is_refused() {
+    let first = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
+    let mut input = first.to_vec();
+    input.extend_from_slice(b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\nUpgrade: x\r\n\r\n");
+    input.extend_from_slice(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    refused_after(&input, first);
 }
 
 #[test]
@@ -281,6 +290,7 @@ fn checked(lines: &str, name: Option<&str>, address: &str) -> bool {
     decided.by_name()
 }
 
+// spec(NETWORK): A harness host that no rule decides is checked too.
 // spec(NETWORK): A connection that no name rule decides skips this check, so under `NETWORK +`, clients that resolve names on their own (DNS over HTTPS, hard-coded addresses) keep working.
 #[test]
 fn only_a_connection_a_name_decides_is_checked() {

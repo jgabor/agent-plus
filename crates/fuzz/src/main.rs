@@ -389,7 +389,7 @@ const TARGETS: [Target; 9] = [
                 "3;x\r\nabc\r\n0\r\nT: 1\r\n\r\n",
                 "PUT / HTTP/1.1\r\nHost: host.ap.internal:80\r\nContent-Length: 3\r\n\r\nabc",
             ),
-            "GET / HTTP/1.1\r\nHost: host.ap.internal\r\nUpgrade: x\r\n\r\nanything",
+            "M-SEARCH * HTTP/1.1\r\nHost: host.ap.internal\r\nMan: x\r\n\r\n",
             "SSH-2.0-OpenSSH_9.9\r\n",
         ],
         words: &[

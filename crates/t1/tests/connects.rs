@@ -451,6 +451,122 @@ fn a_network_that_reaches_nothing_still_answers_the_guest() {
     scratch.stop(&name, run);
 }
 
+/// Runs `agent` headless, as [`Scratch::run`] does, tries `script` in its
+/// guest, and stops it. Returns the run's standard output after its
+/// harness's report, and its standard error.
+fn run_to_end(scratch: &Scratch, agent: &str, script: &str) -> (Vec<String>, String, String) {
+    let mut run = Started(
+        scratch
+            .command()
+            .args(["run", agent, "-p", "Try the network."])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut stdout = BufReader::new(run.0.stdout.take().unwrap());
+    let mut stderr = run.0.stderr.take().unwrap();
+    let mut report = String::new();
+    stdout.read_line(&mut report).unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    let listed = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
+    let row = listed.lines().nth(1).expect("ap ps lists the run");
+    let name = row.split_whitespace().next().unwrap().to_owned();
+    let lines = scratch.try_network(&name, script);
+    scratch.stop(&name, run);
+    let mut rest = String::new();
+    stdout.read_to_string(&mut rest).unwrap();
+    let mut errors = String::new();
+    stderr.read_to_string(&mut errors).unwrap();
+    println!("{errors}");
+    (lines, rest, errors)
+}
+
+/// The hosts and rules that a run's standard error lists, after the line
+/// that says how many hosts were blocked.
+fn listed(stderr: &str) -> Vec<(String, String)> {
+    let mut lines = stderr.lines();
+    if !lines.any(|line| line.starts_with("ap: NETWORK blocked ")) {
+        return Vec::new();
+    }
+    lines
+        .take_while(|line| line.starts_with("  "))
+        .map(|line| {
+            let (host, rule) = line.trim().split_once("  ").unwrap();
+            (host.to_owned(), rule.trim().to_owned())
+        })
+        .collect()
+}
+
+// spec(Run): **Blocked hosts.** When a run ends, `ap` prints the hosts that `NETWORK` blocked and the rule that would allow each one, on standard error.
+// spec(Run): It never asks during the run, and it never adds a rule itself.
+#[test]
+fn a_run_that_ends_lists_the_hosts_it_blocked() {
+    let scratch = Scratch::new("blocked");
+    scratch.build("closed", "NETWORK -\n");
+    scratch.build("opened", "NETWORK -\nNETWORK +host.ap.internal\n");
+    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let seen = tcp_echo(tcp, "host");
+    let script = format!(
+        "tcp allowed host.ap.internal {port}\n\
+         tcp denied denied.example 443\n\
+         tcp denied-again denied.example 443\n\
+         tcp literal 192.0.2.7 443\n\
+         tcp literal-v6 2001:db8::7 443\n\
+         timeout 20 getent ahosts looked-up.example >/dev/null; echo \"lookup $?\"\n"
+    );
+    let blocked = |host: &str| (host.to_owned(), format!("NETWORK +{host}"));
+    let denied = [
+        blocked("denied.example"),
+        ("192.0.2.7".to_owned(), "NETWORK +192.0.2.7".to_owned()),
+        (
+            "2001:db8::7".to_owned(),
+            "NETWORK +[2001:db8::7]".to_owned(),
+        ),
+        blocked("looked-up.example"),
+    ];
+    let unchanged = |agent: &str| {
+        let dir = scratch.root.join(agent);
+        let files = ["Agentfile", "Agentfile.lock"].map(|file| fs::read(dir.join(file)).unwrap());
+        (files, scratch.ap(&["inspect", agent]).stdout)
+    };
+
+    for (agent, allowed) in [("closed", "failed"), ("opened", "host:ping")] {
+        let before = unchanged(agent);
+        let (lines, stdout, stderr) = run_to_end(&scratch, agent, &script);
+        assert_eq!(
+            lines,
+            [
+                format!("allowed {allowed}").as_str(),
+                "denied failed",
+                "denied-again failed",
+                "literal failed",
+                "literal-v6 failed",
+                "lookup 2",
+            ]
+        );
+        let mut expected = denied.to_vec();
+        if agent == "closed" {
+            expected.insert(0, blocked("host.ap.internal"));
+        }
+        assert_eq!(listed(&stderr), expected, "{stderr}");
+        let count = format!("ap: NETWORK blocked {} hosts.", expected.len());
+        assert!(stderr.contains(&count), "{stderr}");
+        // Nothing else of the run's changes.
+        assert_eq!(stdout, "", "{stdout}");
+        assert_eq!(unchanged(agent), before, "the run of {agent} changed it");
+    }
+    assert_eq!(settled(&seen, 2), ["tcp ping", "closed"]);
+
+    // A run that blocks nothing lists nothing.
+    let quiet = format!("tcp allowed host.ap.internal {port}\n");
+    let (lines, _, stderr) = run_to_end(&scratch, "opened", &quiet);
+    assert_eq!(lines, ["allowed host:ping"]);
+    assert!(!stderr.contains("NETWORK"), "{stderr}");
+}
+
 /// The port every listener in the namespace takes.
 const PORT: u16 = 8000;
 /// The host's DNS servers in the namespace, before and after the change.

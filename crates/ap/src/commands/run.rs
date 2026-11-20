@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentfile::{
     Destination, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings,
@@ -208,16 +208,14 @@ fn run_agent(
     let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
     // The network process and the share server end once the run process,
     // which holds the only other end of each one's socket, does.
-    let network =
-        ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
     let ap::network::Started {
         process: network_process,
         link: network_link,
         lookups,
         authority,
-    } = network;
+    } = ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
     start.authority = authority;
-    ap::network::answer_lookups(lookups);
+    let lookups = ap::network::answer_lookups(lookups, ap::network::asks(network));
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -281,6 +279,14 @@ fn run_agent(
     // The run process exits once it has reported, so this doesn't wait long.
     let exited = process.wait();
     drop(held);
+    // SPEC.md's Run, under **Blocked hosts**. The network process ends once
+    // the run process has, and its reports end with it.
+    let reports = lookups.reports(REPORTS_WAIT);
+    if let Some(report) = ap::network::report(network, &reports) {
+        // As with the run's own output, a failed write doesn't change how
+        // the run ends.
+        let _ = io::stderr().write_all(report.as_bytes());
+    }
     // A VM that `ap stop` powered off ends the run with no report.
     let killed = exited.is_ok_and(|status| status.code() == Some(runs::KILLED.into()));
     if end.is_err() && killed {
@@ -292,6 +298,10 @@ fn run_agent(
         End::Failed(_, reason) => Err(Error::Failed(reason)),
     }
 }
+
+/// How long a run that has ended waits for the network process to end, for
+/// the hosts it blocked.
+const REPORTS_WAIT: Duration = Duration::from_secs(2);
 
 /// An error from `ap run`'s own work, in this context.
 fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {

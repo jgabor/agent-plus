@@ -4,7 +4,7 @@
 
 use std::net::IpAddr;
 
-use agentfile::{Destination, Network, NetworkRule, Scheme, Sign};
+use agentfile::{Destination, Instruction, Network, NetworkRule, Scheme, Sign};
 
 /// A connection the agent makes.
 #[derive(Clone, Copy, Debug)]
@@ -198,6 +198,82 @@ pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
         return !opened.denies(name);
     }
     !network.denies(name)
+}
+
+/// Something that `NETWORK` blocked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Blocked {
+    /// A name the resolver wouldn't answer.
+    Lookup(String),
+    /// A connection the proxy refused: the name it is attributed to, if
+    /// any, its real destination address, and its port.
+    Connection {
+        name: Option<String>,
+        address: IpAddr,
+        port: u16,
+    },
+}
+
+impl Blocked {
+    /// The host it was for: the name, or else the address.
+    pub fn host(&self) -> String {
+        match self {
+            Blocked::Lookup(name)
+            | Blocked::Connection {
+                name: Some(name), ..
+            } => name.clone(),
+            Blocked::Connection { address, .. } => address.to_string(),
+        }
+    }
+}
+
+/// The rule that, added to `network`'s rules, allows `blocked`, with
+/// `harness` as the harness's hosts, as it would be written after
+/// `NETWORK`. It is a rule for the host alone, or with the port where a
+/// rule for the host would tie with a `-` rule or lose to one. `None` when
+/// neither would allow it.
+pub fn allowing(network: &Network, harness: &[&str], blocked: &Blocked) -> Option<String> {
+    let host = match blocked {
+        Blocked::Connection {
+            name: None,
+            address: IpAddr::V6(v6),
+            ..
+        } => format!("[{v6}]"),
+        _ => blocked.host(),
+    };
+    let mut candidates = vec![format!("+{host}")];
+    if let Blocked::Connection { port, .. } = blocked {
+        candidates.push(format!("+{host}:{port}"));
+    }
+    candidates.into_iter().find(|text| {
+        let line = Instruction {
+            line: 1,
+            name: "NETWORK".to_owned(),
+            arguments: vec![text.clone()],
+            text: None,
+        };
+        let Ok(mut added) = Network::read(&[line]) else {
+            return false;
+        };
+        added.default = network.default;
+        added.rules.splice(..0, network.rules.iter().cloned());
+        match blocked {
+            Blocked::Lookup(name) => could_allow(&added, harness, name),
+            Blocked::Connection {
+                name,
+                address,
+                port,
+            } => {
+                let connection = Connection {
+                    name: name.as_deref(),
+                    address: *address,
+                    port: *port,
+                    request: None,
+                };
+                proxied(&added, harness, &connection).allows()
+            }
+        }
+    })
 }
 
 /// The most specific URL or host rule that matches a connection to `name`

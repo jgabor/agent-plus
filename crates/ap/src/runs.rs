@@ -45,6 +45,8 @@
 //!
 //! `ap run` writes what it shows of the run's output to the run's log, in the
 //! same messages the run process sends it, and `ap logs` reads them back.
+//! The run's network decisions are a stream of their own in the same log,
+//! each one message, so they are deleted with it.
 //! Before the run process lets go of the run's record, it adds the status
 //! `ap run` exits with, which `ap ps -a` shows.
 
@@ -99,6 +101,8 @@ const HUNG_UP: u8 = 13;
 const TOOK: u8 = 14;
 /// `ap stop` asks for the run to stop.
 const STOP: u8 = 15;
+/// A network decision, which only a run's log holds.
+const DECISION: u8 = 16;
 
 /// How long a harness has to exit after `SIGTERM`, before `ap stop` powers
 /// the VM off.
@@ -158,6 +162,16 @@ pub enum FromRun {
     ForExec(u32, u8, Vec<u8>),
 }
 
+/// What a run's log holds.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Logged {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    /// A network decision: when, in nanoseconds since the Unix epoch, and
+    /// its line, without the time.
+    Decision(u64, String),
+}
+
 /// Adds output that `ap run` showed, on standard error if `stderr`, to the
 /// run's log. It is one write, so a reader sees all of it or none.
 pub fn write_log(log: &mut impl Write, stderr: bool, bytes: &[u8]) -> io::Result<()> {
@@ -169,12 +183,32 @@ pub fn write_log(log: &mut impl Write, stderr: bool, bytes: &[u8]) -> io::Result
     log.write_all(&message)
 }
 
-/// Reads the next output from a run's log. The end of the log is `None`, and
+/// Adds a network decision, made `at` nanoseconds since the Unix epoch, to
+/// the run's log, in one write as [`write_log`] does.
+pub fn write_decision(log: &mut impl Write, at: u64, line: &str) -> io::Result<()> {
+    let mut message = Vec::new();
+    push_frame(
+        &mut message,
+        DECISION,
+        &[&at.to_le_bytes()[..], line.as_bytes()].concat(),
+    );
+    log.write_all(&message)
+}
+
+/// Reads the next part of a run's log. The end of the log is `None`, and
 /// so is a message cut short, which a run still writing may have left.
-pub fn read_log(log: &mut impl Read) -> io::Result<Option<FromRun>> {
+pub fn read_log(log: &mut impl Read) -> io::Result<Option<Logged>> {
     match read_frame(log) {
-        Ok(Some((STDOUT, body))) => Ok(Some(FromRun::Stdout(body))),
-        Ok(Some((STDERR, body))) => Ok(Some(FromRun::Stderr(body))),
+        Ok(Some((STDOUT, body))) => Ok(Some(Logged::Stdout(body))),
+        Ok(Some((STDERR, body))) => Ok(Some(Logged::Stderr(body))),
+        Ok(Some((DECISION, body))) => {
+            let (at, line) = body.split_at_checked(8).ok_or_else(bad_message)?;
+            let line = String::from_utf8(line.to_vec()).map_err(|_| bad_message())?;
+            Ok(Some(Logged::Decision(
+                u64::from_le_bytes(at.try_into().unwrap()),
+                line,
+            )))
+        }
         Ok(None) => Ok(None),
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
         Ok(Some(_)) => Err(bad_message()),
@@ -969,11 +1003,19 @@ mod tests {
         write_log(&mut log, false, b"out").unwrap();
         write_log(&mut log, true, b"").unwrap();
         write_log(&mut log, true, b"err").unwrap();
+        write_decision(&mut log, 7, "allow  example.com:443  NETWORK +example.com").unwrap();
         write_log(&mut log, false, b"cut").unwrap();
         let mut reader = &log[..log.len() - 1];
         let mut read = || read_log(&mut reader).unwrap();
-        assert_eq!(read(), Some(FromRun::Stdout(b"out".to_vec())));
-        assert_eq!(read(), Some(FromRun::Stderr(b"err".to_vec())));
+        assert_eq!(read(), Some(Logged::Stdout(b"out".to_vec())));
+        assert_eq!(read(), Some(Logged::Stderr(b"err".to_vec())));
+        assert_eq!(
+            read(),
+            Some(Logged::Decision(
+                7,
+                "allow  example.com:443  NETWORK +example.com".to_owned()
+            ))
+        );
         assert_eq!(read(), None);
         let mut other = Vec::new();
         push_frame(&mut other, EXITED, &[0]);

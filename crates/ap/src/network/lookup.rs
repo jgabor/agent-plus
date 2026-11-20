@@ -19,6 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::blocked::{Reports, TAG};
+use super::decisions::Keeper;
 
 /// The longest name a question holds.
 const LONGEST_NAME: usize = 253;
@@ -39,14 +40,15 @@ const QUESTION: u8 = b'?';
 
 /// Answers the network process's questions on `socket`, the
 /// [`super::Started::lookups`] of its start, until the network process
-/// ends, and keeps its reports. It answers none unless `answers`, for a
+/// ends, and keeps its reports: its decisions in `keeper`, if there is one,
+/// and the hosts it blocked. It answers none unless `answers`, for a
 /// network process whose rules can reach nothing, which never asks. One
 /// thread reads, so reports never wait for a lookup. A few threads answer
 /// at once, each one question at a time, so a slow name doesn't hold up the
 /// others, and the network process can't make `ap run` start more. The rest
 /// wait their turn, up to [`WAITING`] of them. A question past those goes
 /// unanswered.
-pub fn answer_lookups(socket: OwnedFd, answers: bool) -> Lookups {
+pub fn answer_lookups(socket: OwnedFd, answers: bool, mut keeper: Option<Keeper>) -> Lookups {
     let socket = Arc::new(UnixDatagram::from(socket));
     let reports = Arc::new(Mutex::new(Reports::default()));
     let (running, ended) = mpsc::channel::<()>();
@@ -80,6 +82,10 @@ pub fn answer_lookups(socket: OwnedFd, answers: bool) -> Lookups {
             };
             let message = &buffer[..len];
             if message.first() == Some(&TAG) {
+                let decision = keeper.as_mut().is_some_and(|keeper| keeper.take(message));
+                if decision {
+                    continue;
+                }
                 if let Ok(mut reports) = read.lock() {
                     reports.take(message);
                 }
@@ -248,7 +254,7 @@ mod tests {
     /// and returns whether an answer came, and the reports.
     fn ask_and_report(answers: bool) -> (bool, Reports) {
         let (mine, theirs) = super::super::link().unwrap();
-        let lookups = answer_lookups(theirs, answers);
+        let lookups = answer_lookups(theirs, answers, None);
         let mine = UnixDatagram::from(mine);
         mine.send(&write_question(1, "localhost").unwrap()).unwrap();
         mine.send(b"!lookup example.com").unwrap();
@@ -269,6 +275,57 @@ mod tests {
         let (answered, reports) = ask_and_report(false);
         assert!(!answered);
         assert_eq!(reports.blocked.len(), 1, "{reports:?}");
+    }
+
+    #[test]
+    fn a_decision_the_network_process_reports_reaches_the_run_s_log() {
+        let args: Vec<std::ffi::OsString> =
+            ["--", "-", "+host.ap.internal"].map(Into::into).to_vec();
+        let (network, harness) = super::super::rules(&args).unwrap();
+        let (mine, theirs) = super::super::link().unwrap();
+        let reporter = super::super::blocked::Reporter::new(mine.as_raw_fd(), network, harness);
+        let path = std::env::temp_dir().join(format!("ap-lookup-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let log = std::fs::File::options()
+            .create_new(true)
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let keeper = Keeper::new(&args, log.try_clone().unwrap());
+        let lookups = answer_lookups(theirs, true, Some(keeper));
+        let loopback = "127.0.0.1".parse().unwrap();
+        reporter.decided(true, Some("host.ap.internal"), loopback, 8080);
+        reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
+        // A lookup of the name's other records is the same decision.
+        reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
+        // Once another decision comes between, it is a new one.
+        reporter.decided(true, Some("host.ap.internal"), loopback, 8080);
+        reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
+        drop((reporter, mine));
+        let reports = lookups.reports(Duration::from_secs(5));
+        // The host it blocked is still reported.
+        assert_eq!(reports.blocked.len(), 1, "{reports:?}");
+        let mut log = log;
+        std::io::Seek::rewind(&mut log).unwrap();
+        let mut log = std::io::BufReader::new(log);
+        let mut lines = Vec::new();
+        while let Some(part) = crate::runs::read_log(&mut log).unwrap() {
+            match part {
+                crate::runs::Logged::Decision(_, line) => lines.push(line),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(
+            lines,
+            [
+                "allow  host.ap.internal:8080  NETWORK +host.ap.internal",
+                "deny   denied.example  the default",
+                "allow  host.ap.internal:8080  NETWORK +host.ap.internal",
+                "deny   denied.example  the default",
+            ]
+        );
     }
 
     #[test]

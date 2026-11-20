@@ -14,7 +14,10 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::net::IpAddr;
 
+use agentfile::Network;
 use net::Blocked;
+
+use super::decisions::{self, Rule};
 
 /// The first byte of a report, which no question starts with.
 pub(super) const TAG: u8 = b'!';
@@ -54,7 +57,12 @@ enum Read {
 }
 
 fn write(blocked: &Blocked) -> Vec<u8> {
-    let text = match blocked {
+    [&[TAG][..], text(blocked).as_bytes()].concat()
+}
+
+/// `blocked` as a report writes it, after the tag.
+pub(super) fn text(blocked: &Blocked) -> String {
+    match blocked {
         Blocked::Lookup(name) => format!("lookup {name}"),
         Blocked::Connection {
             name,
@@ -64,24 +72,31 @@ fn write(blocked: &Blocked) -> Vec<u8> {
             "connect {} {address} {port}",
             name.as_deref().unwrap_or("-")
         ),
-    };
-    [&[TAG][..], text.as_bytes()].concat()
+    }
 }
 
 fn read(message: &[u8]) -> Option<Read> {
     let text = std::str::from_utf8(message.strip_prefix(&[TAG])?).ok()?;
+    match text {
+        "more" => Some(Read::More),
+        text => parse(text).map(Read::Blocked),
+    }
+}
+
+/// What [`text`] wrote, if it reads as a host the network process could
+/// have blocked.
+pub(super) fn parse(text: &str) -> Option<Blocked> {
     let words: Vec<&str> = text.split(' ').collect();
     match words[..] {
-        ["more"] => Some(Read::More),
-        ["lookup", name] => Some(Read::Blocked(Blocked::Lookup(host_name(name)?))),
-        ["connect", name, address, port] => Some(Read::Blocked(Blocked::Connection {
+        ["lookup", name] => Some(Blocked::Lookup(host_name(name)?)),
+        ["connect", name, address, port] => Some(Blocked::Connection {
             name: match name {
                 "-" => None,
                 name => Some(host_name(name)?),
             },
             address: address.parse::<IpAddr>().ok()?,
             port: port.parse().ok()?,
-        })),
+        }),
         _ => None,
     }
 }
@@ -95,32 +110,81 @@ fn host_name(name: &str) -> Option<String> {
     fits.then(|| name.to_owned())
 }
 
-/// The network process's side: it reports each host once.
+/// The network process's side: it reports each decision, as
+/// [`super::decisions`] says, and each host it blocks once.
 pub(super) struct Reporter {
     fd: i32,
     hosts: RefCell<HashSet<String>>,
+    /// The rules and the harness's hosts, which name what decided.
+    network: Network,
+    harness: Vec<String>,
+    /// The name the resolver refused in the last decision reported, which a
+    /// lookup of its other records doesn't report again.
+    refused: RefCell<Option<String>>,
 }
 
 impl Reporter {
     /// Reports on `fd`, the socket the process asks for lookups on, which
-    /// it may write to once confined.
-    pub(super) fn new(fd: i32) -> Reporter {
+    /// it may write to once confined, the decisions of `network`, with
+    /// `harness` as the harness's hosts.
+    pub(super) fn new(fd: i32, network: Network, harness: Vec<String>) -> Reporter {
         Reporter {
             fd,
             hosts: RefCell::new(HashSet::new()),
+            network,
+            harness,
+            refused: RefCell::new(None),
         }
     }
 
-    /// Reports `blocked`, unless its host was reported already. A reverse
-    /// lookup, of the name for an address, is no host, so it isn't
-    /// reported.
+    /// Reports a connection to `address` on `port`, attributed to `name`,
+    /// that the proxy allows or not, and the rule that decided.
+    pub(super) fn decided(&self, allow: bool, name: Option<&str>, address: IpAddr, port: u16) {
+        let harness: Vec<&str> = self.harness.iter().map(String::as_str).collect();
+        let connection = net::Connection {
+            name,
+            address,
+            port,
+            request: None,
+        };
+        let proxied = net::proxied(&self.network, &harness, &connection);
+        let about = Blocked::Connection {
+            name: name.map(str::to_owned),
+            address,
+            port,
+        };
+        let rule = Rule::proxied(&self.network, proxied);
+        if self.send(&decisions::write(allow, &rule, &about)) {
+            *self.refused.borrow_mut() = None;
+        }
+    }
+
+    /// Reports `blocked`, as a decision, and as a host unless its host was
+    /// reported already. A reverse lookup, of the name for an address, is
+    /// no host, so it isn't reported.
     pub(super) fn report(&self, blocked: Blocked) {
-        if let Blocked::Lookup(name) = &blocked
-            && (name.ends_with(".in-addr.arpa")
-                || name.ends_with(".ip6.arpa")
-                || name.parse::<IpAddr>().is_ok())
-        {
-            return;
+        match &blocked {
+            Blocked::Lookup(name)
+                if name.ends_with(".in-addr.arpa")
+                    || name.ends_with(".ip6.arpa")
+                    || name.parse::<IpAddr>().is_ok() =>
+            {
+                return;
+            }
+            Blocked::Lookup(name) => {
+                let mut refused = self.refused.borrow_mut();
+                if refused.as_ref() != Some(name) {
+                    let rule = Rule::by(&self.network, net::refusing(&self.network, name));
+                    if self.send(&decisions::write(false, &rule, &blocked)) {
+                        *refused = Some(name.clone());
+                    }
+                }
+            }
+            Blocked::Connection {
+                name,
+                address,
+                port,
+            } => self.decided(false, name.as_deref(), *address, *port),
         }
         let mut hosts = self.hosts.borrow_mut();
         let host = blocked.host();
@@ -133,11 +197,16 @@ impl Reporter {
         };
         // The socket doesn't wait. A report that doesn't fit is sent again
         // the next time the host is blocked.
-        // SAFETY: `message` holds the bytes the call reads.
-        let sent = unsafe { libc::write(self.fd, message.as_ptr().cast(), message.len()) };
-        if sent >= 0 {
+        if self.send(&message) {
             hosts.insert(host);
         }
+    }
+
+    /// Sends `message`, and returns whether it fit.
+    fn send(&self, message: &[u8]) -> bool {
+        // SAFETY: `message` holds the bytes the call reads.
+        let sent = unsafe { libc::write(self.fd, message.as_ptr().cast(), message.len()) };
+        sent >= 0
     }
 }
 
@@ -220,7 +289,13 @@ mod tests {
     #[test]
     fn a_run_lists_each_host_once_and_at_most_100() {
         let (mine, theirs) = super::super::link().unwrap();
-        let reporter = Reporter::new(std::os::fd::AsRawFd::as_raw_fd(&theirs));
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            super::super::rules(&super::super::arguments(&[], &[]))
+                .unwrap()
+                .0,
+            Vec::new(),
+        );
         for round in 0..2 {
             for host in 0..150 {
                 reporter.report(Blocked::Lookup(format!("host{host}.example")));
@@ -266,7 +341,13 @@ mod tests {
         let theirs = std::os::unix::net::UnixDatagram::from(theirs);
         theirs.set_nonblocking(true).unwrap();
         while theirs.send(b"!filler").is_ok() {}
-        let reporter = Reporter::new(std::os::fd::AsRawFd::as_raw_fd(&theirs));
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            super::super::rules(&super::super::arguments(&[], &[]))
+                .unwrap()
+                .0,
+            Vec::new(),
+        );
         let blocked = Blocked::Lookup("example.com".to_owned());
         reporter.report(blocked.clone());
         let mine = std::os::unix::net::UnixDatagram::from(mine);
@@ -278,6 +359,8 @@ mod tests {
         }
         assert!(drained.iter().all(|message| message == b"!filler"));
         reporter.report(blocked);
+        let len = mine.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..len], b"!deny default lookup example.com");
         let len = mine.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..len], b"!lookup example.com");
     }

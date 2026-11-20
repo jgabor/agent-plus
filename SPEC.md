@@ -581,6 +581,11 @@ and sends no input.
 - It prints the run's network decisions after its output, on standard
   error. Each line has the time, `allow` or `deny`, the destination, and
   the rule that decided.
+- A connection's destination is its name, or else its address, with its
+  port. A name that the resolver refuses is a decision too, and its
+  destination is the name alone.
+- The rule is the `NETWORK` line that decided, or else the default, the
+  harness's hosts, or your host's loopback.
 
 ### ap exec
 

@@ -2,7 +2,7 @@
 //! by the evaluation under NETWORK in SPEC.md. It is pure functions: the
 //! resolver and the proxy hand it what they know of a connection.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use agentfile::{Destination, Instruction, Network, NetworkRule, Scheme, Sign};
 
@@ -198,6 +198,51 @@ pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
         return !opened.denies(name);
     }
     !network.denies(name)
+}
+
+/// What decided that the resolver refuses `name`, which [`could_allow`]
+/// refuses: the most specific `-` host rule that names it on every port,
+/// the `-` IP rule that refuses your host's loopback for [`YOUR_HOST`], or
+/// else the default.
+pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    // A port that no rule names, so that only a rule for every port matches.
+    let port = (1..=u16::MAX).find(|&port| {
+        !network.rules.iter().any(|rule| match &rule.destination {
+            Destination::Host { port: only, .. }
+            | Destination::Address { port: only, .. }
+            | Destination::Url { port: only, .. } => *only == Some(port),
+        })
+    });
+    let port = port.unwrap_or(0);
+    let rule = name_decision(&network.rules, name, port, None);
+    if let Some(rule) = rule.filter(|rule| rule.sign == Sign::Deny) {
+        return By::Rule(rule);
+    }
+    if name != YOUR_HOST {
+        return By::Default;
+    }
+    // Where a `+` rule names your host, on any port, the IP rules refused
+    // its loopback.
+    let ports = (network.rules.iter()).filter_map(|rule| match &rule.destination {
+        Destination::Host {
+            port: Some(only), ..
+        } => Some(*only),
+        _ => None,
+    });
+    let loopback = [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()];
+    std::iter::once(port)
+        .chain(ports)
+        .filter(|&port| {
+            name_decision(&network.rules, name, port, None)
+                .is_some_and(|rule| rule.sign == Sign::Allow)
+        })
+        .flat_map(|port| loopback.map(|address| (address, port)))
+        .find_map(|(address, port)| {
+            address_decision(&network.rules, address, port).filter(|rule| rule.sign == Sign::Deny)
+        })
+        .map_or(By::Default, By::Rule)
 }
 
 /// Something that `NETWORK` blocked.

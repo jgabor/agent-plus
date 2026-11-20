@@ -26,15 +26,18 @@
 //! configuration either, and asks `ap run` for each lookup instead, over a
 //! socket on its standard output. It reports each host it blocks on that
 //! socket too, as [`blocked`] says, for `ap run` to print when the run
-//! ends. It ends when the other end of its link closes.
+//! ends, and each decision it makes, as [`decisions`] says, for `ap run` to
+//! keep in the run's log. It ends when the other end of its link closes.
 
 mod authority;
 pub mod blocked;
+mod decisions;
 mod lookup;
 mod proxy;
 
 pub use authority::{Authority, Leaf};
 pub use blocked::{Reports, report};
+pub use decisions::Keeper;
 pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;
 
@@ -178,19 +181,18 @@ fn link() -> io::Result<(OwnedFd, OwnedFd)> {
 /// standard output is where it asks for lookups, and `args` are the ones
 /// [`arguments`] made. It returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
-    // Its standard output is the socket it reports on.
-    let reporter = Rc::new(Reporter::new(STDOUT));
-    let ready = rules(args).and_then(|(network, harness)| {
-        let resolver = resolver_for(&network, &harness, Some(Rc::clone(&reporter)))?;
-        Ok((resolver, network, harness))
-    });
-    let (mut resolver, network, harness) = match ready {
-        Ok(ready) => ready,
-        Err(Unready::Usage) => {
+    let (network, harness) = match rules(args) {
+        Ok(rules) => rules,
+        Err(_) => {
             eprintln!("usage: ap-network <harness host>... -- <NETWORK rule>...");
             return 125;
         }
-        Err(Unready::NoPool) => {
+    };
+    // Its standard output is the socket it reports on.
+    let reporter = Rc::new(Reporter::new(STDOUT, network.clone(), harness.clone()));
+    let mut resolver = match resolver_for(&network, &harness, Some(Rc::clone(&reporter))) {
+        Ok(resolver) => resolver,
+        Err(_) => {
             eprintln!("ap: every private IPv4 block meets an IP rule, so the resolver has no pool");
             return 1;
         }

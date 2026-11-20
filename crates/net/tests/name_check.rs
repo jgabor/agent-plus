@@ -196,11 +196,7 @@ fn a_request_the_server_could_read_another_way_is_refused() {
     ] {
         refused(format!("{head}{headers}\r\nx").as_bytes());
     }
-    let bad_chunks = [
-        "zz\r\n",
-        "1\r\nab\r\n",
-        "1\r\na\n0\r\n\r\n",
-    ];
+    let bad_chunks = ["zz\r\n", "1\r\nab\r\n", "1\r\na\n0\r\n\r\n"];
     for chunks in bad_chunks {
         let input = format!("{head}Transfer-Encoding: chunked\r\n\r\n{chunks}");
         let (_, result, _) = fed(input.as_bytes(), input.len());
@@ -279,11 +275,27 @@ fn checked(lines: &str, name: Option<&str>, address: &str) -> bool {
 // spec(NETWORK): A connection that no name rule decides skips this check, so under `NETWORK +`, clients that resolve names on their own (DNS over HTTPS, hard-coded addresses) keep working.
 #[test]
 fn only_a_connection_a_name_decides_is_checked() {
-    assert!(checked("NETWORK -\nNETWORK +kagi.com\n", Some("kagi.com"), "1.2.3.4"));
+    assert!(checked(
+        "NETWORK -\nNETWORK +kagi.com\n",
+        Some("kagi.com"),
+        "1.2.3.4"
+    ));
     assert!(checked("NETWORK -\n", Some("api.anthropic.com"), "1.2.3.4"));
-    assert!(checked("NETWORK +\nNETWORK +kagi.com\n", Some("kagi.com"), "1.2.3.4"));
+    assert!(checked(
+        "NETWORK +\nNETWORK +kagi.com\n",
+        Some("kagi.com"),
+        "1.2.3.4"
+    ));
     assert!(!checked("NETWORK +\n", Some("kagi.com"), "1.2.3.4"));
     assert!(!checked("NETWORK +\n", None, "1.2.3.4"));
-    assert!(!checked("NETWORK -\nNETWORK +1.2.3.0/24\n", Some("kagi.com"), "1.2.3.4"));
-    assert!(!checked("NETWORK -\nNETWORK +1.2.3.0/24\n", None, "1.2.3.4"));
+    assert!(!checked(
+        "NETWORK -\nNETWORK +1.2.3.0/24\n",
+        Some("kagi.com"),
+        "1.2.3.4"
+    ));
+    assert!(!checked(
+        "NETWORK -\nNETWORK +1.2.3.0/24\n",
+        None,
+        "1.2.3.4"
+    ));
 }

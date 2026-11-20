@@ -1490,7 +1490,9 @@ mod tests {
             assert!(name_check_input(input), "{input:?}");
         }
         assert!(!name_check_input(&HELLO.replace("host.ap", "evil.ap")));
-        assert!(!name_check_input("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"));
+        assert!(!name_check_input(
+            "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        ));
     }
 
     #[test]

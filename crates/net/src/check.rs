@@ -153,10 +153,7 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
         return short();
     };
     let line = &held[start..];
-    let method = line
-        .iter()
-        .take_while(|byte| byte.is_ascii_uppercase())
-        .count();
+    let method = line.iter().take_while(|&&byte| token(byte)).count();
     match line.get(method) {
         Some(b' ') if method > 0 => {}
         None => return short(),
@@ -302,9 +299,10 @@ fn head(parsed: &httparse::Request, name: &str) -> Result<State, Refused> {
         (None, None) => Http::Head,
         _ => return Err(Refused),
     };
-    // Once the server switches protocols, what follows passes as bytes.
+    // A server may switch protocols, or ignore the request to, and the
+    // check can't see which.
     if named("upgrade").next().is_some() {
-        return Ok(State::Passing);
+        return Err(Refused);
     }
     Ok(State::Http(body))
 }
@@ -322,6 +320,11 @@ fn host_name(value: &[u8]) -> Option<String> {
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'));
     (port_ok && name_ok).then(|| normal(name))
+}
+
+/// Whether `byte` may be in a method, as RFC 9110 says.
+fn token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// `name` in lowercase, without a final dot.

@@ -422,6 +422,29 @@ fn receiver(listener: TcpListener) -> Received {
     received
 }
 
+/// Sends each TCP connection a greeting first, as an SMTP server does,
+/// then reads it to its end, and notes what came.
+fn greeter(listener: TcpListener) -> Received {
+    let received = Received::default();
+    let noted = Arc::clone(&received);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let noted = Arc::clone(&noted);
+            thread::spawn(move || {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let _ = stream.write_all(b"greeting\n");
+                let mut bytes = Vec::new();
+                let _ = stream.read_to_end(&mut bytes);
+                noted.lock().unwrap().push(bytes);
+            });
+        }
+    });
+    received
+}
+
 /// What a receiver received, once `want` connections ended or a few
 /// seconds passed, by the label of each of `known`, in order.
 fn received(received: &Received, want: usize, known: &[(&str, &[u8])]) -> Vec<String> {
@@ -484,6 +507,7 @@ const AGREES: &[u8] = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
 const DISAGREES: &[u8] = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
 
 // spec(NETWORK): **Name checks.** When a host or URL rule decides a connection, the attributed name must agree with whatever the protocol shows without decrypting: the TLS server name (SNI), or the `Host` header of plain HTTP.
+// spec(NETWORK): When the guest sends nothing first, as in protocols where the server speaks first, the proxy connects after a quarter of a second, and checks the guest's first bytes when they come.
 #[test]
 fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() {
     let scratch = Scratch::new("agrees");
@@ -491,11 +515,25 @@ fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let seen = receiver(listener);
+    let speaks_first = TcpListener::bind("127.0.0.1:0").unwrap();
+    let greeter_port = speaks_first.local_addr().unwrap().port();
+    let greeted = greeter(speaks_first);
     let host = "host.ap.internal";
     let mine = hello(host);
     let other = hello("example.com");
 
     let (run, name) = scratch.run("agrees");
+    // The guest waits for the greeting, then answers it.
+    let lines = scratch.try_network(
+        &name,
+        &format!(
+            "timeout 20 bash -c 'exec 3<>/dev/tcp/{host}/{greeter_port} && read -r -t 10 line <&3 \
+             && printf \"EHLO x\\r\\n\" >&3 && echo \"$line\" && sleep 1'\n"
+        ),
+    );
+    assert_eq!(lines, ["greeting"]);
+    let known: [(&str, &[u8]); 1] = [("ehlo", b"EHLO x\r\n")];
+    assert_eq!(received(&greeted, 1, &known), ["ehlo"]);
     let script = [
         send(host, port, &[&other]),
         send(host, port, &[DISAGREES]),

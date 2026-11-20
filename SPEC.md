@@ -1880,6 +1880,14 @@ allow one.
   proxy resolves the name itself and connects only to the addresses it
   gets. It resolves through your host's resolver configuration as it is at
   each connection, so a run follows your host to another network.
+- **What the name check reads.** A harness host that no rule decides is
+  checked too. The proxy refuses plain HTTP that it can't check request by
+  request: a request with no `Host` header or more than one, a `CONNECT`
+  request or one whose target names a host, an `Upgrade` request, and a
+  body whose length a server could read another way. When the guest sends
+  nothing first, as in protocols where the server speaks first, the proxy
+  connects after a quarter of a second, and checks the guest's first bytes
+  when they come.
 - **Decryption.** The proxy decrypts TLS, with the per-run certificate
   authority, only where it must.
   - on hosts with URL rules, because the rules need the request path

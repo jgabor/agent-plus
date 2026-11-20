@@ -236,6 +236,28 @@ fn any_method_is_checked() {
 }
 
 #[test]
+fn a_request_line_a_lenient_server_reads_is_refused() {
+    for line in [
+        "GET\t/ HTTP/1.1",
+        "GET /\tHTTP/1.1",
+        "GET  / HTTP/1.1",
+        "GET / http/1.1",
+        " GET / HTTP/1.1",
+        "\tGET / HTTP/1.1",
+        "GET /\x0bHTTP/1.1",
+    ] {
+        for host in ["example.com", NAME] {
+            refused(format!("{line}\r\nHost: {host}\r\n\r\n").as_bytes());
+        }
+    }
+    // After an agreeing request too.
+    let first = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
+    let mut input = first.to_vec();
+    input.extend_from_slice(b"GET\t/ HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    refused_after(&input, first);
+}
+
+#[test]
 fn an_upgrade_is_refused() {
     let first = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
     let mut input = first.to_vec();

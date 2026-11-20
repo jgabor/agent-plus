@@ -153,17 +153,21 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
         return short();
     };
     let line = &held[start..];
+    // A request line starts with a method, or with the whitespace that a
+    // lenient server skips. Anything else passes at once, as a binary
+    // protocol's first bytes do.
     let method = line.iter().take_while(|&&byte| token(byte)).count();
     match line.get(method) {
-        Some(b' ') if method > 0 => {}
+        Some(byte) if byte.is_ascii_whitespace() => {}
         None => return short(),
         Some(_) => return Ok(Some(State::Passing)),
     }
     let Some(end) = line.iter().position(|&byte| byte == b'\n') else {
         return short();
     };
-    // Anything like a version reads as HTTP, so the parser decides it.
-    let version = line[..end].windows(6).any(|window| window == b" HTTP/");
+    // A line that a lenient server could read as a request reads as HTTP,
+    // so the strict parser decides it.
+    let version = (line[..end].windows(5)).any(|window| window.eq_ignore_ascii_case(b"http/"));
     Ok(Some(match version {
         true => State::Http(Http::Head),
         false => State::Passing,

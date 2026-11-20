@@ -267,6 +267,57 @@ mod tests {
         certified.keys_match().unwrap();
     }
 
+    /// Set in the process that [`a_confined_network_process_issues_a_leaf`]
+    /// starts, which confines itself.
+    const CONFINED_VARIABLE: &str = "AP_AUTHORITY_CONFINED";
+    const CONFINED_TEST: &str =
+        "network::authority::tests::a_confined_network_process_issues_a_leaf";
+    /// What the confined process prints once its leaf verifies.
+    const VERIFIED: &str = "a leaf verified in a confined process";
+    const GETRANDOM: std::ffi::c_long = 318;
+
+    unsafe extern "C" {
+        fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
+    }
+
+    /// The network process makes its authority before it confines itself,
+    /// and issues leaves after, which draws on the random source. This
+    /// starts this test again in a process of its own, which makes an
+    /// authority, confines itself as the network process does when it may
+    /// connect, and then issues a leaf and verifies it.
+    #[test]
+    fn a_confined_network_process_issues_a_leaf() {
+        if std::env::var_os(CONFINED_VARIABLE).is_some() {
+            let now = SystemTime::now();
+            let authority = Authority::generate(now).unwrap();
+            // Standard input is the link, which the filter lets it read.
+            vmm::confine::confine_network_connecting(0).unwrap();
+            let leaf = authority.issue("api.example.com", now).unwrap();
+            assert!(verifies(&authority, &leaf, "api.example.com", now));
+            // glibc can answer from the vDSO without a system call, but
+            // musl and older glibc make the call, so this makes it too.
+            let mut bytes = [0u8; 16];
+            // SAFETY: getrandom writes at most `bytes.len()` bytes to it.
+            let drawn = unsafe { syscall(GETRANDOM, bytes.as_mut_ptr(), bytes.len(), 0) };
+            assert_eq!(drawn, bytes.len() as std::ffi::c_long);
+            println!("{VERIFIED}");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([CONFINED_TEST, "--exact", "--test-threads=1", "--nocapture"])
+            .env(CONFINED_VARIABLE, "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(VERIFIED),
+            "{:?}\n{stdout}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn the_pem_holds_the_certificate() {
         let authority = Authority::generate(SystemTime::now()).unwrap();

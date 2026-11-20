@@ -21,6 +21,8 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 rustls-graviola = "0.4"
 vmm = { path = "../vmm" }
 webpki-roots = "1"
+rcgen = { version = "0.14", default-features = false, features = ["pem"] }
+time = { version = "0.3", default-features = false }
 
 [lints.cargo]
 unused_dependencies = "deny"

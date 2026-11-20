@@ -169,7 +169,7 @@ fn run_agent(
     args: &Args,
     layers: &[LayerName],
     shares: Vec<Opened>,
-    start: Start,
+    mut start: Start,
     network: &[OsString],
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
@@ -214,7 +214,9 @@ fn run_agent(
         process: network_process,
         link: network_link,
         lookups,
+        authority,
     } = network;
+    start.authority = authority;
     ap::network::answer_lookups(lookups);
     let share_socket = match shares.is_empty() {
         true => None,
@@ -829,6 +831,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
                 file: (opened.file.as_ref()).map(|name| name.as_bytes().to_vec()),
             })
             .collect(),
+        // The network process makes the run's authority, once it starts.
+        authority: Vec::new(),
         prompt: args.prompt.clone(),
         terminal,
     };

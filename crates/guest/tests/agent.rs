@@ -338,3 +338,75 @@ fn a_host_that_stops_listening_is_an_error() {
     let mut channel = DeadHost(Cursor::new(wire));
     assert!(matches!(serve(&mut channel), Err(ProtocolError::Io(_))));
 }
+
+const AUTHORITY: &[u8] = b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+
+fn fresh_root(name: &str) -> PathBuf {
+    let root = scratch(name);
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn trust_adds_the_authority_after_the_roots_in_the_bundle() {
+    let root = fresh_root("trust-appends");
+    let certs = root.join("etc/ssl/certs");
+    fs::create_dir_all(&certs).unwrap();
+    // A bundle whose last line has no newline still gets the authority on a
+    // line of its own.
+    fs::write(certs.join("ca-certificates.crt"), b"roots").unwrap();
+    agent::trust(&root, AUTHORITY).unwrap();
+    let bundle = fs::read(certs.join("ca-certificates.crt")).unwrap();
+    assert_eq!(bundle, [&b"roots\n"[..], AUTHORITY].concat());
+}
+
+#[test]
+fn trust_makes_a_bundle_when_the_root_has_none() {
+    let root = fresh_root("trust-makes");
+    agent::trust(&root, AUTHORITY).unwrap();
+    let bundle = root.join("etc/ssl/certs/ca-certificates.crt");
+    assert_eq!(fs::read(&bundle).unwrap(), AUTHORITY);
+    let mode = fs::metadata(&bundle).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644);
+}
+
+#[test]
+fn trust_refuses_a_bundle_that_is_a_symlink() {
+    let root = fresh_root("trust-symlink");
+    let certs = root.join("etc/ssl/certs");
+    fs::create_dir_all(&certs).unwrap();
+    let target = root.join("elsewhere");
+    fs::write(&target, b"kept").unwrap();
+    std::os::unix::fs::symlink(&target, certs.join("ca-certificates.crt")).unwrap();
+    assert!(agent::trust(&root, AUTHORITY).is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"kept");
+}
+
+#[test]
+fn the_bundle_variables_name_the_bundle_and_win_over_env() {
+    let mut env = vec![
+        (b"SSL_CERT_FILE".to_vec(), b"/mine.pem".to_vec()),
+        (b"KEPT".to_vec(), b"yes".to_vec()),
+    ];
+    agent::name_bundle(&mut env);
+    let mut names: Vec<&[u8]> = env.iter().map(|(key, _)| key.as_slice()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            &b"CURL_CA_BUNDLE"[..],
+            b"GIT_SSL_CAINFO",
+            b"KEPT",
+            b"NODE_EXTRA_CA_CERTS",
+            b"REQUESTS_CA_BUNDLE",
+            b"SSL_CERT_FILE",
+        ]
+    );
+    for (key, value) in &env {
+        match key.as_slice() {
+            b"KEPT" => assert_eq!(value, b"yes"),
+            _ => assert_eq!(value, agent::BUNDLE.as_bytes()),
+        }
+    }
+}

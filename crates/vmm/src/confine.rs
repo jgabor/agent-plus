@@ -111,6 +111,7 @@ const PPOLL: u32 = 271;
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const CLONE3: u32 = 435;
+const GETRANDOM: u32 = 318;
 
 /// One BPF instruction, as `struct sock_filter`.
 #[repr(C)]
@@ -284,9 +285,10 @@ fn network_rules(link: RawFd) -> Vec<Rule> {
 }
 
 /// The calls of [`network_rules`], and those that connect out: it makes
-/// internet sockets, and connects, reads, writes, and shuts them. It still
-/// can't start a process, or open a file, and the only sockets it can make
-/// are IPv4 and IPv6 ones.
+/// internet sockets, and connects, reads, writes, and shuts them. It also
+/// draws on the random source, to sign a certificate for a name it decrypts,
+/// and for the TLS it speaks. It still can't start a process, or open a
+/// file, and the only sockets it can make are IPv4 and IPv6 ones.
 fn network_connecting_rules(link: RawFd) -> Vec<Rule> {
     use Rule::{Allow, AllowIf};
     let mut rules = vec![
@@ -296,6 +298,7 @@ fn network_connecting_rules(link: RawFd) -> Vec<Rule> {
         Allow(RECVFROM),
         Allow(GETSOCKOPT),
         Allow(SHUTDOWN),
+        Allow(GETRANDOM),
     ];
     rules.extend(network_common_rules(link));
     rules
@@ -835,6 +838,11 @@ mod tests {
         for number in [CONNECT, SENDTO, RECVFROM, GETSOCKOPT, SHUTDOWN, POLL] {
             assert_eq!(connecting_call(number, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
         }
+    }
+
+    #[test]
+    fn a_connecting_network_process_draws_on_the_random_source() {
+        assert_eq!(connecting_call(GETRANDOM, [0, 32, 0, 0, 0, 0]), RET_ALLOW);
     }
 
     #[test]

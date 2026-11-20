@@ -410,7 +410,9 @@ fn receiver(listener: TcpListener) -> Received {
             let Ok(mut stream) = stream else { continue };
             let noted = Arc::clone(&noted);
             thread::spawn(move || {
-                stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
                 let mut bytes = Vec::new();
                 let _ = stream.read_to_end(&mut bytes);
                 noted.lock().unwrap().push(bytes);

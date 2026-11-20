@@ -140,7 +140,10 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
         return short();
     };
     let line = &held[start..];
-    let method = line.iter().take_while(|byte| byte.is_ascii_uppercase()).count();
+    let method = line
+        .iter()
+        .take_while(|byte| byte.is_ascii_uppercase())
+        .count();
     match line.get(method) {
         Some(b' ') if method > 0 => {}
         None => return short(),
@@ -219,7 +222,9 @@ fn request(http: Http, name: &str, held: &[u8]) -> Result<Option<(usize, State)>
         }
         Http::ChunkSize => match httparse::parse_chunk_size(held).map_err(|_| Refused)? {
             httparse::Status::Partial => short(),
-            httparse::Status::Complete((taken, 0)) => Ok(Some((taken, State::Http(Http::Trailers)))),
+            httparse::Status::Complete((taken, 0)) => {
+                Ok(Some((taken, State::Http(Http::Trailers))))
+            }
             httparse::Status::Complete((taken, size)) => {
                 Ok(Some((taken, State::Http(Http::ChunkData(size)))))
             }
@@ -233,7 +238,9 @@ fn request(http: Http, name: &str, held: &[u8]) -> Result<Option<(usize, State)>
             let mut headers = [httparse::EMPTY_HEADER; HEADERS];
             match httparse::parse_headers(held, &mut headers).map_err(|_| Refused)? {
                 httparse::Status::Partial => short(),
-                httparse::Status::Complete((taken, _)) => Ok(Some((taken, State::Http(Http::Head)))),
+                httparse::Status::Complete((taken, _)) => {
+                    Ok(Some((taken, State::Http(Http::Head))))
+                }
             }
         }
     }

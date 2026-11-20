@@ -94,6 +94,7 @@ const UTIMENSAT: u32 = 280;
 const FALLOCATE: u32 = 285;
 const RENAMEAT2: u32 = 316;
 const AT_FDCWD: u32 = -100_i32 as u32;
+const STDOUT: u32 = 1;
 const STDERR: u32 = 2;
 const EXIT_GROUP: u32 = 231;
 const TGKILL: u32 = 234;
@@ -273,8 +274,9 @@ fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
 /// The calls the network process makes while it passes the guest's frames
 /// through its stack. It has one thread, so it starts none. It reads and
 /// writes frames on `link`, waits on it, and writes to standard error. It
-/// holds no other socket, and makes none, so nothing it does reaches past
-/// the link.
+/// writes to standard output too, a socket to `ap run`, where it reports
+/// what it blocked. It makes no socket, so nothing it does reaches past the
+/// link and `ap run`.
 fn network_rules(link: RawFd) -> Vec<Rule> {
     let mut rules = vec![Rule::AllowIf(RECVFROM, 0, vec![link as u32])];
     rules.extend(network_common_rules(link));
@@ -303,7 +305,7 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
     use Rule::{Allow, AllowIf, AllowIfSet};
     vec![
         AllowIf(READ, 0, vec![link as u32]),
-        AllowIf(WRITE, 0, vec![link as u32, STDERR]),
+        AllowIf(WRITE, 0, vec![link as u32, STDOUT, STDERR]),
         Allow(POLL),
         Allow(PPOLL),
         Allow(CLOCK_GETTIME),
@@ -745,6 +747,7 @@ mod tests {
         assert_eq!(network_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(network_call(WRITE, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(network_call(WRITE, [STDERR, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(network_call(WRITE, [1, 0, 0, 0, 0, 0]), RET_ALLOW);
         for number in [CLOCK_GETTIME, CLOSE, FUTEX, MUNMAP, BRK, EXIT_GROUP] {
             assert_eq!(network_call(number, [0; 6]), RET_ALLOW, "{number}");
         }

@@ -7,14 +7,16 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use agentfile::Network;
-use net::{Connection, YOUR_HOST, proxied};
+use net::{Blocked, Connection, YOUR_HOST, proxied};
 use netstack::{Flow, Pipe, Resolver, Stack, Verdict};
 use vmm::net::MAX_FRAME;
 
 use super::RECEIVE_WAIT;
+use super::blocked::Reporter;
 use super::lookup::Asker;
 
 /// How long a connection waits for its lookup, and then for each address.
@@ -87,6 +89,8 @@ pub struct Proxy {
     waiting: Vec<Waiting>,
     pipes: Vec<Pipe>,
     flows: Vec<UdpFlow>,
+    /// Where it reports what it blocks, if anywhere.
+    reporter: Option<Rc<Reporter>>,
 }
 
 impl Proxy {
@@ -107,6 +111,15 @@ impl Proxy {
             waiting: Vec::new(),
             pipes: Vec::new(),
             flows: Vec::new(),
+            reporter: None,
+        }
+    }
+
+    /// This proxy, reporting each host it blocks to `reporter`.
+    pub(super) fn reporting(self, reporter: Rc<Reporter>) -> Proxy {
+        Proxy {
+            reporter: Some(reporter),
+            ..self
         }
     }
 
@@ -208,9 +221,6 @@ impl Proxy {
         if resolver.takes(flow) {
             return Verdict::Take;
         }
-        let Some((network, harness, asker)) = &mut self.policy else {
-            return Verdict::Refuse;
-        };
         let (guest, destination, tcp) = match *flow {
             Flow::Tcp {
                 source,
@@ -220,6 +230,16 @@ impl Proxy {
                 source,
                 destination,
             } => (source, destination, false),
+        };
+        let reporter = self.reporter.as_deref();
+        let Some((network, harness, asker)) = &mut self.policy else {
+            // A connection to the pool's address is to no host, since the
+            // resolver answers no name.
+            let pooled = matches!(destination.ip(), IpAddr::V4(v4) if resolver.owns(v4));
+            if !pooled {
+                report(reporter, None, destination.ip(), destination.port());
+            }
+            return Verdict::Refuse;
         };
         if !tcp {
             let known = self
@@ -249,6 +269,7 @@ impl Proxy {
         let (name, step) = match target {
             Target::Name(name) => {
                 if !net::could_allow(network, &hosts, &name) {
+                    report(reporter, Some(&name), destination.ip(), destination.port());
                     return Verdict::Refuse;
                 }
                 match asker.ask(&name) {
@@ -265,6 +286,7 @@ impl Proxy {
                     &addresses,
                 );
                 if allowed.is_empty() {
+                    report(reporter, name.as_deref(), addresses[0], destination.port());
                     return Verdict::Refuse;
                 }
                 (name, Err(allowed))
@@ -317,6 +339,10 @@ impl Proxy {
                 let opening = &mut self.opening[at];
                 let port = flow_destination(&opening.flow).port();
                 let allowed = allowed(network, &hosts, opening.name.as_deref(), port, &addresses);
+                if allowed.is_empty() && !addresses.is_empty() {
+                    let reporter = self.reporter.as_deref();
+                    report(reporter, opening.name.as_deref(), addresses[0], port);
+                }
                 match connecting(allowed, port, now) {
                     Some(step) => opening.step = step,
                     None => {
@@ -331,6 +357,10 @@ impl Proxy {
             if let Some(flow) = flow {
                 let port = flow.destination.port();
                 let allowed = allowed(network, &hosts, flow.name.as_deref(), port, &addresses);
+                if allowed.is_empty() && !addresses.is_empty() {
+                    let reporter = self.reporter.as_deref();
+                    report(reporter, flow.name.as_deref(), addresses[0], port);
+                }
                 let waiting = match std::mem::replace(&mut flow.state, UdpState::Failed) {
                     UdpState::Asking(_, waiting) => waiting,
                     _ => Vec::new(),
@@ -479,6 +509,17 @@ impl Proxy {
                 stack.unbind(port);
             }
         }
+    }
+}
+
+/// Reports to `reporter`, if there is one, a connection it blocked.
+fn report(reporter: Option<&Reporter>, name: Option<&str>, address: IpAddr, port: u16) {
+    if let Some(reporter) = reporter {
+        reporter.report(Blocked::Connection {
+            name: name.map(str::to_owned),
+            address,
+            port,
+        });
     }
 }
 

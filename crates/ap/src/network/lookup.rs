@@ -3,17 +3,22 @@
 //! looks each name up through the host's own resolver at the time it is
 //! asked, so a run follows the host when it changes networks.
 //!
-//! Each question is one message: an id of four bytes, then the name. Each
-//! answer is one message: the question's id, then each address, as a byte
-//! for its family, 4 or 6, and its bytes. A name that doesn't resolve gets
-//! no addresses.
+//! Each question is one message: `?`, an id of four bytes, then the name.
+//! Each answer is one message: the question's id, then each address, as a
+//! byte for its family, 4 or 6, and its bytes. A name that doesn't resolve
+//! gets no addresses. The same socket carries the network process's
+//! reports of what it blocked, which [`super::blocked`] reads.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
-use std::sync::Arc;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
+
+use super::blocked::{Reports, TAG};
 
 /// The longest name a question holds.
 const LONGEST_NAME: usize = 253;
@@ -21,29 +26,69 @@ const LONGEST_NAME: usize = 253;
 const WORKERS: usize = 4;
 /// The most addresses an answer holds.
 const MOST_ADDRESSES: usize = 16;
-/// The longest message either way.
+/// The longest answer.
 pub(super) const LONGEST: usize = 4 + MOST_ADDRESSES * 17;
+/// The longest message the network process sends: a question, or a
+/// report.
+const LONGEST_SENT: usize = 512;
+/// The first byte of a question.
+const QUESTION: u8 = b'?';
 
 /// Answers the network process's questions on `socket`, the
 /// [`super::Started::lookups`] of its start, until the network process
-/// ends. A few threads answer at once, each one question at a time, so a
-/// slow name doesn't hold up the others, and the network process can't
-/// make `ap run` start more.
-pub fn answer_lookups(socket: OwnedFd) {
+/// ends, and keeps its reports. A few threads answer at once, each one
+/// question at a time, so a slow name doesn't hold up the others, and the
+/// network process can't make `ap run` start more.
+pub fn answer_lookups(socket: OwnedFd) -> Lookups {
     let socket = Arc::new(UnixDatagram::from(socket));
+    let reports = Arc::new(Mutex::new(Reports::default()));
+    let (running, ended) = mpsc::channel::<()>();
     for _ in 0..WORKERS {
         let socket = Arc::clone(&socket);
+        let reports = Arc::clone(&reports);
+        let running = running.clone();
         let started = thread::Builder::new().spawn(move || {
-            let mut buffer = [0; 4 + LONGEST_NAME + 1];
+            let mut buffer = [0; LONGEST_SENT + 1];
             while let Ok(len @ 1..) = socket.recv(&mut buffer) {
-                if let Some((id, name)) = read_question(&buffer[..len]) {
+                let message = &buffer[..len];
+                if message.first() == Some(&TAG) {
+                    if let Ok(mut reports) = reports.lock() {
+                        reports.take(message);
+                    }
+                } else if let Some((id, name)) = read_question(message) {
                     let _ = socket.send(&write_answer(id, &look_up(&name)));
                 }
             }
+            drop(running);
         });
         // With no thread to answer, a connection to a name fails, as it
         // would with no resolver.
         drop(started);
+    }
+    drop(running);
+    Lookups { reports, ended }
+}
+
+/// The network process's lookups, which [`answer_lookups`] answers.
+pub struct Lookups {
+    reports: Arc<Mutex<Reports>>,
+    /// Disconnects once every thread that answers has ended.
+    ended: mpsc::Receiver<()>,
+}
+
+impl Lookups {
+    /// What the network process reported, once it has ended, or `wait`
+    /// has passed.
+    pub fn reports(self, wait: Duration) -> Reports {
+        // Nothing is ever sent, so this returns once the last thread drops
+        // its sender, or the wait ends.
+        let _ = self.ended.recv_timeout(wait);
+        std::mem::take(
+            &mut *self
+                .reports
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
     }
 }
 
@@ -60,11 +105,12 @@ fn look_up(name: &str) -> Vec<IpAddr> {
 }
 
 pub(super) fn write_question(id: u32, name: &str) -> Option<Vec<u8>> {
-    (name.len() <= LONGEST_NAME).then(|| [&id.to_be_bytes()[..], name.as_bytes()].concat())
+    (name.len() <= LONGEST_NAME)
+        .then(|| [&[QUESTION][..], &id.to_be_bytes(), name.as_bytes()].concat())
 }
 
 fn read_question(message: &[u8]) -> Option<(u32, String)> {
-    let (id, name) = message.split_at_checked(4)?;
+    let (id, name) = message.strip_prefix(&[QUESTION])?.split_at_checked(4)?;
     let name = std::str::from_utf8(name).ok()?;
     (name.len() <= LONGEST_NAME && !name.is_empty())
         .then(|| (u32::from_be_bytes(id.try_into().unwrap()), name.to_owned()))
@@ -161,7 +207,8 @@ mod tests {
             Some((7, "api.anthropic.com".to_owned()))
         );
         assert_eq!(write_question(1, &"a".repeat(254)), None);
-        assert_eq!(read_question(&[0, 0, 0, 1]), None);
+        assert_eq!(read_question(b"?\0\0\0\x01"), None);
+        assert_eq!(read_question(b"\0\0\0\x01example.com"), None);
         let addresses: Vec<IpAddr> =
             vec!["192.0.2.1".parse().unwrap(), "2001:db8::1".parse().unwrap()];
         assert_eq!(

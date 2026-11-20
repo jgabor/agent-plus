@@ -24,15 +24,18 @@
 //! IPv6 sockets, unless its rules can reach nothing, but it can't start a
 //! process or open a host file. So it can't read your host's resolver
 //! configuration either, and asks `ap run` for each lookup instead, over a
-//! socket on its standard output. It ends when the other end of its link
-//! closes.
+//! socket on its standard output. It reports each host it blocks on that
+//! socket too, as [`blocked`] says, for `ap run` to print when the run
+//! ends. It ends when the other end of its link closes.
 
 mod authority;
+pub mod blocked;
 mod lookup;
 mod proxy;
 
 pub use authority::{Authority, Leaf};
-pub use lookup::answer_lookups;
+pub use blocked::{Reports, report};
+pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;
 
 use std::collections::hash_map::RandomState;
@@ -45,11 +48,14 @@ use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use agentfile::{Destination, Instruction, Network, Sign};
 use guest::net;
 use netstack::{Config, Pool, Resolver, Stack};
+
+use blocked::Reporter;
 
 /// The `argv[0]` that `ap` starts the network process with.
 pub const PROGRAM: &str = "ap-network";
@@ -172,8 +178,10 @@ fn link() -> io::Result<(OwnedFd, OwnedFd)> {
 /// standard output is where it asks for lookups, and `args` are the ones
 /// [`arguments`] made. It returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
+    // Its standard output is the socket it reports on.
+    let reporter = Rc::new(Reporter::new(STDOUT));
     let ready = rules(args).and_then(|(network, harness)| {
-        let resolver = resolver_for(&network, &harness)?;
+        let resolver = resolver_for(&network, &harness, Some(Rc::clone(&reporter)))?;
         Ok((resolver, network, harness))
     });
     let (mut resolver, network, harness) = match ready {
@@ -211,9 +219,9 @@ pub fn main(args: &[OsString]) -> u8 {
     // A proxy that can reach nothing asks for no lookups, so it needs no
     // socket but its link.
     let (mut proxy, confined) = match reaches_nothing(&network, &harness) {
-        true => (Proxy::refusing(), confine(link.as_fd())),
+        true => (Proxy::refusing().reporting(reporter), confine(link.as_fd())),
         false => (
-            Proxy::new(network, harness, lookups),
+            Proxy::new(network, harness, lookups).reporting(reporter),
             confine_connecting(link.as_fd()),
         ),
     };
@@ -278,10 +286,16 @@ fn rules(args: &[OsString]) -> Result<(Network, Vec<String>), Unready> {
 /// the guest's link.
 pub fn resolver(args: &[OsString]) -> Result<Resolver, Unready> {
     let (network, harness) = rules(args)?;
-    resolver_for(&network, &harness)
+    resolver_for(&network, &harness, None)
 }
 
-fn resolver_for(network: &Network, harness: &[String]) -> Result<Resolver, Unready> {
+/// The resolver that [`resolver`] makes, which reports each name it
+/// doesn't answer to `reporter`.
+fn resolver_for(
+    network: &Network,
+    harness: &[String],
+    reporter: Option<Rc<Reporter>>,
+) -> Result<Resolver, Unready> {
     let blocks: Vec<_> = network
         .rules
         .iter()
@@ -299,7 +313,11 @@ fn resolver_for(network: &Network, harness: &[String]) -> Result<Resolver, Unrea
     let harness = harness.to_vec();
     Ok(Resolver::new(&at, pool, move |name| {
         let harness: Vec<&str> = harness.iter().map(String::as_str).collect();
-        ::net::could_allow(&network, &harness, name)
+        let allows = ::net::could_allow(&network, &harness, name);
+        if let (false, Some(reporter)) = (allows, &reporter) {
+            reporter.report(::net::Blocked::Lookup(name.to_owned()));
+        }
+        allows
     }))
 }
 

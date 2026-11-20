@@ -523,6 +523,8 @@ dependencies = [
  "ap",
  "erofs",
  "guest",
+ "rustls",
+ "rustls-graviola",
  "share",
  "store",
  "vmm",

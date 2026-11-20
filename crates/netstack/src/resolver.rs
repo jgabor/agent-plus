@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 use simple_dns::rdata::{A, RData};
-use simple_dns::{CLASS, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, ResourceRecord, TYPE};
+use simple_dns::{
+    CLASS, OPCODE, Packet, PacketFlag, QCLASS, QTYPE, RCODE, ResourceRecord, SimpleDnsError, TYPE,
+};
 
 use crate::{Flow, Stack};
 
@@ -30,6 +32,11 @@ const BLOCKS: [([u8; 4], u8); 5] = [
     ([10, 0, 0, 0], 8),
 ];
 const POOL_PREFIX: u8 = 16;
+/// The length of a DNS message's header.
+const HEADER: usize = 12;
+/// The type a question of a type `simple-dns` doesn't know is read as: NULL,
+/// which no answer here holds.
+const STAND_IN: u16 = 10;
 
 /// The IPv4 block the resolver hands addresses out of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +162,20 @@ impl Resolver {
     /// The answer to `query`, or `None` if it isn't a standard query with
     /// one question.
     pub fn answer(&mut self, query: &[u8]) -> Option<Vec<u8>> {
-        let query = Packet::parse(query).ok()?;
+        // `simple-dns` reads no question of a type it doesn't know, such as
+        // SSHFP. Such a query is read with a type it knows in its place,
+        // and the answer's question gets the real type back.
+        let (query, unknown) = match Packet::parse(query) {
+            Err(SimpleDnsError::InvalidQType(kind)) => {
+                let at = question_type_at(query)?;
+                let mut known = query.to_vec();
+                known[at..at + 2].copy_from_slice(&STAND_IN.to_be_bytes());
+                (known, Some((at, kind)))
+            }
+            Ok(_) => (query.to_vec(), None),
+            Err(_) => return None,
+        };
+        let query = Packet::parse(&query).ok()?;
         if query.has_flags(PacketFlag::RESPONSE)
             || query.opcode() != OPCODE::StandardQuery
             || query.questions.len() != 1
@@ -190,7 +210,15 @@ impl Resolver {
                 }
             }
         }
-        answer.build_bytes_vec_compressed().ok()
+        let mut bytes = answer.build_bytes_vec_compressed().ok()?;
+        // The answer's question is its first name, written as the query
+        // wrote it, so its type is where the query's was.
+        if let Some((at, kind)) = unknown {
+            bytes
+                .get_mut(at..at + 2)?
+                .copy_from_slice(&kind.to_be_bytes());
+        }
+        Some(bytes)
     }
 
     /// The address that is `name`'s, handed out now if it has none yet, or
@@ -208,6 +236,21 @@ impl Resolver {
         self.names.insert(address, name);
         Some(address)
     }
+}
+
+/// Where the type of the first question in `query` starts, if its name is
+/// written out in full.
+fn question_type_at(query: &[u8]) -> Option<usize> {
+    let mut at = HEADER;
+    loop {
+        match *query.get(at)? {
+            0 => break,
+            // A compression pointer, or a reserved label type.
+            length if length > 63 => return None,
+            length => at += 1 + usize::from(length),
+        }
+    }
+    (at + 5 <= query.len()).then_some(at + 1)
 }
 
 /// `name` in lowercase, without a final dot, if every label is a host name

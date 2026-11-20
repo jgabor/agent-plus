@@ -281,6 +281,23 @@ fn every_query_but_a_gets_an_empty_answer() {
     // Only an allowed name gets one, though.
     let (code, _) = read(&net.ask(&query(15, "example.com", AAAA)), 15);
     assert_eq!(code, RCODE::NameError);
+    // So does a type the parser doesn't know, such as SSHFP or TLSA. The
+    // answer is read by hand here, because `simple-dns` can't read it.
+    for (id, kind, name, code) in [
+        (16, 44, "kagi.com", 0),
+        (17, 52, "kagi.com", 0),
+        (18, 65000, "kagi.com", 0),
+        (19, 44, "example.com", 3),
+    ] {
+        let asked = query(id, name, kind);
+        let answer = net.ask(&asked);
+        assert_eq!(answer[..2], id.to_be_bytes(), "type {kind}");
+        assert_eq!(answer[2] & 0x80, 0x80, "a response, type {kind}");
+        assert_eq!(answer[3] & 0x0f, code, "type {kind}");
+        // One question, the one asked, and no records.
+        assert_eq!(answer[4..12], [0, 1, 0, 0, 0, 0, 0, 0], "type {kind}");
+        assert_eq!(answer[12..asked.len()], asked[12..], "type {kind}");
+    }
 }
 
 #[test]

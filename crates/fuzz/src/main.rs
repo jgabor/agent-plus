@@ -368,6 +368,9 @@ const TARGETS: [Target; 8] = [
             "\x3f",
             "\x00\x00\x29",
             "\x7f",
+            // A compression pointer to the question's name.
+            "\u{c0}\x0c",
+            "\u{ff}",
         ],
     },
 ];
@@ -457,14 +460,17 @@ fn drain(device: &mut Transport, memory: &GuestMemory) -> usize {
 
 /// Asks a resolver that allows `kagi.com` and its subdomains, from a pool
 /// of two addresses, the input as one query, twice, and panics if an answer
-/// isn't a reply to it, or the second differs. Returns whether it answered.
+/// isn't a reply to it, or the second differs. Each character is the byte
+/// of its code point's low eight bits, so that the input can hold any byte.
+/// Returns whether it answered.
 fn dns_input(input: &str) -> bool {
     let at = [std::net::IpAddr::from([10, 0, 2, 2])];
     let pool = netstack::Pool::new([198, 18, 0, 0].into(), 30);
     let mut resolver = netstack::Resolver::new(&at, pool, |name| {
         name == "kagi.com" || name.ends_with(".kagi.com")
     });
-    let query = input.as_bytes();
+    let query: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+    let query = &query[..];
     let Some(answer) = resolver.answer(query) else {
         return false;
     };

@@ -165,7 +165,6 @@ look ahostsv4 anthropic.com
 
 // spec(NETWORK): **DNS.** The guest's only resolver is inside `ap`.
 // spec(NETWORK): For a name it doesn't answer, it says that the name doesn't exist.
-// spec(NETWORK): Under `NETWORK -` with only IP rules, no name resolves except the harness hosts, so only connections to literal addresses work.
 #[test]
 fn the_guest_s_only_resolver_is_ap() {
     if let Some(root) = env::var_os(INSIDE_VARIABLE) {

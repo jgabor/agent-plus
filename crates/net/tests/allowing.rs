@@ -1,6 +1,7 @@
 //! The rule that `ap run` suggests for each host that `NETWORK` blocked,
 //! by the blocked hosts under Run in SPEC.md. Added to the same rules, it
-//! allows what was blocked, and changes nothing for any other host.
+//! allows what was blocked, and changes nothing for any other host but the
+//! host's subdomains.
 
 use std::net::IpAddr;
 
@@ -67,6 +68,13 @@ fn suggests(lines: &str, blocked: Blocked, expected: &str, others: &[Blocked]) {
 // spec(Run): **Blocked hosts.** When a run ends, `ap` prints the hosts that `NETWORK` blocked and the rule that would allow each one, on standard error.
 #[test]
 fn the_rule_for_a_name_allows_that_name_and_no_other() {
+    // Every host rule covers the host's subdomains too, as SPEC.md's
+    // NETWORK says, and there is no rule for a host alone.
+    let after = network("NETWORK -\nNETWORK +example.com\n");
+    assert!(allows(
+        &after,
+        &Blocked::Lookup("api.example.com".to_owned())
+    ));
     let others = [
         Blocked::Lookup("example.net".to_owned()),
         Blocked::Lookup("com".to_owned()),

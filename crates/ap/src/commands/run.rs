@@ -215,7 +215,7 @@ fn run_agent(
         authority,
     } = ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
     start.authority = authority;
-    let lookups = ap::network::answer_lookups(lookups);
+    let lookups = ap::network::answer_lookups(lookups, ap::network::asks(network));
     let share_socket = match shares.is_empty() {
         true => None,
         false => {

@@ -215,6 +215,12 @@ pub fn main(args: &[OsString]) -> u8 {
         eprintln!("ap: can't send the run's certificate authority: {error}");
         return 1;
     }
+    // A report or a question that doesn't fit is lost, rather than hold
+    // up the guest's network.
+    if let Err(error) = lookups.set_nonblocking(true) {
+        eprintln!("ap: can't set up the network process: {error}");
+        return 1;
+    }
     let mut stack = stack();
     // A proxy that can reach nothing asks for no lookups, so it needs no
     // socket but its link.
@@ -235,6 +241,12 @@ pub fn main(args: &[OsString]) -> u8 {
             1
         }
     }
+}
+
+/// Whether a network process with the `args` that [`arguments`] made asks
+/// for lookups, because its rules can reach something.
+pub fn asks(args: &[OsString]) -> bool {
+    rules(args).is_ok_and(|(network, harness)| !reaches_nothing(&network, &harness))
 }
 
 /// Whether `network`, with `harness` as the harness's hosts, can allow no

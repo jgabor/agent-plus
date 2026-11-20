@@ -472,7 +472,8 @@ directory) and writes an image into the local store.
   because full-screen interfaces wait for the answers.
 - **Blocked hosts.** When a run ends, `ap` prints the hosts that `NETWORK`
   blocked and the rule that would allow each one, on standard error. It
-  never asks during the run, and it never adds a rule itself.
+  never asks during the run, and it never adds a rule itself. It lists each
+  host once, and at most 100 hosts, and then says that it left others out.
 - **Desktop.** With `OS desktop`, `ap run --gui <agent>` opens the agent's
   desktop in a native window.
 

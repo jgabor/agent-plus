@@ -111,11 +111,14 @@ impl Reporter {
         }
     }
 
-    /// Reports `blocked`, unless its host was reported already. A name the
-    /// guest looks up by address is no host, so it isn't reported.
+    /// Reports `blocked`, unless its host was reported already. A reverse
+    /// lookup, of the name for an address, is no host, so it isn't
+    /// reported.
     pub(super) fn report(&self, blocked: Blocked) {
         if let Blocked::Lookup(name) = &blocked
-            && (name.ends_with(".arpa") || name.parse::<IpAddr>().is_ok())
+            && (name.ends_with(".in-addr.arpa")
+                || name.ends_with(".ip6.arpa")
+                || name.parse::<IpAddr>().is_ok())
         {
             return;
         }
@@ -129,7 +132,8 @@ impl Reporter {
             _ => write(&blocked),
         };
         hosts.insert(host);
-        // A report that doesn't fit is lost, as a frame on a full link is.
+        // The socket doesn't wait, so a report that doesn't fit is lost, as
+        // a frame on a full link is.
         // SAFETY: `message` holds the bytes the call reads.
         let _ = unsafe { libc::write(self.fd, message.as_ptr().cast(), message.len()) };
     }
@@ -151,16 +155,28 @@ pub fn report(args: &[OsString], reports: &Reports) -> Option<String> {
     };
     let mut text = format!("ap: NETWORK blocked {count}. The rule beside each would allow it:\n");
     for (blocked, host) in reports.blocked.iter().zip(&hosts) {
-        let rule = match net::allowing(&network, &harness, blocked) {
-            Some(rule) => format!("NETWORK {rule}"),
-            None => "no rule on its own".to_owned(),
+        let rule = match (net::allowing(&network, &harness, blocked), blocked) {
+            (Some(rule), _) => format!("NETWORK {rule}"),
+            // SPEC.md's NETWORK, under **Your host**.
+            (None, Blocked::Connection { address, .. }) if loopback(*address) => {
+                "your host's loopback, which only host.ap.internal reaches".to_owned()
+            }
+            // A rule for the host alone always beats the default.
+            (None, _) => "a `-` rule denies it".to_owned(),
         };
         let _ = writeln!(text, "  {host:width$}  {rule}");
     }
     if reports.more {
-        let _ = writeln!(text, "  and more, past the first {MOST_BLOCKED}");
+        let _ = writeln!(text, "  and others, left out past the first {MOST_BLOCKED}");
     }
     Some(text)
+}
+
+/// Whether `address` is a loopback or unspecified address, which no IP
+/// rule reaches.
+fn loopback(address: IpAddr) -> bool {
+    let address = address.to_canonical();
+    address.is_loopback() || address.is_unspecified()
 }
 
 #[cfg(test)]
@@ -190,6 +206,70 @@ mod tests {
         assert!(read(b"!lookup \x1b[2Jexample.com").is_none());
         assert!(read(b"!connect - 192.0.2.1 99999").is_none());
         assert!(read(b"lookup example.com").is_none());
+    }
+
+    // spec(Run): It lists each host once, and at most 100 hosts, and then says that it left others out.
+    #[test]
+    fn a_run_lists_each_host_once_and_at_most_100() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let reporter = Reporter::new(std::os::fd::AsRawFd::as_raw_fd(&theirs));
+        for round in 0..2 {
+            for host in 0..150 {
+                reporter.report(Blocked::Lookup(format!("host{host}.example")));
+                let port = 80 + round;
+                let address = format!("192.0.2.{host}").parse().unwrap();
+                reporter.report(Blocked::Connection {
+                    name: None,
+                    address,
+                    port,
+                });
+            }
+        }
+        drop(theirs);
+        let mut reports = Reports::default();
+        let mut buffer = [0; 512];
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            reports.take(&buffer[..len]);
+        }
+        let args = super::super::arguments(&[], &[]);
+        let text = report(&args, &reports).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "ap: NETWORK blocked 100 hosts. The rule beside each would allow it:"
+        );
+        assert_eq!(lines.len(), 1 + 100 + 1, "{text}");
+        assert_eq!(
+            lines[1].split_whitespace().collect::<Vec<_>>(),
+            ["host0.example", "NETWORK", "+host0.example"]
+        );
+        assert_eq!(
+            lines[2].split_whitespace().collect::<Vec<_>>(),
+            ["192.0.2.0", "NETWORK", "+192.0.2.0"]
+        );
+        assert_eq!(lines[101], "  and others, left out past the first 100");
+    }
+
+    #[test]
+    fn a_host_no_rule_of_its_own_allows_says_why() {
+        let args: Vec<OsString> = ["--", "+", "-example.com"].map(OsString::from).to_vec();
+        let reports = Reports {
+            blocked: vec![
+                Blocked::Lookup("example.com".to_owned()),
+                Blocked::Connection {
+                    name: None,
+                    address: "127.0.0.1".parse().unwrap(),
+                    port: 8080,
+                },
+            ],
+            more: false,
+        };
+        let text = report(&args, &reports).unwrap();
+        assert!(text.contains("example.com  a `-` rule denies it"), "{text}");
+        assert!(text.contains("127.0.0.1    your host's loopback"), "{text}");
+        assert_eq!(report(&args, &Reports::default()), None);
     }
 
     #[test]

@@ -36,43 +36,55 @@ const QUESTION: u8 = b'?';
 
 /// Answers the network process's questions on `socket`, the
 /// [`super::Started::lookups`] of its start, until the network process
-/// ends, and keeps its reports. A few threads answer at once, each one
-/// question at a time, so a slow name doesn't hold up the others, and the
-/// network process can't make `ap run` start more.
-pub fn answer_lookups(socket: OwnedFd) -> Lookups {
+/// ends, and keeps its reports. It answers none unless `answers`, for a
+/// network process whose rules can reach nothing, which never asks. One
+/// thread reads, so reports never wait for a lookup. A few threads answer
+/// at once, each one question at a time, so a slow name doesn't hold up the
+/// others, and the network process can't make `ap run` start more. A
+/// question that comes while every one of them is busy goes unanswered.
+pub fn answer_lookups(socket: OwnedFd, answers: bool) -> Lookups {
     let socket = Arc::new(UnixDatagram::from(socket));
     let reports = Arc::new(Mutex::new(Reports::default()));
     let (running, ended) = mpsc::channel::<()>();
+    let (questions, asked) = mpsc::sync_channel::<(u32, String)>(WORKERS);
+    let asked = Arc::new(Mutex::new(asked));
     for _ in 0..WORKERS {
         let socket = Arc::clone(&socket);
-        let reports = Arc::clone(&reports);
-        let running = running.clone();
+        let asked = Arc::clone(&asked);
         let started = thread::Builder::new().spawn(move || {
-            let mut buffer = [0; LONGEST_SENT + 1];
-            while let Ok(len @ 1..) = socket.recv(&mut buffer) {
-                let message = &buffer[..len];
-                if message.first() == Some(&TAG) {
-                    if let Ok(mut reports) = reports.lock() {
-                        reports.take(message);
-                    }
-                } else if let Some((id, name)) = read_question(message) {
-                    let _ = socket.send(&write_answer(id, &look_up(&name)));
-                }
+            loop {
+                let next = asked.lock().map(|asked| asked.recv());
+                let Ok(Ok((id, name))) = next else { break };
+                let _ = socket.send(&write_answer(id, &look_up(&name)));
             }
-            drop(running);
         });
         // With no thread to answer, a connection to a name fails, as it
         // would with no resolver.
         drop(started);
     }
-    drop(running);
+    let read = Arc::clone(&reports);
+    let started = thread::Builder::new().spawn(move || {
+        let mut buffer = [0; LONGEST_SENT + 1];
+        while let Ok(len @ 1..) = socket.recv(&mut buffer) {
+            let message = &buffer[..len];
+            if message.first() == Some(&TAG) {
+                if let Ok(mut reports) = read.lock() {
+                    reports.take(message);
+                }
+            } else if let (true, Some(question)) = (answers, read_question(message)) {
+                let _ = questions.try_send(question);
+            }
+        }
+        drop(running);
+    });
+    drop(started);
     Lookups { reports, ended }
 }
 
 /// The network process's lookups, which [`answer_lookups`] answers.
 pub struct Lookups {
     reports: Arc<Mutex<Reports>>,
-    /// Disconnects once every thread that answers has ended.
+    /// Disconnects once the thread that reads has ended.
     ended: mpsc::Receiver<()>,
 }
 
@@ -80,8 +92,8 @@ impl Lookups {
     /// What the network process reported, once it has ended, or `wait`
     /// has passed.
     pub fn reports(self, wait: Duration) -> Reports {
-        // Nothing is ever sent, so this returns once the last thread drops
-        // its sender, or the wait ends.
+        // Nothing is ever sent, so this returns once the thread that reads
+        // drops its sender, or the wait ends.
         let _ = self.ended.recv_timeout(wait);
         std::mem::take(
             &mut *self
@@ -218,6 +230,33 @@ mod tests {
         assert_eq!(read_answer(&write_answer(3, &[])), Some((3, vec![])));
         assert_eq!(read_answer(&[0, 0, 0, 1, 4, 1, 2]), None);
         assert_eq!(read_answer(&[0, 0, 0, 1, 5]), None);
+    }
+
+    /// Asks `localhost` on a link to [`answer_lookups`], reports a host,
+    /// and returns whether an answer came, and the reports.
+    fn ask_and_report(answers: bool) -> (bool, Reports) {
+        let (mine, theirs) = super::super::link().unwrap();
+        let lookups = answer_lookups(theirs, answers);
+        let mine = UnixDatagram::from(mine);
+        mine.send(&write_question(1, "localhost").unwrap()).unwrap();
+        mine.send(b"!lookup example.com").unwrap();
+        mine.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let mut buffer = [0; LONGEST];
+        let answered = mine.recv(&mut buffer).is_ok();
+        drop(mine);
+        (answered, lookups.reports(Duration::from_secs(5)))
+    }
+
+    #[test]
+    fn a_network_that_reaches_nothing_gets_no_lookups() {
+        let (answered, reports) = ask_and_report(true);
+        assert!(answered);
+        assert_eq!(reports.blocked.len(), 1, "{reports:?}");
+        // A network process that can reach nothing never asks, so a
+        // question from it can't carry anything out through your resolver.
+        let (answered, reports) = ask_and_report(false);
+        assert!(!answered);
+        assert_eq!(reports.blocked.len(), 1, "{reports:?}");
     }
 
     #[test]

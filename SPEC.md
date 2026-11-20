@@ -578,6 +578,9 @@ and sends no input.
   deletes it.
 - If the run doesn't exist, or its log was deleted, `ap logs` says so on
   standard error and exits 1.
+- It prints the run's network decisions after its output, on standard
+  error. Each line has the time, `allow` or `deny`, the destination, and
+  the rule that decided.
 
 ### ap exec
 
@@ -631,6 +634,22 @@ specifies `ap reset <digest>`. [SHARE](#share) says when it refuses.
 
 `ap secret set`, `ap secret rm`, and `ap secret ls` set, remove, and list the
 secrets in `ap`'s secret store. [SECRET](#secret) says when a run reads them.
+
+- `ap secret set <name>` reads the value from the terminal with echo off,
+  or from standard input when standard input isn't a terminal. It never
+  takes the value as an argument, so the value stays out of your shell
+  history and the process list.
+- `ap secret ls` prints the names of the stored secrets, one per line, and
+  never their values.
+- If the store doesn't have the name, `ap secret rm <name>` says so on
+  standard error and exits 1.
+- On Linux, the store is the Secret Service, which GNOME Keyring and KWallet
+  provide. `ap` finds the session bus through `DBUS_SESSION_BUS_ADDRESS`,
+  or else `$XDG_RUNTIME_DIR/bus`. With no bus or no Secret Service, as over
+  SSH or in CI, `ap secret` says so on standard error, says to give the
+  secret in the environment variable that [SECRET](#secret) reads first,
+  and exits 1. Nothing falls back to a file, so `ap` never keeps a secret
+  on disk in the clear.
 
 ### ap acp
 
@@ -1837,7 +1856,9 @@ allow one.
   hosts, so only connections to literal addresses work. The resolver
   removes HTTPS and SVCB records, so clients can't use Encrypted Client
   Hello to hide the server name. For a name it doesn't answer, it says
-  that the name doesn't exist.
+  that the name doesn't exist. It answers only `A` queries, and only for a
+  name that a rule or the default could allow. For such a name, it gives
+  every other record type an empty answer.
 - **Attribution.** The resolver answers each name with its own address
   from a private pool that `ap` chooses to overlap no IP rule, so `ap`
   knows which name every address belongs to. A connection is attributed to
@@ -1869,6 +1890,11 @@ allow one.
   certificate and checks every request's host and path, including each
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
   rules, traffic that isn't HTTP is denied.
+
+  The proxy verifies an upstream server's certificate against the root
+  certificates compiled into `ap`, plus those in the file that
+  `SSL_CERT_FILE` names in your host's environment. Until the proxy has
+  its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 - **Harness hosts are never decrypted for a rule.** A rule set that would
   need it, such as a URL rule for a harness host or `-console.anthropic.com`
   under `+anthropic.com`, is a build error, because those connections can
@@ -1877,7 +1903,8 @@ allow one.
 - **IP rules** are checked against the real destination address.
 - **UDP** follows the same rules, with names attributed through the
   resolver. QUIC to a host that needs decrypting is blocked, so clients
-  fall back to TCP.
+  fall back to TCP. UDP port 443 is denied to a host the proxy decrypts.
+- **ICMP** isn't carried, so `ping` gets no reply.
 - **Limits.**
   - Under `NETWORK +`, a deny rule for a name is best effort: a client that
     connects to a literal IP address without a name only meets IP rules.

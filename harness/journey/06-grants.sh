@@ -47,6 +47,7 @@ says() {
 
 build_fails notes
 says "ap: notes/Agentfile asks for these grants:"
+says "  AGENT claude"
 says "  PATH $here/shared/data"
 says "  NETWORK -"
 says "  NETWORK +github.com"
@@ -56,12 +57,12 @@ if [ -e "$store/agents/notes" ]; then
   exit 1
 fi
 
-printf 'NETWORK -\nNETWORK +github.com\nPOLICY +\n' >fewer
+printf 'AGENT claude\nNETWORK -\nNETWORK +github.com\nPOLICY +\n' >fewer
 build_fails --approve=fewer notes
 says "ap: notes/Agentfile asks for more than fewer approves:"
 says "  PATH $here/shared/data"
 
-printf 'PATH %s/shared/data\nNETWORK -\nNETWORK +github.com\nPOLICY +\n' \
+printf 'AGENT claude\nPATH %s/shared/data\nNETWORK -\nNETWORK +github.com\nPOLICY +\n' \
   "$here" >grants
 ap build --approve=grants notes </dev/null >out
 if ! grep -qx 'agent notes' out; then

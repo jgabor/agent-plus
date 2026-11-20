@@ -2,8 +2,8 @@
 //! prints and `--approve=<file>` reads.
 
 use agentfile::{
-    Auth, Destination, Error, Grants, Location, Network, NetworkRule, PathGrant, Policy, Secret,
-    Sign, parse,
+    Auth, Destination, Error, Grants, Harness, Location, Network, NetworkRule, PathGrant, Policy,
+    Secret, Sign, parse,
 };
 
 /// Resolves a host path the way a build in `/ctx` with home `/home/u` would,
@@ -248,6 +248,39 @@ fn git_credentials_are_left_out() {
 }
 
 #[test]
+fn the_harness_is_a_grant_only_under_network_deny() {
+    assert_eq!(grants_of("NETWORK +").harness, None);
+    assert_eq!(grants_of("NETWORK -").harness, Some(Harness::Claude));
+    let instructions = parse("AGENT codex:0.169.0\nNETWORK -").unwrap();
+    let grants = Grants::read(&instructions, resolve).unwrap();
+    assert_eq!(grants.harness, Some(Harness::Codex));
+    assert_eq!(round_trip(&grants), "AGENT codex\nNETWORK -\nPOLICY +\n");
+}
+
+#[test]
+fn an_agent_line_takes_the_agentfile_s_argument_once() {
+    let grants: Grants = "AGENT codex:latest\nNETWORK -\nPOLICY +\n".parse().unwrap();
+    assert_eq!(grants.harness, Some(Harness::Codex));
+    assert_eq!(
+        errors_of("AGENT\nAGENT gemini\nAGENT claude\nAGENT codex\nNETWORK -\nPOLICY +\n"),
+        [
+            Error {
+                line: 1,
+                message: "`AGENT` takes one harness".to_string(),
+            },
+            Error {
+                line: 2,
+                message: "`AGENT` takes `claude` or `codex`, but found `gemini`".to_string(),
+            },
+            Error {
+                line: 4,
+                message: "the grants already have an `AGENT` line".to_string(),
+            },
+        ],
+    );
+}
+
+#[test]
 fn the_text_form_uses_agentfile_lines() {
     let grants = grants_of(
         "SHARE ./out ~/out rw\n\
@@ -267,7 +300,8 @@ fn the_text_form_uses_agentfile_lines() {
     );
     assert_eq!(
         round_trip(&grants),
-        "PATH /ctx/out rw\n\
+        "AGENT claude\n\
+         PATH /ctx/out rw\n\
          PATH /home/u/notes\n\
          VARIABLE USER\n\
          SECRET STRIPE_KEY @api.stripe.com @stripe.com\n\

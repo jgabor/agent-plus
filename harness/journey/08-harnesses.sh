@@ -6,14 +6,14 @@ set -eu
 # sign-in. The journey keeps downloads in `$XDG_CACHE_HOME/ap` across steps,
 # so each harness is downloaded once.
 
-printf 'NETWORK -\nPOLICY +\n' >grants
-
 # Builds the agent `$1` from the harness and channel `$2`, and fails unless
-# the lockfile pins that harness by an exact version and a digest.
+# the lockfile pins that harness by an exact version and a digest. Each agent
+# is named for its harness, which its grants name under `NETWORK -`.
 build() {
   mkdir -p "$1"
+  printf 'AGENT %s\nNETWORK -\nPOLICY +\n' "$1" >"$1.grants"
   printf 'AGENT %s\nOS minimal\nNETWORK -\n' "$2" >"$1/Agentfile"
-  if ! ap build --approve=grants "$1" </dev/null >/dev/null 2>"$1.build"; then
+  if ! ap build --approve="$1.grants" "$1" </dev/null >/dev/null 2>"$1.build"; then
     echo "ap build $1 failed for AGENT $2:" >&2
     cat "$1.build" >&2
     exit 1

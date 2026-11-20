@@ -119,7 +119,8 @@ fn notes(scratch: &Scratch) -> (PathBuf, String) {
     }
     fs::create_dir_all(scratch.root.join("shared")).unwrap();
     let grants = format!(
-        "PATH {}/notes/out rw\n\
+        "AGENT claude\n\
+         PATH {}/notes/out rw\n\
          PATH {}/shared\n\
          VARIABLE USER\n\
          SECRET GITHUB_TOKEN @api.github.com\n\
@@ -225,7 +226,7 @@ fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
     fs::create_dir_all(&dir).unwrap();
     std::os::unix::fs::symlink(real.join("Agentfile"), dir.join("Agentfile")).unwrap();
     common::pin_harness(&scratch.home, &dir);
-    fs::write(&file, "NETWORK -\nPOLICY -\n").unwrap();
+    fs::write(&file, "AGENT claude\nNETWORK -\nPOLICY -\n").unwrap();
     scratch.build(&scratch.home, &dir, &file);
 
     // The link now leads to an Agentfile whose approval is wider, and then
@@ -235,7 +236,7 @@ fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
     let output = scratch.ap(&["inspect", "--grants", "notes"]);
     assert_eq!(
         stdout(&output),
-        "NETWORK -\nPOLICY -\n",
+        "AGENT claude\nNETWORK -\nPOLICY -\n",
         "{}",
         stderr(&output)
     );
@@ -243,7 +244,7 @@ fn inspect_shows_the_approval_of_the_agentfile_the_build_read() {
     let output = scratch.ap(&["inspect", "--grants", "notes"]);
     assert_eq!(
         stdout(&output),
-        "NETWORK -\nPOLICY -\n",
+        "AGENT claude\nNETWORK -\nPOLICY -\n",
         "{}",
         stderr(&output)
     );

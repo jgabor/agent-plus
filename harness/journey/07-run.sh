@@ -21,7 +21,7 @@ ENV FAKE_HARNESS_WRITE ran
 ENV FAKE_HARNESS_STATUS 3
 EOF
 echo "HARNESS claude 0.0.0 $digest" >fake/Agentfile.lock
-printf 'NETWORK -\nPOLICY +\n' >grants
+printf 'AGENT claude\nNETWORK -\nPOLICY +\n' >grants
 ap build --approve=grants fake </dev/null >/dev/null
 
 prompt="Say what you can see."

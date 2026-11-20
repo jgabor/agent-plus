@@ -6,6 +6,7 @@
 //! reader, one grant per line:
 //!
 //! ```text
+//! AGENT claude
 //! PATH /home/me/notes
 //! PATH /home/me/project/out rw
 //! VARIABLE USER
@@ -21,8 +22,13 @@
 //! In each argument, `\\` is a backslash, and `\u{<hex>}` is the character
 //! with that code. Printing uses `\u{<hex>}` for control characters,
 //! bidirectional controls, and whitespace other than a space, so a grant
-//! shows as it is. Git credentials aren't listed yet, because nothing is
-//! fetched.
+//! shows as it is.
+//!
+//! Under `NETWORK -`, `AGENT` names the harness, whose hosts stay allowed.
+//! It is the Agentfile's own line, without the version. The adapter knows
+//! the hosts, so they aren't listed.
+//!
+//! Git credentials aren't listed yet, because nothing is fetched.
 
 use std::fmt;
 use std::str::FromStr;
@@ -30,8 +36,9 @@ use std::str::FromStr;
 use crate::network::{self, Line};
 use crate::secrets::{self, name_length};
 use crate::{
-    Auth, Destination, Error, Files, Instruction, Mcp, Network, NetworkRule, Policy, Scheme,
-    Secret, Secrets, ShareMode, Sign, Source, Sources, Text, read_argument,
+    Auth, Destination, Error, Files, Harness, Instruction, Mcp, Network, NetworkRule, Policy,
+    Reserved, Scheme, Secret, Secrets, Settings, ShareMode, Sign, Source, Sources, Text,
+    read_argument, settings,
 };
 
 /// Where a host path from an Agentfile really is, as the caller resolved it
@@ -58,6 +65,9 @@ pub struct PathGrant {
 /// duplicates, so two lists with the same grants are equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grants {
+    /// The harness, under `NETWORK -`, where its hosts stay allowed. Under
+    /// `NETWORK +` every host is allowed, so it is `None`.
+    pub harness: Option<Harness>,
     pub paths: Vec<PathGrant>,
     /// The host environment variables that `ENV` values read.
     pub variables: Vec<String>,
@@ -150,7 +160,12 @@ impl Grants {
             })
             .collect();
         let auth = secrets.auth.filter(|auth| *auth != Auth::Login);
+        let harness = match network.default {
+            Sign::Deny => Some(Settings::read(instructions)?.agent.harness),
+            Sign::Allow => None,
+        };
         Ok(Grants {
+            harness,
             paths,
             variables,
             secrets: secrets.secrets,
@@ -200,6 +215,12 @@ impl Grants {
 /// approved, by the list under SPEC.md's Grants section.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Widening {
+    /// A harness whose hosts stay allowed under `NETWORK -`, with the hosts
+    /// that the approved grants didn't allow.
+    Harness {
+        harness: Harness,
+        hosts: Vec<String>,
+    },
     /// A host path you haven't approved, including an approved path whose
     /// canonical location changed.
     Path(PathGrant),
@@ -234,9 +255,31 @@ pub enum Widening {
 impl Grants {
     /// Lists how these grants are wider than `approved`, in the order the
     /// text form prints them. It is empty when they only narrow, or are the
-    /// same. Git credentials and the harness hosts aren't compared yet.
-    pub fn widening(&self, approved: &Grants) -> Vec<Widening> {
+    /// same. `adapter` says what the adapter keeps for a harness, which
+    /// gives its hosts. Git credentials aren't compared yet.
+    pub fn widening<'a>(
+        &self,
+        approved: &Grants,
+        adapter: impl Fn(Harness) -> Reserved<'a>,
+    ) -> Vec<Widening> {
         let mut wider = Vec::new();
+        // Under an approved `NETWORK +`, every harness host was allowed.
+        if let Some(harness) = self.harness
+            && approved.network.default == Sign::Deny
+            && approved.harness != Some(harness)
+        {
+            let old = approved
+                .harness
+                .map(|old| adapter(old).hosts)
+                .unwrap_or(&[]);
+            let hosts: Vec<String> = (adapter(harness).hosts.iter())
+                .filter(|host| !old.contains(host))
+                .map(|host| host.to_string())
+                .collect();
+            if !hosts.is_empty() {
+                wider.push(Widening::Harness { harness, hosts });
+            }
+        }
         for path in &self.paths {
             match approved.paths.iter().find(|old| old.path == path.path) {
                 None => wider.push(Widening::Path(path.clone())),
@@ -326,6 +369,20 @@ impl Grants {
 impl fmt::Display for Widening {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Widening::Harness { harness, hosts } => {
+                let hosts: Vec<String> = hosts.iter().map(|host| printed(host)).collect();
+                let list = match hosts.as_slice() {
+                    [one] => one.clone(),
+                    [first, second] => format!("{first} and {second}"),
+                    [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+                    [] => String::new(),
+                };
+                write!(
+                    f,
+                    "AGENT {}, which may reach {list}",
+                    harness_name(*harness)
+                )
+            }
             Widening::Path(path) if path.write => write!(f, "PATH {} rw", printed(&path.path)),
             Widening::Path(path) => write!(f, "PATH {}", printed(&path.path)),
             Widening::Write(path) => write!(f, "PATH {} rw, which was read-only", printed(path)),
@@ -382,6 +439,9 @@ impl fmt::Display for Grants {
             }
             writeln!(f)
         };
+        if let Some(harness) = self.harness {
+            line("AGENT", &[harness_name(harness)])?;
+        }
         for path in &self.paths {
             match path.write {
                 true => line("PATH", &[&path.path, "rw"])?,
@@ -428,6 +488,7 @@ impl FromStr for Grants {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let mut errors = Vec::new();
         let mut grants = Grants {
+            harness: None,
             paths: Vec::new(),
             variables: Vec::new(),
             secrets: Vec::new(),
@@ -497,6 +558,15 @@ impl Grants {
     ) -> Result<(), String> {
         let arguments = instruction.arguments.as_slice();
         match instruction.name.as_str() {
+            "AGENT" => {
+                if self.harness.is_some() {
+                    return Err("the grants already have an `AGENT` line".to_string());
+                }
+                match arguments {
+                    [agent] => self.harness = Some(settings::agent(agent)?.harness),
+                    _ => return Err("`AGENT` takes one harness".to_string()),
+                }
+            }
             "PATH" => {
                 let (path, write) = match arguments {
                     [path] => (path, false),
@@ -560,6 +630,14 @@ pub fn arguments(text: &str) -> Result<Vec<String>, String> {
         rest = after.trim_start();
     }
     Ok(arguments)
+}
+
+/// The harness as `AGENT` names it.
+fn harness_name(harness: Harness) -> &'static str {
+    match harness {
+        Harness::Claude => "claude",
+        Harness::Codex => "codex",
+    }
 }
 
 fn sign(sign: Sign) -> &'static str {

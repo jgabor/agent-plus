@@ -14,7 +14,7 @@ use t1::{guest_binary, kernel};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const AGENTFILE: &str = "AGENT claude\nOS minimal\nNETWORK -\nPOLICY -\n";
-const GRANTS: &str = "NETWORK -\nPOLICY -\n";
+const GRANTS: &str = "AGENT claude\nNETWORK -\nPOLICY -\n";
 /// The SHA-256 digest of the empty file, which stands in for the harness that
 /// each agent locks. The guest command doesn't start it.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";

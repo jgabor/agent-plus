@@ -18,7 +18,7 @@ else
 fi
 mkdir -p "$XDG_CACHE_HOME/ap"
 cp "$fake" "$XDG_CACHE_HOME/ap/$digest"
-printf 'NETWORK -\nPOLICY +\n' >grants
+printf 'AGENT claude\nNETWORK -\nPOLICY +\n' >grants
 
 # The host's `git`, away from any config but its own identity.
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null

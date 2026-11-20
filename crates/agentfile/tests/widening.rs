@@ -2,8 +2,21 @@
 //! Grants section.
 
 use agentfile::{
-    Auth, Destination, Grants, Location, NetworkRule, PathGrant, Secret, Sign, Widening, parse,
+    Auth, Destination, Grants, Harness, Location, NetworkRule, PathGrant, Reserved, Secret, Sign,
+    Widening, parse,
 };
+
+/// Stands in for the adapters in `ap`, which own the real harness hosts.
+fn adapter(harness: Harness) -> Reserved<'static> {
+    let hosts: &'static [&'static str] = match harness {
+        Harness::Claude => &["model.test"],
+        Harness::Codex => &["model.test", "sign-in.codex.test"],
+    };
+    Reserved {
+        hosts,
+        ..Reserved::default()
+    }
+}
 
 /// Resolves a host path the way a build in `/ctx` with home `/home/u` would,
 /// without symlinks: relative paths land inside the build context.
@@ -30,7 +43,7 @@ fn grants_of(lines: &str) -> Grants {
 
 /// What `now` widens, compared with the grants approved from `approved`.
 fn widened(approved: &str, now: &str) -> Vec<Widening> {
-    grants_of(now).widening(&grants_of(approved))
+    grants_of(now).widening(&grants_of(approved), adapter)
 }
 
 fn host(sign: Sign, name: &str) -> NetworkRule {
@@ -87,7 +100,7 @@ fn an_approved_path_whose_canonical_location_changed_widens() {
     })
     .unwrap();
     assert_eq!(
-        now.widening(&approved),
+        now.widening(&approved, adapter),
         [Widening::Path(PathGrant {
             path: "/home/u/.ssh".to_string(),
             write: false,
@@ -264,6 +277,62 @@ fn changing_a_rule_widens_unless_it_only_drops_an_allow_or_adds_a_deny() {
         })]
     );
     assert_eq!(widened(approved, "NETWORK -\nNETWORK -github.com\n"), []);
+}
+
+/// What `now` widens, compared with `approved`, each after an `AGENT` line
+/// for its harness.
+fn widened_with(approved: (&str, &str), now: (&str, &str)) -> Vec<Widening> {
+    let grants = |(agent, lines): (&str, &str)| {
+        let instructions = parse(&format!("AGENT {agent}\n{lines}")).unwrap();
+        Grants::read(&instructions, resolve).unwrap()
+    };
+    grants(now).widening(&grants(approved), adapter)
+}
+
+// spec(Grants): any network change other than removing a `+` rule or adding a `-` rule, including a change in the harness hosts that stay allowed under `NETWORK -`
+#[test]
+fn another_harness_under_network_deny_widens_by_its_new_hosts() {
+    assert_eq!(
+        widened_with(("claude", "NETWORK -\n"), ("codex", "NETWORK -\n")),
+        [Widening::Harness {
+            harness: Harness::Codex,
+            hosts: vec!["sign-in.codex.test".to_string()],
+        }]
+    );
+}
+
+// spec(Grants): A build that only narrows grants does not ask, and neither does a change that touches no grant, such as a new `PLUGIN`.
+#[test]
+fn another_version_or_a_harness_with_fewer_hosts_widens_nothing() {
+    let approved = ("codex:0.169.0", "NETWORK -\n");
+    assert_eq!(widened_with(approved, ("codex:0.170.0", "NETWORK -\n")), []);
+    assert_eq!(widened_with(approved, ("claude", "NETWORK -\n")), []);
+}
+
+// spec(Grants): A build that only narrows grants does not ask, and neither does a change that touches no grant, such as a new `PLUGIN`.
+#[test]
+fn another_harness_widens_nothing_where_every_host_was_allowed() {
+    let open = ("claude", "NETWORK +\n");
+    assert_eq!(widened_with(open, ("codex", "NETWORK +\n")), []);
+    assert_eq!(widened_with(open, ("codex", "NETWORK -\n")), []);
+}
+
+#[test]
+fn an_approval_that_names_no_harness_under_network_deny_widens_by_every_host() {
+    let approved: Grants = "NETWORK -\nPOLICY +\n".parse().unwrap();
+    let instructions = parse("AGENT codex\nNETWORK -\n").unwrap();
+    let now = Grants::read(&instructions, resolve).unwrap();
+    assert_eq!(
+        now.widening(&approved, adapter),
+        [Widening::Harness {
+            harness: Harness::Codex,
+            hosts: vec!["model.test".to_string(), "sign-in.codex.test".to_string()],
+        }]
+    );
+    assert_eq!(
+        now.widening(&approved, adapter)[0].to_string(),
+        "AGENT codex, which may reach model.test and sign-in.codex.test"
+    );
 }
 
 #[test]

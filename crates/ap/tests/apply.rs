@@ -80,7 +80,7 @@ impl Scratch {
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
         common::pin_harness(&self.home, &dir);
         let grants = self.root.join("grants");
-        fs::write(&grants, "NETWORK -\nPOLICY -\n").unwrap();
+        fs::write(&grants, "AGENT claude\nNETWORK -\nPOLICY -\n").unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_ap"))
             .args(["build", &format!("--approve={}", grants.display())])
             .current_dir(&dir)

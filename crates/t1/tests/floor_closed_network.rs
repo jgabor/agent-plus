@@ -49,6 +49,28 @@ unsafe extern "C" {
     fn _exit(status: c_int) -> !;
     fn prctl(option: c_int, ...) -> c_int;
     fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
+    fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *mut c_int) -> c_int;
+}
+
+const AF_UNIX: c_int = 1;
+const SOCK_SEQPACKET: c_int = 5;
+const SOCK_CLOEXEC: c_int = 0o2_000_000;
+
+/// A link like the one `ap run` makes: a pair of sockets that keep message
+/// boundaries, and whose reads end once the other end closes.
+fn link() -> (UnixDatagram, UnixDatagram) {
+    let mut fds = [0; 2];
+    // SAFETY: `fds` has room for the two descriptors the call writes.
+    let made = unsafe { socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, fds.as_mut_ptr()) };
+    assert_eq!(made, 0, "{}", io::Error::last_os_error());
+    // SAFETY: both descriptors are new, and nothing else owns them. A
+    // datagram socket's calls are the ones a seqpacket socket takes.
+    unsafe {
+        (
+            UnixDatagram::from_raw_fd(fds[0]),
+            UnixDatagram::from_raw_fd(fds[1]),
+        )
+    }
 }
 
 /// Built and fetched once, because the tests in this file run at once.
@@ -477,7 +499,7 @@ fn confined_network_process() {
 /// ended, and what it said on its link, with `answered ARP` once it answers
 /// the request this side sends after its outcome.
 fn attempt(directory: &Path, attempt: Attempt, confine: bool) -> (ExitStatus, Vec<String>) {
-    let (mine, theirs) = UnixDatagram::pair().unwrap();
+    let (mine, theirs) = link();
     mine.set_read_timeout(Some(QUIET)).unwrap();
     let fd = theirs.as_raw_fd();
     let target = directory.join("unrelated");
@@ -503,7 +525,8 @@ fn attempt(directory: &Path, attempt: Attempt, confine: bool) -> (ExitStatus, Ve
     drop(theirs);
     let mut said = Vec::new();
     let mut buffer = [0; 2048];
-    while let Ok(len) = mine.recv(&mut buffer) {
+    // A read of nothing is the end of the link: the process has died.
+    while let Ok(len @ 1..) = mine.recv(&mut buffer) {
         let message = &buffer[..len];
         if message.get(12..14) == Some(&[0x08, 0x06]) {
             said.push("answered ARP".to_owned());
@@ -511,7 +534,8 @@ fn attempt(directory: &Path, attempt: Attempt, confine: bool) -> (ExitStatus, Ve
         }
         said.push(String::from_utf8_lossy(message).into_owned());
         if said.len() == 2 {
-            mine.send(&arp_request()).unwrap();
+            // A process that died since gets no request.
+            let _ = mine.send(&arp_request());
         }
     }
     // Without its link, the process ends.

@@ -143,10 +143,8 @@ pub fn serve(link: &File, stack: &mut Stack) -> io::Result<()> {
 }
 
 fn set_timeout(socket: BorrowedFd, option: c_int, wait: Duration) -> io::Result<()> {
-    let timeout = libc::timeval {
-        tv_sec: wait.as_secs() as libc::time_t,
-        tv_usec: libc::suseconds_t::from(wait.subsec_micros()),
-    };
+    // A `struct timeval` on x86_64, with glibc and with musl.
+    let timeout = [wait.as_secs() as i64, i64::from(wait.subsec_micros())];
     // SAFETY: `timeout` is a `struct timeval`, which outlives the call.
     let set = unsafe {
         libc::setsockopt(

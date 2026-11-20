@@ -211,4 +211,11 @@ fn a_refused_name_is_refused_by_its_most_specific_rule_or_the_default() {
         ),
         Some("-127.0.0.0/8".to_owned())
     );
+    assert_eq!(
+        refused_by(
+            "NETWORK +\nNETWORK +host.ap.internal:8080\nNETWORK -127.0.0.0/8\nNETWORK -[::1]\n",
+            "host.ap.internal"
+        ),
+        Some("-127.0.0.0/8".to_owned())
+    );
 }

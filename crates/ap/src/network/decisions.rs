@@ -196,6 +196,7 @@ mod tests {
 
     // spec(ap logs): A connection's destination is its name, or else its address, with its port.
     // spec(ap logs): A name that the resolver refuses is a decision too, and its destination is the name alone.
+    // spec(ap logs): The rule is the `NETWORK` line that decided, or else the default, the harness's hosts, or your host's loopback.
     #[test]
     fn a_decision_reads_back_as_its_line() {
         let (keeper, _) = keeper(&["-", "-evil.net", "+", "+host.ap.internal"]);

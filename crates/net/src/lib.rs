@@ -216,16 +216,33 @@ pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
         })
     });
     let port = port.unwrap_or(0);
-    match name_decision(&network.rules, name, port, None) {
-        Some(rule) if rule.sign == Sign::Deny => By::Rule(rule),
-        // A `+` rule names your host, so the IP rules refused its loopback.
-        Some(_) if name == YOUR_HOST => [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]
-            .into_iter()
-            .find_map(|address| address_decision(&network.rules, address, port))
-            .filter(|rule| rule.sign == Sign::Deny)
-            .map_or(By::Default, By::Rule),
-        _ => By::Default,
+    let rule = name_decision(&network.rules, name, port, None);
+    if let Some(rule) = rule.filter(|rule| rule.sign == Sign::Deny) {
+        return By::Rule(rule);
     }
+    if name != YOUR_HOST {
+        return By::Default;
+    }
+    // Where a `+` rule names your host, on any port, the IP rules refused
+    // its loopback.
+    let ports = (network.rules.iter()).filter_map(|rule| match &rule.destination {
+        Destination::Host {
+            port: Some(only), ..
+        } => Some(*only),
+        _ => None,
+    });
+    let loopback = [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()];
+    std::iter::once(port)
+        .chain(ports)
+        .filter(|&port| {
+            name_decision(&network.rules, name, port, None)
+                .is_some_and(|rule| rule.sign == Sign::Allow)
+        })
+        .flat_map(|port| loopback.map(|address| (address, port)))
+        .find_map(|(address, port)| {
+            address_decision(&network.rules, address, port).filter(|rule| rule.sign == Sign::Deny)
+        })
+        .map_or(By::Default, By::Rule)
 }
 
 /// Something that `NETWORK` blocked.

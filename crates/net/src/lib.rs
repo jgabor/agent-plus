@@ -2,7 +2,7 @@
 //! by the evaluation under NETWORK in SPEC.md. It is pure functions: the
 //! resolver and the proxy hand it what they know of a connection.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use agentfile::{Destination, Instruction, Network, NetworkRule, Scheme, Sign};
 
@@ -202,7 +202,8 @@ pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
 
 /// What decided that the resolver refuses `name`, which [`could_allow`]
 /// refuses: the most specific `-` host rule that names it on every port,
-/// or else the default.
+/// the `-` IP rule that refuses your host's loopback for [`YOUR_HOST`], or
+/// else the default.
 pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
     let name = name.to_ascii_lowercase();
     let name = name.strip_suffix('.').unwrap_or(&name);
@@ -214,8 +215,15 @@ pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
             | Destination::Url { port: only, .. } => *only == Some(port),
         })
     });
-    match port.and_then(|port| name_decision(&network.rules, name, port, None)) {
+    let port = port.unwrap_or(0);
+    match name_decision(&network.rules, name, port, None) {
         Some(rule) if rule.sign == Sign::Deny => By::Rule(rule),
+        // A `+` rule names your host, so the IP rules refused its loopback.
+        Some(_) if name == YOUR_HOST => [Ipv4Addr::LOCALHOST.into(), Ipv6Addr::LOCALHOST.into()]
+            .into_iter()
+            .find_map(|address| address_decision(&network.rules, address, port))
+            .filter(|rule| rule.sign == Sign::Deny)
+            .map_or(By::Default, By::Rule),
         _ => By::Default,
     }
 }

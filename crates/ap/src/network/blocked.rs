@@ -118,8 +118,8 @@ pub(super) struct Reporter {
     /// The rules and the harness's hosts, which name what decided.
     network: Network,
     harness: Vec<String>,
-    /// The name the resolver refused last, which a lookup of its other
-    /// records doesn't report again.
+    /// The name the resolver refused in the last decision reported, which a
+    /// lookup of its other records doesn't report again.
     refused: RefCell<Option<String>>,
 }
 
@@ -154,7 +154,9 @@ impl Reporter {
             port,
         };
         let rule = Rule::proxied(&self.network, proxied);
-        self.send(&decisions::write(allow, &rule, &about));
+        if self.send(&decisions::write(allow, &rule, &about)) {
+            *self.refused.borrow_mut() = None;
+        }
     }
 
     /// Reports `blocked`, as a decision, and as a host unless its host was

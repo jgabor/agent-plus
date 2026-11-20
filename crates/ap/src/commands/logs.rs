@@ -53,11 +53,18 @@ fn print(name: &str) -> Result<(), String> {
 }
 
 /// Writes the output in `log` to `stdout` and `stderr`, each part where it
-/// was shown, then the network decisions to `stderr`, each on a line with
-/// its time. A reader that went away has nothing more to see.
+/// was shown, then the network decisions to `stderr`, each on a line of its
+/// own with its time. A reader that went away has nothing more to see.
 fn show(mut log: impl Read, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<()> {
     let mut decisions = Vec::new();
+    // Whether the output shown last ended its line, as no output does.
+    let mut ended = true;
     while let Some(part) = runs::read_log(&mut log)? {
+        if let Logged::Stdout(bytes) | Logged::Stderr(bytes) = &part
+            && let Some(&last) = bytes.last()
+        {
+            ended = last == b'\n';
+        }
         let written = match part {
             Logged::Stdout(bytes) => stdout.write_all(&bytes),
             Logged::Stderr(bytes) => stdout.flush().and_then(|()| stderr.write_all(&bytes)),
@@ -72,6 +79,9 @@ fn show(mut log: impl Read, stdout: &mut impl Write, stderr: &mut impl Write) ->
     }
     if stdout.flush().is_err() {
         return Ok(());
+    }
+    if !ended && !decisions.is_empty() {
+        decisions.insert(0, "\n".to_owned());
     }
     let _ = stderr.write_all(decisions.concat().as_bytes());
     Ok(())
@@ -111,5 +121,27 @@ mod tests {
                  2026-11-13T11:02:10Z  deny   denied.example  the default\n"
             );
         }
+    }
+
+    #[test]
+    fn decisions_start_a_line_of_their_own() {
+        let mut log = Vec::new();
+        runs::write_log(&mut log, true, b"no newline").unwrap();
+        runs::write_decision(&mut log, 0, "deny   denied.example  the default").unwrap();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        show(&log[..], &mut stdout, &mut stderr).unwrap();
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "no newline\n1970-01-01T00:00:00Z  deny   denied.example  the default\n"
+        );
+        // Output that ends a line, or no output, needs no newline.
+        let mut log = Vec::new();
+        runs::write_decision(&mut log, 0, "deny   denied.example  the default").unwrap();
+        let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+        show(&log[..], &mut stdout, &mut stderr).unwrap();
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "1970-01-01T00:00:00Z  deny   denied.example  the default\n"
+        );
     }
 }

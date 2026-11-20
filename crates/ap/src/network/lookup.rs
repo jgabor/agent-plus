@@ -300,6 +300,9 @@ mod tests {
         reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
         // A lookup of the name's other records is the same decision.
         reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
+        // Once another decision comes between, it is a new one.
+        reporter.decided(true, Some("host.ap.internal"), loopback, 8080);
+        reporter.report(net::Blocked::Lookup("denied.example".to_owned()));
         drop((reporter, mine));
         let reports = lookups.reports(Duration::from_secs(5));
         // The host it blocked is still reported.
@@ -317,6 +320,8 @@ mod tests {
         assert_eq!(
             lines,
             [
+                "allow  host.ap.internal:8080  NETWORK +host.ap.internal",
+                "deny   denied.example  the default",
                 "allow  host.ap.internal:8080  NETWORK +host.ap.internal",
                 "deny   denied.example  the default",
             ]

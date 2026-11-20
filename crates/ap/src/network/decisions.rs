@@ -194,6 +194,8 @@ mod tests {
         (Keeper::new(&args, log), reader)
     }
 
+    // spec(ap logs): A connection's destination is its name, or else its address, with its port.
+    // spec(ap logs): A name that the resolver refuses is a decision too, and its destination is the name alone.
     #[test]
     fn a_decision_reads_back_as_its_line() {
         let (keeper, _) = keeper(&["-", "-evil.net", "+", "+host.ap.internal"]);

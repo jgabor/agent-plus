@@ -141,8 +141,9 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
-    let started = start(args)
-        .and_then(|(root, layers, shares, start)| run_agent(&root, args, &layers, shares, start));
+    let started = start(args).and_then(|(root, layers, shares, start, network)| {
+        run_agent(&root, args, &layers, shares, start, &network)
+    });
     match started {
         Ok(status) => status,
         Err(error) => {
@@ -160,6 +161,7 @@ fn run_agent(
     layers: &[LayerName],
     shares: Vec<Opened>,
     start: Start,
+    network: &[OsString],
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -197,7 +199,8 @@ fn run_agent(
     let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
     // The network process and the share server end once the run process,
     // which holds the only other end of each one's socket, does.
-    let network = ap::network::start(exe).map_err(fail("can't start the network process"))?;
+    let network =
+        ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -510,9 +513,12 @@ fn keep_pending(
     Ok(roots)
 }
 
-/// Everything the run needs before its VM starts: the store's root, the
-/// agent's layers, its shares' roots, and how to start its harness.
-fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), Error> {
+/// The store's root, the agent's layers, its shares' roots, how to start
+/// its harness, and the network process's arguments.
+type Prepared = (PathBuf, Vec<LayerName>, Vec<Opened>, Start, Vec<OsString>);
+
+/// Everything the run needs before its VM starts.
+fn start(args: &Args) -> Result<Prepared, Error> {
     let fail = |message: String| Error::Failed(message);
     if let Some(flag) = args.not_built {
         return Err(fail(format!("`ap run {flag}` is not built yet")));
@@ -797,7 +803,9 @@ fn start(args: &Args) -> Result<(PathBuf, Vec<LayerName>, Vec<Opened>, Start), E
         prompt: args.prompt.clone(),
         terminal,
     };
-    Ok((root, layers, roots, start))
+    let hosts = ap::adapter::reserved(settings.agent.harness).hosts;
+    let network = ap::network::arguments(hosts, &instructions);
+    Ok((root, layers, roots, start, network))
 }
 
 /// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a

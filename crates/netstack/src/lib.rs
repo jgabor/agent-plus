@@ -6,6 +6,10 @@
 //! gets a reset, and a refused datagram is dropped, with no answer. It
 //! decides what to do with each connection and datagram it takes.
 
+mod resolver;
+
+pub use resolver::{Pool, Resolver};
+
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
@@ -219,6 +223,23 @@ impl Stack {
             }
         }
         None
+    }
+
+    /// Queues `payload` for the guest as one UDP datagram from `from` to
+    /// `to`, on a port the guest has sent to. It goes out at the next
+    /// [`Stack::poll`]. Returns whether it was queued.
+    pub fn send_datagram(&mut self, from: SocketAddr, to: SocketAddr, payload: &[u8]) -> bool {
+        let Some(&handle) = self.udp.get(&from.port()) else {
+            return false;
+        };
+        let meta = udp::UdpMetadata {
+            local_address: Some(from.ip().into()),
+            ..to.into()
+        };
+        self.sockets
+            .get_mut::<udp::Socket>(handle)
+            .send_slice(payload, meta)
+            .is_ok()
     }
 
     /// What `frame` is to the stack. Only a frame the stack can decide on

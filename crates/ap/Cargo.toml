@@ -12,6 +12,7 @@ agentfile = { path = "../agentfile" }
 erofs = { path = "../erofs" }
 git = { path = "../git" }
 guest = { path = "../guest" }
+net = { path = "../net" }
 netstack = { path = "../netstack" }
 share = { path = "../share" }
 store = { path = "../store" }

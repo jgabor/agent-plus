@@ -1834,12 +1834,15 @@ allow one.
   `NETWORK -` with only IP rules, no name resolves except the harness
   hosts, so only connections to literal addresses work. The resolver
   removes HTTPS and SVCB records, so clients can't use Encrypted Client
-  Hello to hide the server name.
+  Hello to hide the server name. For a name it doesn't answer, it says
+  that the name doesn't exist.
 - **Attribution.** The resolver answers each name with its own address
   from a private pool that `ap` chooses to overlap no IP rule, so `ap`
   knows which name every address belongs to. A connection is attributed to
   the name behind the address it connects to, which is how host rules apply
-  to traffic without a server name, such as SSH.
+  to traffic without a server name, such as SSH. If the pool runs out, a
+  name that has no address yet gets a server failure, and every name keeps
+  the address it has.
 - **Name checks.** When a host or URL rule decides a connection, the
   attributed name must agree with whatever the protocol shows without
   decrypting: the TLS server name (SNI), or the `Host` header of plain

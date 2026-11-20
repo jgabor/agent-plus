@@ -77,7 +77,7 @@ impl Network {
     /// when a name rule or the default allows it, and then its real address
     /// still meets the IP rules, so a name is denied when no address it
     /// could have passes.
-    pub(crate) fn denies(&self, host: &str) -> bool {
+    pub fn denies(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
         // Each port and path a rule names, and one that none names, so that
         // every way a request can match the rules gets tried.

@@ -158,7 +158,8 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
     // protocol's first bytes do.
     let method = line.iter().take_while(|&&byte| token(byte)).count();
     match line.get(method) {
-        Some(byte) if byte.is_ascii_whitespace() => {}
+        // Vertical tab too, which `is_ascii_whitespace` leaves out.
+        Some(byte) if byte.is_ascii_whitespace() || *byte == 0x0b => {}
         None => return short(),
         Some(_) => return Ok(Some(State::Passing)),
     }

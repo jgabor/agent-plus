@@ -245,6 +245,8 @@ fn a_request_line_a_lenient_server_reads_is_refused() {
         " GET / HTTP/1.1",
         "\tGET / HTTP/1.1",
         "GET /\x0bHTTP/1.1",
+        "GET\x0b/ HTTP/1.1",
+        "\x0bGET / HTTP/1.1",
     ] {
         for host in ["example.com", NAME] {
             refused(format!("{line}\r\nHost: {host}\r\n\r\n").as_bytes());

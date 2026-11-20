@@ -21,7 +21,7 @@ pub use grants::{
     Grants, Location, PathGrant, Widening, arguments as read_arguments, printed as print_argument,
 };
 mod network;
-pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign};
+pub use network::{Destination, Network, NetworkRule, Policy, Scheme, Sign, with_typed_network};
 mod paths;
 pub use paths::GuestPath;
 mod secrets;

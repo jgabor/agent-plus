@@ -1,9 +1,9 @@
-//! `ap run <agent> [-i] [-p <prompt>]`, from SPEC.md's Run section. It names
-//! the run, and starts a run process that boots the agent's layers in a new
-//! microVM and starts the harness there as the user `agent`, as
-//! [`ap::runs`] says. It streams the harness's output and exits with its
-//! status, or with 125 if the harness never started. What it shows of the
-//! output, it also writes to the run's log.
+//! `ap run <agent> [-i] [-p <prompt>] [--network=<rule>]...`, from SPEC.md's
+//! Run section. It names the run, and starts a run process that boots the
+//! agent's layers in a new microVM and starts the harness there as the user
+//! `agent`, as [`ap::runs`] says. It streams the harness's output and exits
+//! with its status, or with 125 if the harness never started. What it shows
+//! of the output, it also writes to the run's log.
 //!
 //! A run with a prompt is headless, and the harness gets pipes. Any other
 //! run, or one with `-i`, is interactive: the harness gets a terminal in the
@@ -17,7 +17,8 @@
 //! makes in the store and leaves there when it ends. The guest mounts each
 //! share at the place SPEC.md's Paths section gives it.
 //!
-//! The guest's network follows the agent's host and IP rules in `NETWORK`.
+//! The guest's network follows the agent's host and IP rules in `NETWORK`,
+//! merged with the ones from `--network`.
 //! A URL rule, and everything else on #297's list of what isn't built yet,
 //! fails with 125 and says so, before any VM starts.
 
@@ -63,7 +64,7 @@ const DEFAULT_SIZE: Size = Size {
 const KEYS: usize = 4096;
 
 /// The flags SPEC.md gives `ap run` that aren't built yet.
-const FLAGS_NOT_BUILT: [&str; 5] = ["-t", "--network", "--resume", "--gui", "--approve"];
+const FLAGS_NOT_BUILT: [&str; 4] = ["-t", "--resume", "--gui", "--approve"];
 
 /// The instructions a run can't honor yet. `ap build` refuses the ones that
 /// need a fetch, so an agent that has them can't be built either.
@@ -89,13 +90,15 @@ pub struct Args {
     interactive: bool,
     /// Each directory from `--share`, as typed.
     shares: Vec<OsString>,
+    /// Each rule from `--network=<rule>`, in order.
+    network: Vec<OsString>,
     /// The first flag that isn't built yet.
     not_built: Option<&'static str>,
 }
 
 /// Reads `ap run`'s arguments: the agent, `-i` at most once,
-/// `-p <prompt>` or `--prompt <prompt>` at most once, and `--share <path>`,
-/// in any order. A second `--share` fails the run, not the reading. A flag
+/// `-p <prompt>` or `--prompt <prompt>` at most once, `--share <path>`, and
+/// `--network=<rule>`, in any order. A second `--share` fails the run, not the reading. A flag
 /// that isn't built yet stops the reading, because `ap run` fails on it
 /// anyway. Any other flag is bad usage.
 pub fn parse(args: &[OsString]) -> Option<Args> {
@@ -103,6 +106,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
     let mut prompt = None;
     let mut interactive = false;
     let mut shares = Vec::new();
+    let mut network = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let flag = arg.as_bytes();
@@ -116,6 +120,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
                 prompt,
                 interactive,
                 shares,
+                network,
                 not_built: Some(not_built),
             });
         }
@@ -123,6 +128,8 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
             prompt = Some(args.next()?.as_bytes().to_vec());
         } else if arg == "--share" {
             shares.push(args.next()?.clone());
+        } else if let Some(rule) = flag.strip_prefix(b"--network=") {
+            network.push(OsString::from_vec(rule.to_vec()));
         } else if arg == "-i" && !interactive {
             interactive = true;
         } else if flag.starts_with(b"-") || agent.is_some() {
@@ -136,6 +143,7 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
         prompt,
         interactive,
         shares,
+        network,
         not_built: None,
     })
 }
@@ -671,7 +679,20 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     if let Some(tier) = tier {
         return Err(fail(format!("`OS {tier}` is not built yet")));
     }
-    let network = Network::read(&instructions).map_err(unreadable)?;
+    // SPEC.md's NETWORK: rules from `--network` are for this run only, and
+    // need no approval.
+    let rules: Vec<String> = (args.network.iter())
+        .map(|rule| {
+            rule.to_str().map(str::to_owned).ok_or_else(|| {
+                fail(format!(
+                    "`--network={}` isn't UTF-8",
+                    rule.to_string_lossy()
+                ))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    let merged = agentfile::with_typed_network(&instructions, &rules).map_err(unreadable)?;
+    let network = Network::read(&merged).map_err(unreadable)?;
     let url_rule =
         (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
     if url_rule {
@@ -812,7 +833,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         terminal,
     };
     let hosts = ap::adapter::reserved(settings.agent.harness).hosts;
-    let network = ap::network::arguments(hosts, &instructions);
+    let network = ap::network::arguments(hosts, &merged);
     Ok((root, layers, roots, start, network))
 }
 

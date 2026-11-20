@@ -290,7 +290,7 @@ fn checked(lines: &str, name: Option<&str>, address: &str) -> bool {
     decided.by_name()
 }
 
-// spec(NETWORK): A harness host that no rule decides is checked too.
+// spec(NETWORK): **What the name check reads.** A harness host that no rule decides is checked too.
 // spec(NETWORK): A connection that no name rule decides skips this check, so under `NETWORK +`, clients that resolve names on their own (DNS over HTTPS, hard-coded addresses) keep working.
 #[test]
 fn only_a_connection_a_name_decides_is_checked() {

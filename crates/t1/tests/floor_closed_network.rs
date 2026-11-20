@@ -492,7 +492,8 @@ fn confined_network_process() {
     (&link).write_all(attempting.as_bytes()).unwrap();
     let outcome = attempt.make(&target);
     (&link).write_all(outcome.as_bytes()).unwrap();
-    ap::network::serve(&link, &mut stack).unwrap();
+    let mut resolver = ap::network::resolver(&["--".into(), "-".into()]).unwrap();
+    ap::network::serve(&link, &mut stack, &mut resolver).unwrap();
 }
 
 /// Makes one attempt in its own process, and returns how that process

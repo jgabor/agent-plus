@@ -580,3 +580,28 @@ fn a_flow_sent_to_every_station_is_never_taken_unasked() {
         assert!(stack.recv_datagram().is_none(), "{station:?}");
     }
 }
+
+#[test]
+fn answers_a_udp_datagram_from_the_address_it_was_sent_to() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let handle = guest.udp(40000);
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 9000);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .send_slice(b"ping", to)
+        .unwrap();
+    exchange(&mut guest, &mut stack, start);
+    let datagram = stack.recv_datagram().expect("the stack took the datagram");
+    assert!(stack.send_datagram(datagram.destination, datagram.source, b"pong"));
+    exchange(&mut guest, &mut stack, start);
+    let (payload, meta) = guest
+        .sockets
+        .get_mut::<udp::Socket>(handle)
+        .recv()
+        .expect("the guest got the answer");
+    assert_eq!(payload, b"pong");
+    assert_eq!(SocketAddr::from(meta.endpoint), to);
+}

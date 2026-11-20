@@ -263,7 +263,10 @@ fn an_agent_with_host_and_ip_rules_runs_and_one_with_a_url_rule_fails_before_its
     for (name, network) in [
         ("open", "NETWORK +\n"),
         ("default", ""),
-        ("rule", "NETWORK -\nNETWORK +example.com\nNETWORK +192.0.2.0/24\n"),
+        (
+            "rule",
+            "NETWORK -\nNETWORK +example.com\nNETWORK +192.0.2.0/24\n",
+        ),
     ] {
         scratch.build(name, &format!("AGENT claude:0.0.0\nOS minimal\n{network}"));
         past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[]));

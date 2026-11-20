@@ -38,6 +38,8 @@ enum State {
     Http(Http),
     /// Everything else passes unread.
     Passing,
+    /// It refused, and nothing more passes.
+    Refused,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,12 +71,23 @@ impl NameCheck {
     /// nothing more may pass.
     pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), Refused> {
         self.held.extend_from_slice(input);
+        let fed = self.read(out);
+        if fed.is_err() {
+            self.state = State::Refused;
+            self.held = Vec::new();
+        }
+        fed
+    }
+
+    /// Passes what it can of the bytes held.
+    fn read(&mut self, out: &mut Vec<u8>) -> Result<(), Refused> {
         loop {
             let moved = match &mut self.state {
                 State::Passing => {
                     out.append(&mut self.held);
                     return Ok(());
                 }
+                State::Refused => return Err(Refused),
                 State::First => match first(&self.held)? {
                     Some(state) => {
                         self.state = state;
@@ -110,7 +123,7 @@ impl NameCheck {
     pub fn holding(&self) -> bool {
         !self.held.is_empty()
             || match self.state {
-                State::Http(Http::Head) | State::First | State::Passing => false,
+                State::Http(Http::Head) | State::First | State::Passing | State::Refused => false,
                 State::Tls(..) | State::Http(_) => true,
             }
     }

@@ -3,11 +3,16 @@
 //! address and port. It routes nothing and opens no socket on the host. Frames
 //! come in through [`Stack::receive`] and go out through [`Stack::transmit`].
 //! The caller takes or refuses each new [`Flow`]: a refused TCP connection
-//! gets a reset, and a refused datagram is dropped, with no answer. It
-//! decides what to do with each connection and datagram it takes.
+//! gets a reset, and a refused datagram is dropped, with no answer. It can
+//! also hold a TCP connection at its SYN, while it connects to the real
+//! destination, and then take or refuse it. It decides what to do with each
+//! connection and datagram it takes, and a [`Pipe`] forwards a connection
+//! to a stream the caller opened.
 
+mod pipe;
 mod resolver;
 
+pub use pipe::Pipe;
 pub use resolver::{Pool, Resolver};
 
 use std::collections::{BTreeMap, VecDeque};
@@ -66,6 +71,17 @@ pub enum Flow {
     },
 }
 
+/// What the caller makes of a new [`Flow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Take,
+    Refuse,
+    /// Neither yet: the SYN of a TCP connection waits, unanswered, for
+    /// [`Stack::release`]. The guest's copies of it go unanswered too, and
+    /// aren't asked about. A datagram held is dropped.
+    Hold,
+}
+
 /// A UDP datagram from the guest, and the destination it was sent to.
 #[derive(Debug)]
 pub struct Datagram {
@@ -85,6 +101,8 @@ pub struct Stack {
     accepted: VecDeque<Connection>,
     /// The UDP socket for each destination port the guest has sent to.
     udp: BTreeMap<u16, SocketHandle>,
+    /// The SYN of each connection the caller holds.
+    held: Vec<(Flow, Vec<u8>)>,
 }
 
 impl Stack {
@@ -114,12 +132,27 @@ impl Stack {
             opening: Vec::new(),
             accepted: VecDeque::new(),
             udp: BTreeMap::new(),
+            held: Vec::new(),
         }
     }
 
     /// Takes one Ethernet frame from the guest, and handles it. If it opens a
     /// [`Flow`], `take` decides whether the stack takes it.
     pub fn receive(&mut self, frame: &[u8], now: Instant, take: impl FnOnce(&Flow) -> bool) {
+        self.receive_holding(frame, now, |flow| match take(flow) {
+            true => Verdict::Take,
+            false => Verdict::Refuse,
+        });
+    }
+
+    /// Takes one Ethernet frame from the guest, and handles it. If it opens a
+    /// [`Flow`], `decide` says what the stack makes of it.
+    pub fn receive_holding(
+        &mut self,
+        frame: &[u8],
+        now: Instant,
+        decide: impl FnOnce(&Flow) -> Verdict,
+    ) {
         match self.classify(frame) {
             Seen::Drop => return,
             Seen::Other => {}
@@ -128,17 +161,36 @@ impl Stack {
                 source,
                 destination,
             }) if self.holds(source, destination) => {}
-            Seen::Flow(flow) => match (take(&flow), flow) {
-                (true, Flow::Tcp { destination, .. }) => self.listen(destination),
-                (true, Flow::Udp { destination, .. }) => self.bind(destination.port()),
+            Seen::Flow(flow) if self.held.iter().any(|(held, _)| *held == flow) => return,
+            Seen::Flow(flow) => match (decide(&flow), flow) {
+                (Verdict::Take, Flow::Tcp { destination, .. }) => self.listen(destination),
+                (Verdict::Take, Flow::Udp { destination, .. }) => self.bind(destination.port()),
+                (Verdict::Hold, Flow::Tcp { .. }) => {
+                    self.held.push((flow, frame.to_vec()));
+                    return;
+                }
                 // With no socket to take it, smoltcp answers a SYN with a
                 // reset.
-                (false, Flow::Tcp { .. }) => {}
+                (Verdict::Refuse, Flow::Tcp { .. }) => {}
                 // smoltcp would answer it with a port unreachable message.
-                (false, Flow::Udp { .. }) => return,
+                (Verdict::Refuse | Verdict::Hold, Flow::Udp { .. }) => return,
             },
         }
         self.link.rx.push_back(frame.to_vec());
+        self.poll(now);
+    }
+
+    /// Takes or refuses a connection the caller held. Its SYN is handled
+    /// now, as if it had just come.
+    pub fn release(&mut self, flow: Flow, take: bool, now: Instant) {
+        let Some(at) = self.held.iter().position(|(held, _)| *held == flow) else {
+            return;
+        };
+        let (_, frame) = self.held.remove(at);
+        if let (true, Flow::Tcp { destination, .. }) = (take, flow) {
+            self.listen(destination);
+        }
+        self.link.rx.push_back(frame);
         self.poll(now);
     }
 
@@ -205,6 +257,36 @@ impl Stack {
             .get_mut::<tcp::Socket>(id.0)
             .send_slice(bytes)
             .unwrap_or(0)
+    }
+
+    /// Sends what is queued on a connection, then a FIN.
+    pub fn close(&mut self, id: ConnectionId) {
+        self.sockets.get_mut::<tcp::Socket>(id.0).close();
+    }
+
+    /// Resets a connection.
+    pub fn abort(&mut self, id: ConnectionId) {
+        self.sockets.get_mut::<tcp::Socket>(id.0).abort();
+    }
+
+    /// Whether the guest has closed its half of a connection, or reset it,
+    /// and everything it sent has been read.
+    pub fn received_all(&self, id: ConnectionId) -> bool {
+        !self.sockets.get::<tcp::Socket>(id.0).may_recv()
+    }
+
+    /// Whether a connection has ended on both sides, or was reset. The
+    /// caller then forgets it.
+    pub fn ended(&self, id: ConnectionId) -> bool {
+        matches!(
+            self.sockets.get::<tcp::Socket>(id.0).state(),
+            tcp::State::Closed | tcp::State::TimeWait
+        )
+    }
+
+    /// Frees a connection, which the caller must not use again.
+    pub fn forget(&mut self, id: ConnectionId) {
+        self.sockets.remove(id.0);
     }
 
     /// The next datagram the guest sent.

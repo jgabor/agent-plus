@@ -24,6 +24,9 @@ use super::blocked::{Reports, TAG};
 const LONGEST_NAME: usize = 253;
 /// The threads that answer at once.
 const WORKERS: usize = 4;
+/// The questions that wait for a thread to answer them, far more than the
+/// network process has waiting at once.
+const WAITING: usize = 1024;
 /// The most addresses an answer holds.
 const MOST_ADDRESSES: usize = 16;
 /// The longest answer.
@@ -40,13 +43,14 @@ const QUESTION: u8 = b'?';
 /// network process whose rules can reach nothing, which never asks. One
 /// thread reads, so reports never wait for a lookup. A few threads answer
 /// at once, each one question at a time, so a slow name doesn't hold up the
-/// others, and the network process can't make `ap run` start more. A
-/// question that comes while every one of them is busy goes unanswered.
+/// others, and the network process can't make `ap run` start more. The rest
+/// wait their turn, up to [`WAITING`] of them. A question past those goes
+/// unanswered.
 pub fn answer_lookups(socket: OwnedFd, answers: bool) -> Lookups {
     let socket = Arc::new(UnixDatagram::from(socket));
     let reports = Arc::new(Mutex::new(Reports::default()));
     let (running, ended) = mpsc::channel::<()>();
-    let (questions, asked) = mpsc::sync_channel::<(u32, String)>(WORKERS);
+    let (questions, asked) = mpsc::sync_channel::<(u32, String)>(WAITING);
     let asked = Arc::new(Mutex::new(asked));
     for _ in 0..WORKERS {
         let socket = Arc::clone(&socket);

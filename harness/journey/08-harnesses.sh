@@ -49,10 +49,11 @@ trap 'exit 1' HUP INT TERM
 # Starts the agent `$1` interactively, in a terminal that `script` gives it,
 # and sets `run` to the new run's name. With no credentials, the harness
 # waits at its sign-in screen, which keeps the run open for `ap exec`. The
-# terminal's input stays open until this script exits.
+# terminal's input stays open until this script exits, and the run outlasts
+# the slowest probe below.
 start() {
   mkfifo "$1.keys"
-  timeout -k 10 300 script -qec "ap run $1" /dev/null <"$1.keys" \
+  timeout -k 10 900 script -qec "ap run $1" /dev/null <"$1.keys" \
     >"$1.screen" 2>&1 &
   holders="$holders $!"
   case $1 in
@@ -110,10 +111,14 @@ build claude claude:stable
 build codex codex:latest
 
 # Claude Code reports its `init` event before it needs a sign-in. With no
-# credentials, it exits after that, so the probe needs no input.
+# credentials, it exits after that, so the probe needs no input. It prints
+# the event only once its start is done, which keeps the guest's one vCPU
+# busy for 40 to 140 seconds on a loaded machine, with no wait on the
+# network. The deadline is far past that, because Claude Code exits as soon
+# as it has reported, so a slow start costs only its own time.
 start claude
 in_home "$run"
-timeout -k 10 120 ap exec "$run" claude -p "Say what you can see." \
+timeout -k 10 600 ap exec "$run" claude -p "Say what you can see." \
   --output-format stream-json --verbose </dev/null >claude.init 2>&1 || true
 says claude.init '"subtype":"init"'
 says claude.init '"cwd":"/home/agent"'

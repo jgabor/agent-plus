@@ -139,9 +139,10 @@ pub fn run() -> Result<Verdict, Problem> {
             continue;
         }
         // A runner that can't prove `main` says nothing about the PR.
-        if main_proof
-            .get_or_insert_with(|| prove_main(&root, actions))
-            .is_err()
+        if runner_could_cause(&why)
+            && main_proof
+                .get_or_insert_with(|| prove_main(&root, actions))
+                .is_err()
         {
             println!(
                 "refresh: PR {} keeps `{LAND_NEEDED}`, because `main` can't be proven on the runner either",
@@ -277,6 +278,17 @@ fn remove_land_needed(gh: &Gh, pr: &OpenPr) -> Result<(), Problem> {
 }
 
 const NOT_PROVEN: &str = "Not proven";
+
+/// Whether a fault of the runner or of `main` could have failed the proof,
+/// by what `xtask/gate` says: a check failed, an error stopped the proof, or
+/// it ended without a result. Anything else is a refusal that `prepare` gave
+/// in words, from the PR and git alone, so the failure is the change's.
+fn runner_could_cause(why: &str) -> bool {
+    why.starts_with("Failed: ")
+        || why.starts_with("Failed in its own xtask: ")
+        || why == "Stopped by an error"
+        || why == NOT_PROVEN
+}
 
 /// What happened to one PR, as a row of the run's summary.
 struct Row {
@@ -432,7 +444,8 @@ fn prepare(root: &Path, number: u64) -> Result<bool, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Row, escaped, queued, summary, took};
+    use super::{NOT_PROVEN, Row, escaped, queued, runner_could_cause, summary, took};
+    use crate::merge;
     use std::time::Duration;
 
     #[test]
@@ -440,6 +453,27 @@ mod tests {
         assert_eq!(queued(0), "Queued, next");
         assert_eq!(queued(1), "Queued, 1 PR ahead");
         assert_eq!(queued(2), "Queued, 2 PRs ahead");
+    }
+
+    #[test]
+    fn only_a_check_or_an_error_can_be_the_runners_fault() {
+        for why in [
+            "Failed: lint, tests",
+            "Failed in its own xtask: journey",
+            "Stopped by an error",
+            NOT_PROVEN,
+        ] {
+            assert!(runner_could_cause(why), "{why}");
+        }
+        for why in [
+            "the tip of PR 9 has no ledger record, so there are no budgets to keep",
+            "the branch doesn't rebase onto `main`. Rebase it by hand, and push it",
+            "PR 9 changed during the merge, and the checks read what it said before",
+            "Failed",
+            merge::MAIN_MOVED,
+        ] {
+            assert!(!runner_could_cause(why), "{why}");
+        }
     }
 
     #[test]

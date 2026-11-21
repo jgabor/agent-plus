@@ -3223,6 +3223,89 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
     assert!(!calls.contains("gh pr merge"), "{calls}");
 }
 
+/// `prepare` refused that PR in words, from the PR and git alone, so no fault
+/// of the runner caused it, and the refresh proves nothing on `main`.
+#[test]
+fn a_refresh_proves_nothing_on_main_for_a_pr_that_prepare_refused_in_words() {
+    let repo = Repo::new("refresh-in-words");
+    repo.prepared(BRANCH, 7, "");
+    repo.change_branch("more.txt", "x\n");
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert!(!out.contains("proving `main`"), "{out}");
+    // The failure is the change's, so the PR is handed back all the same.
+    let calls = repo.calls();
+    assert!(calls.contains(&unlabeled(7)), "{calls}");
+    assert!(calls.contains(&unlabeled(9)), "{calls}");
+    assert!(
+        repo.pr_comments().contains("no ledger record"),
+        "{}",
+        repo.pr_comments()
+    );
+}
+
+/// A `main` that can't be proven excuses only the PRs that a check or an
+/// error failed. One that `prepare` refused in words is handed back.
+#[test]
+fn a_refresh_that_can_not_prove_main_still_hands_back_a_pr_refused_in_words() {
+    let repo = Repo::new("refresh-main-fails-in-words");
+    repo.other_pr(
+        5,
+        "8-y",
+        &Pr {
+            closes: &[8],
+            reviews: &[("a", "CHANGES_REQUESTED")],
+            ..Pr::default()
+        },
+    );
+    repo.prepared(BRANCH, 7, "");
+    repo.prepared("8-y", 8, "");
+    repo.change_branch("more.txt", "x\n");
+    repo.advance_main("crates/demo/src/lib.rs", "pub fn f(  ) {}\n");
+    let (nine, five) = (repo.head_of(BRANCH), repo.head_of("8-y"));
+    repo.set_open_prs(&[
+        listed(5, "8-y", &five, 8, false),
+        listed(9, BRANCH, &nine, 7, false),
+    ]);
+    repo.set_land_needed(&[7, 8]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let out = stdout(&output);
+    assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
+    let said = stderr(&output);
+    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    assert!(said.contains(why), "{said}");
+    let calls = repo.calls();
+    for number in [5, 8] {
+        assert!(!calls.contains(&unlabeled(number)), "{calls}");
+    }
+    for number in [9, 7] {
+        assert!(calls.contains(&unlabeled(number)), "{calls}");
+    }
+    let comments = repo.pr_comments();
+    assert!(comments.contains("no ledger record"), "{comments}");
+    assert!(!comments.contains("Not proven"), "{comments}");
+}
+
 /// A `prepare` that was stopped after it posted the green did prove the PR.
 #[test]
 fn a_refresh_leaves_a_green_that_its_prepare_posted() {

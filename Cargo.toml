@@ -12,3 +12,15 @@ strip = true
 
 [profile.dev]
 debug = false
+
+# Building and running an agent compresses, decompresses, and hashes images of
+# hundreds of megabytes. Unoptimized, these crates are most of a debug build's
+# time in the tests that do it.
+[profile.dev.package.structured-zstd]
+opt-level = 3
+
+[profile.dev.package.ruzstd]
+opt-level = 3
+
+[profile.dev.package.graviola]
+opt-level = 3

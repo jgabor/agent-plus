@@ -3051,6 +3051,56 @@ fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
     );
 }
 
+/// A gate of `main` that hangs would hold the refresh for as long as its job
+/// may run. It stops at the merge timeout, with what it started, and that is
+/// a `main` the runner can't prove.
+#[test]
+fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
+    let repo = Repo::new("refresh-main-hangs");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_pr(&Pr {
+        reviews: &[("a", "CHANGES_REQUESTED")],
+        ..Pr::default()
+    });
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head_of(BRANCH);
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.git(&["checkout", "-q", "main"]);
+    // `prepare` refuses the PR before the fetch, so only the gate of `main`
+    // formats. It starts the stray, and then hangs for far longer than the
+    // timeout.
+    let started = Instant::now();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .env("RUN_ON", "cargo fmt --version")
+        .env("RUN_COMMAND", stray(&repo))
+        .env("HANG_ON", "cargo fmt --all")
+        .env("HANG_FOR", "60")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(started.elapsed() < Duration::from_secs(30), "{output:?}");
+    let said = stderr(&output);
+    let why =
+        "refresh: `main` can't be proven on the runner: its gate ran past the 1 second timeout";
+    assert!(said.contains(why), "{said}");
+    assert_stray_stopped(&repo);
+    let calls = repo.calls();
+    for number in [9, 7] {
+        assert!(!calls.contains(&unlabeled(number)), "{calls}");
+    }
+    assert!(!calls.contains("pr comment"), "{calls}");
+}
+
 /// A token that can't write issues can still unlabel the PR, and the comment
 /// says only what was done, once for each failed head.
 #[test]

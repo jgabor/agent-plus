@@ -7,9 +7,12 @@ use crate::{Problem, Verdict, base, lock, merge, workspace};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 pub fn run() -> Result<Verdict, Problem> {
@@ -394,7 +397,20 @@ fn prove_main(root: &Path, actions: bool) -> Result<(), String> {
     proven.map_err(|Problem(why)| why)
 }
 
-/// What failed in the gate of `main`, if anything did.
+/// How long the gate of `main` may run, which is the merge timeout. A PR's
+/// proof stops there, and a gate that hangs on the runner would otherwise hold
+/// the refresh for as long as its job may run.
+const MAIN_SECONDS: u64 = 30 * 60;
+/// Replaces the merge timeout, and this one with it.
+const MAIN_SECONDS_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
+/// Stops the gate's group when this process dies, as on Ctrl-C, which reaches
+/// only this process's group. Only this process holds the other end of its
+/// input. A merge's supervisor has the same watcher, for the same reason.
+const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
+
+/// What failed in the gate of `main`, if anything did. The gate runs in a
+/// process group of its own, which everything it starts joins, and the group
+/// is stopped once it has run for the timeout.
 fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
     let spec = format!("+refs/heads/main:{}", merge::MAIN);
     base::git_text(root, &["fetch", "-q", "origin", &spec])?;
@@ -402,6 +418,10 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
     let tree = merge::Tree::of_main(root, main.trim())?;
     let program =
         env::current_exe().map_err(|e| Problem(format!("couldn't find this program: {e}")))?;
+    let seconds = env::var(MAIN_SECONDS_OVERRIDE)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(MAIN_SECONDS);
     let mut child = Command::new(program)
         .arg("gate")
         .current_dir(&tree.path)
@@ -409,8 +429,35 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
         // toolchain file of `main`.
         .env_remove("RUSTUP_TOOLCHAIN")
         .stdout(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| Problem(format!("couldn't start the gate: {e}")))?;
+    let group = child.id();
+    let (watched, _alive) =
+        io::pipe().map_err(|e| Problem(format!("couldn't make a pipe: {e}")))?;
+    let watcher = Command::new("sh")
+        .args(["-c", WATCHER, "sh", &group.to_string()])
+        .stdin(watched)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn();
+    if let Err(error) = watcher {
+        stop_group(group);
+        let _ = child.wait();
+        return Err(Problem(format!(
+            "couldn't start the gate's watcher: {error}"
+        )));
+    }
+    let (ended, end) = mpsc::channel::<()>();
+    let timer = thread::spawn(move || {
+        let late =
+            end.recv_timeout(Duration::from_secs(seconds)) == Err(mpsc::RecvTimeoutError::Timeout);
+        if late {
+            stop_group(group);
+        }
+        late
+    });
     let mut failed = Vec::new();
     if let Some(out) = child.stdout.take() {
         for line in BufReader::new(out).lines().map_while(Result::ok) {
@@ -420,14 +467,33 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
             }
         }
     }
+    // The gate isn't reaped yet, so its group is still its own, and a timer
+    // that fires now stops nothing else.
+    drop(ended);
+    let timed_out = timer.join().unwrap_or(false);
     let status = child
         .wait()
         .map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
     Ok(match (status.success(), failed.is_empty()) {
+        _ if timed_out => Some(format!("its gate ran past the {seconds} second timeout")),
         (true, _) => None,
         (false, false) => Some(format!("Failed: {}", failed.join(", "))),
         (false, true) => Some(format!("its gate stopped: {status}")),
     })
+}
+
+/// Stops the group first, so that none of it runs while the kill goes through
+/// it, as a merge's supervisor stops its worker. `xtask` has no dependencies,
+/// so `kill` sends the signals, and it fails on a group that is gone.
+fn stop_group(group: u32) {
+    let target = format!("-{group}");
+    for signal in ["-STOP", "-KILL"] {
+        let _ = Command::new("kill")
+            .args([signal, "--", &target])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 /// Its own process, so that one PR's timeout or crash ends only that PR.

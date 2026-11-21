@@ -29,6 +29,7 @@ dependencies = [
  "rustls-graviola",
  "ruzstd",
  "share",
+ "smoltcp",
  "store",
  "time",
  "vmm",

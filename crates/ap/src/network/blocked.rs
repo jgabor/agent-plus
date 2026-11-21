@@ -140,12 +140,25 @@ impl Reporter {
     /// Reports a connection to `address` on `port`, attributed to `name`,
     /// that the proxy allows or not, and the rule that decided.
     pub(super) fn decided(&self, allow: bool, name: Option<&str>, address: IpAddr, port: u16) {
+        self.requested(allow, name, address, port, None);
+    }
+
+    /// Reports a connection as [`Reporter::decided`] does, or the
+    /// `request` on it.
+    pub(super) fn requested(
+        &self,
+        allow: bool,
+        name: Option<&str>,
+        address: IpAddr,
+        port: u16,
+        request: Option<net::Request>,
+    ) {
         let harness: Vec<&str> = self.harness.iter().map(String::as_str).collect();
         let connection = net::Connection {
             name,
             address,
             port,
-            request: None,
+            request,
         };
         let proxied = net::proxied(&self.network, &harness, &connection);
         let about = Blocked::Connection {
@@ -186,6 +199,32 @@ impl Reporter {
                 port,
             } => self.decided(false, name.as_deref(), *address, *port),
         }
+        self.note(&blocked);
+    }
+
+    /// Reports a request on a connection to `name` at `address` on
+    /// `port` that the proxy allows or not, as a decision, and, if it
+    /// doesn't, its host as [`Reporter::report`] does.
+    pub(super) fn request(
+        &self,
+        allow: bool,
+        name: &str,
+        address: IpAddr,
+        port: u16,
+        request: net::Request,
+    ) {
+        self.requested(allow, Some(name), address, port, Some(request));
+        if !allow {
+            self.note(&Blocked::Connection {
+                name: Some(name.to_owned()),
+                address,
+                port,
+            });
+        }
+    }
+
+    /// Notes the host of `blocked`, unless it was noted already.
+    fn note(&self, blocked: &Blocked) {
         let mut hosts = self.hosts.borrow_mut();
         let host = blocked.host();
         if hosts.contains(&host) || hosts.len() > MOST_BLOCKED {
@@ -193,7 +232,7 @@ impl Reporter {
         }
         let message = match hosts.len() {
             MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
-            _ => write(&blocked),
+            _ => write(blocked),
         };
         // The socket doesn't wait. A report that doesn't fit is sent again
         // the next time the host is blocked.

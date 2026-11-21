@@ -22,9 +22,14 @@
 //! guest has sent nothing for a while. Every later plain HTTP request on it
 //! is checked too, and one that disagrees resets the connection.
 //!
+//! A TCP connection to a host with URL rules gets neither. The proxy
+//! connects first, and then reads every request on it, as [`decrypt`]
+//! says, decrypting TLS with the run's certificate authority.
+//!
 //! Before it confines itself, it makes the run's certificate authority, as
 //! [`Authority`] says, and sends `ap run` the authority's certificate, in
 //! PEM, as the first message on its standard output. The key stays here.
+//! It reads the roots in the file that `SSL_CERT_FILE` names then too.
 //!
 //! It confines itself before it reads a frame. It can then make IPv4 and
 //! IPv6 sockets, unless its rules can reach nothing, but it can't start a
@@ -38,12 +43,14 @@
 mod authority;
 pub mod blocked;
 mod decisions;
+mod decrypt;
 mod lookup;
 mod proxy;
 
 pub use authority::{Authority, Leaf};
 pub use blocked::{Reports, report};
 pub use decisions::Keeper;
+pub use decrypt::{Decryption, roots};
 pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;
 
@@ -223,6 +230,16 @@ pub fn main(args: &[OsString]) -> u8 {
         eprintln!("ap: can't send the run's certificate authority: {error}");
         return 1;
     }
+    let extra =
+        std::env::var_os("SSL_CERT_FILE").map_or_else(Vec::new, |path| roots(path.as_ref()));
+    // The key lives as long as the process serves.
+    let decryption = match Decryption::new(authority, extra) {
+        Ok(decryption) => decryption,
+        Err(error) => {
+            eprintln!("ap: can't set up decryption: {error}");
+            return 1;
+        }
+    };
     // A report or a question that doesn't fit is lost, rather than hold
     // up the guest's network.
     if let Err(error) = lookups.set_nonblocking(true) {
@@ -235,13 +252,13 @@ pub fn main(args: &[OsString]) -> u8 {
     let (mut proxy, confined) = match reaches_nothing(&network, &harness) {
         true => (Proxy::refusing().reporting(reporter), confine(link.as_fd())),
         false => (
-            Proxy::new(network, harness, lookups).reporting(reporter),
+            (Proxy::new(network, harness, lookups))
+                .decrypting(decryption)
+                .reporting(reporter),
             confine_connecting(link.as_fd()),
         ),
     };
     let served = confined.and_then(|()| proxy.serve(&link, &mut stack, &mut resolver));
-    // The key lives as long as the process serves.
-    drop(authority);
     match served {
         Ok(()) => 0,
         Err(error) => {

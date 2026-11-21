@@ -1907,9 +1907,8 @@ allow one.
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
   rules, traffic that isn't HTTP is denied. A request that the rules deny
   never reaches the server, and the proxy resets the connection it came on.
-  The requests before it on that connection still reach the server. The
-  proxy connects to the server before the first request, but nothing the
-  server sends reaches the guest until the rules allow a request. The
+  The proxy connects to the server before the first request, but nothing
+  the server sends reaches the guest until the rules allow a request. The
   proxy reads what the guest sends, and what the server answers passes
   unread.
 

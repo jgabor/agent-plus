@@ -379,7 +379,6 @@ fn server() -> (CertificateDer<'static>, Arc<ServerConfig>) {
 // spec(NETWORK): on hosts with URL rules, because the rules need the request path
 // spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 // spec(NETWORK): A request that the rules deny never reaches the server, and the proxy resets the connection it came on.
-// spec(NETWORK): The requests before it on that connection still reach the server.
 #[test]
 fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let (root, config) = server();
@@ -408,13 +407,6 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(denied, Some(&mut tls), &get("/allowed/../denied"));
     assert_eq!(answer, Err("reset".to_owned()));
-    // A request the rules allow, sent with a denied one after it, still
-    // reaches the destination, even before the proxy's own handshake.
-    let pipelined = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
-    let both = [get("/allowed/first"), get("/denied")].concat();
-    let answer = guest.exchange(pipelined, Some(&mut tls), &both);
-    assert_eq!(answer, Err("reset".to_owned()));
     // A guest that offers only HTTP/2 gets no protocol it can speak.
     let only_h2 = guest.connect();
     let mut tls = Guest::tls_offering(&guest.authority.clone(), &[b"h2"]);
@@ -428,15 +420,9 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     };
     assert!(answer.is_err(), "{answer:?}");
 
-    // The destination got the allowed requests alone, and was offered only
+    // The destination got the allowed request alone, and was offered only
     // HTTP/1.1 too.
-    assert_eq!(
-        settled(&seen),
-        [
-            "GET /allowed/a HTTP/1.1 (http/1.1)",
-            "GET /allowed/first HTTP/1.1 (http/1.1)"
-        ]
-    );
+    assert_eq!(settled(&seen), ["GET /allowed/a HTTP/1.1 (http/1.1)"]);
 }
 
 #[test]
@@ -461,6 +447,55 @@ fn a_destination_that_ends_before_its_handshake_still_resets_a_denied_guest() {
         Err("reset".to_owned())
     );
     assert!(started.elapsed() < WAIT / 2, "{:?}", started.elapsed());
+}
+
+#[test]
+fn a_guest_that_ends_before_any_request_leaves_no_connection_open() {
+    let (root, config) = server();
+    let (port, _) = destination(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    // Its handshake, then its close, and no request.
+    let deadline = Instant::now() + WAIT;
+    let mut buffer = [0; 16 * 1024];
+    let mut unsent = Vec::new();
+    while tls.is_handshaking() && Instant::now() < deadline {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        while tls.wants_write() {
+            tls.write_tls(&mut unsent).unwrap();
+        }
+        if socket.can_send() && !unsent.is_empty() {
+            let n = socket.send_slice(&unsent).unwrap();
+            unsent.drain(..n);
+        }
+        while socket.can_recv() {
+            let n = socket.recv_slice(&mut buffer).unwrap();
+            tls.read_tls(&mut &buffer[..n]).unwrap();
+            tls.process_new_packets().unwrap();
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!tls.is_handshaking());
+    tls.send_close_notify();
+    let mut out = Vec::new();
+    while tls.wants_write() {
+        tls.write_tls(&mut out).unwrap();
+    }
+    send_raw(&mut guest, handle, &out);
+    guest.sockets.get_mut::<tcp::Socket>(handle).close();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        guest.poll();
+        if guest.sockets.get_mut::<tcp::Socket>(handle).state() == tcp::State::Closed {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    let state = guest.sockets.get_mut::<tcp::Socket>(handle).state();
+    panic!("the proxy kept the connection open: {state}");
 }
 
 /// Sends `bytes` as they are on `handle`, and gives the guest a moment.
@@ -709,25 +744,11 @@ fn the_server_reaches_the_guest_only_once_a_request_is_allowed() {
             .is_ok_and(|a| a.starts_with("220 greeting\r\n")),
         "{answer:?}"
     );
-    // Plain HTTP too: what the rules allowed before a denied request goes
-    // on.
-    let pipelined = guest.connect();
-    let both = [get("/allowed/first"), get("/denied")].concat();
-    assert_eq!(
-        guest.exchange(pipelined, None, &both),
-        Err("reset".to_owned())
-    );
     let mut seen = settled(&seen);
     seen.sort();
     assert_eq!(
         seen,
-        [
-            "GET /allowed HTTP/1.1 (plain)",
-            "GET /allowed/first HTTP/1.1 (plain)",
-            "connected",
-            "connected",
-            "connected"
-        ]
+        ["GET /allowed HTTP/1.1 (plain)", "connected", "connected"]
     );
 }
 

@@ -289,6 +289,13 @@ mod tests {
     #[test]
     fn a_run_lists_each_host_once_and_at_most_100() {
         let (mine, theirs) = super::super::link().unwrap();
+        // The socket doesn't wait, as in the network process, and `ap run`
+        // reads as the reports arrive. So what fits in the socket's buffer,
+        // which differs between machines, decides nothing here.
+        let theirs = std::os::unix::net::UnixDatagram::from(theirs);
+        theirs.set_nonblocking(true).unwrap();
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
         let reporter = Reporter::new(
             std::os::fd::AsRawFd::as_raw_fd(&theirs),
             super::super::rules(&super::super::arguments(&[], &[]))
@@ -296,6 +303,8 @@ mod tests {
                 .0,
             Vec::new(),
         );
+        let mut reports = Reports::default();
+        let mut buffer = [0; 512];
         for round in 0..2 {
             for host in 0..150 {
                 reporter.report(Blocked::Lookup(format!("host{host}.example")));
@@ -306,15 +315,10 @@ mod tests {
                     address,
                     port,
                 });
+                while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+                    reports.take(&buffer[..len]);
+                }
             }
-        }
-        drop(theirs);
-        let mut reports = Reports::default();
-        let mut buffer = [0; 512];
-        let mine = std::os::unix::net::UnixDatagram::from(mine);
-        mine.set_nonblocking(true).unwrap();
-        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
-            reports.take(&buffer[..len]);
         }
         let args = super::super::arguments(&[], &[]);
         let text = report(&args, &reports).unwrap();

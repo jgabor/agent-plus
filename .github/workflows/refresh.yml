@@ -19,16 +19,17 @@ on:
 
 permissions: {}
 
-# A newer run replaces one that is still queued. That loses nothing, because
-# each run proves against the newest `main`.
-concurrency:
-  group: refresh
-  cancel-in-progress: false
-
 jobs:
   refresh:
     if: github.event_name != 'issues' || github.event.label.name == 'land-needed'
     runs-on: ubuntu-latest
+    # A newer run replaces one that is still queued. That loses nothing, because
+    # each run proves against the newest `main`. The group is on the job, so
+    # that a run this job skips never joins it. On the workflow, a label that
+    # starts no refresh would replace a queued run that does.
+    concurrency:
+      group: refresh
+      cancel-in-progress: false
     permissions:
       contents: write
       issues: write

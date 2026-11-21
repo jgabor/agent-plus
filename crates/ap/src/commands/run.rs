@@ -46,8 +46,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentfile::{
-    Destination, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings,
-    Share, ShareMode,
+    Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, ShareMode,
 };
 use ap::boot::Error;
 use ap::filter::Filter;
@@ -802,12 +801,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         })
         .collect::<Result<_, _>>()?;
     let merged = agentfile::with_typed_network(&instructions, &rules).map_err(unreadable)?;
-    let network = Network::read(&merged).map_err(unreadable)?;
-    let url_rule =
-        (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
-    if url_rule {
-        return Err(fail("URL rules in `NETWORK` are not built yet".to_owned()));
-    }
+    Network::read(&merged).map_err(unreadable)?;
     // A build records that the agent has a `PROMPT`, though not the text,
     // which only the guest reads.
     let built_prompt = record

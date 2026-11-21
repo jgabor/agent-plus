@@ -259,7 +259,7 @@ fn a_flag_that_isnt_built_yet_is_named() {
 }
 
 #[test]
-fn an_agent_with_host_and_ip_rules_runs_and_one_with_a_url_rule_fails_before_its_vm_starts() {
+fn an_agent_with_host_ip_and_url_rules_runs() {
     let scratch = Scratch::new("network");
     for (name, network) in [
         ("open", "NETWORK +\n"),
@@ -268,18 +268,11 @@ fn an_agent_with_host_and_ip_rules_runs_and_one_with_a_url_rule_fails_before_its
             "rule",
             "NETWORK -\nNETWORK +example.com\nNETWORK +192.0.2.0/24\n",
         ),
+        ("url", "NETWORK -\nNETWORK +https://codeberg.org/forgejo\n"),
     ] {
         scratch.build(name, &format!("AGENT claude:0.0.0\nOS minimal\n{network}"));
         past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[]));
     }
-    scratch.build(
-        "url",
-        "AGENT claude:0.0.0\nOS minimal\nNETWORK -\nNETWORK +https://codeberg.org/forgejo\n",
-    );
-    refused(
-        &scratch.ap(&["run", "url", "-p", "hi"], &[]),
-        "URL rules in `NETWORK` are not built yet",
-    );
 }
 
 // spec(Grants): Options you type on the command line (for example, `ap run --share .`) are already your decision and need no approval.
@@ -312,21 +305,16 @@ fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
         &scratch.ap(&["run", "closed", "--network=example.com", "-p", "hi"], &[]),
         "`--network=example.com`: a `NETWORK` rule starts with `+` or `-`",
     );
-    // A URL rule fails here as it does in the Agentfile, until the proxy
-    // decrypts.
-    refused(
-        &scratch.ap(
-            &[
-                "run",
-                "closed",
-                "--network=+https://codeberg.org/forgejo",
-                "-p",
-                "hi",
-            ],
-            &[],
-        ),
-        "URL rules in `NETWORK` are not built yet",
-    );
+    past_checks(&scratch.ap(
+        &[
+            "run",
+            "closed",
+            "--network=+https://codeberg.org/forgejo",
+            "-p",
+            "hi",
+        ],
+        &[],
+    ));
 }
 
 #[test]

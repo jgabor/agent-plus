@@ -94,9 +94,11 @@ impl Guard for Checked {
 enum Step {
     /// Waits for the answer with this id.
     Asking(u32),
-    /// Waits for `socket` to connect, with `rest` to try after it.
+    /// Waits for `socket` to connect to `address`, with `rest` to try
+    /// after it.
     Connecting {
         socket: OwnedFd,
+        address: IpAddr,
         rest: Vec<IpAddr>,
         since: Instant,
     },
@@ -108,8 +110,9 @@ struct Waiting {
     flow: Flow,
     upstream: TcpStream,
     since: Instant,
-    /// The name whose URL rules decide each request, if any do.
-    requests: Option<String>,
+    /// The name whose URL rules decide each request, if any do, and the
+    /// address connected to.
+    requests: Option<(String, IpAddr)>,
 }
 
 /// What reads a connection that the rules allow.
@@ -508,6 +511,7 @@ impl Proxy {
                 socket,
                 rest,
                 since,
+                ..
             } = &mut opening.step
             else {
                 at += 1;
@@ -522,7 +526,10 @@ impl Proxy {
             let connected = done.then(|| socket_error(fd)).and_then(Result::ok) == Some(0);
             if connected {
                 let opening = self.opening.remove(at);
-                let Step::Connecting { socket, .. } = opening.step else {
+                let Step::Connecting {
+                    socket, address, ..
+                } = opening.step
+                else {
                     unreachable!()
                 };
                 let upstream = TcpStream::from(socket);
@@ -533,7 +540,9 @@ impl Proxy {
                             flow: opening.flow,
                             upstream,
                             since: now,
-                            requests: opening.name.filter(|_| opening.requests),
+                            requests: (opening.name)
+                                .filter(|_| opening.requests)
+                                .map(|name| (name, address)),
                         });
                     }
                     Guest::Taken(id, check, passed) => {
@@ -569,16 +578,13 @@ impl Proxy {
             });
             if let Some(at) = paired {
                 let waiting = self.waiting.remove(at);
-                let Some(name) = waiting.requests else {
-                    self.pipes.push(Pipe::new(connection.id, waiting.upstream));
-                    continue;
-                };
-                match Decrypted::new(connection.id, waiting.upstream, &name) {
-                    Ok(decrypted) => self.decrypted.push(decrypted),
-                    Err(_) => {
-                        stack.abort(connection.id);
-                        stack.forget(connection.id);
+                match waiting.requests {
+                    Some((name, address)) => {
+                        let to = SocketAddr::new(address, connection.destination.port());
+                        let decrypted = Decrypted::new(connection.id, waiting.upstream, &name, to);
+                        self.decrypted.push(decrypted);
                     }
+                    None => self.pipes.push(Pipe::new(connection.id, waiting.upstream)),
                 }
                 continue;
             }
@@ -849,6 +855,7 @@ fn connecting(mut addresses: Vec<IpAddr>, port: u16, now: Instant) -> Option<Ste
         if let Ok(socket) = open(SocketAddr::new(address, port), libc::SOCK_STREAM) {
             return Some(Step::Connecting {
                 socket,
+                address,
                 rest: addresses,
                 since: now,
             });

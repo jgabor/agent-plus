@@ -12,7 +12,7 @@
 //! and the connection ends with a reset. So does traffic that isn't HTTP.
 
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -128,17 +128,21 @@ enum Stage {
 
 impl Decrypted {
     /// The connection `id`, which the stack accepted, to `name`, whose
-    /// destination is `upstream`, connected and non-blocking.
-    pub(super) fn new(id: ConnectionId, upstream: TcpStream, name: &str) -> io::Result<Decrypted> {
-        let peer = upstream.peer_addr()?;
+    /// destination is `upstream`, connected to `to` and non-blocking.
+    pub(super) fn new(
+        id: ConnectionId,
+        upstream: TcpStream,
+        name: &str,
+        to: SocketAddr,
+    ) -> Decrypted {
         let name = name.to_ascii_lowercase();
-        Ok(Decrypted {
+        Decrypted {
             id,
             upstream,
             check: NameCheck::requests(&name),
             name: name.trim_end_matches('.').to_owned(),
-            address: peer.ip(),
-            port: peer.port(),
+            address: to.ip(),
+            port: to.port(),
             stage: Stage::First,
             to_guest: Vec::new(),
             to_upstream: Vec::new(),
@@ -146,7 +150,7 @@ impl Decrypted {
             shut: false,
             upstream_closed: false,
             closed: false,
-        })
+        }
     }
 
     /// The stream, for the caller to wait on.
@@ -204,7 +208,7 @@ impl Decrypted {
                 let n = stack.recv(self.id, &mut buffer);
                 if n > 0 {
                     moved = true;
-                    self.from_guest(&buffer[..n], decryption, decide)?;
+                    self.guest_sent(&buffer[..n], decryption, decide)?;
                 } else if stack.received_all(self.id) {
                     self.guest_ended()?;
                 }
@@ -242,7 +246,7 @@ impl Decrypted {
                     }
                     Ok(n) => {
                         moved = true;
-                        self.from_upstream(&buffer[..n])?;
+                        self.upstream_sent(&buffer[..n])?;
                     }
                     Err(error) if waited(&error) => {}
                     Err(error) => return Err(error),
@@ -282,7 +286,7 @@ impl Decrypted {
         !self.guest_closed && self.to_upstream.is_empty() && !waiting
     }
 
-    fn from_guest(
+    fn guest_sent(
         &mut self,
         mut input: &[u8],
         decryption: Option<&Decryption>,
@@ -393,7 +397,7 @@ impl Decrypted {
     }
 
     /// Passes what came from the destination to the guest.
-    fn from_upstream(&mut self, mut input: &[u8]) -> io::Result<()> {
+    fn upstream_sent(&mut self, mut input: &[u8]) -> io::Result<()> {
         let Stage::Tls(guest, client) = &mut self.stage else {
             self.to_guest.extend_from_slice(input);
             return Ok(());

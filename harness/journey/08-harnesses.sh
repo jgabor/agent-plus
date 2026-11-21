@@ -112,10 +112,10 @@ build codex codex:latest
 
 # Claude Code reports its `init` event before it needs a sign-in. With no
 # credentials, it exits after that, so the probe needs no input. It prints
-# the event only once its start is done, which keeps the guest's one vCPU
-# busy for 40 to 140 seconds on a loaded machine, with no wait on the
-# network. The deadline is far past that, because Claude Code exits as soon
-# as it has reported, so a slow start costs only its own time.
+# the event only once its start is done, which took 38 to 132 seconds on a
+# loaded machine. A traced start kept making progress the whole time, with
+# no wait on the network. The deadline is far past that, because Claude Code
+# exits as soon as it has reported, so a slow start costs only its own time.
 start claude
 in_home "$run"
 timeout -k 10 600 ap exec "$run" claude -p "Say what you can see." \

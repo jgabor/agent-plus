@@ -332,7 +332,8 @@ impl Repo {
     /// says whether before or after doing the call, `HANG_ON` makes a matching
     /// call sleep for `HANG_FOR` seconds, or 3, and with `HANG_UNTIL` a later
     /// matching call sleeps until that many seconds after the first one
-    /// started. `RUN_ON` runs `RUN_COMMAND` just before the first matching call. The fake `gh` keeps the newest state posted on each
+    /// started. `RUN_ON` runs `RUN_COMMAND` just before the first matching call,
+    /// even one that then hangs. The fake `gh` keeps the newest state posted on each
     /// commit, and gives it back when asked for that commit's status.
     fn write_tools(&self) {
         let bin = self.bin.display();
@@ -345,6 +346,9 @@ maybe_kill() {{
     case "$call" in *"$KILL_ON"*) : > '{bin}/killed'; kill -9 "$PPID"; exit 9 ;; esac
   fi
 }}
+if [ -n "$RUN_ON" ] && [ ! -f '{bin}/ran' ]; then
+  case "$call" in *"$RUN_ON"*) : > '{bin}/ran'; eval "$RUN_COMMAND" ;; esac
+fi
 if [ -n "$HANG_ON" ]; then
   case "$call" in *"$HANG_ON"*)
     if [ -n "$HANG_UNTIL" ] && [ -f '{bin}/hung' ]; then
@@ -353,9 +357,6 @@ if [ -n "$HANG_ON" ]; then
     fi
     date +%s > '{bin}/hung'; exec sleep "${{HANG_FOR:-3}}" ;;
   esac
-fi
-if [ -n "$RUN_ON" ] && [ ! -f '{bin}/ran' ]; then
-  case "$call" in *"$RUN_ON"*) : > '{bin}/ran'; eval "$RUN_COMMAND" ;; esac
 fi
 maybe_kill before
 "#
@@ -3068,17 +3069,17 @@ fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     repo.set_land_needed(&[7]);
     repo.git(&["checkout", "-q", "main"]);
     // `prepare` refuses the PR before the fetch, so only the gate of `main`
-    // formats. It starts the stray, and then hangs for far longer than the
-    // timeout.
+    // asks for the formatter, which is the first thing it does. That call
+    // starts the stray, and then hangs for far longer than the timeout.
     let started = Instant::now();
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .arg("refresh")
         .env("RUN_ON", "cargo fmt --version")
         .env("RUN_COMMAND", stray(&repo))
-        .env("HANG_ON", "cargo fmt --all")
+        .env("HANG_ON", "cargo fmt --version")
         .env("HANG_FOR", "60")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "10")
         .output()
         .unwrap();
     assert_eq!(
@@ -3091,8 +3092,10 @@ fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     assert!(started.elapsed() < Duration::from_secs(30), "{output:?}");
     let said = stderr(&output);
     let why =
-        "refresh: `main` can't be proven on the runner: its gate ran past the 1 second timeout";
+        "refresh: `main` can't be proven on the runner: its gate ran past the 10 second timeout";
     assert!(said.contains(why), "{said}");
+    // The timeout stopped the hang, and not a gate that was only slow.
+    assert!(repo.bin.join("hung").exists(), "{said}");
     assert_stray_stopped(&repo);
     let calls = repo.calls();
     for number in [9, 7] {

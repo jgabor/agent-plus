@@ -444,13 +444,16 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
         .stderr(Stdio::null())
         .process_group(0)
         .spawn();
-    if let Err(error) = watcher {
-        stop_group(group);
-        let _ = child.wait();
-        return Err(Problem(format!(
-            "couldn't start the gate's watcher: {error}"
-        )));
-    }
+    let mut watcher = match watcher {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            stop_group(group);
+            let _ = child.wait();
+            return Err(Problem(format!(
+                "couldn't start the gate's watcher: {error}"
+            )));
+        }
+    };
     let (ended, end) = mpsc::channel::<()>();
     let timer = thread::spawn(move || {
         let late =
@@ -469,15 +472,20 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
             }
         }
     }
-    // The gate isn't reaped yet, so its group is still its own, and a timer
-    // that fires now stops nothing else.
+    // Until the gate is reaped, its group is its own, so the timer and this
+    // stop nothing else. This stops what the gate left running, before its
+    // tree goes. After it, the watcher has nothing to stop, and it mustn't
+    // signal a group that is gone.
     drop(ended);
     let timed_out = timer.join().unwrap_or(false);
-    let status = child
-        .wait()
-        .map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
+    stop_group(group);
+    let status = child.wait();
+    let _ = watcher.kill();
+    let _ = watcher.wait();
+    let status = status.map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
     Ok(match (status.success(), failed.is_empty()) {
-        _ if timed_out => Some(format!("its gate ran past the {seconds} second timeout")),
+        // A gate that passed just as the timer fired did pass.
+        (false, _) if timed_out => Some(format!("its gate ran past the {seconds} second timeout")),
         (true, _) => None,
         (false, false) => Some(format!("Failed: {}", failed.join(", "))),
         (false, true) => Some(format!("its gate stopped: {status}")),

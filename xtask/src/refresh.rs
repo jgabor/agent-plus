@@ -422,6 +422,10 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(MAIN_SECONDS);
+    // Made first, so that nothing can fail between the gate's start and its
+    // watcher's.
+    let (watched, _alive) =
+        io::pipe().map_err(|e| Problem(format!("couldn't make a pipe: {e}")))?;
     let mut child = Command::new(program)
         .arg("gate")
         .current_dir(&tree.path)
@@ -433,8 +437,6 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
         .spawn()
         .map_err(|e| Problem(format!("couldn't start the gate: {e}")))?;
     let group = child.id();
-    let (watched, _alive) =
-        io::pipe().map_err(|e| Problem(format!("couldn't make a pipe: {e}")))?;
     let watcher = Command::new("sh")
         .args(["-c", WATCHER, "sh", &group.to_string()])
         .stdin(watched)

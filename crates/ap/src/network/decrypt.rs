@@ -303,12 +303,15 @@ impl Decrypted {
     }
 
     /// Whether it reads more from the guest: only once what came before has
-    /// gone on, and, once the guest's handshake is done, only once the
-    /// destination's is too.
+    /// gone on, and, once the rules allowed a request, only once the
+    /// destination's handshake is done. Until then, the check holds at most
+    /// a head, so a denied request or a close is seen however long the
+    /// destination takes.
     fn takes_from_guest(&self) -> bool {
         let waiting = match &self.stage {
             Stage::Tls(guest, client) => {
-                client.wants_write() || (client.is_handshaking() && !guest.is_handshaking())
+                client.wants_write()
+                    || (client.is_handshaking() && !guest.is_handshaking() && self.allowed)
             }
             _ => false,
         };

@@ -160,7 +160,13 @@ impl Decrypted {
 
     /// Whether it waits to read the stream.
     pub(super) fn wants_to_read(&self) -> bool {
-        let reading = matches!(self.stage, Stage::Tls(..) | Stage::Plain);
+        // Nothing comes from the destination until the guest's handshake is
+        // done, so nothing waits in the guest's side unsent.
+        let reading = match &self.stage {
+            Stage::Tls(guest, _) => !guest.is_handshaking(),
+            Stage::Plain => true,
+            Stage::First | Stage::Hello(..) => false,
+        };
         reading && !self.upstream_closed && self.to_guest.is_empty()
     }
 
@@ -238,12 +244,10 @@ impl Decrypted {
             // From the destination.
             if self.wants_to_read() {
                 match (&self.upstream).read(&mut buffer) {
-                    Ok(0) => {
-                        self.upstream_closed = true;
-                        if let Stage::Tls(guest, _) = &mut self.stage {
-                            guest.send_close_notify();
-                        }
-                    }
+                    // A destination that ends TLS sent its `close_notify`, which
+                    // the guest got. One that only closes TCP cut the guest
+                    // off, so the guest's side ends the same way.
+                    Ok(0) => self.upstream_closed = true,
                     Ok(n) => {
                         moved = true;
                         self.upstream_sent(&buffer[..n])?;
@@ -354,7 +358,10 @@ impl Decrypted {
                     let Stage::Tls(guest, _) = &mut self.stage else {
                         unreachable!()
                     };
-                    guest.read_tls(&mut input)?;
+                    // Nothing more is read once the guest has ended TLS.
+                    if guest.read_tls(&mut input)? == 0 {
+                        break;
+                    }
                     guest.process_new_packets().map_err(io::Error::other)?;
                     self.decrypted(&mut allows)?;
                 }
@@ -404,7 +411,11 @@ impl Decrypted {
         };
         let mut buffer = [0; BUFFER];
         while !input.is_empty() {
-            client.read_tls(&mut input)?;
+            // Nothing more is read once the destination has ended TLS.
+            if client.read_tls(&mut input)? == 0 {
+                self.upstream_closed = true;
+                break;
+            }
             client.process_new_packets().map_err(io::Error::other)?;
             loop {
                 match client.reader().read(&mut buffer) {

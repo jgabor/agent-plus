@@ -821,8 +821,9 @@ fn allowed(
         .collect();
     let check = match (requests, by_name) {
         (true, _) => Check::Requests,
-        (false, true) => Check::Name,
-        (false, false) => Check::Unread,
+        // The name check reads TCP alone.
+        (false, true) if tcp => Check::Name,
+        (false, _) => Check::Unread,
     };
     (allowed, check)
 }

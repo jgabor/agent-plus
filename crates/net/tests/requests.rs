@@ -60,6 +60,8 @@ fn anything_that_isn_t_http_is_refused() {
         b"\0\0\0\0",
         b"GET /allowed HTTP/1.1\r\nHost: example.com\r\n\r\n",
         b"GET http://host.ap.internal/allowed HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n",
+        // An HTTP/1.0 server may read the body to the connection's end.
+        b"POST /allowed HTTP/1.0\r\nHost: host.ap.internal\r\nTransfer-Encoding: chunked\r\n\r\n",
     ] {
         let (out, result, _) = fed(input, input.len());
         assert_eq!(result, Err(Refused), "{}", input.escape_ascii());

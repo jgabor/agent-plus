@@ -323,7 +323,8 @@ fn head(
     let mut encodings = named("transfer-encoding");
     let mut lengths = named("content-length");
     let body = match (encodings.next(), lengths.next()) {
-        (Some(encoding), None) if encodings.next().is_none() => {
+        // An HTTP/1.0 server may ignore `Transfer-Encoding`.
+        (Some(encoding), None) if encodings.next().is_none() && parsed.version == Some(1) => {
             match encoding.eq_ignore_ascii_case(b"chunked") {
                 true => Http::ChunkSize,
                 false => return Err(Refused),

@@ -184,6 +184,12 @@ impl Guest {
     /// A TLS client for `host.ap.internal`, which trusts only `root`, and
     /// offers HTTP/2 and HTTP/1.1.
     fn tls(root: &CertificateDer<'static>) -> ClientConnection {
+        Guest::tls_offering(root, &[b"h2", b"http/1.1"])
+    }
+
+    /// A TLS client for `host.ap.internal`, which trusts only `root`, and
+    /// offers `protocols`.
+    fn tls_offering(root: &CertificateDer<'static>, protocols: &[&[u8]]) -> ClientConnection {
         let mut roots = RootCertStore::empty();
         roots.add(root.clone()).unwrap();
         let provider = Arc::new(rustls_graviola::default_provider());
@@ -192,7 +198,7 @@ impl Guest {
             .unwrap()
             .with_root_certificates(roots)
             .with_no_client_auth();
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
         let name = ServerName::try_from(NAME).unwrap();
         ClientConnection::new(Arc::new(config), name).unwrap()
     }
@@ -310,33 +316,35 @@ fn destination(tls: Option<Arc<ServerConfig>>) -> (u16, Seen) {
 }
 
 /// Answers each request on `stream`, and notes its request line, and what
-/// `how` says of the stream.
+/// `how` says of the stream. Bytes that end before a whole head are noted
+/// too, as `partial`.
 fn answer<S: Read + Write>(stream: &mut S, noted: &Seen, how: impl Fn(&S) -> String) {
+    let mut reader = BufReader::new(stream);
     loop {
-        let mut reader = BufReader::new(&mut *stream);
+        let mut head = String::new();
         let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        loop {
-            let mut header = String::new();
-            if reader.read_line(&mut header).unwrap_or(0) == 0 {
+        while line != "\r\n" {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                if !head.is_empty() {
+                    noted
+                        .lock()
+                        .unwrap()
+                        .push(format!("partial {}", head.escape_debug()));
+                }
                 return;
             }
-            if header == "\r\n" {
-                break;
-            }
+            head.push_str(&line);
         }
-        drop(reader);
-        noted
-            .lock()
-            .unwrap()
-            .push(format!("{} ({})", line.trim_end(), how(stream)));
-        let target = line.split(' ').nth(1).unwrap_or_default().to_owned();
+        let first = head.lines().next().unwrap_or_default().to_owned();
+        let shown = format!("{first} ({})", how(reader.get_ref()));
+        noted.lock().unwrap().push(shown);
+        let target = first.split(' ').nth(1).unwrap_or_default().to_owned();
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{target}",
             target.len()
         );
+        let stream = reader.get_mut();
         if stream.write_all(response.as_bytes()).is_err() || stream.flush().is_err() {
             return;
         }
@@ -370,6 +378,7 @@ fn server() -> (CertificateDer<'static>, Arc<ServerConfig>) {
 // spec(NETWORK): **Decryption.** The proxy decrypts TLS, with the per-run certificate authority, only where it must.
 // spec(NETWORK): on hosts with URL rules, because the rules need the request path
 // spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
+// spec(NETWORK): A request that the rules deny never reaches the server, and the proxy resets the connection it came on.
 #[test]
 fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let (root, config) = server();
@@ -389,13 +398,19 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     // The guest's side is the run's authority's, and offered only
     // HTTP/1.1.
     assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
-    // A second request on the same connection, which the rules deny.
+    // A second request on the same connection, which the rules deny,
+    // resets it.
     let answer = guest.exchange(reused, Some(&mut tls), &get("/denied"));
-    assert!(answer.is_err(), "{answer:?}");
+    assert_eq!(answer, Err("reset".to_owned()));
 
     let denied = guest.connect();
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(denied, Some(&mut tls), &get("/allowed/../denied"));
+    assert_eq!(answer, Err("reset".to_owned()));
+    // A guest that offers only HTTP/2 gets no protocol it can speak.
+    let only_h2 = guest.connect();
+    let mut tls = Guest::tls_offering(&guest.authority.clone(), &[b"h2"]);
+    let answer = guest.exchange(only_h2, Some(&mut tls), &get("/allowed/h2"));
     assert!(answer.is_err(), "{answer:?}");
     let answer = {
         let other = guest.connect();
@@ -408,6 +423,97 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     // The destination got the allowed request alone, and was offered only
     // HTTP/1.1 too.
     assert_eq!(settled(&seen), ["GET /allowed/a HTTP/1.1 (http/1.1)"]);
+}
+
+/// Sends `bytes` as they are on `handle`, and gives the guest a moment.
+fn send_raw(guest: &mut Guest, handle: SocketHandle, bytes: &[u8]) {
+    let deadline = Instant::now() + WAIT;
+    let mut unsent = bytes;
+    while !unsent.is_empty() && Instant::now() < deadline {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        if socket.can_send() {
+            let n = socket.send_slice(unsent).unwrap();
+            unsent = &unsent[n..];
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    for _ in 0..100 {
+        guest.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// TLS records after `close_notify`, which nothing reads: more than
+/// rustls reads at once.
+fn after_close() -> Vec<u8> {
+    [0x17, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5].repeat(1000)
+}
+
+#[test]
+fn bytes_after_either_side_ends_tls_hold_up_no_other_connection() {
+    let (root, config) = server();
+    let (port, seen) = destination(Some(Arc::clone(&config)));
+    // A destination that answers, then ends TLS and sends a record more.
+    let ending = TcpListener::bind("127.0.0.1:0").unwrap();
+    let ending_port = ending.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in ending.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut server = ServerConnection::new(Arc::clone(&config)).unwrap();
+            let mut tls = rustls::Stream::new(&mut server, &mut stream);
+            let mut line = String::new();
+            let _ = BufReader::new(&mut tls).read_line(&mut line);
+            let _ = tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nend");
+            server.send_close_notify();
+            let mut bytes = Vec::new();
+            while server.wants_write() {
+                let _ = server.write_tls(&mut bytes);
+            }
+            bytes.extend(after_close());
+            let _ = stream.write_all(&bytes);
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+    let rules = format!(
+        "NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\nNETWORK +https://{NAME}:{ending_port}/allowed\n"
+    );
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let authority = guest.authority.clone();
+
+    // The guest ends TLS, and sends a record more.
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&authority);
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/a"));
+    assert!(answer.is_ok(), "{answer:?}");
+    tls.send_close_notify();
+    let mut bytes = Vec::new();
+    while tls.wants_write() {
+        tls.write_tls(&mut bytes).unwrap();
+    }
+    bytes.extend(after_close());
+    send_raw(&mut guest, handle, &bytes);
+
+    // The destination does.
+    guest.port = ending_port;
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&authority);
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/end"));
+    assert!(answer.is_ok(), "{answer:?}");
+
+    // The proxy still serves.
+    guest.port = port;
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&authority);
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/b"));
+    assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(
+        settled(&seen),
+        [
+            "GET /allowed/a HTTP/1.1 (http/1.1)",
+            "GET /allowed/b HTTP/1.1 (http/1.1)"
+        ]
+    );
 }
 
 // spec(NETWORK): The proxy verifies an upstream server's certificate against the root certificates compiled into `ap`, plus those in the file that `SSL_CERT_FILE` names in your host's environment.
@@ -460,6 +566,6 @@ fn traffic_that_isn_t_http_is_denied_on_a_host_with_url_rules() {
     let answer = guest.exchange(handle, None, &get("/allowed"));
     assert!(answer.is_ok(), "{answer:?}");
     let answer = guest.exchange(handle, None, &get("/denied"));
-    assert!(answer.is_err(), "{answer:?}");
+    assert_eq!(answer, Err("reset".to_owned()));
     assert_eq!(settled(&seen), ["GET /allowed HTTP/1.1 (plain)"]);
 }

@@ -1902,7 +1902,8 @@ allow one.
   On a decrypted connection, the proxy verifies the upstream server's
   certificate and checks every request's host and path, including each
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
-  rules, traffic that isn't HTTP is denied.
+  rules, traffic that isn't HTTP is denied. A request that the rules deny
+  never reaches the server, and the proxy resets the connection it came on.
 
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that

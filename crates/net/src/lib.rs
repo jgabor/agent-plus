@@ -2,6 +2,10 @@
 //! by the evaluation under NETWORK in SPEC.md. It is pure functions: the
 //! resolver and the proxy hand it what they know of a connection.
 
+mod check;
+
+pub use check::{NameCheck, Refused};
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use agentfile::{Destination, Instruction, Network, NetworkRule, Scheme, Sign};
@@ -122,6 +126,18 @@ pub enum Proxied<'a> {
 }
 
 impl Proxied<'_> {
+    /// Whether a name decided: a host or URL rule, or the name being a
+    /// harness host. Such a connection gets the name check.
+    pub fn by_name(&self) -> bool {
+        match self {
+            Proxied::Decided(Decision {
+                by: By::Rule(rule), ..
+            }) => !matches!(rule.destination, Destination::Address { .. }),
+            Proxied::Harness => true,
+            Proxied::Decided(_) | Proxied::Loopback => false,
+        }
+    }
+
     pub fn allows(&self) -> bool {
         match self {
             Proxied::Decided(decision) => decision.sign == Sign::Allow,

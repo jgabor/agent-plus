@@ -12,7 +12,7 @@
 mod pipe;
 mod resolver;
 
-pub use pipe::Pipe;
+pub use pipe::{Guard, Pipe};
 pub use resolver::{Pool, Resolver};
 
 use std::collections::{BTreeMap, VecDeque};

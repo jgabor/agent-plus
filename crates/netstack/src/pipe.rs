@@ -1,7 +1,8 @@
 //! Forwards one connection the stack accepted to a TCP stream the caller
 //! opened to its real destination. The bytes pass both ways unchanged, a
 //! close from either side reaches the other as a close, and an error on
-//! the stream resets the guest's connection.
+//! the stream resets the guest's connection. A [`Guard`] can read what the
+//! guest sends before it passes, and end the connection.
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -11,9 +12,20 @@ use crate::{ConnectionId, Stack};
 /// Bytes the pipe holds in each direction.
 const BUFFER: usize = 16 * 1024;
 
+/// Reads what the guest sends on a connection before it reaches the stream.
+pub trait Guard {
+    /// Takes `input`, which the guest sent next, and adds what may pass to
+    /// `out`. False ends the connection with a reset.
+    fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool;
+    /// Whether it holds bytes that can't pass until more come. A guest that
+    /// closes while it does gets a reset, and the stream gets nothing more.
+    fn holding(&self) -> bool;
+}
+
 pub struct Pipe {
     id: ConnectionId,
     upstream: TcpStream,
+    guard: Option<Box<dyn Guard>>,
     to_upstream: Vec<u8>,
     to_guest: Vec<u8>,
     /// The guest closed its half, and the stream's write half is shut.
@@ -31,11 +43,27 @@ impl Pipe {
         Pipe {
             id,
             upstream,
+            guard: None,
             to_upstream: Vec::with_capacity(BUFFER),
             to_guest: Vec::with_capacity(BUFFER),
             guest_closed: false,
             upstream_closed: false,
             closed: false,
+        }
+    }
+
+    /// A pipe like [`Pipe::new`]'s, which first sends `passed`, and passes
+    /// what the guest sends after it through `guard`.
+    pub fn guarded(
+        id: ConnectionId,
+        upstream: TcpStream,
+        passed: Vec<u8>,
+        guard: Box<dyn Guard>,
+    ) -> Pipe {
+        Pipe {
+            guard: Some(guard),
+            to_upstream: passed,
+            ..Pipe::new(id, upstream)
         }
     }
 
@@ -79,8 +107,19 @@ impl Pipe {
             // From the guest to the stream.
             if self.to_upstream.is_empty() && !self.guest_closed {
                 let n = stack.recv(self.id, &mut buffer);
-                self.to_upstream.extend_from_slice(&buffer[..n]);
+                match &mut self.guard {
+                    Some(guard) => {
+                        if !guard.feed(&buffer[..n], &mut self.to_upstream) {
+                            return Err(io::Error::other("the guard refused the connection"));
+                        }
+                        moved = n > 0;
+                    }
+                    None => self.to_upstream.extend_from_slice(&buffer[..n]),
+                }
                 if n == 0 && stack.received_all(self.id) {
+                    if self.guard.as_ref().is_some_and(|guard| guard.holding()) {
+                        return Err(io::Error::other("the guest closed before its check"));
+                    }
                     self.guest_closed = true;
                     self.upstream.shutdown(Shutdown::Write)?;
                 }

@@ -11,8 +11,8 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use agentfile::Network;
-use net::{Blocked, Connection, YOUR_HOST, proxied};
-use netstack::{Flow, Pipe, Resolver, Stack, Verdict};
+use net::{Blocked, Connection, NameCheck, YOUR_HOST, proxied};
+use netstack::{ConnectionId, Flow, Guard, Pipe, Resolver, Stack, Verdict};
 use vmm::net::MAX_FRAME;
 
 use super::RECEIVE_WAIT;
@@ -24,6 +24,10 @@ const LOOKUP_WAIT: Duration = Duration::from_secs(15);
 const CONNECT_WAIT: Duration = Duration::from_secs(15);
 /// How long an open connection waits for the guest to finish its handshake.
 const ACCEPT_WAIT: Duration = Duration::from_secs(30);
+/// How long a connection that a name decided waits for the guest to send
+/// first, before it connects anyway, for a protocol where the server
+/// speaks first.
+const SILENT_WAIT: Duration = Duration::from_millis(250);
 /// How long a UDP flow lasts with no datagram either way.
 const UDP_IDLE: Duration = Duration::from_secs(60);
 /// The datagrams a UDP flow keeps while it waits for its lookup.
@@ -39,12 +43,48 @@ enum Target {
     Addresses(Option<String>, Vec<IpAddr>),
 }
 
-/// A TCP connection the stack holds at its SYN.
+/// A TCP connection that waits for its destination to open.
 struct Opening {
     flow: Flow,
     name: Option<String>,
     since: Instant,
     step: Step,
+    guest: Guest,
+}
+
+/// The guest's end of an opening connection.
+enum Guest {
+    /// The stack holds its SYN.
+    Held,
+    /// The stack took it, and its name check passed these bytes.
+    Taken(ConnectionId, Box<NameCheck>, Vec<u8>),
+}
+
+/// A connection that a name decided, which the stack takes before the
+/// proxy connects, to read the guest's first bytes.
+struct Checking {
+    flow: Flow,
+    /// The connection, once the stack accepted it, and when.
+    accepted: Option<(ConnectionId, Instant)>,
+    check: Box<NameCheck>,
+    /// What the check has passed.
+    passed: Vec<u8>,
+    /// The addresses to connect to, once it has.
+    addresses: Vec<IpAddr>,
+    since: Instant,
+}
+
+/// The name check, as a pipe's guard.
+struct Checked(Box<NameCheck>);
+
+impl Guard for Checked {
+    fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
+        self.0.feed(input, out).is_ok()
+    }
+
+    fn holding(&self) -> bool {
+        self.0.holding()
+    }
 }
 
 enum Step {
@@ -86,6 +126,7 @@ pub struct Proxy {
     /// every flow is refused.
     policy: Option<(Network, Vec<String>, Asker)>,
     opening: Vec<Opening>,
+    checking: Vec<Checking>,
     waiting: Vec<Waiting>,
     pipes: Vec<Pipe>,
     flows: Vec<UdpFlow>,
@@ -108,6 +149,7 @@ impl Proxy {
         Proxy {
             policy: None,
             opening: Vec::new(),
+            checking: Vec::new(),
             waiting: Vec::new(),
             pipes: Vec::new(),
             flows: Vec::new(),
@@ -153,6 +195,7 @@ impl Proxy {
             self.answers(stack, now)?;
             self.connects(stack, &ready, now);
             self.accept(stack, now);
+            self.checks(stack, now);
             self.datagrams(stack, resolver, now);
             self.pipes.retain_mut(|pipe| pipe.pump(stack));
             stack.poll(Instant::now());
@@ -278,7 +321,7 @@ impl Proxy {
                 }
             }
             Target::Addresses(name, addresses) => {
-                let allowed = allowed(
+                let (allowed, checked) = allowed(
                     network,
                     &hosts,
                     name.as_deref(),
@@ -291,6 +334,10 @@ impl Proxy {
                 }
                 if let Some(reporter) = reporter {
                     reporter.decided(true, name.as_deref(), allowed[0], destination.port());
+                }
+                if let (true, Some(name)) = (tcp && checked, &name) {
+                    self.checking.push(Checking::new(*flow, name, allowed, now));
+                    return Verdict::Take;
                 }
                 (name, Err(allowed))
             }
@@ -309,6 +356,7 @@ impl Proxy {
                 name,
                 since: now,
                 step,
+                guest: Guest::Held,
             });
             return Verdict::Hold;
         }
@@ -341,14 +389,16 @@ impl Proxy {
             {
                 let opening = &mut self.opening[at];
                 let port = flow_destination(&opening.flow).port();
-                let allowed = allowed(network, &hosts, opening.name.as_deref(), port, &addresses);
-                answered(
-                    self.reporter.as_deref(),
-                    opening.name.as_deref(),
-                    port,
-                    &addresses,
-                    &allowed,
-                );
+                let name = opening.name.as_deref();
+                let (allowed, checked) = allowed(network, &hosts, name, port, &addresses);
+                answered(self.reporter.as_deref(), name, port, &addresses, &allowed);
+                if let (true, false, Some(name)) = (checked, allowed.is_empty(), name) {
+                    let checking = Checking::new(opening.flow, name, allowed, now);
+                    let opening = self.opening.remove(at);
+                    stack.release(opening.flow, true, now);
+                    self.checking.push(checking);
+                    continue;
+                }
                 match connecting(allowed, port, now) {
                     Some(step) => opening.step = step,
                     None => {
@@ -362,7 +412,7 @@ impl Proxy {
                 .find(|flow| matches!(flow.state, UdpState::Asking(asked, _) if asked == id));
             if let Some(flow) = flow {
                 let port = flow.destination.port();
-                let allowed = allowed(network, &hosts, flow.name.as_deref(), port, &addresses);
+                let (allowed, _) = allowed(network, &hosts, flow.name.as_deref(), port, &addresses);
                 answered(
                     self.reporter.as_deref(),
                     flow.name.as_deref(),
@@ -421,12 +471,21 @@ impl Proxy {
                 let Step::Connecting { socket, .. } = opening.step else {
                     unreachable!()
                 };
-                stack.release(opening.flow, true, now);
-                self.waiting.push(Waiting {
-                    flow: opening.flow,
-                    upstream: TcpStream::from(socket),
-                    since: now,
-                });
+                let upstream = TcpStream::from(socket);
+                match opening.guest {
+                    Guest::Held => {
+                        stack.release(opening.flow, true, now);
+                        self.waiting.push(Waiting {
+                            flow: opening.flow,
+                            upstream,
+                            since: now,
+                        });
+                    }
+                    Guest::Taken(id, check, passed) => {
+                        let guard = Box::new(Checked(check));
+                        self.pipes.push(Pipe::guarded(id, upstream, passed, guard));
+                    }
+                }
                 continue;
             }
             let port = flow_destination(&opening.flow).port();
@@ -437,7 +496,7 @@ impl Proxy {
                 }
                 None => {
                     let opening = self.opening.remove(at);
-                    stack.release(opening.flow, false, now);
+                    refuse(stack, opening, now);
                 }
             }
         }
@@ -453,11 +512,19 @@ impl Proxy {
                         destination: connection.destination,
                     }
             });
-            match paired {
-                Some(at) => {
-                    let waiting = self.waiting.remove(at);
-                    self.pipes.push(Pipe::new(connection.id, waiting.upstream));
-                }
+            if let Some(at) = paired {
+                let waiting = self.waiting.remove(at);
+                self.pipes.push(Pipe::new(connection.id, waiting.upstream));
+                continue;
+            }
+            let flow = Flow::Tcp {
+                source: connection.source,
+                destination: connection.destination,
+            };
+            let checking = (self.checking.iter_mut())
+                .find(|checking| checking.accepted.is_none() && checking.flow == flow);
+            match checking {
+                Some(checking) => checking.accepted = Some((connection.id, now)),
                 None => {
                     stack.abort(connection.id);
                     stack.forget(connection.id);
@@ -472,6 +539,73 @@ impl Proxy {
             }
             !late
         });
+    }
+
+    /// Reads the first bytes of each connection a name decided, and
+    /// connects it once its check passes something, or the guest has sent
+    /// nothing for a while. One that the check refuses, or that the guest
+    /// cuts off or never opens, gets a reset.
+    fn checks(&mut self, stack: &mut Stack, now: Instant) {
+        let mut buffer = [0; 16 * 1024];
+        let mut at = 0;
+        while at < self.checking.len() {
+            let checking = &mut self.checking[at];
+            let late = now.duration_since(checking.since) >= ACCEPT_WAIT;
+            let Some((id, accepted)) = checking.accepted else {
+                if late {
+                    stack.abandon(checking.flow);
+                    self.checking.remove(at);
+                } else {
+                    at += 1;
+                }
+                continue;
+            };
+            let mut refused = false;
+            loop {
+                let n = stack.recv(id, &mut buffer);
+                if n == 0 {
+                    break;
+                }
+                if checking
+                    .check
+                    .feed(&buffer[..n], &mut checking.passed)
+                    .is_err()
+                {
+                    refused = true;
+                    break;
+                }
+            }
+            let silent = !checking.check.started() && now.duration_since(accepted) >= SILENT_WAIT;
+            let ready = !checking.passed.is_empty() || silent;
+            let closed = stack.received_all(id);
+            let cut_off = closed && (checking.check.holding() || checking.passed.is_empty());
+            if refused || cut_off || late && !ready {
+                stack.abort(id);
+                stack.forget(id);
+                self.checking.remove(at);
+                continue;
+            }
+            if !ready {
+                at += 1;
+                continue;
+            }
+            let checking = self.checking.remove(at);
+            let port = flow_destination(&checking.flow).port();
+            let guest = Guest::Taken(id, checking.check, checking.passed);
+            match connecting(checking.addresses, port, now) {
+                Some(step) => self.opening.push(Opening {
+                    flow: checking.flow,
+                    name: None,
+                    since: now,
+                    step,
+                    guest,
+                }),
+                None => {
+                    stack.abort(id);
+                    stack.forget(id);
+                }
+            }
+        }
     }
 
     /// Answers the guest's queries, and passes its other datagrams, and the
@@ -539,6 +673,30 @@ fn answered(
     }
 }
 
+impl Checking {
+    fn new(flow: Flow, name: &str, addresses: Vec<IpAddr>, now: Instant) -> Checking {
+        Checking {
+            flow,
+            accepted: None,
+            check: Box::new(NameCheck::new(name)),
+            passed: Vec::new(),
+            addresses,
+            since: now,
+        }
+    }
+}
+
+/// Refuses the guest's end of a connection whose destination didn't open.
+fn refuse(stack: &mut Stack, opening: Opening, now: Instant) {
+    match opening.guest {
+        Guest::Held => stack.release(opening.flow, false, now),
+        Guest::Taken(id, ..) => {
+            stack.abort(id);
+            stack.forget(id);
+        }
+    }
+}
+
 /// Reports to `reporter`, if there is one, a connection it blocked.
 fn report(reporter: Option<&Reporter>, name: Option<&str>, address: IpAddr, port: u16) {
     if let Some(reporter) = reporter {
@@ -557,15 +715,17 @@ fn flow_destination(flow: &Flow) -> SocketAddr {
 }
 
 /// The addresses of `addresses` that the proxy may connect to on `port`,
-/// for a connection attributed to `name`.
+/// for a connection attributed to `name`, and whether a name decided any
+/// of them, so that the connection gets the name check.
 fn allowed(
     network: &Network,
     harness: &[&str],
     name: Option<&str>,
     port: u16,
     addresses: &[IpAddr],
-) -> Vec<IpAddr> {
-    addresses
+) -> (Vec<IpAddr>, bool) {
+    let mut by_name = false;
+    let allowed = addresses
         .iter()
         .copied()
         .filter(|&address| {
@@ -575,9 +735,13 @@ fn allowed(
                 port,
                 request: None,
             };
-            proxied(network, harness, &connection).allows()
+            let decided = proxied(network, harness, &connection);
+            let allows = decided.allows();
+            by_name |= allows && decided.by_name();
+            allows
         })
-        .collect()
+        .collect();
+    (allowed, by_name)
 }
 
 /// Starts connecting to the first of `addresses` that takes a connect, and

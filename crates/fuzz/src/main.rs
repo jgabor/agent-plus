@@ -29,7 +29,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 8] = [
+const TARGETS: [Target; 9] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -373,7 +373,51 @@ const TARGETS: [Target; 8] = [
             "\u{ff}",
         ],
     },
+    Target {
+        name: "name-check",
+        check: |input| {
+            name_check_input(input);
+        },
+        corpus: &[
+            "",
+            // A TLS client hello for `host.ap.internal`, with only the
+            // extensions a hello must have.
+            HELLO,
+            "GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\nGET /b HTTP/1.1\r\nhost: HOST.ap.internal.\r\n\r\n",
+            concat!(
+                "POST / HTTP/1.1\r\nHost: host.ap.internal\r\nTransfer-Encoding: chunked\r\n\r\n",
+                "3;x\r\nabc\r\n0\r\nT: 1\r\n\r\n",
+                "PUT / HTTP/1.1\r\nHost: host.ap.internal:80\r\nContent-Length: 3\r\n\r\nabc",
+            ),
+            "M-SEARCH * HTTP/1.1\r\nHost: host.ap.internal\r\nMan: x\r\n\r\n",
+            "SSH-2.0-OpenSSH_9.9\r\n",
+        ],
+        words: &[
+            "\x16\x03\x01",
+            "\x00\x00",
+            "\x10host.ap.internal",
+            "\x0bexample.com",
+            "GET ",
+            "CONNECT ",
+            " HTTP/1.1\r\n",
+            " HTTP/2.0\r\n",
+            "Host: host.ap.internal\r\n",
+            "Host: example.com\r\n",
+            "Content-Length: 5\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Upgrade: websocket\r\n",
+            "\r\n",
+            "\n",
+            " \t",
+            "0\r\n\r\n",
+            "ff\r\n",
+            "\u{7f}",
+        ],
+    },
 ];
+
+/// The TLS client hello in the name check's corpus.
+const HELLO: &str = "\x16\x03\x01\x00\x57\x01\x00\x00\x53\x03\x03\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x00\x00\x02\x13\x01\x01\x00\x00\x28\x00\x00\x00\x15\x00\x13\x00\x00\x10\x68\x6f\x73\x74\x2e\x61\x70\x2e\x69\x6e\x74\x65\x72\x6e\x61\x6c\x00\x0d\x00\x04\x00\x02\x04\x03\x00\x2b\x00\x03\x02\x03\x04";
 
 const DEVICE_MEMORY: usize = 1 << 16;
 const DEVICE_QUEUES: usize = 2;
@@ -480,6 +524,56 @@ fn dns_input(input: &str) -> bool {
     assert_eq!(answer.get(4..6), Some(&[0, 1][..]), "{answer:?}");
     assert_eq!(resolver.answer(query), Some(answer));
     true
+}
+
+/// Feeds `input` to the name check of a connection attributed to
+/// `host.ap.internal`, whole and in pieces, and panics if the two disagree,
+/// or if what passes isn't the start of `input`. Returns whether it all
+/// passed.
+fn name_check_input(input: &str) -> bool {
+    let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+    let checked = |piece: usize| {
+        let mut check = net::NameCheck::new("host.ap.internal");
+        let mut passed = Vec::new();
+        for chunk in bytes.chunks(piece) {
+            if check.feed(chunk, &mut passed).is_err() {
+                return (passed, false);
+            }
+        }
+        (passed, !check.holding())
+    };
+    let whole = checked(bytes.len().max(1));
+    for piece in [1, 1 + bytes.len() % 13] {
+        let pieces = checked(piece);
+        assert_eq!(whole.1, pieces.1, "in pieces of {piece}");
+        if whole.1 {
+            assert_eq!(whole.0, pieces.0, "in pieces of {piece}");
+        }
+    }
+    assert!(bytes.starts_with(&whole.0), "{:?}", whole.0);
+    // httparse, as a server would, reads the first request on its own. If
+    // it finds one whose `Host` doesn't agree, none of that head passed.
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut request = httparse::Request::new(&mut headers);
+    if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes) {
+        let agrees = |header: &httparse::Header| {
+            let value = header.value.trim_ascii().to_ascii_lowercase();
+            let colon = value.iter().rposition(|&byte| byte == b':');
+            let name = &value[..colon.unwrap_or(value.len())];
+            name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
+        };
+        let hosts: Vec<_> = (request.headers.iter())
+            .filter(|header| header.name.eq_ignore_ascii_case("host"))
+            .collect();
+        if !matches!(hosts[..], [host] if agrees(host)) {
+            assert!(
+                whole.0.len() < head,
+                "a head for another host passed: {:?}",
+                whole.0
+            );
+        }
+    }
+    whole.1 && whole.0 == bytes
 }
 
 /// Decides each `> <name> <address> <port> [<scheme> <target>]` line, with
@@ -1409,6 +1503,18 @@ mod tests {
     #[should_panic(expected = "differ from git's")]
     fn a_hunk_git_prints_differently_is_found() {
         same_hunks("planted", b"@@ -1 +1 @@\n-a\n+b\n", b"");
+    }
+
+    #[test]
+    fn the_name_check_corpus_passes() {
+        let target = TARGETS.iter().find(|t| t.name == "name-check").unwrap();
+        for input in target.corpus {
+            assert!(name_check_input(input), "{input:?}");
+        }
+        assert!(!name_check_input(&HELLO.replace("host.ap", "evil.ap")));
+        assert!(!name_check_input(
+            "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        ));
     }
 
     #[test]

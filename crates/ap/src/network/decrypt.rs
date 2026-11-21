@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use agentfile::Scheme;
 use net::{NameCheck, Request};
@@ -33,6 +33,9 @@ const BUFFER: usize = 16 * 1024;
 const HELLO_LIMIT: usize = 64 * 1024;
 /// The only protocol either side is offered.
 const HTTP1: &[u8] = b"http/1.1";
+/// How long a connection whose request the rules denied waits for what they
+/// allowed before it to go on, and then for the destination to end.
+const FLUSH_WAIT: Duration = Duration::from_secs(10);
 
 /// What the proxy decrypts with: the run's authority, and the roots that
 /// a destination's certificate must chain to.
@@ -132,6 +135,15 @@ pub(super) struct Decrypted {
     /// The rules denied a request, so the guest gets a reset once what they
     /// allowed before it has gone on.
     refused: bool,
+    /// When they did.
+    refused_at: Option<Instant>,
+    /// What they allowed has gone on, so the guest gets its reset.
+    flushed: bool,
+    /// Since when the guest has had its reset, and the destination's half
+    /// is shut. What the destination sends is read and dropped until it
+    /// ends, because closing a socket with unread input sends a reset,
+    /// which could lose what went before.
+    draining: Option<Instant>,
 }
 
 enum Stage {
@@ -170,6 +182,9 @@ impl Decrypted {
             closed: false,
             allowed: false,
             refused: false,
+            refused_at: None,
+            flushed: false,
+            draining: None,
         }
     }
 
@@ -180,6 +195,9 @@ impl Decrypted {
 
     /// Whether it waits to read the stream.
     pub(super) fn wants_to_read(&self) -> bool {
+        if self.draining.is_some() {
+            return true;
+        }
         // Nothing but its handshake comes from the destination until the
         // rules allow a request, and nothing once they deny one.
         let open = self.allowed && !self.refused;
@@ -195,7 +213,7 @@ impl Decrypted {
 
     /// Whether it waits to write to the stream.
     pub(super) fn wants_to_write(&self) -> bool {
-        !self.to_upstream.is_empty()
+        self.draining.is_none() && !self.to_upstream.is_empty()
             || matches!(&self.stage, Stage::Tls(_, client) if client.wants_write())
     }
 
@@ -209,7 +227,21 @@ impl Decrypted {
         decryption: Option<&Decryption>,
         decide: &mut Decide,
     ) -> bool {
+        if let Some(since) = self.draining {
+            return self.drained(since);
+        }
         match self.moved(stack, decryption, decide) {
+            Ok(()) if self.flushed => {
+                stack.abort(self.id);
+                stack.forget(self.id);
+                let shut = self.shut || self.upstream.shutdown(Shutdown::Write).is_ok();
+                // Nothing went on, so nothing can be lost.
+                if shut && self.allowed {
+                    self.draining = Some(Instant::now());
+                    return self.drained(Instant::now());
+                }
+                false
+            }
             Ok(()) if !stack.ended(self.id) => true,
             Ok(()) => {
                 stack.forget(self.id);
@@ -241,6 +273,7 @@ impl Decrypted {
                         Ok(()) => {}
                         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
                             self.refused = true;
+                            self.refused_at = Some(Instant::now());
                         }
                         Err(error) => return Err(error),
                     }
@@ -271,7 +304,14 @@ impl Decrypted {
             // What the rules allowed before the request they denied has gone
             // on.
             if self.refused && flushed && !(self.allowed && handshaking) {
-                return Err(refused("a request the rules deny"));
+                self.flushed = true;
+                return Ok(());
+            }
+            // A destination that ends, or takes too long, loses what was
+            // allowed.
+            let late = self.refused_at.is_some_and(|at| at.elapsed() >= FLUSH_WAIT);
+            if self.refused && (self.upstream_closed || late) {
+                return Err(refused("a destination that took no request"));
             }
             if self.guest_closed && flushed && !self.shut {
                 self.upstream.shutdown(Shutdown::Write)?;
@@ -283,6 +323,10 @@ impl Decrypted {
                     // A destination that ends TLS sent its `close_notify`, which
                     // the guest got. One that only closes TCP cut the guest
                     // off, so the guest's side ends the same way.
+                    Ok(0) if matches!(&self.stage, Stage::Tls(_, client) if client.is_handshaking()) =>
+                    {
+                        return Err(io::Error::other("the destination ended its handshake"));
+                    }
                     Ok(0) => self.upstream_closed = true,
                     Ok(n) => {
                         moved = true;
@@ -303,12 +347,28 @@ impl Decrypted {
                 self.to_guest.drain(..n);
                 moved |= n > 0;
             }
-            if self.upstream_closed && self.to_guest.is_empty() && !self.closed {
+            // A guest whose request the rules denied gets a reset, not a
+            // close.
+            if self.upstream_closed && self.to_guest.is_empty() && !self.closed && !self.refused {
                 stack.close(self.id);
                 self.closed = true;
             }
             if !moved {
                 return Ok(());
+            }
+        }
+    }
+
+    /// Reads what the destination sends, and drops it, until it ends or
+    /// [`FLUSH_WAIT`] passes since `since`. Returns whether it goes on.
+    fn drained(&mut self, since: Instant) -> bool {
+        let mut buffer = [0; BUFFER];
+        loop {
+            match (&self.upstream).read(&mut buffer) {
+                Ok(0) => return false,
+                Ok(_) => {}
+                Err(error) if waited(&error) => return since.elapsed() < FLUSH_WAIT,
+                Err(_) => return false,
             }
         }
     }

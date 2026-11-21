@@ -484,6 +484,34 @@ mod tests {
         );
     }
 
+    // spec(Run): It leaves out UDP that a host's URL rules deny, which no rule can allow.
+    #[test]
+    fn udp_that_url_rules_deny_is_no_blocked_host() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let args: Vec<OsString> = ["--", "+", "-https://example.com/secret"]
+            .map(OsString::from)
+            .to_vec();
+        let (network, _) = super::super::rules(&args).unwrap();
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            network,
+            Vec::new(),
+        );
+        let address = "192.0.2.7".parse().unwrap();
+        reporter.not_http(Some("example.com"), address, 443);
+        drop(theirs);
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        let mut reports = Reports::default();
+        let mut buffer = [0; 512];
+        let mut decisions = 0;
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            decisions += usize::from(decisions::read(&buffer[..len]).is_some());
+            reports.take(&buffer[..len]);
+        }
+        assert_eq!(decisions, 1);
+        assert_eq!(report(&args, &reports), None);
+    }
+
     #[test]
     fn a_host_no_rule_of_its_own_allows_says_why() {
         let args: Vec<OsString> = ["--", "+", "-example.com"].map(OsString::from).to_vec();

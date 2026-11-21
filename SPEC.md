@@ -474,6 +474,7 @@ directory) and writes an image into the local store.
   blocked and the rule that would allow each one, on standard error. It
   never asks during the run, and it never adds a rule itself. It lists each
   host once, and at most 100 hosts, and then says that it left others out.
+  It leaves out UDP that a host's URL rules deny, which no rule can allow.
 - **Desktop.** With `OS desktop`, `ap run --gui <agent>` opens the agent's
   desktop in a native window.
 
@@ -1908,7 +1909,9 @@ allow one.
   never reaches the server, and the proxy resets the connection it came on.
   The requests before it on that connection still reach the server. The
   proxy connects to the server before the first request, but nothing the
-  server sends reaches the guest until the rules allow a request.
+  server sends reaches the guest until the rules allow a request. The
+  proxy reads what the guest sends, and what the server answers passes
+  unread.
 
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that

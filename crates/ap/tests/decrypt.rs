@@ -439,6 +439,30 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     );
 }
 
+#[test]
+fn a_destination_that_ends_before_its_handshake_still_resets_a_denied_guest() {
+    let (root, _) = server();
+    // It takes the connection, and closes it at once.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            drop(stream);
+        }
+    });
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let both = [get("/allowed/first"), get("/denied")].concat();
+    let started = Instant::now();
+    assert_eq!(
+        guest.exchange(handle, Some(&mut tls), &both),
+        Err("reset".to_owned())
+    );
+    assert!(started.elapsed() < WAIT / 2, "{:?}", started.elapsed());
+}
+
 /// Sends `bytes` as they are on `handle`, and gives the guest a moment.
 fn send_raw(guest: &mut Guest, handle: SocketHandle, bytes: &[u8]) {
     let deadline = Instant::now() + WAIT;
@@ -659,6 +683,7 @@ fn greeter() -> (u16, Seen) {
 }
 
 // spec(NETWORK): The proxy connects to the server before the first request, but nothing the server sends reaches the guest until the rules allow a request.
+// spec(NETWORK): The proxy reads what the guest sends, and what the server answers passes unread.
 #[test]
 fn the_server_reaches_the_guest_only_once_a_request_is_allowed() {
     let (port, seen) = greeter();

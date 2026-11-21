@@ -25,7 +25,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 time = { version = "0.3", default-features = false }
 
 [dev-dependencies]
-smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
 
 [lints.cargo]
 unused_dependencies = "deny"

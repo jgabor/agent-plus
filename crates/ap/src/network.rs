@@ -230,8 +230,13 @@ pub fn main(args: &[OsString]) -> u8 {
         eprintln!("ap: can't send the run's certificate authority: {error}");
         return 1;
     }
-    let extra =
-        std::env::var_os("SSL_CERT_FILE").map_or_else(Vec::new, |path| roots(path.as_ref()));
+    // Only a host with URL rules is decrypted.
+    let decrypts =
+        (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
+    let extra = match std::env::var_os("SSL_CERT_FILE") {
+        Some(path) if decrypts => roots(path.as_ref()),
+        _ => Vec::new(),
+    };
     // The key lives as long as the process serves.
     let decryption = match Decryption::new(authority, extra) {
         Ok(decryption) => decryption,

@@ -33,6 +33,8 @@ pub(super) enum Rule {
     Loopback,
     /// The request path.
     Path,
+    /// The host's URL rules, under which only HTTP passes.
+    NotHttp,
 }
 
 impl Rule {
@@ -67,6 +69,7 @@ pub(super) fn write(allow: bool, rule: &Rule, about: &Blocked) -> Vec<u8> {
         Rule::Harness => "harness".to_owned(),
         Rule::Loopback => "loopback".to_owned(),
         Rule::Path => "path".to_owned(),
+        Rule::NotHttp => "http".to_owned(),
     };
     let text = format!("{verdict} {rule} {}", blocked::text(about));
     [&[TAG][..], text.as_bytes()].concat()
@@ -86,6 +89,7 @@ fn read(message: &[u8]) -> Option<(bool, Rule, Blocked)> {
         "harness" => Rule::Harness,
         "loopback" => Rule::Loopback,
         "path" => Rule::Path,
+        "http" => Rule::NotHttp,
         number if number.bytes().all(|byte| byte.is_ascii_digit()) => {
             Rule::Numbered(number.parse().ok()?)
         }
@@ -150,6 +154,7 @@ impl Keeper {
                 "your host's loopback, which only host.ap.internal reaches".to_owned()
             }
             Rule::Path => "the request path".to_owned(),
+            Rule::NotHttp => "the host's URL rules, which only HTTP meets".to_owned(),
         };
         let destination = match about {
             Blocked::Lookup(name) => name,
@@ -232,6 +237,10 @@ mod tests {
             line(false, Rule::Loopback, &literal)
                 .unwrap()
                 .contains("loopback")
+        );
+        assert_eq!(
+            line(false, Rule::NotHttp, &to_host).as_deref(),
+            Some("deny   host.ap.internal:8080  the host's URL rules, which only HTTP meets")
         );
     }
 

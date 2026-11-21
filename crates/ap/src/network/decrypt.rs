@@ -80,10 +80,12 @@ impl Decryption {
 }
 
 /// The certificates in the file at `path`, in PEM, which `SSL_CERT_FILE`
-/// names. A file that can't be read gives none, and a block that can't be
-/// read is left out.
+/// names. A file that can't be read, or isn't a regular file, gives none,
+/// and a block that can't be read is left out.
 pub fn roots(path: &Path) -> Vec<CertificateDer<'static>> {
-    let Ok(pem) = std::fs::read(path) else {
+    // A pipe or a device could hold up the read.
+    let regular = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
+    let Some(pem) = regular.then(|| std::fs::read(path).ok()).flatten() else {
         return Vec::new();
     };
     CertificateDer::pem_slice_iter(&pem)

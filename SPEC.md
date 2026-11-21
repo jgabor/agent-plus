@@ -1907,7 +1907,8 @@ allow one.
 
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that
-  `SSL_CERT_FILE` names in your host's environment. Until the proxy has
+  `SSL_CERT_FILE` names in your host's environment. A file that can't be
+  read, or isn't a regular file, adds none. Until the proxy has
   its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 - **Harness hosts are never decrypted for a rule.** A rule set that would
   need it, such as a URL rule for a harness host or `-console.anthropic.com`

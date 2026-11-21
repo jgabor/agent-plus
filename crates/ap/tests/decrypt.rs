@@ -20,7 +20,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
 
@@ -516,6 +516,32 @@ fn bytes_after_either_side_ends_tls_hold_up_no_other_connection() {
     );
 }
 
+// spec(NETWORK): A file that can't be read, or isn't a regular file, adds none.
+#[test]
+fn ssl_cert_file_adds_the_roots_of_a_regular_file_alone() {
+    let directory = std::env::temp_dir().join(format!("ap-roots-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let authority = Authority::generate(SystemTime::now()).unwrap();
+    let file = directory.join("roots.pem");
+    let pem = format!("junk\n{}", authority.certificate_pem());
+    std::fs::write(&file, pem).unwrap();
+    assert_eq!(ap::network::roots(&file), [authority.certificate().clone()]);
+    let fifo = directory.join("fifo");
+    let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: `path` is a C string that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    // A pipe with no writer would hold up a read.
+    for unread in [directory.join("missing"), directory.clone(), fifo] {
+        assert!(
+            ap::network::roots(&unread).is_empty(),
+            "{}",
+            unread.display()
+        );
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
 // spec(NETWORK): The proxy verifies an upstream server's certificate against the root certificates compiled into `ap`, plus those in the file that `SSL_CERT_FILE` names in your host's environment.
 #[test]
 fn a_destination_whose_certificate_the_roots_don_t_trust_is_refused() {
@@ -550,6 +576,49 @@ fn a_host_without_url_rules_is_passed_through_without_decryption() {
     assert!(answer.is_ok(), "{answer:?}");
     assert_eq!(tls.alpn_protocol(), Some(&b"h2"[..]));
     assert_eq!(settled(&seen), ["GET /anything HTTP/1.1 (h2)"]);
+}
+
+/// Whether a datagram the guest sends to `host.ap.internal` on `port`
+/// gets an answer from the echo there.
+fn echoed(guest: &mut Guest, port: u16) -> bool {
+    let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+    let mut socket = udp::Socket::new(buffer(), buffer());
+    socket.bind(40000).unwrap();
+    let handle = guest.sockets.add(socket);
+    let to = SocketAddr::new(IpAddr::V4(guest.host), port);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut sent = false;
+    while Instant::now() < deadline {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<udp::Socket>(handle);
+        if !sent && socket.can_send() {
+            socket.send_slice(b"ping", to).unwrap();
+            sent = true;
+        }
+        if socket.can_recv() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
+// spec(NETWORK): On a host with URL rules, traffic that isn't HTTP is denied.
+#[test]
+fn udp_is_denied_on_a_host_with_url_rules() {
+    let echo = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = echo.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buffer = [0; 64];
+        while let Ok((n, from)) = echo.recv_from(&mut buffer) {
+            let _ = echo.send_to(&buffer[..n], from);
+        }
+    });
+    // The host rule allows the flow, until the host has a URL rule too.
+    let host = format!("NETWORK -\nNETWORK +{NAME}\n");
+    assert!(echoed(&mut Guest::new(&host, Vec::new(), port), port));
+    let url = format!("{host}NETWORK -https://{NAME}/secret\n");
+    assert!(!echoed(&mut Guest::new(&url, Vec::new(), port), port));
 }
 
 // spec(NETWORK): On a host with URL rules, traffic that isn't HTTP is denied.

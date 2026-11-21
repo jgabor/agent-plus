@@ -937,8 +937,7 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
         decisions,
         [
             format!("allow  {host}  NETWORK {rule}"),
-            // The default, which never reaches your host's loopback.
-            format!("deny   {host}  your host's loopback, which only host.ap.internal reaches"),
+            format!("deny   {host}  the default"),
         ],
         "{stderr}"
     );

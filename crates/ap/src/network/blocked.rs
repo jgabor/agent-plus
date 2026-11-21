@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::net::IpAddr;
 
-use agentfile::Network;
+use agentfile::{Network, Sign};
 use net::Blocked;
 
 use super::decisions::{self, Rule};
@@ -161,13 +161,38 @@ impl Reporter {
             request,
         };
         let proxied = net::proxied(&self.network, &harness, &connection);
+        let rule = match (proxied, request) {
+            // A request on a connection to your host, which got there, is
+            // decided by the rules or the default, not by its loopback.
+            (net::Proxied::Loopback, Some(_)) => {
+                let decision = net::decide(&self.network.rules, Sign::Deny, &connection);
+                Rule::by(&self.network, decision.by)
+            }
+            _ => Rule::proxied(&self.network, proxied),
+        };
+        self.send_decision(allow, &rule, name, address, port);
+    }
+
+    /// Reports a UDP flow to `name` at `address` on `port` that the proxy
+    /// refused, because the name has URL rules, and UDP isn't HTTP.
+    pub(super) fn not_http(&self, name: Option<&str>, address: IpAddr, port: u16) {
+        self.send_decision(false, &Rule::NotHttp, name, address, port);
+    }
+
+    fn send_decision(
+        &self,
+        allow: bool,
+        rule: &Rule,
+        name: Option<&str>,
+        address: IpAddr,
+        port: u16,
+    ) {
         let about = Blocked::Connection {
             name: name.map(str::to_owned),
             address,
             port,
         };
-        let rule = Rule::proxied(&self.network, proxied);
-        if self.send(&decisions::write(allow, &rule, &about)) {
+        if self.send(&decisions::write(allow, rule, &about)) {
             *self.refused.borrow_mut() = None;
         }
     }

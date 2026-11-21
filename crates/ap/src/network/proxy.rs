@@ -124,6 +124,8 @@ enum Check {
     Name,
     /// The name has URL rules, so each request is read and decided.
     Requests,
+    /// The name has URL rules, and the flow is UDP, which isn't HTTP.
+    NotHttp,
 }
 
 struct UdpFlow {
@@ -285,7 +287,11 @@ impl Proxy {
             if decrypted.wants_to_write() {
                 events |= libc::POLLOUT;
             }
-            fds.push(event(decrypted.upstream().as_raw_fd(), events));
+            // A socket that errs wakes the wait even for no events, and
+            // nothing reads it until the guest's first bytes.
+            if events != 0 {
+                fds.push(event(decrypted.upstream().as_raw_fd(), events));
+            }
         }
         for flow in &self.flows {
             if let UdpState::Open(socket) = &flow.state {
@@ -379,7 +385,13 @@ impl Proxy {
                     tcp,
                 );
                 if allowed.is_empty() {
-                    report(reporter, name.as_deref(), addresses[0], destination.port());
+                    let port = destination.port();
+                    match (reporter, check) {
+                        (Some(reporter), Check::NotHttp) => {
+                            reporter.not_http(name.as_deref(), addresses[0], port)
+                        }
+                        _ => report(reporter, name.as_deref(), addresses[0], port),
+                    }
                     return Verdict::Refuse;
                 }
                 // Each request is a decision of its own.
@@ -445,7 +457,14 @@ impl Proxy {
                 let (allowed, check) = allowed(network, &hosts, name, port, &addresses, true);
                 // Each request is a decision of its own.
                 if check != Check::Requests || allowed.is_empty() {
-                    answered(self.reporter.as_deref(), name, port, &addresses, &allowed);
+                    answered(
+                        self.reporter.as_deref(),
+                        name,
+                        port,
+                        &addresses,
+                        &allowed,
+                        false,
+                    );
                 }
                 opening.requests = check == Check::Requests;
                 if let (Check::Name, false, Some(name)) = (check, allowed.is_empty(), name) {
@@ -469,13 +488,14 @@ impl Proxy {
             if let Some(flow) = flow {
                 let port = flow.destination.port();
                 let name = flow.name.as_deref();
-                let (allowed, _) = allowed(network, &hosts, name, port, &addresses, false);
+                let (allowed, check) = allowed(network, &hosts, name, port, &addresses, false);
                 answered(
                     self.reporter.as_deref(),
                     flow.name.as_deref(),
                     port,
                     &addresses,
                     &allowed,
+                    check == Check::NotHttp,
                 );
                 let waiting = match std::mem::replace(&mut flow.state, UdpState::Failed) {
                     UdpState::Asking(_, waiting) => waiting,
@@ -737,9 +757,13 @@ fn answered(
     port: u16,
     addresses: &[IpAddr],
     allowed: &[IpAddr],
+    not_http: bool,
 ) {
     match (reporter, allowed.first(), addresses.first()) {
         (Some(reporter), Some(&address), _) => reporter.decided(true, name, address, port),
+        (Some(reporter), None, Some(&address)) if not_http => {
+            reporter.not_http(name, address, port)
+        }
         (_, None, Some(&address)) => report(reporter, name, address, port),
         _ => {}
     }
@@ -798,7 +822,12 @@ fn allowed(
     addresses: &[IpAddr],
     tcp: bool,
 ) -> (Vec<IpAddr>, Check) {
-    let requests = tcp && name.is_some_and(|name| url_rules(network, name));
+    let url = name.is_some_and(|name| url_rules(network, name));
+    // UDP to such a host, QUIC among it, isn't HTTP.
+    if url && !tcp {
+        return (Vec::new(), Check::NotHttp);
+    }
+    let requests = url;
     let mut by_name = false;
     let allowed = addresses
         .iter()

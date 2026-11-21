@@ -16,6 +16,12 @@
 //! until that connection opens, so a destination that refuses looks refused
 //! to the guest. The bytes then pass both ways unchanged.
 //!
+//! A TCP connection that a name decided gets the name check of
+//! [`net::NameCheck`] instead. The stack takes it first, and the proxy
+//! connects only once the guest's first bytes agree with the name, or the
+//! guest has sent nothing for a while. Every later plain HTTP request on it
+//! is checked too, and one that disagrees resets the connection.
+//!
 //! Before it confines itself, it makes the run's certificate authority, as
 //! [`Authority`] says, and sends `ap run` the authority's certificate, in
 //! PEM, as the first message on its standard output. The key stays here.

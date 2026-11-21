@@ -13,6 +13,8 @@ guest = { path = "../guest" }
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 erofs = { path = "../erofs" }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+rustls-graviola = "0.4"
 share = { path = "../share" }
 store = { path = "../store" }
 

@@ -7,6 +7,11 @@ publish.workspace = true
 
 [dependencies]
 agentfile = { path = "../agentfile" }
+httparse = { version = "1", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+rustls-graviola = "0.4"
 
 [lints.cargo]
 unused_dependencies = "deny"

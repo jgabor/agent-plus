@@ -66,8 +66,10 @@ fn seed() -> &'static Path {
                 "--connect-timeout",
                 "30",
             ])
-            // A download that stalls for 30 seconds fails, and is retried.
-            .args(["--speed-limit", "1", "--speed-time", "30", "--output"])
+            // A download that stalls for 30 seconds, or takes 5 minutes, fails
+            // and is retried, and the retries end after 15 minutes.
+            .args(["--speed-limit", "1", "--speed-time", "30"])
+            .args(["--max-time", "300", "--retry-max-time", "900", "--output"])
             .arg(&download)
             .arg(crate::pinned(PIN, "url"))
             .status()

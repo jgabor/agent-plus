@@ -1459,8 +1459,8 @@ fn placeholder(scratch: &Scratch) -> String {
     placeholder
 }
 
-// spec(SECRET): At run time, `ap` reads the value from the host environment variable `<name>`.
-// spec(SECRET): Inside the guest, the environment variable `<name>` holds a placeholder.
+// spec(SECRET): **Where the value comes from.** At run time, `ap` reads the value from the host environment variable `<name>`.
+// spec(SECRET): **Hidden (the default).** Inside the guest, the environment variable `<name>` holds a placeholder.
 // spec(SECRET): **`visible`** hands the real value to the agent.
 #[test]
 fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_visible_one() {

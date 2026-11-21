@@ -17,7 +17,7 @@ use std::process::{self, Child, Command, Output, Stdio};
 use ap::fetch;
 use ap::store::Store;
 use guest::net;
-use t1::{guest_binary, kernel};
+use t1::{guest_binary, kernel, os};
 
 /// How long `ap` may take, in seconds, before `timeout` stops it, and the VM
 /// it holds with it.
@@ -28,9 +28,9 @@ const TIMEOUT: &str = "240";
 const INSIDE_VARIABLE: &str = "AP_RESOLVER_INSIDE";
 const TEST: &str = "the_guest_s_only_resolver_is_ap";
 
-/// A home of its own, with the kernel in its store and the fake harness in
-/// its download cache, so that `ap` reads none of the owner's files and
-/// fetches nothing.
+/// A home of its own, with the kernel and the OS layer in its store and the
+/// fake harness in its download cache, so that `ap` reads none of the owner's
+/// files and fetches nothing.
 struct Scratch {
     root: PathBuf,
     ap: PathBuf,
@@ -49,6 +49,7 @@ impl Scratch {
                 File::open(kernel::vmlinux()).unwrap(),
             )
             .unwrap();
+        os::put(&root.join("home/.local/share/ap"));
         fs::create_dir_all(root.join("runtime")).unwrap();
         Scratch {
             root,
@@ -100,6 +101,9 @@ impl Scratch {
         let approve = format!("--approve={}", approved.display());
         let built = self.ap(&["build", &approve, dir.to_str().unwrap()]);
         assert_eq!(built.status.code(), Some(0), "{built:?}");
+        // The store starts with the pinned layer, so no build downloads it.
+        let stdout = String::from_utf8_lossy(&built.stdout);
+        assert!(stdout.starts_with("hit OS minimal\n"), "{built:?}");
     }
 
     /// The static `ap`, with only `HOME` and `XDG_RUNTIME_DIR` in its

@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use ap::fetch;
 use ap::store::Store;
-use t1::{guest_binary, kernel};
+use t1::{guest_binary, kernel, os};
 
 /// How long one run may take, in seconds, before `timeout` stops `ap run`,
 /// and the VM it holds with it.
@@ -31,9 +31,9 @@ fn shared() -> &'static (PathBuf, PathBuf, PathBuf) {
     })
 }
 
-/// A home of its own, with the kernel in its store and the fake harness in
-/// its download cache, so that `ap` reads none of the owner's files and
-/// fetches nothing.
+/// A home of its own, with the kernel and the OS layer in its store and the
+/// fake harness in its download cache, so that `ap` reads none of the owner's
+/// files and fetches nothing.
 struct Scratch {
     root: PathBuf,
     home: PathBuf,
@@ -54,6 +54,7 @@ impl Scratch {
         store
             .put(fetch::kernel().sha256, File::open(&shared().2).unwrap())
             .unwrap();
+        os::put(&home.join(".local/share/ap"));
         let harness = sha256(&shared().1);
         let cache = home.join(".cache/ap");
         fs::create_dir_all(&cache).unwrap();
@@ -100,6 +101,9 @@ impl Scratch {
             dir.to_str().unwrap(),
         ]);
         assert_eq!(built.status.code(), Some(0), "{built:?}");
+        // The store starts with the pinned layer, so no build downloads it.
+        let stdout = String::from_utf8_lossy(&built.stdout);
+        assert!(stdout.starts_with("hit OS minimal\n"), "{built:?}");
     }
 
     fn command(&self, args: &[&str]) -> Command {

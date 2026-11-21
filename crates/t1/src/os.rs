@@ -1,7 +1,8 @@
 //! Fetches the pinned `OS minimal` layer for tests once, so that a test's
 //! store can start with it, and only the tests about fetching it download it.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::OnceLock;
@@ -25,33 +26,48 @@ pub fn put(root: &Path) {
         fs::create_dir_all(root.join(directory)).unwrap();
         // A store replaces or removes a layer's file, and never writes into
         // it, so its stores can share one. A copy works across filesystems.
-        if fs::hard_link(&from, &to).is_err() {
-            fs::copy(&from, &to).unwrap();
+        match fs::hard_link(&from, &to) {
+            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                fs::copy(&from, &to).unwrap();
+            }
+            linked => linked.unwrap(),
         }
     }
 }
 
 /// A store that holds only the pinned layer, checked against `pin.toml` once
-/// in each process. Its directory is named by the digest, and moves into
-/// place only when it's complete, so concurrent test binaries can't use part
-/// of one.
+/// in each process. Test binaries make and check it under a lock, and its
+/// directory moves into place only when it's complete, so none can use part
+/// of one, even after a killed one.
 fn seed() -> &'static Path {
     static SEED: OnceLock<PathBuf> = OnceLock::new();
     SEED.get_or_init(|| {
         let digest = crate::pinned(PIN, "sha256");
         let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest");
         let seed = directory.join(format!("os-{digest}"));
+        fs::create_dir_all(&directory).expect("target/guest should be writable");
+        let lock = File::create(directory.join(format!("os-{digest}.lock"))).unwrap();
+        lock.lock().unwrap();
         if complete(&seed, digest) {
             return seed;
         }
         let _ = fs::remove_dir_all(&seed);
         let partial = directory.join(format!(".os-{digest}.{}", process::id()));
         let _ = fs::remove_dir_all(&partial);
-        fs::create_dir_all(&partial).expect("target/guest should be writable");
+        fs::create_dir_all(&partial).unwrap();
         let download = partial.join("download");
         let status = Command::new("curl")
             .args(["--fail", "--silent", "--show-error", "--location"])
-            .args(["--proto", "=https", "--retry", "3", "--output"])
+            .args([
+                "--proto",
+                "=https",
+                "--retry",
+                "3",
+                "--connect-timeout",
+                "30",
+            ])
+            // A download that stalls for 30 seconds fails, and is retried.
+            .args(["--speed-limit", "1", "--speed-time", "30", "--output"])
             .arg(&download)
             .arg(crate::pinned(PIN, "url"))
             .status()
@@ -66,20 +82,19 @@ fn seed() -> &'static Path {
         fs::remove_file(&download).unwrap();
         assert_eq!(layers.put(&data, LEVEL).unwrap(), digest);
         drop(layers.open(digest).unwrap());
-        // Another process may have moved its copy into place first.
-        if let Err(error) = fs::rename(&partial, &seed) {
-            assert!(complete(&seed, digest), "{error}");
-            fs::remove_dir_all(&partial).unwrap();
-        }
+        fs::rename(&partial, &seed).unwrap();
         seed
     })
 }
 
 /// Whether `seed` holds the layer with this digest, at the level `ap build`
-/// keeps it at, and an uncompressed copy whose bytes have this digest.
+/// keeps it at, and both its frame and its uncompressed copy hold bytes with
+/// this digest.
 fn complete(seed: &Path, digest: &str) -> bool {
+    let layers = Layers::new(seed);
     let plain = seed.join("plain-layers").join(digest);
-    Layers::new(seed).level(digest).ok().flatten() == Some(LEVEL)
+    layers.level(digest).ok().flatten() == Some(LEVEL)
+        && layers.get(digest).is_ok()
         && plain.is_file()
         && crate::digest_matches(&plain, digest)
 }

@@ -1383,8 +1383,10 @@ fn every_run_trusts_a_certificate_authority_of_its_own() {
 }
 
 /// An agent with a hidden secret and a visible one, and their values.
+/// `SHOWN_KEY` is visible on one line and hidden on a later one, and its
+/// grant, which is visible, decides.
 const SECRETS: &str = "NETWORK +example.com\nENV FAKE_HARNESS_SLEEP 300\n\
-     SECRET HIDDEN_TOKEN @example.com\nSECRET SHOWN_KEY visible\n";
+     SECRET HIDDEN_TOKEN @example.com\nSECRET SHOWN_KEY visible\nSECRET SHOWN_KEY @example.com\n";
 const HIDDEN_VALUE: &str = "hidden-value-5d1c9e";
 const SHOWN_VALUE: &str = "shown-value-77a0b4";
 
@@ -1426,6 +1428,8 @@ fn placeholder(scratch: &Scratch) -> String {
         b"",
     );
     assert_eq!(String::from_utf8_lossy(&files.stdout), "", "{files:?}");
+    // grep ran: it found nothing, or also met a file it couldn't read.
+    assert!(matches!(files.status.code(), Some(1 | 2)), "{files:?}");
     // Nor does the environment or command line of any process there that
     // the agent can read. The pattern comes on standard input, so no
     // command line holds it.

@@ -674,7 +674,18 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     let secrets = Secrets::read(&instructions).map_err(unreadable)?;
     let mut given = Vec::new();
     let mut hidden = Vec::new();
-    for secret in &secrets.secrets {
+    for (at, secret) in secrets.secrets.iter().enumerate() {
+        let same = |other: &&agentfile::Secret| other.name == secret.name;
+        if secrets.secrets[..at].iter().any(|other| same(&other)) {
+            continue;
+        }
+        // A name on several lines is visible if any of them says so, as
+        // its grant is.
+        let visible = secrets
+            .secrets
+            .iter()
+            .filter(same)
+            .any(|other| other.visible);
         let value = std::env::var_os(&secret.name).ok_or_else(|| {
             fail(format!(
                 "`SECRET {0}` has no value. Set the environment variable `{0}`",
@@ -682,7 +693,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             ))
         })?;
         let value = value.into_vec();
-        if secret.visible {
+        if visible {
             given.push((secret.name.as_bytes().to_vec(), value));
             continue;
         }

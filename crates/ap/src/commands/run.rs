@@ -21,6 +21,13 @@
 //! merged with the ones from `--network`.
 //! A URL rule, and everything else on #297's list of what isn't built yet,
 //! fails with 125 and says so, before any VM starts.
+//!
+//! Each `SECRET`'s value comes from the variable of its name in this
+//! process's environment, and a run without one fails with 125, before any
+//! VM starts. A `visible` value goes to the harness's environment. A hidden
+//! one stays in this process, for the network process, and the harness
+//! gets a placeholder made for this run instead. The run process starts
+//! without a hidden secret's variable.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsString};
@@ -68,8 +75,7 @@ const FLAGS_NOT_BUILT: [&str; 4] = ["-t", "--resume", "--gui", "--approve"];
 
 /// The instructions a run can't honor yet. `ap build` refuses the ones that
 /// need a fetch, so an agent that has them can't be built either.
-const NOT_BUILT: [&str; 10] = [
-    "SECRET",
+const NOT_BUILT: [&str; 9] = [
     "AUTH",
     "PERSIST",
     "PORT",
@@ -150,8 +156,8 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
-    let started = start(args).and_then(|(root, layers, shares, start, network)| {
-        run_agent(&root, args, &layers, shares, start, &network)
+    let started = start(args).and_then(|(root, layers, shares, start, network, hidden)| {
+        run_agent(&root, args, &layers, shares, start, &network, &hidden)
     });
     match started {
         Ok(status) => status,
@@ -171,6 +177,7 @@ fn run_agent(
     shares: Vec<Opened>,
     mut start: Start,
     network: &[OsString],
+    hidden: &[Hidden],
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -232,6 +239,11 @@ fn run_agent(
     drop(network_link);
     drop(network_process);
     let mut command = Command::new(exe);
+    // The run process gets no hidden value, not even through the
+    // environment it would inherit.
+    for secret in hidden {
+        command.env_remove(&secret.name);
+    }
     command
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
@@ -548,8 +560,50 @@ fn keep_pending(
 }
 
 /// The store's root, the agent's layers, its shares' roots, how to start
-/// its harness, and the network process's arguments.
-type Prepared = (PathBuf, Vec<LayerName>, Vec<Opened>, Start, Vec<OsString>);
+/// its harness, the network process's arguments, and its hidden secrets.
+type Prepared = (
+    PathBuf,
+    Vec<LayerName>,
+    Vec<Opened>,
+    Start,
+    Vec<OsString>,
+    Vec<Hidden>,
+);
+
+/// A hidden secret, whose value stays out of the run process and the guest.
+struct Hidden {
+    name: String,
+    /// The value from your host, for the network process to swap in.
+    #[expect(dead_code, reason = "the network process gets it in a later change")]
+    value: Vec<u8>,
+    /// What the guest holds instead, random for each run.
+    #[expect(dead_code, reason = "the network process gets it in a later change")]
+    placeholder: Vec<u8>,
+}
+
+/// How many random bytes a placeholder has. It holds them in hex.
+const PLACEHOLDER_BYTES: usize = 16;
+
+/// A new placeholder: random bytes from the kernel, in lowercase hex.
+fn random_placeholder() -> io::Result<Vec<u8>> {
+    let mut bytes = [0u8; PLACEHOLDER_BYTES];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        // SAFETY: the call writes at most the bytes left in `bytes`.
+        let drawn = unsafe {
+            libc::getrandom(bytes[filled..].as_mut_ptr().cast(), bytes.len() - filled, 0)
+        };
+        match drawn {
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+            -1 => return Err(io::Error::last_os_error()),
+            drawn => filled += drawn as usize,
+        }
+    }
+    Ok(bytes
+        .iter()
+        .flat_map(|byte| format!("{byte:02x}").into_bytes())
+        .collect())
+}
 
 /// Everything the run needs before its VM starts.
 fn start(args: &Args) -> Result<Prepared, Error> {
@@ -613,6 +667,44 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         (instructions.iter()).find(|instruction| NOT_BUILT.contains(&instruction.name.as_str()))
     {
         return Err(fail(format!("`{}` is not built yet", instruction.name)));
+    }
+    // SPEC.md's SECRET: each value comes from the host environment variable
+    // of the secret's name, and a run without one fails before it asks
+    // anything else.
+    let secrets = Secrets::read(&instructions).map_err(unreadable)?;
+    let mut given = Vec::new();
+    let mut hidden = Vec::new();
+    for (at, secret) in secrets.secrets.iter().enumerate() {
+        let same = |other: &&agentfile::Secret| other.name == secret.name;
+        if secrets.secrets[..at].iter().any(|other| same(&other)) {
+            continue;
+        }
+        // A name on several lines is visible if any of them says so, as
+        // its grant is.
+        let visible = secrets
+            .secrets
+            .iter()
+            .filter(same)
+            .any(|other| other.visible);
+        let value = std::env::var_os(&secret.name).ok_or_else(|| {
+            fail(format!(
+                "`SECRET {0}` has no value. Set the environment variable `{0}`",
+                secret.name
+            ))
+        })?;
+        let value = value.into_vec();
+        if visible {
+            given.push((secret.name.as_bytes().to_vec(), value));
+            continue;
+        }
+        let placeholder = random_placeholder()
+            .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
+        given.push((secret.name.as_bytes().to_vec(), placeholder.clone()));
+        hidden.push(Hidden {
+            name: secret.name.clone(),
+            value,
+            placeholder,
+        });
     }
     let files = Files::read(&instructions).map_err(unreadable)?;
     let home_dir = home.clone().unwrap_or_default();
@@ -746,8 +838,6 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         }
         false => None,
     };
-    let secrets = Secrets::read(&instructions).map_err(unreadable)?;
-
     let mut env = BTreeMap::new();
     env.insert(b"PATH".to_vec(), PATH.as_bytes().to_vec());
     for variable in &secrets.env {
@@ -759,6 +849,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         })?;
         env.insert(variable.key.as_bytes().to_vec(), value);
     }
+    // A visible secret's value, and a hidden one's placeholder.
+    env.extend(given);
     // SPEC.md fixes these, so `ENV` can't change them.
     for (key, value) in [("HOME", HOME), ("USER", "agent"), ("LOGNAME", "agent")] {
         env.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec());
@@ -854,7 +946,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     };
     let hosts = ap::adapter::reserved(settings.agent.harness).hosts;
     let network = ap::network::arguments(hosts, &merged);
-    Ok((root, layers, roots, start, network))
+    Ok((root, layers, roots, start, network, hidden))
 }
 
 /// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a

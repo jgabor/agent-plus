@@ -815,19 +815,24 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
 /// Starts a headless run of `agent`, and returns it and its name, once the
 /// harness has reported, which the fake one does before it sleeps.
 fn start_headless(scratch: &Scratch, agent: &str) -> (Started, String) {
-    let (run, name, _) = start_reporting(scratch, agent);
+    let (run, name, _) = start_reporting(scratch, agent, &[]);
     (run, name)
 }
 
 /// Starts a headless run of `agent`, as [`start_headless`] does, and also
-/// returns the harness's report.
-fn start_reporting(scratch: &Scratch, agent: &str) -> (Started, String, String) {
+/// returns the harness's report. `ap run` also gets the variables in `env`.
+fn start_reporting(
+    scratch: &Scratch,
+    agent: &str,
+    env: &[(&str, &str)],
+) -> (Started, String, String) {
     let mut run = Started(
         Command::new(&shared().0)
             .args(["run", agent, "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)
             .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .envs(env.iter().copied())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -1293,7 +1298,7 @@ const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 
 /// What one run trusts: the certificates in its bundle, in order.
 fn trusted(scratch: &Scratch, agent: &str) -> Vec<String> {
-    let (run, name, report) = start_reporting(scratch, agent);
+    let (run, name, report) = start_reporting(scratch, agent, &[]);
     for variable in BUNDLE_VARIABLES {
         let seen = format!("\"{variable}\":\"{BUNDLE}\"");
         assert!(
@@ -1375,4 +1380,113 @@ fn every_run_trusts_a_certificate_authority_of_its_own() {
     for kept in &image {
         assert!(after.contains(kept), "a run changed {}", kept.0.display());
     }
+}
+
+/// An agent with a hidden secret and a visible one, and their values.
+/// `SHOWN_KEY` is visible on one line and hidden on a later one, and its
+/// grant, which is visible, decides.
+const SECRETS: &str = "NETWORK +example.com\nENV FAKE_HARNESS_SLEEP 300\n\
+     SECRET HIDDEN_TOKEN @example.com\nSECRET SHOWN_KEY visible\nSECRET SHOWN_KEY @example.com\n";
+const HIDDEN_VALUE: &str = "hidden-value-5d1c9e";
+const SHOWN_VALUE: &str = "shown-value-77a0b4";
+
+/// The value the harness saw for the variable `name`.
+fn seen<'a>(report: &'a str, name: &str) -> &'a str {
+    let start = format!("\"{name}\":\"");
+    let at = report
+        .find(&start)
+        .unwrap_or_else(|| panic!("the harness didn't see {name}: {report}"));
+    let rest = &report[at + start.len()..];
+    &rest[..rest.find('"').unwrap()]
+}
+
+/// Starts a run of the agent `secretive` with both values, checks that
+/// only the visible one reaches the guest, and that the run process has
+/// no copy of the hidden one, and returns the hidden secret's placeholder.
+fn placeholder(scratch: &Scratch) -> String {
+    let (run, name, report) = start_reporting(
+        scratch,
+        "secretive",
+        &[("HIDDEN_TOKEN", HIDDEN_VALUE), ("SHOWN_KEY", SHOWN_VALUE)],
+    );
+    assert_eq!(seen(&report, "SHOWN_KEY"), SHOWN_VALUE, "{report}");
+    let placeholder = seen(&report, "HIDDEN_TOKEN").to_owned();
+    assert!(!placeholder.is_empty(), "{report}");
+    assert!(!report.contains(HIDDEN_VALUE), "{report}");
+    // No file in the guest holds the value.
+    let files = scratch.exec(
+        &name,
+        &[
+            "grep",
+            "-rlsF",
+            "--exclude-dir=proc",
+            "--exclude-dir=sys",
+            "--exclude-dir=dev",
+            HIDDEN_VALUE,
+            "/",
+        ],
+        b"",
+    );
+    assert_eq!(String::from_utf8_lossy(&files.stdout), "", "{files:?}");
+    // grep ran: it found nothing, or also met a file it couldn't read.
+    assert!(matches!(files.status.code(), Some(1 | 2)), "{files:?}");
+    // Nor does the environment or command line of any process there that
+    // the agent can read. The pattern comes on standard input, so no
+    // command line holds it.
+    let environments = |value: &str| {
+        let found = scratch.exec(
+            &name,
+            &[
+                "sh",
+                "-c",
+                "grep -lsF -f - /proc/[0-9]*/environ /proc/[0-9]*/cmdline",
+            ],
+            value.as_bytes(),
+        );
+        String::from_utf8(found.stdout).unwrap()
+    };
+    assert_eq!(environments(HIDDEN_VALUE), "");
+    // The harness's own environment is one the agent can read.
+    assert!(environments(SHOWN_VALUE).contains("/environ"));
+    // The run process, which holds the VM, has no copy of it either.
+    let process = run_process(run.0.id());
+    let environment = fs::read(format!("/proc/{process}/environ")).unwrap();
+    assert!(
+        environment.starts_with(b"HOME=") || environment.windows(6).any(|w| w == b"\0HOME="),
+        "{process} has no environment"
+    );
+    assert!(
+        !(environment.windows(HIDDEN_VALUE.len())).any(|window| window == HIDDEN_VALUE.as_bytes()),
+        "the run process holds the hidden value"
+    );
+    drop(run);
+    placeholder
+}
+
+// spec(SECRET): **Where the value comes from.** At run time, `ap` reads the value from the host environment variable `<name>`.
+// spec(SECRET): **Hidden (the default).** Inside the guest, the environment variable `<name>` holds a placeholder.
+// spec(SECRET): **`visible`** hands the real value to the agent.
+#[test]
+fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_visible_one() {
+    let scratch = Scratch::new("secrets");
+    scratch.build("secretive", &fake(SECRETS));
+    let first = placeholder(&scratch);
+    let second = placeholder(&scratch);
+    assert_ne!(first, HIDDEN_VALUE);
+    assert_ne!(first, second, "two runs got the same placeholder");
+}
+
+// spec(SECRET): A missing value makes the run fail, and the error names the secret.
+// spec(Run): **Exit status.** If `ap` fails before the harness starts, for example on a missing secret or a refused approval, it exits with status 125.
+#[test]
+fn a_run_with_a_secret_it_has_no_value_for_fails_before_its_vm_starts() {
+    let scratch = Scratch::new("missing-secret");
+    scratch.build("secretive", &fake(SECRETS));
+    let output = scratch.ap(&["run", "secretive", "-p", PROMPT]);
+    assert_eq!(output.status.code(), Some(FAILED), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("`HIDDEN_TOKEN`"), "{stderr}");
+    assert!(!stderr.contains("not built"), "{stderr}");
+    assert_eq!(scratch.ps_all(), Vec::<Vec<String>>::new());
 }

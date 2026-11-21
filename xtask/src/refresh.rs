@@ -472,17 +472,18 @@ fn gate_main(root: &Path) -> Result<Option<String>, Problem> {
             }
         }
     }
-    // Until the gate is reaped, its group is its own, so the timer and this
-    // stop nothing else. This stops what the gate left running, before its
-    // tree goes. After it, the watcher has nothing to stop, and it mustn't
-    // signal a group that is gone.
+    // Until the gate is reaped, its group is its own, so the timer, this, and
+    // the watcher stop nothing else. This stops what the gate left running,
+    // before its tree goes. The watcher goes next, while the group is still
+    // the gate's, so that it never signals a group that is gone.
     drop(ended);
     let timed_out = timer.join().unwrap_or(false);
     stop_group(group);
-    let status = child.wait();
     let _ = watcher.kill();
     let _ = watcher.wait();
-    let status = status.map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
+    let status = child
+        .wait()
+        .map_err(|e| Problem(format!("couldn't wait for the gate: {e}")))?;
     Ok(match (status.success(), failed.is_empty()) {
         // A gate that passed just as the timer fired did pass.
         (false, _) if timed_out => Some(format!("its gate ran past the {seconds} second timeout")),

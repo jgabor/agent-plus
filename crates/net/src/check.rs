@@ -66,12 +66,33 @@ impl NameCheck {
         }
     }
 
+    /// A check for a connection to `name`, a host with URL rules, which
+    /// reads only HTTP. Each request must name `name`, as a plain HTTP
+    /// request must, and [`NameCheck::feed_deciding`] decides its target.
+    pub fn requests(name: &str) -> NameCheck {
+        NameCheck {
+            state: State::Http(Http::Head),
+            ..NameCheck::new(name)
+        }
+    }
+
     /// Takes `input`, which the guest sent next, and adds the bytes that may
     /// now pass to `out`. Once it refuses, the connection must end, and
     /// nothing more may pass.
     pub fn feed(&mut self, input: &[u8], out: &mut Vec<u8>) -> Result<(), Refused> {
+        self.feed_deciding(input, out, &mut |_| true)
+    }
+
+    /// Takes `input` as [`NameCheck::feed`] does, and passes a request's
+    /// head only if `allows` allows its target.
+    pub fn feed_deciding(
+        &mut self,
+        input: &[u8],
+        out: &mut Vec<u8>,
+        allows: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), Refused> {
         self.held.extend_from_slice(input);
-        let fed = self.read(out);
+        let fed = self.read(out, allows);
         if fed.is_err() {
             self.state = State::Refused;
             self.held = Vec::new();
@@ -80,7 +101,11 @@ impl NameCheck {
     }
 
     /// Passes what it can of the bytes held.
-    fn read(&mut self, out: &mut Vec<u8>) -> Result<(), Refused> {
+    fn read(
+        &mut self,
+        out: &mut Vec<u8>,
+        allows: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<(), Refused> {
         loop {
             let moved = match &mut self.state {
                 State::Passing => {
@@ -102,7 +127,7 @@ impl NameCheck {
                     }
                     agreed
                 }
-                State::Http(http) => match request(*http, &self.name, &self.held)? {
+                State::Http(http) => match request(*http, &self.name, &self.held, allows)? {
                     Some((taken, next)) => {
                         out.extend(self.held.drain(..taken));
                         self.state = next;
@@ -204,7 +229,12 @@ fn hello(
 
 /// One step of a request from `held`, at `http`: how many bytes pass, and
 /// what comes after them, or `None` if more must come.
-fn request(http: Http, name: &str, held: &[u8]) -> Result<Option<(usize, State)>, Refused> {
+fn request(
+    http: Http,
+    name: &str,
+    held: &[u8],
+    allows: &mut dyn FnMut(&str) -> bool,
+) -> Result<Option<(usize, State)>, Refused> {
     let short = || match held.len() > HEAD_LIMIT {
         true => Err(Refused),
         false => Ok(None),
@@ -218,7 +248,9 @@ fn request(http: Http, name: &str, held: &[u8]) -> Result<Option<(usize, State)>
             let mut parsed = httparse::Request::new(&mut headers);
             match parsed.parse(held).map_err(|_| Refused)? {
                 httparse::Status::Partial => short(),
-                httparse::Status::Complete(taken) => Ok(Some((taken, head(&parsed, name)?))),
+                httparse::Status::Complete(taken) => {
+                    Ok(Some((taken, head(&parsed, name, allows)?)))
+                }
             }
         }
         Http::Body(left) | Http::ChunkData(left) => {
@@ -262,8 +294,13 @@ fn request(http: Http, name: &str, held: &[u8]) -> Result<Option<(usize, State)>
 }
 
 /// What follows a request whose head is `parsed`, if its `Host` agrees
-/// with `name`, and the server would read its body as this reads it.
-fn head(parsed: &httparse::Request, name: &str) -> Result<State, Refused> {
+/// with `name`, the server would read its body as this reads it, and
+/// `allows` allows its target.
+fn head(
+    parsed: &httparse::Request,
+    name: &str,
+    allows: &mut dyn FnMut(&str) -> bool,
+) -> Result<State, Refused> {
     // An absolute target names a host of its own, and CONNECT opens a
     // tunnel to one.
     let target = parsed.path.ok_or(Refused)?;
@@ -306,7 +343,7 @@ fn head(parsed: &httparse::Request, name: &str) -> Result<State, Refused> {
     };
     // A server may switch protocols, or ignore the request to, and the
     // check can't see which.
-    if named("upgrade").next().is_some() {
+    if named("upgrade").next().is_some() || !allows(target) {
         return Err(Refused);
     }
     Ok(State::Http(body))

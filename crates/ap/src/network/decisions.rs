@@ -75,7 +75,7 @@ pub(super) fn write(allow: bool, rule: &Rule, about: &Blocked) -> Vec<u8> {
     [&[TAG][..], text.as_bytes()].concat()
 }
 
-fn read(message: &[u8]) -> Option<(bool, Rule, Blocked)> {
+pub(super) fn read(message: &[u8]) -> Option<(bool, Rule, Blocked)> {
     let text = std::str::from_utf8(message.strip_prefix(&[TAG])?).ok()?;
     let (verdict, text) = text.split_once(' ')?;
     let (rule, text) = text.split_once(' ')?;

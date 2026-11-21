@@ -83,11 +83,22 @@ impl Decryption {
 /// names. A file that can't be read, or isn't a regular file, gives none,
 /// and a block that can't be read is left out.
 pub fn roots(path: &Path) -> Vec<CertificateDer<'static>> {
-    // A pipe or a device could hold up the read.
-    let regular = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file());
-    let Some(pem) = regular.then(|| std::fs::read(path).ok()).flatten() else {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    // A pipe or a device could hold up the open or the read, so it opens
+    // without waiting, and reads only a regular file.
+    let file = std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path);
+    let mut pem = Vec::new();
+    let read = file.and_then(|mut file| match file.metadata()?.is_file() {
+        true => file.read_to_end(&mut pem),
+        false => Err(io::ErrorKind::InvalidInput.into()),
+    });
+    if read.is_err() {
         return Vec::new();
-    };
+    }
     CertificateDer::pem_slice_iter(&pem)
         .filter_map(Result::ok)
         .collect()
@@ -116,6 +127,11 @@ pub(super) struct Decrypted {
     upstream_closed: bool,
     /// The guest got its FIN.
     closed: bool,
+    /// The rules allowed a request.
+    allowed: bool,
+    /// The rules denied a request, so the guest gets a reset once what they
+    /// allowed before it has gone on.
+    refused: bool,
 }
 
 enum Stage {
@@ -152,6 +168,8 @@ impl Decrypted {
             shut: false,
             upstream_closed: false,
             closed: false,
+            allowed: false,
+            refused: false,
         }
     }
 
@@ -162,11 +180,14 @@ impl Decrypted {
 
     /// Whether it waits to read the stream.
     pub(super) fn wants_to_read(&self) -> bool {
-        // Nothing comes from the destination until the guest's handshake is
-        // done, so nothing waits in the guest's side unsent.
+        // Nothing but its handshake comes from the destination until the
+        // rules allow a request, and nothing once they deny one.
+        let open = self.allowed && !self.refused;
         let reading = match &self.stage {
-            Stage::Tls(guest, _) => !guest.is_handshaking(),
-            Stage::Plain => true,
+            Stage::Tls(guest, client) => {
+                client.is_handshaking() || (open && !guest.is_handshaking())
+            }
+            Stage::Plain => open,
             Stage::First | Stage::Hello(..) => false,
         };
         reading && !self.upstream_closed && self.to_guest.is_empty()
@@ -216,7 +237,13 @@ impl Decrypted {
                 let n = stack.recv(self.id, &mut buffer);
                 if n > 0 {
                     moved = true;
-                    self.guest_sent(&buffer[..n], decryption, decide)?;
+                    match self.guest_sent(&buffer[..n], decryption, decide) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                            self.refused = true;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 } else if stack.received_all(self.id) {
                     self.guest_ended()?;
                 }
@@ -239,6 +266,13 @@ impl Decrypted {
             }
             let flushed = self.to_upstream.is_empty()
                 && !matches!(&self.stage, Stage::Tls(_, client) if client.wants_write());
+            let handshaking =
+                matches!(&self.stage, Stage::Tls(_, client) if client.is_handshaking());
+            // What the rules allowed before the request they denied has gone
+            // on.
+            if self.refused && flushed && !(self.allowed && handshaking) {
+                return Err(refused("a request the rules deny"));
+            }
             if self.guest_closed && flushed && !self.shut {
                 self.upstream.shutdown(Shutdown::Write)?;
                 self.shut = true;
@@ -289,7 +323,7 @@ impl Decrypted {
             }
             _ => false,
         };
-        !self.guest_closed && self.to_upstream.is_empty() && !waiting
+        !self.guest_closed && !self.refused && self.to_upstream.is_empty() && !waiting
     }
 
     fn guest_sent(
@@ -317,10 +351,12 @@ impl Decrypted {
             Stage::First => unreachable!(),
             Stage::Plain => {
                 let check = &mut self.check;
-                (check.feed_deciding(input, &mut self.to_upstream, &mut |target| {
+                let before = self.to_upstream.len();
+                let fed = check.feed_deciding(input, &mut self.to_upstream, &mut |target| {
                     allows(Scheme::Http, target)
-                }))
-                .map_err(|_| refused("a request the rules deny"))
+                });
+                self.allowed |= self.to_upstream.len() > before;
+                fed.map_err(|_| refused("a request the rules deny"))
             }
             Stage::Hello(acceptor, read) => {
                 *read += input.len();
@@ -395,6 +431,7 @@ impl Decrypted {
                         .check
                         .feed_deciding(&buffer[..n], &mut passed, &mut decide);
                     client.writer().write_all(&passed)?;
+                    self.allowed |= !passed.is_empty();
                     passed.clear();
                     fed.map_err(|_| refused("a request the rules deny"))?;
                 }
@@ -425,6 +462,10 @@ impl Decrypted {
                         guest.send_close_notify();
                         break;
                     }
+                    // A server that speaks before a request is allowed isn't
+                    // HTTP.
+                    Ok(_) if !self.allowed => return Err(refused("a server that speaks first")),
+                    Ok(_) if self.refused => {}
                     Ok(n) => guest.writer().write_all(&buffer[..n])?,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                     Err(error) => return Err(error),

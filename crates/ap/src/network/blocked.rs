@@ -163,10 +163,16 @@ impl Reporter {
         let proxied = net::proxied(&self.network, &harness, &connection);
         let rule = match (proxied, request) {
             // A request on a connection to your host, which got there, is
-            // decided by the rules or the default, not by its loopback.
+            // denied by a `-` rule, its path, or else the default, not by
+            // its loopback, and never by a `+` IP rule.
             (net::Proxied::Loopback, Some(_)) => {
-                let decision = net::decide(&self.network.rules, Sign::Deny, &connection);
-                Rule::by(&self.network, decision.by)
+                match net::decide(&self.network.rules, Sign::Deny, &connection) {
+                    net::Decision {
+                        sign: Sign::Deny,
+                        by,
+                    } => Rule::by(&self.network, by),
+                    _ => Rule::Default,
+                }
             }
             _ => Rule::proxied(&self.network, proxied),
         };
@@ -431,6 +437,51 @@ mod tests {
         assert_eq!(&buffer[..len], b"!deny default lookup example.com");
         let len = mine.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..len], b"!lookup example.com");
+    }
+
+    // spec(ap logs): On a host with URL rules, the rule can also be the request path, or, for traffic that isn't HTTP, the host's URL rules.
+    #[test]
+    fn a_request_denied_on_your_host_names_what_denied_it() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let args: Vec<OsString> = [
+            "--",
+            "-",
+            "+https://host.ap.internal/allowed",
+            "-https://host.ap.internal/allowed/secret",
+            "+127.0.0.1",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let (network, _) = super::super::rules(&args).unwrap();
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            network,
+            Vec::new(),
+        );
+        let request = |target| net::Request {
+            scheme: agentfile::Scheme::Https,
+            target,
+        };
+        let address = "127.0.0.1".parse().unwrap();
+        for target in ["/other", "/allowed/secret", "/allowed/../x"] {
+            reporter.request(false, "host.ap.internal", address, 443, request(target));
+        }
+        reporter.not_http(Some("host.ap.internal"), address, 443);
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
+        let mut buffer = [0; 512];
+        let mut rules = Vec::new();
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            if let Some((_, rule, _)) = decisions::read(&buffer[..len]) {
+                rules.push(rule);
+            }
+        }
+        // A `+` rule never names a denial, and the IP rule doesn't reach a
+        // request that its path decides.
+        assert_eq!(
+            rules,
+            [Rule::Default, Rule::Numbered(1), Rule::Path, Rule::NotHttp]
+        );
     }
 
     #[test]

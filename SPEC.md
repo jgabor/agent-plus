@@ -586,6 +586,8 @@ and sends no input.
   destination is the name alone.
 - The rule is the `NETWORK` line that decided, or else the default, the
   harness's hosts, or your host's loopback.
+- On a host with URL rules, the rule can also be the request path, or, for
+  traffic that isn't HTTP, the host's URL rules.
 
 ### ap exec
 
@@ -1904,6 +1906,9 @@ allow one.
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
   rules, traffic that isn't HTTP is denied. A request that the rules deny
   never reaches the server, and the proxy resets the connection it came on.
+  The requests before it on that connection still reach the server. The
+  proxy connects to the server before the first request, but nothing the
+  server sends reaches the guest until the rules allow a request.
 
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that

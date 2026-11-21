@@ -379,6 +379,7 @@ fn server() -> (CertificateDer<'static>, Arc<ServerConfig>) {
 // spec(NETWORK): on hosts with URL rules, because the rules need the request path
 // spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 // spec(NETWORK): A request that the rules deny never reaches the server, and the proxy resets the connection it came on.
+// spec(NETWORK): The requests before it on that connection still reach the server.
 #[test]
 fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let (root, config) = server();
@@ -407,6 +408,13 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(denied, Some(&mut tls), &get("/allowed/../denied"));
     assert_eq!(answer, Err("reset".to_owned()));
+    // A request the rules allow, sent with a denied one after it, still
+    // reaches the destination, even before the proxy's own handshake.
+    let pipelined = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let both = [get("/allowed/first"), get("/denied")].concat();
+    let answer = guest.exchange(pipelined, Some(&mut tls), &both);
+    assert_eq!(answer, Err("reset".to_owned()));
     // A guest that offers only HTTP/2 gets no protocol it can speak.
     let only_h2 = guest.connect();
     let mut tls = Guest::tls_offering(&guest.authority.clone(), &[b"h2"]);
@@ -420,9 +428,15 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     };
     assert!(answer.is_err(), "{answer:?}");
 
-    // The destination got the allowed request alone, and was offered only
+    // The destination got the allowed requests alone, and was offered only
     // HTTP/1.1 too.
-    assert_eq!(settled(&seen), ["GET /allowed/a HTTP/1.1 (http/1.1)"]);
+    assert_eq!(
+        settled(&seen),
+        [
+            "GET /allowed/a HTTP/1.1 (http/1.1)",
+            "GET /allowed/first HTTP/1.1 (http/1.1)"
+        ]
+    );
 }
 
 /// Sends `bytes` as they are on `handle`, and gives the guest a moment.
@@ -619,6 +633,77 @@ fn udp_is_denied_on_a_host_with_url_rules() {
     assert!(echoed(&mut Guest::new(&host, Vec::new(), port), port));
     let url = format!("{host}NETWORK -https://{NAME}/secret\n");
     assert!(!echoed(&mut Guest::new(&url, Vec::new(), port), port));
+}
+
+/// A plain destination that greets each connection first, as an SMTP
+/// server does, and then answers requests as [`destination`]'s does. It
+/// notes each connection as `connected`.
+fn greeter() -> (u16, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Seen::default();
+    let noted = Arc::clone(&seen);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let noted = Arc::clone(&noted);
+            thread::spawn(move || {
+                noted.lock().unwrap().push("connected".to_owned());
+                stream.set_read_timeout(Some(WAIT)).unwrap();
+                let _ = stream.write_all(b"220 greeting\r\n");
+                answer(&mut stream, &noted, |_| "plain".to_owned());
+            });
+        }
+    });
+    (port, seen)
+}
+
+// spec(NETWORK): The proxy connects to the server before the first request, but nothing the server sends reaches the guest until the rules allow a request.
+#[test]
+fn the_server_reaches_the_guest_only_once_a_request_is_allowed() {
+    let (port, seen) = greeter();
+    let rules = format!("NETWORK -\nNETWORK +http://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, Vec::new(), port);
+    // The guest has sent part of a request, which reads as HTTP.
+    let silent = guest.connect();
+    send_raw(&mut guest, silent, b"GET /allo");
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(silent);
+        assert!(!socket.can_recv(), "the greeting reached the guest");
+        thread::sleep(Duration::from_millis(1));
+    }
+    let answer = guest.exchange(silent, None, b"w\r\n\r\n");
+    assert_eq!(answer, Err("reset".to_owned()));
+    let allowed = guest.connect();
+    let answer = guest.exchange(allowed, None, &get("/allowed"));
+    assert!(
+        answer
+            .as_ref()
+            .is_ok_and(|a| a.starts_with("220 greeting\r\n")),
+        "{answer:?}"
+    );
+    // Plain HTTP too: what the rules allowed before a denied request goes
+    // on.
+    let pipelined = guest.connect();
+    let both = [get("/allowed/first"), get("/denied")].concat();
+    assert_eq!(
+        guest.exchange(pipelined, None, &both),
+        Err("reset".to_owned())
+    );
+    let mut seen = settled(&seen);
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "GET /allowed HTTP/1.1 (plain)",
+            "GET /allowed/first HTTP/1.1 (plain)",
+            "connected",
+            "connected",
+            "connected"
+        ]
+    );
 }
 
 // spec(NETWORK): On a host with URL rules, traffic that isn't HTTP is denied.

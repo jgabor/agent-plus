@@ -14,8 +14,8 @@ strip = true
 debug = false
 
 # Building and running an agent compresses, decompresses, and hashes images of
-# hundreds of megabytes. Unoptimized, these crates are most of a debug build's
-# time in the tests that do it.
+# hundreds of megabytes. Unoptimized, these crates take much of the CPU time of
+# the tests that do it with a debug build.
 [profile.dev.package.structured-zstd]
 opt-level = 3
 

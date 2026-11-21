@@ -8,13 +8,13 @@ publish.workspace = true
 [dependencies]
 vmm = { path = "../vmm" }
 guest = { path = "../guest" }
+store = { path = "../store" }
 
 [dev-dependencies]
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 erofs = { path = "../erofs" }
 share = { path = "../share" }
-store = { path = "../store" }
 
 [lints.cargo]
 unused_dependencies = "deny"

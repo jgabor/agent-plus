@@ -6,23 +6,12 @@ use std::process::{self, Command};
 
 const PIN: &str = include_str!("../../../guest/kernel/pin.toml");
 
-/// The value of `key` in `pin.toml`.
 fn pinned(key: &str) -> &'static str {
-    PIN.lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(" = ")?;
-            (name == key).then(|| value.trim_matches('"'))
-        })
-        .unwrap_or_else(|| panic!("pin.toml has no {key}"))
+    crate::pinned(PIN, key)
 }
 
 fn digest_matches(path: &Path) -> bool {
-    let output = Command::new("sha256sum")
-        .arg(path)
-        .output()
-        .expect("sha256sum should run");
-    assert!(output.status.success(), "sha256sum failed on {path:?}");
-    output.stdout.starts_with(pinned("sha256").as_bytes())
+    crate::digest_matches(path, pinned("sha256"))
 }
 
 /// The release the pinned kernel reports.

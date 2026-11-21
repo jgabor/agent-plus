@@ -17,7 +17,7 @@ use ap::fetch;
 use ap::store::Store;
 use guest::linux::{open_terminal, program_has_ended, resize, take_terminal};
 use guest::protocol::Size;
-use t1::{guest_binary, kernel};
+use t1::{guest_binary, kernel, os};
 
 /// The status `ap run` exits with when it fails before the harness starts.
 const FAILED: i32 = 125;
@@ -42,9 +42,9 @@ fn shared() -> &'static (PathBuf, PathBuf, PathBuf) {
     })
 }
 
-/// A home of its own, with the kernel in its store and the fake harness in
-/// its download cache, so that `ap` reads none of the owner's files and
-/// fetches nothing.
+/// A home of its own, with the kernel and the OS layer in its store and the
+/// fake harness in its download cache, so that `ap` reads none of the owner's
+/// files and fetches nothing.
 struct Scratch {
     root: PathBuf,
     home: PathBuf,
@@ -64,6 +64,7 @@ impl Scratch {
         store
             .put(fetch::kernel().sha256, File::open(&shared().2).unwrap())
             .unwrap();
+        os::put(&home.join(".local/share/ap"));
         let fake = &shared().1;
         let harness = sha256(fake);
         let cache = home.join(".cache/ap");
@@ -108,6 +109,9 @@ impl Scratch {
             dir.to_str().unwrap(),
         ]);
         assert_eq!(built.status.code(), Some(0), "{built:?}");
+        // The store starts with the pinned layer, so no build downloads it.
+        let stdout = String::from_utf8_lossy(&built.stdout);
+        assert!(stdout.starts_with("hit OS minimal\n"), "{built:?}");
     }
 
     /// Runs the static `ap` with these arguments and only `HOME`,

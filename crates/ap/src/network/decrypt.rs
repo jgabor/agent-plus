@@ -120,6 +120,10 @@ pub(super) struct Decrypted {
     guest_closed: bool,
     /// The stream's write half is shut.
     shut: bool,
+    /// The destination's side was told the guest ended: by TLS's
+    /// `close_notify`, once the proxy's handshake is done, so what the rules
+    /// allowed goes before it.
+    notified: bool,
     /// The stream read to its end.
     upstream_closed: bool,
     /// The guest got its FIN.
@@ -160,6 +164,7 @@ impl Decrypted {
             to_upstream: Vec::new(),
             guest_closed: false,
             shut: false,
+            notified: false,
             upstream_closed: false,
             closed: false,
             allowed: false,
@@ -236,6 +241,16 @@ impl Decrypted {
                 }
             }
             // To the destination.
+            if self.guest_closed && !self.notified {
+                match &mut self.stage {
+                    Stage::Tls(_, client) if client.is_handshaking() => {}
+                    Stage::Tls(_, client) => {
+                        client.send_close_notify();
+                        self.notified = true;
+                    }
+                    _ => self.notified = true,
+                }
+            }
             if let Stage::Tls(_, client) = &mut self.stage {
                 while self.to_upstream.len() < BUFFER && client.wants_write() {
                     client.write_tls(&mut self.to_upstream)?;
@@ -258,7 +273,7 @@ impl Decrypted {
             if self.guest_closed && !self.allowed {
                 return Err(refused("the guest ended before any request"));
             }
-            if self.guest_closed && flushed && !self.shut {
+            if self.guest_closed && self.notified && flushed && !self.shut {
                 self.upstream.shutdown(Shutdown::Write)?;
                 self.shut = true;
             }
@@ -414,7 +429,6 @@ impl Decrypted {
                 }
                 Ok(0) => {
                     self.guest_closed = true;
-                    client.send_close_notify();
                     break;
                 }
                 Ok(n) => {
@@ -475,9 +489,6 @@ impl Decrypted {
         };
         if unchecked || self.check.holding() {
             return Err(refused("the guest closed before its check"));
-        }
-        if let Stage::Tls(_, client) = &mut self.stage {
-            client.send_close_notify();
         }
         self.guest_closed = true;
         Ok(())

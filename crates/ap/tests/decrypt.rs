@@ -285,6 +285,12 @@ type Seen = Arc<Mutex<Vec<String>>>;
 /// A fake destination on this host's loopback, over TLS with `tls`, or
 /// plain. It answers each request with its target.
 fn destination(tls: Option<Arc<ServerConfig>>) -> (u16, Seen) {
+    destination_after(tls, Duration::ZERO)
+}
+
+/// A fake destination as [`destination`]'s, which waits `delay` on each
+/// connection before it starts.
+fn destination_after(tls: Option<Arc<ServerConfig>>, delay: Duration) -> (u16, Seen) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let seen = Seen::default();
@@ -294,6 +300,7 @@ fn destination(tls: Option<Arc<ServerConfig>>) -> (u16, Seen) {
             let Ok(stream) = stream else { continue };
             let (tls, noted) = (tls.clone(), Arc::clone(&noted));
             thread::spawn(move || {
+                thread::sleep(delay);
                 stream.set_read_timeout(Some(WAIT)).unwrap();
                 match tls {
                     Some(config) => {
@@ -542,9 +549,38 @@ fn a_guest_that_ends_before_any_request_leaves_no_connection_open() {
         }
         let state = guest.sockets.get_mut::<tcp::Socket>(handle).state();
         assert_eq!(state, tcp::State::Closed, "on port {port}");
+        // The proxy closed the silent destination's end too, while the
+        // link is still up.
+        if port == quiet {
+            assert_eq!(settled(&ended), ["ended"]);
+        }
     }
-    // The proxy closed the silent destination's end too.
-    assert_eq!(settled(&ended), ["ended"]);
+}
+
+#[test]
+fn a_request_and_the_guest_s_close_together_reach_a_slow_destination() {
+    let (root, config) = server();
+    let (port, seen) = destination_after(Some(config), Duration::from_secs(1));
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    handshake(&mut guest, handle, &mut tls);
+    // The request and the close in one write, while the proxy's own
+    // handshake waits for the destination.
+    tls.writer().write_all(&get("/allowed/slow")).unwrap();
+    tls.send_close_notify();
+    let mut out = Vec::new();
+    while tls.wants_write() {
+        tls.write_tls(&mut out).unwrap();
+    }
+    send_raw(&mut guest, handle, &out);
+    let deadline = Instant::now() + WAIT;
+    while seen.lock().unwrap().is_empty() && Instant::now() < deadline {
+        guest.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(settled(&seen), ["GET /allowed/slow HTTP/1.1 (http/1.1)"]);
 }
 
 #[test]

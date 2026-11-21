@@ -3209,6 +3209,9 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
         stderr(&output)
     );
     assert_eq!(repo.head(), head);
+    // `prepare` refused the PR in words, so `main` isn't proven for it.
+    let out = stdout(&output);
+    assert!(!out.contains("proving `main`"), "{out}");
     // `prepare` said why, and `refresh` leaves that standing.
     let failures: Vec<(String, String)> = posts(&repo)
         .into_iter()
@@ -3221,39 +3224,6 @@ fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {
     assert!(calls.contains(&unlabeled(7)), "{calls}");
     assert!(calls.contains(&unlabeled(9)), "{calls}");
     assert!(!calls.contains("gh pr merge"), "{calls}");
-}
-
-/// `prepare` refused that PR in words, from the PR and git alone, so no fault
-/// of the runner caused it, and the refresh proves nothing on `main`.
-#[test]
-fn a_refresh_proves_nothing_on_main_for_a_pr_that_prepare_refused_in_words() {
-    let repo = Repo::new("refresh-in-words");
-    repo.prepared(BRANCH, 7, "");
-    repo.change_branch("more.txt", "x\n");
-    repo.advance_main("later.txt", "x\n");
-    let head = repo.head();
-    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
-    repo.set_land_needed(&[7]);
-
-    let output = repo.refresh();
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "{}{}",
-        stdout(&output),
-        stderr(&output)
-    );
-    let out = stdout(&output);
-    assert!(!out.contains("proving `main`"), "{out}");
-    // The failure is the change's, so the PR is handed back all the same.
-    let calls = repo.calls();
-    assert!(calls.contains(&unlabeled(7)), "{calls}");
-    assert!(calls.contains(&unlabeled(9)), "{calls}");
-    assert!(
-        repo.pr_comments().contains("no ledger record"),
-        "{}",
-        repo.pr_comments()
-    );
 }
 
 /// A `main` that can't be proven excuses only the PRs that a check or an

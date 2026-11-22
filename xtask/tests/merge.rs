@@ -3563,6 +3563,40 @@ fn a_refresh_merges_no_green_pr_that_a_review_asked_to_change() {
     assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
 }
 
+/// The label goes from the issue that this run listed the PR with, and that
+/// is the issue to close. A PR that has come to close another one waits for a
+/// run that lists it so.
+#[test]
+fn a_refresh_merges_no_green_pr_that_came_to_close_another_issue() {
+    let repo = Repo::new("refresh-issue-changed");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_pr(&Pr {
+        closes: &[8],
+        ..Pr::default()
+    });
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("the issue it closes changed"),
+        "{}",
+        stdout(&output)
+    );
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("-X DELETE"), "{calls}");
+    assert!(!calls.contains("-X PATCH"), "{calls}");
+}
+
 /// Each merge moves `main`, so a PR that was green on the old one is proven
 /// again before it merges.
 #[test]

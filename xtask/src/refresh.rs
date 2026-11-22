@@ -189,7 +189,7 @@ fn merge_if_armed(
     let now = gh.armed(number)?;
     // GitHub's own auto-merge can get there first, and then GitHub closes
     // the PR's issues itself.
-    let mut closes = Vec::new();
+    let mut squashed = false;
     if now.state != "MERGED" {
         if now.state != "OPEN" {
             return Ok(Some(format!("it is {}", now.state)));
@@ -200,26 +200,33 @@ fn merge_if_armed(
         if now.head != head {
             return Ok(Some(format!("its head moved from {head} to {}", now.head)));
         }
-        // A green from an earlier proof can predate the review.
         let read = gh.pull_request(number)?;
+        // A green from an earlier proof can predate the review.
         if read.changes_requested {
             return Ok(Some("a review of it requested changes".to_string()));
         }
-        if let Err(problem) = gh.merge_pr(number, head, &slot)
-            && gh.armed(number)?.state != "MERGED"
-        {
-            return Err(problem);
+        // The label goes from the issues this run listed, and they are the
+        // ones to close.
+        if read.closing_issues != pr.closing_issues {
+            return Ok(Some("the issue it closes changed".to_string()));
+        }
+        match gh.merge_pr(number, head, &slot) {
+            Ok(()) => squashed = true,
+            Err(problem) => {
+                if gh.armed(number)?.state != "MERGED" {
+                    return Err(problem);
+                }
+            }
         }
         println!("refresh: PR {number} merged at {head}");
-        // As the PR named them just before the squash, which is newer than
-        // the list this run started from.
-        closes = read.closing_issues;
     }
     // A merge with the workflow's token starts no `mirror-labels` run.
     remove_land_needed(gh, pr)?;
     // Nor does GitHub close the issues of a PR that such a merge lands.
-    for number in closes {
-        gh.close_issue(number)?;
+    if squashed {
+        for number in &pr.closing_issues {
+            gh.close_issue(*number)?;
+        }
     }
     Ok(None)
 }

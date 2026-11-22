@@ -20,7 +20,7 @@
 //! host. The guest's one vCPU waits for each answer, so a lock never waits:
 //! one that would is refused with `EOPNOTSUPP`, as C virtiofsd does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -229,15 +229,22 @@ impl Place {
     }
 
     /// Whether making the entry `name` in `directory`, at this place, makes
-    /// it a bare repository, as git finds one.
+    /// it a bare repository, as git finds one. Its entries match folded, and
+    /// a directory that can't be listed counts as one that would be.
     fn completes(self, directory: BorrowedFd, name: &[u8]) -> bool {
         let Some(made) = fold(name).filter(|name| BARE.contains(&name.as_str())) else {
             return false;
         };
-        self == Place::Plain
-            && bare(|entry| {
-                fold(entry.to_bytes()).as_deref() == Some(made.as_str()) || holds(directory, entry)
-            })
+        if !matches!(self, Place::Plain | Place::Holder) {
+            return false;
+        }
+        let Some(held) = folded_entries(directory) else {
+            return true;
+        };
+        bare(|entry| {
+            let entry = fold(entry.to_bytes()).unwrap_or_default();
+            entry == made || held.contains(&entry)
+        })
     }
 
     /// Whether a file of `mode` may land at `name` in a directory at this
@@ -260,6 +267,32 @@ fn bare(holds: impl Fn(&CStr) -> bool) -> bool {
 /// Whether `directory` holds the entry `name`, of any kind.
 fn holds(directory: BorrowedFd, name: &CStr) -> bool {
     sys::open_beneath(directory, name, libc::O_PATH | libc::O_NOFOLLOW).is_ok()
+}
+
+/// The names of the entries in `directory`, folded, or `None` if it can't
+/// be listed.
+fn folded_entries(directory: BorrowedFd) -> Option<BTreeSet<String>> {
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let fd = sys::open_beneath(directory, c".", flags).ok()?;
+    let mut names = BTreeSet::new();
+    let mut raw = vec![0; MAX_READ];
+    let mut offset = 0;
+    loop {
+        let len = sys::read_directory(fd.as_fd(), &mut raw, offset).ok()?;
+        if len == 0 {
+            return Some(names);
+        }
+        let mut at = 0;
+        // `struct linux_dirent64`: inode, offset, record length, type, name.
+        while at + 19 < len {
+            offset = u64_at(&raw, at + 8)?;
+            let record = usize::from(u16::from_le_bytes([raw[at + 16], raw[at + 17]]));
+            let name = raw.get(at + 19..at + record)?;
+            let name = CStr::from_bytes_until_nul(name).ok()?;
+            names.insert(fold(name.to_bytes()).unwrap_or_default());
+            at += record;
+        }
+    }
 }
 
 /// A name as a case-insensitive filesystem compares it, as far as the names
@@ -584,33 +617,27 @@ impl Share {
         })
     }
 
-    /// The place of the file `fd`, of `mode`, at `name` in a directory at
-    /// `place`. In a share that can change, a plain directory that holds
-    /// what git finds a bare repository by is a git directory.
-    fn place_of(&self, place: Place, name: &[u8], fd: BorrowedFd, mode: u32) -> Place {
-        match place.of_file(name, mode) {
-            Place::Plain
-                if !self.read_only && is(mode, libc::S_IFDIR) && bare(|e| holds(fd, e)) =>
-            {
-                Place::Bare
-            }
-            place => place,
-        }
-    }
-
     fn node(&self, node: u64) -> Result<&Node, i32> {
         self.nodes.get(&node).ok_or(libc::ESTALE)
     }
 
     /// A directory node's descriptor and place, while it is beneath the
-    /// root.
+    /// root. In a share that can change, a plain directory that holds what
+    /// git finds a bare repository by is a git directory, from the moment
+    /// it does.
     fn directory(&self, node: u64) -> Result<(Rc<OwnedFd>, Place), i32> {
         let found = self.node(node)?;
         if !is(found.mode, libc::S_IFDIR) {
             return Err(libc::ENOTDIR);
         }
         self.served(&found.fd)?;
-        Ok((Rc::clone(&found.fd), found.place))
+        let place = match found.place {
+            Place::Plain if !self.read_only && bare(|entry| holds(found.fd.as_fd(), entry)) => {
+                Place::Bare
+            }
+            place => place,
+        };
+        Ok((Rc::clone(&found.fd), place))
     }
 
     /// Refuses a directory that the host has moved out from under the
@@ -682,7 +709,7 @@ impl Share {
         fd: OwnedFd,
     ) -> Answer {
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
-        let place = self.place_of(place, name.as_bytes(), fd.as_fd(), stat.st_mode);
+        let place = place.of_file(name.as_bytes(), stat.st_mode);
         let key = (stat.st_dev, stat.st_ino);
         if let Some(&found) = self.known.get(&key) {
             let node = self.nodes.get_mut(&found).ok_or(libc::EIO)?;
@@ -1047,16 +1074,16 @@ impl Share {
         let (old, new) = two_names(names.ok_or(libc::EINVAL)?)?;
         let (from, from_place) = self.directory(parent)?;
         let (into, into_place) = self.directory(to)?;
-        if from_place.fixes(old.as_bytes()) || into_place.fixes(new.as_bytes()) {
+        if from_place.keeps(old.as_bytes()) || into_place.fixes(new.as_bytes()) {
             return Err(libc::EPERM);
         }
-        // An exchange leaves both names, so it takes no entry away and
-        // makes none.
+        // An exchange makes no name, but it moves the entry at `new` out.
         let exchange = flags & libc::RENAME_EXCHANGE != 0;
-        if !exchange
-            && (from_place.keeps(old.as_bytes())
-                || into_place.completes(into.as_fd(), new.as_bytes()))
-        {
+        let refused = match exchange {
+            true => into_place.keeps(new.as_bytes()),
+            false => into_place.completes(into.as_fd(), new.as_bytes()),
+        };
+        if refused {
             return Err(libc::EPERM);
         }
         let mode = |directory: &OwnedFd, name: &CStr| {
@@ -1091,7 +1118,6 @@ impl Share {
         let Ok(stat) = sys::fstat(fd.as_fd()) else {
             return;
         };
-        let place = self.place_of(place, name.to_bytes(), fd.as_fd(), stat.st_mode);
         let Some(node) = self
             .known
             .get(&(stat.st_dev, stat.st_ino))
@@ -1102,7 +1128,7 @@ impl Share {
         node.parent = Rc::clone(directory);
         node.name = name.to_owned();
         if node.place != Place::Fixed {
-            node.place = place;
+            node.place = place.of_file(name.to_bytes(), stat.st_mode);
         }
     }
 

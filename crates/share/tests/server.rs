@@ -9,7 +9,7 @@ use share::{Mode, Root, Server};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -648,6 +648,7 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
 
 // spec(SHARE): A directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, is a git directory too, because that is how git finds a bare repository.
 // spec(SHARE): None of those entries can be removed or moved out of it.
+// spec(SHARE): Its `modules` and `worktrees` are protected as they are in `.git`.
 #[test]
 fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let tree = Tree::new("bare");
@@ -656,7 +657,10 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
         "repo.git/objects",
         "repo.git/refs",
         "repo.git/hooks",
+        "repo.git/worktrees/wt",
         "linked",
+        "later/objects",
+        "later/refs",
     ] {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
@@ -664,6 +668,7 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
         "repo.git/HEAD",
         "repo.git/config",
         "repo.git/hooks/pre-receive",
+        "repo.git/worktrees/wt/config",
         "linked/HEAD",
         "linked/commondir",
         "linked/config.worktree",
@@ -674,6 +679,7 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     for path in [
         "repo.git/config",
         "repo.git/hooks/pre-receive",
+        "repo.git/worktrees/wt/config",
         "linked/commondir",
         "linked/config.worktree",
     ] {
@@ -683,6 +689,8 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let hooks = guest.walk("repo.git/hooks").unwrap();
     assert_eq!(guest.create(hooks, b"post-receive", 0), Err(EPERM));
     assert_eq!(guest.create(repo, b"config.worktree", 0), Err(EPERM));
+    let worktrees = guest.walk("repo.git/worktrees").unwrap();
+    assert_eq!(guest.symlink(worktrees, b"evil", b"/x"), Err(EPERM));
     // `HEAD` changes, as git changes it, by a rename over it.
     guest
         .overwrite("repo.git/HEAD", b"ref: refs/heads/agent")
@@ -698,10 +706,21 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     ] {
         assert_eq!(guest.remove(opcode, repo, name), EPERM, "{name:?}");
         assert_eq!(guest.rename(repo, name, 1, b"out", 0), EPERM, "{name:?}");
+        let exchange = RENAME_EXCHANGE;
+        assert_eq!(guest.rename(repo, name, 1, b"dir", exchange), EPERM);
+        assert_eq!(guest.rename(1, b"dir", repo, name, exchange), EPERM);
     }
     let linked = guest.walk("linked").unwrap();
     assert_eq!(guest.remove(UNLINK, linked, b"HEAD"), EPERM);
-    // So does a root that is one, or that is beneath one.
+    assert_eq!(guest.rename(linked, b"HEAD", 1, b"out", 0), EPERM);
+    // One the host makes during the run is one from then on.
+    let later = guest.walk("later").unwrap();
+    fs::write(root.join("later/HEAD"), b"host").unwrap();
+    fs::write(root.join("later/config"), b"host").unwrap();
+    let (config, _) = guest.lookup(later, b"config").unwrap();
+    assert_eq!(guest.open(config, O_WRONLY), Err(EPERM));
+    assert_eq!(guest.create(later, b"config.worktree", 0), Err(EPERM));
+    // So is a root that is one, or that is beneath one.
     let mut bare = Guest::with(&root.join("repo.git"), Mode::ReadWrite);
     assert_eq!(bare.overwrite("config", b"agent"), Err(EPERM));
     let mut beneath = Guest::with(&root.join("repo.git/hooks"), Mode::ReadWrite);
@@ -709,7 +728,9 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     for file in [
         "repo.git/config",
         "repo.git/hooks/pre-receive",
+        "repo.git/worktrees/wt/config",
         "linked/commondir",
+        "later/config",
     ] {
         assert_eq!(fs::read(root.join(file)).unwrap(), b"host", "{file}");
     }
@@ -721,6 +742,7 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
 #[test]
 fn no_directory_the_agent_writes_becomes_a_bare_repository() {
     let tree = Tree::new("make-bare");
+    fs::create_dir_all(tree.root.join(".git/worktrees")).unwrap();
     let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
     let made = |guest: &mut Guest, parent, name: &[u8]| {
         let (_, handle) = guest.create(parent, name, 0)?;
@@ -754,12 +776,37 @@ fn no_directory_the_agent_writes_becomes_a_bare_repository() {
     let head = guest.mkdir(1, b"head").unwrap();
     made(&mut guest, head, b"commondir").unwrap();
     assert_eq!(made(&mut guest, head, b"HEAD"), Err(EPERM));
+    // Entries already made match in any case too.
+    let lower = guest.mkdir(1, b"lower").unwrap();
+    made(&mut guest, lower, b"head").unwrap();
+    assert_eq!(made(&mut guest, lower, b"commondir"), Err(EPERM));
+    let upper = guest.mkdir(1, b"upper").unwrap();
+    made(&mut guest, upper, b"HEAD").unwrap();
+    guest.mkdir(upper, b"REFS").unwrap();
+    assert_eq!(guest.mkdir(upper, b"Objects"), Err(EPERM));
+    // A directory that can't be listed might complete it.
+    let blind = guest.mkdir(1, b"blind").unwrap();
+    guest.mkdir(blind, b"objects").unwrap();
+    guest.mkdir(blind, b"refs").unwrap();
+    assert_eq!(guest.setattr(blind, FATTR_MODE, 0, 0o300), 0);
+    let refused = made(&mut guest, blind, b"HEAD");
+    fs::set_permissions(tree.root.join("blind"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(refused, Err(EPERM));
+    // Nor where git keeps other git directories, from which one could move.
+    let worktrees = guest.walk(".git/worktrees").unwrap();
+    made(&mut guest, worktrees, b"HEAD").unwrap();
+    guest.mkdir(worktrees, b"objects").unwrap();
+    assert_eq!(guest.mkdir(worktrees, b"refs"), Err(EPERM));
     for path in [
         "refs-last/refs",
         "head-last/HEAD",
         "head-last/head",
         "common/commondir",
         "head/HEAD",
+        "lower/commondir",
+        "upper/Objects",
+        "blind/HEAD",
+        ".git/worktrees/refs",
     ] {
         assert!(
             fs::symlink_metadata(tree.root.join(path)).is_err(),

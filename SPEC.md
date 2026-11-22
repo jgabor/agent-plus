@@ -1486,6 +1486,7 @@ In `rw` shares, the files your host acts on are read-only to the agent.
 - A directory that holds `HEAD`, and either `commondir` or both `objects`
   and `refs`, is a git directory too, because that is how git finds a bare
   repository. None of those entries can be removed or moved out of it.
+  Its `modules` and `worktrees` are protected as they are in `.git`.
 - Anywhere else, the agent can't make the entry that would complete that
   set, so nothing the agent wrote becomes a bare repository.
 - A directory or a symlink can't be moved or linked beneath

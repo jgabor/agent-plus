@@ -826,6 +826,9 @@ started.
    proves nothing on `main` for it. After the first failure of any other kind,
    which is a failed check, `Stopped by an error`, or `Not proven`, `refresh`
    runs its own gate on the newest `main`, in a tree of its own, once per run.
+   That gate gets the merge timeout, which here counts its wait for a place too.
+   It is stopped there, with every command it started, and that counts as a
+   `main` that fails. It is stopped the same way when the refresh itself stops.
    So a run where every PR is proven pays nothing more. If `main` fails too, the
    fault is the runner's or `main`'s. Then no PR that failed that way in the run
    loses `land-needed` or gets a comment, and `refresh` names what failed on

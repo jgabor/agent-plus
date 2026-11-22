@@ -28,7 +28,7 @@ pub fn run() -> Result<Verdict, Problem> {
     // A nightly has no PR, so nothing can give a reason for a slowdown. Comparing
     // `main` with itself only measures it, which is why the bench comes first,
     // on the quietest machine.
-    let mut checks = vec![("bench", state(bench::compare(&root, Some(""))))];
+    let mut checks = vec![("bench", state(bench::compare(&root, Some(""), &|_| Ok(()))))];
     let hold = lock::testing(&root)?;
     let (gated, score) = match gate::check(&root, &hold, None) {
         Ok((failed, score)) => (state(Ok(gate::verdict(&failed))), Some(score)),

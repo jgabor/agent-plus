@@ -1803,6 +1803,97 @@ fn the_wait_for_a_place_does_not_count_against_the_timeout() {
     assert_merged(&repo, &merge.wait_with_output().unwrap());
 }
 
+/// Other work holds the activity lock for as long as it runs, so the wait of a
+/// merge's bench to hold it alone doesn't count against the timeout either.
+/// The proof's other work takes up to 40 seconds on a loaded machine, of the
+/// 60 that the timeout gives it.
+#[test]
+fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "bench-wait",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
+    );
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let lock = |name: &str| {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(name))
+            .unwrap()
+    };
+    let activity = lock("activity.lock");
+    activity.lock_shared().unwrap();
+    // To files, because nothing reads a pipe while this waits.
+    let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .stdout(said("merge.out"))
+        .stderr(said("merge.err"))
+        .spawn()
+        .unwrap();
+    let ended = |merge: &mut std::process::Child, why: &str| -> ! {
+        let _ = merge.kill();
+        let status = merge.wait().unwrap();
+        panic!(
+            "{why}: {status}\n{}\n{}",
+            fs::read_to_string(repo.temp.join("merge.out")).unwrap(),
+            fs::read_to_string(repo.temp.join("merge.err")).unwrap()
+        );
+    };
+    // A bench keeps the turnstile for as long as it waits for the lock. A
+    // build only passes through it, so the bench waits once the proof has
+    // reached it and the turnstile is held twice in a row.
+    let turnstile = lock("turnstile.lock");
+    let held = || match turnstile.try_lock() {
+        Ok(()) => turnstile.unlock().is_err(),
+        Err(_) => true,
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if merge.try_wait().unwrap().is_some() || Instant::now() > deadline {
+            ended(&mut merge, "the merge's bench never waited for the lock");
+        }
+        thread::sleep(Duration::from_millis(100));
+        if repo.calls().contains("Proving: bench") && held() {
+            thread::sleep(Duration::from_millis(200));
+            if held() {
+                break;
+            }
+        }
+    }
+    // The wait alone now outlasts the timeout.
+    thread::sleep(Duration::from_secs(62));
+    if merge.try_wait().unwrap().is_some() {
+        ended(&mut merge, "the merge didn't wait for the activity lock");
+    }
+    activity.unlock().unwrap();
+    // The timeout goes on with what the proof left of it, so the bench ends
+    // within it, one way or the other.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = merge.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            ended(&mut merge, "the merge didn't end once it had the lock");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let output = Output {
+        status,
+        stdout: fs::read(repo.temp.join("merge.out")).unwrap(),
+        stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
+    };
+    assert_merged(&repo, &output);
+    assert!(stdout(&output).contains("bench: pass"), "{output:?}");
+}
+
 /// A command that a merge starts, and that outlives its parent: it ignores
 /// hangups, and nothing waits for it. It writes its process id to `stray`.
 fn stray(repo: &Repo) -> String {

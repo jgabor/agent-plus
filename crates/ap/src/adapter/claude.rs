@@ -101,8 +101,8 @@ const AUTO_FROM: [u64; 3] = [2, 1, 71];
 /// time. The state marks the onboarding done, so a new VM skips the theme and
 /// welcome screens. It also marks `/` as trusted, so an interactive run skips
 /// the trust dialog. Claude Code 2.1.323 takes a directory as trusted when it
-/// or a directory above it is, but in a git repository only the record of the
-/// repository's root counts.
+/// or a directory above it is, but in a git repository it looks no higher
+/// than the repository's root.
 pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     let mut files = Vec::new();
     if !system.is_empty() {

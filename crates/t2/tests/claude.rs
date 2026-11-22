@@ -17,9 +17,14 @@ use guest::linux::{open_terminal, program_has_ended, take_terminal};
 use guest::protocol::Size;
 use t1::{guest_binary, kernel, os};
 
-/// The version the adapter's first-run state was read from. A pinned one
-/// keeps a new release from changing what this check sees.
+/// The version the adapter's first-run state was read from, and the SHA-256
+/// digest of its Linux x64 release. A pinned one keeps a new release from
+/// changing what this check sees, and a cached download needs no network.
 const VERSION: &str = "2.1.323";
+const DIGEST: &str = "604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e";
+/// How long `ap build` may take, in seconds, downloading Claude Code
+/// included.
+const BUILDS_WITHIN: &str = "600";
 /// How long Claude Code may take to start in a guest. A start took 38 to 132
 /// seconds on a loaded machine in journey step 8.
 const STARTS_WITHIN: Duration = Duration::from_secs(600);
@@ -62,12 +67,13 @@ impl Scratch {
         }
     }
 
-    /// `ap` with these arguments, and only `HOME`, `XDG_CACHE_HOME`, and
-    /// `XDG_RUNTIME_DIR` in its environment.
-    fn command(&self, args: &[&str]) -> Command {
+    /// `ap run` of the agent `name`, with only `HOME`, `XDG_CACHE_HOME`, and
+    /// `XDG_RUNTIME_DIR` in its environment. It has no `timeout`, because
+    /// that would take it out of its terminal's foreground.
+    fn run(&self, name: &str) -> Command {
         let mut command = Command::new(&self.ap);
         command
-            .args(args)
+            .args(["run", name])
             .env_clear()
             .env("HOME", &self.home)
             .env("XDG_CACHE_HOME", &self.cache)
@@ -76,11 +82,17 @@ impl Scratch {
     }
 
     /// Builds the agent `name` from this Agentfile, approving what it asks,
-    /// and downloading Claude Code unless the cache has it.
+    /// and downloading Claude Code unless the cache has it. The lock pins
+    /// [`VERSION`] by its digest.
     fn build(&self, name: &str, agentfile: &str) {
         let dir = self.root.join(name);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        fs::write(
+            dir.join("Agentfile.lock"),
+            format!("HARNESS claude {VERSION} {DIGEST}\n"),
+        )
+        .unwrap();
         let instructions = agentfile::parse(agentfile).unwrap();
         let grants = ap::approval::grants(&instructions, |text| {
             ap::paths::HostPath::resolve(text, &dir, &self.home)
@@ -88,12 +100,18 @@ impl Scratch {
         .unwrap();
         let approved = self.root.join("approved-grants");
         fs::write(&approved, grants.to_string()).unwrap();
-        let built = self
-            .command(&[
+        let built = Command::new("timeout")
+            .args(["-k", "10", BUILDS_WITHIN])
+            .arg(&self.ap)
+            .args([
                 "build",
                 &format!("--approve={}", approved.display()),
                 dir.to_str().unwrap(),
             ])
+            .env_clear()
+            .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", &self.cache)
+            .env("XDG_RUNTIME_DIR", &self.runtime)
             .stdin(Stdio::null())
             .output()
             .unwrap();
@@ -128,19 +146,20 @@ impl Interactive {
             columns: 120,
         };
         let (controller, terminal) = open_terminal(size).unwrap();
-        let mut command = scratch.command(&["run", name]);
+        let mut command = scratch.run(name);
         command
             .stdin(terminal.try_clone().unwrap())
             .stdout(terminal.try_clone().unwrap())
             .stderr(terminal.try_clone().unwrap());
         // SAFETY: `take_terminal` only makes system calls.
         unsafe { command.pre_exec(take_terminal) };
-        let run = command.spawn().unwrap();
-        drop(command);
         let shown = Arc::new(Mutex::new(Vec::new()));
         let mut side = controller.try_clone().unwrap();
         let screen = Arc::clone(&shown);
         let (stopped, stop_reading) = io::pipe().unwrap();
+        // Nothing between here and the guard below can panic.
+        let run = command.spawn().unwrap();
+        drop(command);
         let reader = thread::spawn(move || {
             let mut buffer = [0; 4096];
             while let Ok(false) = program_has_ended(side.as_fd(), stopped.as_fd()) {
@@ -185,6 +204,15 @@ fn visible(screen: &str) -> String {
     while let Some(character) = characters.next() {
         match character {
             '\x1b' => match characters.next() {
+                // An escape sequence ends at the first byte after its
+                // intermediate bytes, as in ESC `(` `B`.
+                Some(' '..='/') => {
+                    for next in characters.by_ref() {
+                        if !(' '..='/').contains(&next) {
+                            break;
+                        }
+                    }
+                }
                 // A control sequence ends at its final byte.
                 Some('[') => {
                     for next in characters.by_ref() {
@@ -222,19 +250,21 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
         "claude",
         &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\n"),
     );
-    let run = Interactive::start(&scratch, "claude");
+    let mut run = Interactive::start(&scratch, "claude");
     // The prompt's status line names the mode. Claude Code draws it only
     // once no dialog is in the way.
     let deadline = Instant::now() + STARTS_WITHIN;
     loop {
+        let exited = run.run.try_wait().unwrap();
         let text = run.text();
         assert!(
             !text.contains("Itrustthisfolder"),
             "Claude Code asked whether to trust its working directory: {text}"
         );
-        if text.contains("automodeon") {
+        if text.contains("⏵⏵automodeon") {
             break;
         }
+        assert!(exited.is_none(), "ap run exited {exited:?}: {text}");
         assert!(
             Instant::now() < deadline,
             "Claude Code never showed its prompt: {text}"
@@ -245,6 +275,6 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
 
 #[test]
 fn visible_text_drops_escape_sequences_and_whitespace() {
-    let screen = "\x1b[?25l\x1b]0;title\x07⏵⏵ auto\x1b[1Cmode on\r\n\x1b]8;;x\x1b\\on";
+    let screen = "\x1b[?25l\x1b]0;title\x07⏵⏵ auto\x1b[1Cmode\x1b(B on\r\n\x1b]8;;x\x1b\\on";
     assert_eq!(visible(screen), "⏵⏵automodeonon");
 }

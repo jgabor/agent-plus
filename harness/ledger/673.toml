@@ -1,0 +1,17 @@
+issue = 673
+pr = 680
+commit = "10226094cc2c0d38cadffbcfb470265192bfe9cf"
+base = "122816de51b661c8470c1ce4ab9b5cb4a363ff23"
+date = "2026-11-22"
+host = "linux-x86_64"
+spec = { proven = 503, promises = 908 }
+journey = { passing = 11, steps = 19 }
+reason = "The guest kernel keeps a page structure for each page of memory, so twice the memory costs about 4 MiB more while idle. Idle overhead stays under its 64 MiB target."
+
+[budgets]
+binary_bytes = 8000432
+boot_ms = 115.11
+idle_mib = 46.12
+noop_build_ms = 1.33
+run_ms = 138.95
+version_ms = 0.24

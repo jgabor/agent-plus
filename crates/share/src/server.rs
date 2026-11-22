@@ -566,6 +566,9 @@ impl Share {
     /// with `O_PATH`, and only its identity is read, until the root, or the
     /// top of the host's tree.
     fn served(&self, directory: &OwnedFd) -> Result<(), i32> {
+        if directory.as_raw_fd() == self.root.as_raw_fd() {
+            return Ok(());
+        }
         let root = self.node(ROOT)?;
         let root = (root.device, root.inode);
         let identity = |fd: BorrowedFd| {

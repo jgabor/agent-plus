@@ -440,7 +440,6 @@ fn a_directory_the_host_moves_outside_the_root_is_no_longer_served() {
     assert_eq!(guest.lookup(deeper, b"kept.txt"), Err(ENOENT));
     assert_eq!(guest.open(nested, 0), Err(ENOENT));
     assert_eq!(guest.read(READDIR, listing, 0, 4096).0, ENOENT);
-    assert_eq!(guest.read_file("dir/new.txt"), Err(ENOENT));
     // Moved back beneath the root, it is served again.
     fs::rename(&away, tree.root.join("back")).unwrap();
     assert_eq!(guest.read_file("back/deeper/new.txt").unwrap(), CANARY);

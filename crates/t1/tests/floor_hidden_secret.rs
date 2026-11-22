@@ -1,4 +1,5 @@
-//! The floor: a hidden secret can't be read from the guest.
+//! The floor: a hidden secret can't be read from the guest, and neither can
+//! the key of `AUTH key`.
 //!
 //! A real `ap run` gets a hidden secret's value from its environment, with
 //! the secret bound to `host.ap.internal`, where the fake upstream answers
@@ -12,6 +13,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, Output, Stdio};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,10 +46,13 @@ struct Scratch {
     ap: PathBuf,
 }
 
+/// Held by each test for as long as it runs. They boot a VM each, and the
+/// kernel they prepare is a file of this process's.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 impl Scratch {
-    fn new() -> Scratch {
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("floor-hidden-secret-{}", process::id()));
+    fn new(test: &str) -> Scratch {
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{test}-{}", process::id()));
         let _ = fs::remove_dir_all(&root);
         Store::new(root.join("home/.local/share/ap"))
             .put(
@@ -229,11 +234,13 @@ fn count(text: &str, wanted: &str) -> usize {
 /// request over TLS to your host, holding the placeholder in the query,
 /// in `Authorization`, `X-Api-Key`, and `X-Other`, and in the body, and
 /// prints its label and the answer's status line.
-fn script(port: u16) -> String {
+/// The secret is in the variable `variable`.
+fn script(port: u16, variable: &str) -> String {
     let pattern = pattern();
     assert!(!pattern.contains(VALUE));
     format!(
         r#"
+SECRET="${variable}"
 search() {{
   environ=0
   cmdline=0
@@ -271,7 +278,10 @@ send other other.example
 // spec(SECRET): `SECRET` gives the agent a credential that, by default, it can use but never read.
 #[test]
 fn floor_hidden_secret() {
-    let scratch = Scratch::new();
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("floor-hidden-secret");
     let directory = scratch.root.join("upstream");
     let (_upstream, port) = start_upstream(&directory);
     scratch.build(
@@ -300,31 +310,10 @@ fn floor_hidden_secret() {
     let row = listed.lines().nth(1).expect("ap ps lists the run");
     let name = row.split_whitespace().next().unwrap().to_owned();
 
-    // On the host, no process that `ap run` started holds the value in its
-    // arguments or its environment. Each environment holds `HOME`, so an
-    // unreadable one doesn't pass for one without the value.
-    let ap_run = started_as(run.0.id(), scratch.ap.to_str().unwrap());
-    let environment = fs::read(format!("/proc/{ap_run}/environ")).unwrap();
-    assert!(holds(&environment, VALUE), "the test passed no value");
-    for program in [
-        "ap-run-process",
-        "ap-share-server",
-        "ap-network",
-        "ap-run-cleanup",
-    ] {
-        let pid = started_as(ap_run, program);
-        let environment = fs::read(format!("/proc/{pid}/environ")).unwrap();
-        assert!(holds(&environment, "HOME="), "{program} has no environment");
-        for (file, bytes) in [
-            ("cmdline", fs::read(format!("/proc/{pid}/cmdline")).unwrap()),
-            ("environ", environment),
-        ] {
-            assert!(!holds(&bytes, VALUE), "{program}'s {file} holds the value");
-        }
-    }
+    no_process_holds_the_value(&scratch, &run);
 
     let started = Instant::now();
-    let tried = scratch.ap(&["exec", &name, "bash", "-c", &script(port)]);
+    let tried = scratch.ap(&["exec", &name, "bash", "-c", &script(port, "SECRET")]);
     let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
     println!(
         "{stdout}{}took {:?}",
@@ -380,6 +369,116 @@ fn floor_hidden_secret() {
     assert_ne!(held, VALUE);
     assert_eq!(count(bound, held), 3, "{bound}");
     assert_eq!(count(other, held), 5, "{other}");
+}
+
+/// On the host, no process that `ap run` started holds the value in its
+/// arguments or its environment. Each environment holds `HOME`, so an
+/// unreadable one doesn't pass for one without the value.
+fn no_process_holds_the_value(scratch: &Scratch, run: &Started) {
+    let ap_run = started_as(run.0.id(), scratch.ap.to_str().unwrap());
+    let environment = fs::read(format!("/proc/{ap_run}/environ")).unwrap();
+    assert!(holds(&environment, VALUE), "the test passed no value");
+    for program in [
+        "ap-run-process",
+        "ap-share-server",
+        "ap-network",
+        "ap-run-cleanup",
+    ] {
+        let pid = started_as(ap_run, program);
+        let environment = fs::read(format!("/proc/{pid}/environ")).unwrap();
+        assert!(holds(&environment, "HOME="), "{program} has no environment");
+        for (file, bytes) in [
+            ("cmdline", fs::read(format!("/proc/{pid}/cmdline")).unwrap()),
+            ("environ", environment),
+        ] {
+            assert!(!holds(&bytes, VALUE), "{program}'s {file} holds the value");
+        }
+    }
+}
+
+/// The value the fake harness saw for the variable `name`, in its report.
+fn reported<'a>(report: &'a str, name: &str) -> &'a str {
+    let start = format!("\"{name}\":\"");
+    let at = (report.find(&start)).unwrap_or_else(|| panic!("no {name}: {report}"));
+    let rest = &report[at + start.len()..];
+    &rest[..rest.find('"').unwrap()]
+}
+
+// spec(AUTH): The agent sees only a placeholder, and the adapter signs the harness in with it.
+// spec(AUTH): With Claude Code, the adapter approves `AUTH key`'s placeholder by its last 20 characters, which are the same on every run, so an interactive run doesn't ask whether to use the key.
+#[test]
+fn floor_auth_key() {
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = Scratch::new("floor-auth-key");
+    let directory = scratch.root.join("upstream");
+    let (_upstream, port) = start_upstream(&directory);
+    scratch.build(
+        "keyed",
+        "NETWORK -\nNETWORK +host.ap.internal\nAUTH key\nSHARE ./notes ro\n",
+    );
+
+    let mut run = Started(
+        scratch
+            .command()
+            .env("ANTHROPIC_API_KEY", VALUE)
+            .args(["run", "keyed", "-p", "Use the key."])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut report = String::new();
+    BufReader::new(run.0.stdout.take().unwrap())
+        .read_line(&mut report)
+        .unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    assert!(!report.contains(VALUE), "{report}");
+    // The harness starts with the placeholder, which ends in what Claude
+    // Code's state approves.
+    let placeholder = reported(&report, "ANTHROPIC_API_KEY").to_owned();
+    assert_eq!(placeholder.len(), 32 + 20, "{report}");
+    assert!(
+        placeholder.ends_with(ap::adapter::claude::KEY_SUFFIX),
+        "{report}"
+    );
+    let listed = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
+    let row = listed.lines().nth(1).expect("ap ps lists the run");
+    let name = row.split_whitespace().next().unwrap().to_owned();
+    no_process_holds_the_value(&scratch, &run);
+
+    let tried = scratch.ap(&[
+        "exec",
+        &name,
+        "bash",
+        "-c",
+        &script(port, "ANTHROPIC_API_KEY"),
+    ]);
+    let stdout = String::from_utf8_lossy(&tried.stdout).into_owned();
+    println!("{stdout}{}", String::from_utf8_lossy(&tried.stderr));
+    assert_eq!(tried.status.code(), Some(0), "{tried:?}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "{stdout}");
+    assert_eq!(lines[0], "held 52", "{stdout}");
+    let found: Vec<usize> = (lines[1].split_whitespace())
+        .filter_map(|word| word.parse().ok())
+        .collect();
+    assert!(lines[1].starts_with("placeholder "), "{stdout}");
+    assert!(found.iter().all(|&found| found > 0), "{stdout}");
+    // The value is nowhere in the guest.
+    assert_eq!(lines[2], "value environ 0 cmdline 0 files 0", "{stdout}");
+    // Your host isn't the key's host, so neither request gets the value.
+    assert_eq!(lines[3], "bound HTTP/1.1 404 Not Found", "{stdout}");
+    assert_eq!(lines[4], "other HTTP/1.1 404 Not Found", "{stdout}");
+
+    let stopped = scratch.ap(&["stop", &name]);
+    assert_eq!(stopped.status.code(), Some(0), "{stopped:?}");
+    let _ = run.0.wait();
+    for request in kept(&directory.join("requests"), 2) {
+        assert_eq!(count(&request, VALUE), 0, "{request}");
+        assert_eq!(count(&request, &placeholder), 5, "{request}");
+    }
 }
 
 /// The requests the upstream kept, once there are `want` of them.

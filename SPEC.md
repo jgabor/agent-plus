@@ -966,6 +966,9 @@ default is `auto`.
   (`sandbox_workspace_write.network_access`), because `NETWORK` already
   decides what the agent can reach. With `edit`, it stays off, so Codex asks
   before commands that need the network.
+- With `edit` and `auto`, the Codex adapter also empties
+  `sandbox_workspace_write.writable_roots`, so a project's settings can't add
+  directories the sandbox lets the agent write.
 - `MODE` overrides any permission settings a plugin sets.
 - `auto` depends on the harness. With Claude Code, it needs a recent model,
   an administrator can turn it off, and its classifier calls count toward

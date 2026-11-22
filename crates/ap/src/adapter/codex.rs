@@ -18,6 +18,12 @@
 //! | 0.147.0 | `codex exec` has `--approve-for-me` |
 //! | 0.156.0 | the interactive `codex` has `--no-daemon` |
 //!
+//! A trusted project's `.codex/config.toml` can't select a profile: Codex
+//! 0.137.0, 0.147.0, 0.156.0, and 0.169.0 ignore its `profile` and
+//! `profiles` keys. Each still applies its
+//! `sandbox_workspace_write.writable_roots` despite the other overrides, so
+//! the adapter empties that list too.
+//!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
 //! interactive run passes `--no-daemon` wherever the version has it.
@@ -120,7 +126,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// Without a model or an effort, Codex uses its own default.
 ///
 /// The mode is the sandbox, the approval policy, and the reviewer, and for
-/// the `workspace-write` sandbox its network access, each set every time. A
+/// the `workspace-write` sandbox its network access and an empty list of
+/// extra writable roots, each set every time. A
 /// headless run in `auto` uses `--approve-for-me`, which sets the same
 /// sandbox, approval policy, and reviewer, where the version has it.
 pub fn arguments(
@@ -170,6 +177,11 @@ pub fn arguments(
         arguments.extend([
             "-c".to_owned(),
             format!("sandbox_workspace_write.network_access={network}"),
+            // A trusted project's `writable_roots` would otherwise survive
+            // the overrides, and widen the sandbox. `--add-dir` still adds
+            // the workspace.
+            "-c".to_owned(),
+            "sandbox_workspace_write.writable_roots=[]".to_owned(),
         ]);
     }
     if let Some(model) = model {

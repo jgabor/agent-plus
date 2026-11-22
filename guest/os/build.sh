@@ -22,8 +22,9 @@ mkdir -p "$out"
 # Every time in the root is clamped to the snapshot's.
 epoch=$(echo "$snapshot" | sed -E 's/(....)(..)(..)T(..)(..)(..)Z/\1-\2-\3 \4:\5:\6Z/')
 epoch=$(date -u -d "$epoch" +%s)
-# The tar comes back on stdout, so the container writes nothing here.
-docker run --rm -i --env SOURCE_DATE_EPOCH="$epoch" \
+# The tar comes back on stdout, so the container writes nothing here. The
+# image names several platforms, and the guest is x86-64 on every host.
+docker run --rm -i --platform linux/amd64 --env SOURCE_DATE_EPOCH="$epoch" \
   --env DEBIAN_FRONTEND=noninteractive "$image" \
   sh -s "$snapshot" "$releases" < "$here/debian.sh" > "$out/root.tar.part"
 mv "$out/root.tar.part" "$out/root.tar"

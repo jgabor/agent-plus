@@ -1232,9 +1232,9 @@ fn type_until_held_back(mut to: impl Write + Send + 'static) -> usize {
     }
 }
 
-/// More than every buffer between `ap` and the program in the guest holds,
-/// so that what is typed past it waits for the program to read.
-const UNREAD: usize = 1 << 20;
+/// More than the run process lets wait for the guest. That typing stopped
+/// with this much taken shows the rest waits for the program to read.
+const UNREAD: usize = 64 << 10;
 
 #[test]
 fn ap_exec_answers_while_an_interactive_harness_leaves_your_keys_unread() {

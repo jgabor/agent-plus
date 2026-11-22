@@ -26,8 +26,8 @@
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes, on
 //! the other pair. The run process sends the harness's output, unfiltered,
-//! then how the run ended. Each message is a tag byte, a body length as a little-endian
-//! `u32`, and the body.
+//! then how the run ended. Each message is a tag byte, a body length as a
+//! little-endian `u32`, and the body.
 //!
 //! Each `ap exec` connects to the run's socket, sends the command, then its
 //! input, and reads the command's output and status, as `ap run` reads the

@@ -260,8 +260,9 @@ fn run_agent(
     drop(network_link);
     // Your keys have a pair of their own, so a harness that doesn't read
     // them holds back nothing else.
-    let (keys, their_keys) = UnixStream::pair().map_err(fail("can't start the run"))?;
-    let their_keys = share::inheritable(their_keys.as_fd()).map_err(fail("can't start the run"))?;
+    let (keys, keys_end) = UnixStream::pair().map_err(fail("can't start the run"))?;
+    let their_keys = share::inheritable(keys_end.as_fd()).map_err(fail("can't start the run"))?;
+    drop(keys_end);
     drop(network_process);
     let mut command = Command::new(exe);
     for secret in &names {

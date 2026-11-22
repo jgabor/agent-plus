@@ -24,11 +24,17 @@ use t1::{guest_binary, kernel, os};
 const TIMEOUT: &str = "240";
 /// How long the fake upstream may run, in seconds.
 const UPSTREAM_TIMEOUT: &str = "600";
-/// The value, which no check below may hand to the guest whole.
+/// The value, which no check below may hand to the guest whole. Its
+/// characters mean nothing special in a pattern.
 const VALUE: &str = "floor-hidden-value-6b2e0d9a41";
+
 /// A pattern that matches the value alone, but doesn't hold it, so that a
-/// search for it doesn't find itself.
-const PATTERN: &str = "floor-hidden-valu[e]-6b2e0d9a41";
+/// search for it doesn't find itself: the value with one character in
+/// brackets.
+fn pattern() -> String {
+    let (before, after) = VALUE.split_at(1);
+    format!("{before}[{}]{}", &after[..1], &after[1..])
+}
 
 /// A home of its own, with the kernel and the OS layer in its store and the
 /// fake harness in its download cache, so that `ap` reads none of the owner's
@@ -224,6 +230,8 @@ fn count(text: &str, wanted: &str) -> usize {
 /// in `Authorization`, `X-Api-Key`, and `X-Other`, and in the body, and
 /// prints its label and the answer's status line.
 fn script(port: u16) -> String {
+    let pattern = pattern();
+    assert!(!pattern.contains(VALUE));
     format!(
         r#"
 search() {{
@@ -252,7 +260,7 @@ bash -c 'sleep 60; true' holder "$SECRET" &
 holder=$!
 until grep -qa -- "$SECRET" "/proc/$holder/cmdline" 2>/dev/null; do sleep 0.1; done
 search placeholder "$SECRET"
-search value '{PATTERN}'
+search value '{pattern}'
 kill "$holder"
 send bound host.ap.internal:{port}
 send other other.example
@@ -261,7 +269,6 @@ send other other.example
 }
 
 // spec(SECRET): `SECRET` gives the agent a credential that, by default, it can use but never read.
-// spec(SECRET): The real value is never sent to any other host.
 #[test]
 fn floor_hidden_secret() {
     let scratch = Scratch::new();

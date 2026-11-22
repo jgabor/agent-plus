@@ -22,7 +22,7 @@
 //! <line>`, `address <line>`, or `tls <target>`, so a check can tell what
 //! reached it. Each HTTPS request, its head and body as they arrived, is
 //! also kept whole in `<directory>/requests/<n>`, numbered from 1 in the
-//! order they came.
+//! order each one finished arriving.
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -180,7 +180,7 @@ fn https(
         }
         let target = line.split(' ').nth(1).unwrap_or_default();
         note(seen, &format!("tls {target}"));
-        let mut request = line.clone().into_bytes();
+        let mut request = line.into_bytes();
         let mut length = 0;
         let mut header = String::new();
         while stream.read_line(&mut header)? > 0 {

@@ -352,7 +352,8 @@ fn keep(bin: &Path, built: &Path, main: &str) -> Result<PathBuf, Problem> {
 }
 
 /// Removes the copies that no process runs, which a run leaves when it ends.
-/// Where the processes can't be listed, it keeps them all.
+/// It sees only the processes of its own PID namespace. Where the processes
+/// can't be listed, as on macOS, it keeps them all.
 fn sweep_kept(bin: &Path) {
     let Ok(processes) = fs::read_dir("/proc") else {
         return;
@@ -1487,6 +1488,7 @@ mod tests {
 
     /// A copy stays while a process runs it, and goes once none does.
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_kept_xtask_stays_while_it_runs() {
         let bin = std::env::temp_dir().join(format!("xtask-kept-{}", std::process::id()));
         let _ = fs::remove_dir_all(&bin);
@@ -1499,9 +1501,13 @@ mod tests {
         };
         // Another test that forks while the copy is open for writing makes
         // it busy until that child runs its program.
+        let mut tries = 0;
         let mut child = loop {
             match spawn() {
-                Err(e) if e.raw_os_error() == Some(26) => std::thread::yield_now(),
+                Err(e) if e.raw_os_error() == Some(26) && tries < 1000 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 spawned => break spawned.unwrap(),
             }
         };

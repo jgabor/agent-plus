@@ -4158,6 +4158,12 @@ fn a_merge_keeps_its_xtask_of_main_while_another_builds_one() {
 
     assert_merged(&repo, &output);
     assert_eq!(builds(&repo), 2, "{}", repo.calls());
+    let kept: Vec<_> = fs::read_dir(&repo.temp)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("target/debug/xtask").is_file() && path.join("bin").is_dir())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
 }
 
 /// The xtask that a revert puts back was measured already, and may not know

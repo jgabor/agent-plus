@@ -160,8 +160,10 @@ fn rm_keeps_the_approval_of_the_agentfile() {
     let kept = approvals.get(&dir.join("Agentfile")).unwrap();
     let kept = kept.map(|grants| grants.to_string());
     assert_eq!(kept.as_deref(), Some(NOTES_GRANTS));
-    // With no terminal to ask on, the build goes ahead only because the
-    // grants are still approved.
+    // `ap rm` freed the stand-in for the OS layer, so put it back, and the
+    // rebuild downloads nothing. With no terminal to ask on, the build goes
+    // ahead only because the grants are still approved.
+    common::seed_os(&scratch.store());
     scratch.ok_in(&dir, &["build"]);
     assert_eq!(
         scratch.ok_in(&scratch.root, &["ls"]),

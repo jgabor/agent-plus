@@ -35,7 +35,13 @@ can't continue alone, park the issue as AGENTS.md says.
    ```
 
    ```json
-   {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5"}
+   {"providerInstanceId": "antigravity", "model": "gemini-4-neon",
+    "options": {"thought_level": "high"}}
+   ```
+
+   ```json
+   {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5",
+    "options": {"effort": "high"}}
    ```
 
    When the PR adds a crate, or writes code a crate could do, ask the

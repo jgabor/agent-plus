@@ -27,7 +27,8 @@
 //! VM starts. A `visible` value goes to the harness's environment. A hidden
 //! one goes to the network process, which puts it in requests to its bound
 //! hosts, and the harness gets a placeholder made for this run instead.
-//! Neither the run process nor the network process starts with a hidden
+//! No process that `ap run` starts, such as the run process, the network
+//! process, the share server, or the cleanup process, starts with a hidden
 //! secret's variable.
 
 use std::collections::{BTreeMap, HashMap};
@@ -188,6 +189,11 @@ fn run_agent(
         .create(&args.agent.to_string_lossy(), started)
         .map_err(fail("can't record the run"))?;
     let shares = keep_pending(&runs, &run.name, shares)?;
+    // No process this one starts gets a hidden value, not even through the
+    // environment it would inherit.
+    let names: Vec<String> = (injection.secrets.iter())
+        .map(|secret| secret.name.clone())
+        .collect();
 
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), root);
     DirBuilder::new()
@@ -203,7 +209,11 @@ fn run_agent(
     // alone, so there's no other socket it could remove.
     let (lifeline, held) = io::pipe().map_err(fail("can't start the run"))?;
     let exe = Path::new("/proc/self/exe");
-    Command::new(exe)
+    let mut cleanup = Command::new(exe);
+    for secret in &names {
+        cleanup.env_remove(secret);
+    }
+    cleanup
         .arg0(runs::CLEANUP)
         .arg(dir.join(&socket_name))
         .stdin(lifeline)
@@ -225,15 +235,13 @@ fn run_agent(
         .map_err(fail("can't start the network process"))?;
     start.authority = authority;
     // The values live in the network process alone from here.
-    let names: Vec<String> = (injection.secrets.iter())
-        .map(|secret| secret.name.clone())
-        .collect();
     drop(injection);
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
             let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
-            let server = share::start(exe, &roots).map_err(fail("can't start the share server"))?;
+            let server =
+                share::start(exe, &roots, &names).map_err(fail("can't start the share server"))?;
             let inherited = share::inheritable(server.socket.as_fd())
                 .map_err(fail("can't start the share server"))?;
             Some(inherited)
@@ -246,8 +254,6 @@ fn run_agent(
     drop(network_link);
     drop(network_process);
     let mut command = Command::new(exe);
-    // The run process gets no hidden value, not even through the
-    // environment it would inherit.
     for secret in &names {
         command.env_remove(secret);
     }

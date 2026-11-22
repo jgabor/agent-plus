@@ -75,7 +75,7 @@ fn share_owner_process() {
     // The VMM's end of the socket closes with the machine, and the share
     // server ends on its own.
     let root = File::open(base.join("root")).unwrap();
-    let server = share::start(&ap, &[Root::new(root.as_fd(), Mode::ReadOnly)]).unwrap();
+    let server = share::start(&ap, &[Root::new(root.as_fd(), Mode::ReadOnly)], &[]).unwrap();
     drop(root);
     let files = [Entry::File {
         path: "share-probe",

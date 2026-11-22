@@ -47,7 +47,8 @@ pub struct Started {
 /// share order. Each root's directory is one the caller opened, and so is
 /// a copy-on-write share's pending directory, which must be empty. The
 /// server serves what the caller checked, and never opens a path itself.
-pub fn start(program: &Path, roots: &[Root<BorrowedFd>]) -> io::Result<Started> {
+/// It starts without the environment variables named in `hidden`.
+pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     // Each root reaches the server as a descriptor it inherits, numbered in
     // its arguments. The copies are made just for it, and closed once it
@@ -61,6 +62,9 @@ pub fn start(program: &Path, roots: &[Root<BorrowedFd>]) -> io::Result<Started> 
     }
     let mut numbers = inherited.iter().map(|fd| fd.as_raw_fd().to_string());
     let mut command = Command::new(program);
+    for name in hidden {
+        command.env_remove(name);
+    }
     command.arg0(PROGRAM);
     for root in roots {
         if let Some(name) = &root.file {

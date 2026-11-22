@@ -1476,6 +1476,39 @@ fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_v
     assert_ne!(first, second, "two runs got the same placeholder");
 }
 
+/// The process's environment, which must hold `HOME`, so that an empty
+/// one doesn't pass for one without the value.
+fn holds_hidden_value(pid: u32) -> bool {
+    let environment = fs::read(format!("/proc/{pid}/environ")).unwrap();
+    assert!(
+        environment.starts_with(b"HOME=") || environment.windows(6).any(|w| w == b"\0HOME="),
+        "{pid} has no environment"
+    );
+    (environment.windows(HIDDEN_VALUE.len())).any(|window| window == HIDDEN_VALUE.as_bytes())
+}
+
+// #608: the share server, the cleanup process, and the network process,
+// like the run process, start without a hidden secret's variable.
+#[test]
+fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable() {
+    let scratch = Scratch::new("secret-share");
+    fs::create_dir_all(scratch.root.join("shared").join("notes")).unwrap();
+    scratch.build("shared", &fake(&format!("{SECRETS}SHARE ./notes rw\n")));
+    let (run, _, _) = start_reporting(
+        &scratch,
+        "shared",
+        &[("HIDDEN_TOKEN", HIDDEN_VALUE), ("SHOWN_KEY", SHOWN_VALUE)],
+    );
+    let ap_run = run.0.id();
+    // `ap run` itself reads the value from its environment.
+    assert!(holds_hidden_value(ap_run), "the test passed no value");
+    for program in ["ap-share-server", "ap-run-cleanup", "ap-network"] {
+        let pid = started_as(ap_run, format!("{program}\0").as_bytes());
+        assert!(!holds_hidden_value(pid), "{program} holds the hidden value");
+    }
+    drop(run);
+}
+
 // spec(SECRET): A missing value makes the run fail, and the error names the secret.
 // spec(Run): **Exit status.** If `ap` fails before the harness starts, for example on a missing secret or a refused approval, it exits with status 125.
 #[test]

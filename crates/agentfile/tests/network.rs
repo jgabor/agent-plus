@@ -125,6 +125,14 @@ fn network_bare_rules_that_disagree_are_an_error() {
     assert!(errors[0].message.contains("line 2"), "{errors:?}");
 }
 
+// spec(NETWORK): Two bare rules that disagree are an error.
+#[test]
+fn only_bare_rules_of_one_instruction_can_disagree() {
+    let instructions = parse("AGENT claude\nNETWORK -\nPOLICY +\nSHARE 1\nSHARE 0\n").unwrap();
+    assert_eq!(Network::read(&instructions).unwrap().default, Sign::Deny);
+    assert_eq!(Policy::read(&instructions).unwrap().default, Sign::Allow);
+}
+
 #[test]
 fn network_bare_rules_that_agree_are_fine() {
     assert_eq!(
@@ -208,6 +216,10 @@ fn brackets_hold_only_an_ipv6_address() {
     ] {
         error_of(line);
     }
+    assert_eq!(
+        error_of("NETWORK +[::1]x\n").message,
+        "`[::1]x` has `x` after its address"
+    );
 }
 
 #[test]
@@ -277,6 +289,18 @@ fn a_label_is_at_most_63_characters() {
 }
 
 #[test]
+fn a_host_name_is_at_most_253_characters() {
+    let label = "a".repeat(63);
+    let name = format!("{label}.{label}.{label}.{}", "a".repeat(61));
+    assert_eq!(name.len(), 253);
+    assert_eq!(
+        destination_of(&format!("NETWORK +{name}\n")),
+        host(&name, None)
+    );
+    error_of(&format!("NETWORK +{name}a\n"));
+}
+
+#[test]
 fn a_url_rule_reads_its_scheme_host_and_path() {
     assert_eq!(
         destination_of("NETWORK +https://github.com/jgabor/agent-plus\n"),
@@ -316,6 +340,8 @@ fn a_url_path_is_written_as_rfc_3986_allows() {
         "NETWORK \"+https://github.com/my repo\"\n",
         "NETWORK +https://github.com/%zz\n",
         "NETWORK +https://github.com/a%2\n",
+        "NETWORK +https://github.com/%2\n",
+        "NETWORK +https://github.com/a%20%zz\n",
         "NETWORK +https://github.com/a\\b\n",
         "NETWORK +https://github.com/caf\u{e9}\n",
     ] {

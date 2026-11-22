@@ -126,6 +126,18 @@ fn a_share_mode_word_must_be_the_last_argument() {
     }
 }
 
+// spec(Arguments): A few instructions end in an optional word that sets a mode.
+#[test]
+fn a_mode_word_alone_is_the_source() {
+    assert_eq!(
+        files("SHARE rw\nSHARE ro\n").share,
+        vec![
+            share(2, "rw", None, ShareMode::CopyOnWrite),
+            share(3, "ro", None, ShareMode::CopyOnWrite),
+        ]
+    );
+}
+
 // spec(Arguments): To use one of these words as a destination, write it as a path, such as `./rw`.
 #[test]
 fn a_mode_word_written_as_a_path_is_a_destination() {

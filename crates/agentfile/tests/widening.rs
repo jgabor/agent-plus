@@ -411,7 +411,8 @@ fn each_widening_is_listed() {
 fn each_widening_shows_as_one_line() {
     let approved = "SHARE ~/a /a\nSECRET T @a.com\nSECRET S @s.com\n\
                     NETWORK -\nNETWORK +a.com\nNETWORK +s.com\nNETWORK -evil.com\nPOLICY -\n";
-    let now = "SHARE ~/a /a rw\nSHARE ~/b /b\nENV USER $USER\nSECRET T @a.com @b.com visible\n\
+    let now = "SHARE ~/a /a rw\nSHARE ~/b /b\nSHARE ~/c /c rw\nENV USER $USER\n\
+               SECRET T @a.com @b.com visible\n\
                SEAL S @s.com\nSEAL N @n.com\nAUTH token\nNETWORK +\nNETWORK +github.com\n\
                POLICY +\nPOLICY -writer\n";
     let lines: Vec<String> = widened(approved, now)
@@ -423,6 +424,7 @@ fn each_widening_shows_as_one_line() {
         [
             "PATH /home/u/a rw, which was read-only",
             "PATH /home/u/b",
+            "PATH /home/u/c rw",
             "VARIABLE USER",
             "T becomes visible",
             "T may go to @b.com",

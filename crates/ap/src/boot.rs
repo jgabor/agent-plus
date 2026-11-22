@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use guest::linux::{self, Linux};
-use guest::protocol::{EXEC_PORT, MAX_BODY, PORT, Start, ToGuest, ToHost};
+use guest::protocol::{EXEC_PORT, KEYS_PORT, MAX_BODY, PORT, Start, ToGuest, ToHost};
 use guest::{Channel, Event, agent, net, root, share};
 use vmm::block::{Block, Disk};
 use vmm::fs::{Fs, Relay as ShareRelay};
@@ -56,8 +56,8 @@ const PROGRAM_HEADER_MIN: usize = 56;
 /// How many frames of output may wait for the user's terminal. Past this the
 /// guest waits too, so a slow reader can't fill the host's memory.
 const OUTPUT_WINDOW: usize = 16;
-/// How many bytes of input may wait for the guest. Past this the sender
-/// waits too.
+/// How many bytes of keys and resizes may wait for the guest. Past this the
+/// sender waits too.
 const INPUT_WINDOW: usize = 64 << 10;
 /// How many messages of a command beside the harness may be on their way to
 /// `ap exec`. Past this, only that command waits.
@@ -111,13 +111,15 @@ pub struct Shares {
     pub count: usize,
 }
 
-/// What a run gets while it runs, sent from a thread other than the vCPU's:
-/// keys and resizes for a harness in a terminal, which reach the guest after
-/// the request that started the harness, and the commands beside the
-/// harness, with their input.
+/// What a run gets while it runs, sent from a thread other than the vCPU's.
+/// Keys and resizes for a harness in a terminal go on a connection of their
+/// own. A stop reaches the guest after the request that started the harness.
+/// The commands beside the harness come with their input.
 pub struct Input {
-    /// Frames for the guest, not yet handed to the vsock device.
-    queued: Mutex<Vec<u8>>,
+    /// A stop for the init, not yet handed to the vsock device.
+    stops: Mutex<Vec<u8>>,
+    /// Keys and resizes, not yet handed to the vsock device.
+    keys: Mutex<Vec<u8>>,
     room: Condvar,
     waker: Arc<Waker>,
     /// The descriptors the sender reads its input from. A confined process
@@ -143,7 +145,8 @@ impl Input {
     /// Input that the sender reads from `sources`.
     pub fn new(sources: [RawFd; 2]) -> Input {
         Input {
-            queued: Mutex::new(Vec::new()),
+            stops: Mutex::new(Vec::new()),
+            keys: Mutex::new(Vec::new()),
             room: Condvar::new(),
             waker: Arc::default(),
             sources,
@@ -196,14 +199,15 @@ impl Input {
         self.execs.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Queues `message` for the guest, and waits while too much is queued
-    /// already, so the guest's pace holds back the sender.
+    /// Queues a key or a resize for the harness's terminal, and waits while
+    /// too much is queued already, so the harness's pace holds back the
+    /// sender.
     pub fn send(&self, message: &ToGuest) -> Result<(), Error> {
         let mut frame = Vec::new();
         message
             .write(&mut frame)
             .map_err(|error| Error::Failed(format!("can't send input: {error:?}")))?;
-        let mut queued = self.queued();
+        let mut queued = lock(&self.keys);
         while queued.len() >= INPUT_WINDOW {
             queued = self
                 .room
@@ -216,9 +220,21 @@ impl Input {
         Ok(())
     }
 
-    fn queued(&self) -> MutexGuard<'_, Vec<u8>> {
-        self.queued.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Queues a request to send the harness `SIGTERM`. It waits for no
+    /// key, so it reaches a harness that has stopped reading them.
+    pub fn terminate(&self) -> Result<(), Error> {
+        let mut stops = lock(&self.stops);
+        ToGuest::Terminate
+            .write(&mut *stops)
+            .map_err(|error| Error::Failed(format!("can't send the stop: {error:?}")))?;
+        drop(stops);
+        self.waker.wake();
+        Ok(())
     }
+}
+
+fn lock(queue: &Mutex<Vec<u8>>) -> MutexGuard<'_, Vec<u8>> {
+    queue.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// One of an agent's layers, served to the guest as a read-only disk.
@@ -577,9 +593,9 @@ pub fn boot_linked(
         .map(|shares| ShareRelay::new(shares.socket, Instant::now() + guest.timeout))
         .transpose()
         .map_err(|error| failed("can't reach the share server", error))?;
-    // Only a run has commands beside its harness.
+    // Only a run has keys for its harness, and commands beside it.
     let ports: &[u32] = match guest.input {
-        Some(_) => &[PORT, EXEC_PORT],
+        Some(_) => &[PORT, EXEC_PORT, KEYS_PORT],
         None => &[PORT],
     };
     let mut machine = Machine {
@@ -600,6 +616,7 @@ pub fn boot_linked(
         failure: None,
         on_report,
         input: guest.input,
+        keys: None,
         spares: VecDeque::new(),
         bound: BTreeMap::new(),
     };
@@ -721,6 +738,9 @@ struct Machine<'vm, F> {
     failure: Option<String>,
     on_report: F,
     input: Option<&'vm Input>,
+    /// The connection the guest opened for the keys of a harness in a
+    /// terminal.
+    keys: Option<Connection>,
     /// Connections the guest opened for commands beside the harness, which
     /// no command has yet.
     spares: VecDeque<Connection>,
@@ -756,11 +776,14 @@ impl<F: FnMut(Report)> Machine<'_, F> {
     }
 
     /// Takes the connections the guest has opened: the first to [`PORT`] is
-    /// the init's, and each to [`EXEC_PORT`] waits for a command.
+    /// the init's, the first to [`KEYS_PORT`] takes the harness's keys, and
+    /// each to [`EXEC_PORT`] waits for a command.
     fn accept(&mut self) {
         while let Some(connection) = self.vsock.accept() {
             match connection.port() {
                 EXEC_PORT => self.spares.push_back(connection),
+                KEYS_PORT if self.keys.is_none() => self.keys = Some(connection),
+                KEYS_PORT => self.vsock.close(connection),
                 _ if self.connection.is_none() => self.connection = Some(connection),
                 _ => self.vsock.close(connection),
             }
@@ -830,20 +853,25 @@ impl<F: FnMut(Report)> Machine<'_, F> {
     }
 
     /// Hands queued input to the vsock device, once the harness has been
-    /// asked to start, as much as fits.
+    /// asked to start, as much as fits: a stop on the init's connection, and
+    /// keys on their own.
     fn pass_input(&mut self) {
-        let (Some(input), Some(connection)) = (self.input, self.connection) else {
+        let Some(input) = self.input else {
             return;
         };
         if !self.ready || self.run_frame.is_some() || self.finished {
             return;
         }
-        let mut queued = input.queued();
-        if queued.is_empty() {
-            return;
+        for (queue, connection) in [(&input.stops, self.connection), (&input.keys, self.keys)] {
+            let Some(connection) = connection else {
+                continue;
+            };
+            let mut queued = lock(queue);
+            if !queued.is_empty() {
+                let taken = self.vsock.send(connection, &queued);
+                queued.drain(..taken);
+            }
         }
-        let taken = self.vsock.send(connection, &queued);
-        queued.drain(..taken);
         input.room.notify_all();
     }
 
@@ -1089,8 +1117,7 @@ impl Channel for Host {
         ToHost::Ready(release.trim_ascii().to_vec())
             .write(&mut channel)
             .map_err(protocol_failed)?;
-        let connect = || linux::connect_to_host(EXEC_PORT);
-        agent::serve(&mut channel, Some(connect)).map_err(protocol_failed)?;
+        agent::serve(&mut channel, Some(linux::connect_to_host)).map_err(protocol_failed)?;
         Ok(Event::PowerOff)
     }
 }

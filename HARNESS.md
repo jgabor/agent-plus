@@ -888,7 +888,8 @@ on the owner's machines still decides every merge.
 - Its concurrency group is its own, so it never holds or replaces a refresh.
   A newer push replaces a run that is queued, not one that runs.
 - The gate gets the merge timeout, because a hang is one of the faults it is
-  for. Running out of time counts as a failure.
+  for. A gate that runs out of time fails. The job has a longer limit, for the
+  steps before the gate, and a job that reaches it files no issue.
 - When the gate fails there, a second job files one open issue titled
   `` The gate fails on a GitHub runner at `main` ``, with the commit and a link
   to the run. While that issue is open, a later failure adds nothing. That job

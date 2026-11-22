@@ -5,7 +5,9 @@
 //! entry of a directory. Each file is reached from a descriptor the server
 //! holds, one name at a time, beneath it and without following a symlink, so
 //! nothing a guest sends can reach a host file outside the share's root. A
-//! symlink reaches the guest as itself, and the guest resolves it.
+//! symlink reaches the guest as itself, and the guest resolves it. A
+//! directory's descriptor follows it wherever the host moves it, so the
+//! server checks that it is still beneath the root before each use.
 //!
 //! An `ro` share refuses every write. An `rw` share refuses the writes that
 //! SPEC.md's `SHARE` protects, by the place each name has, which [`Place`]
@@ -548,13 +550,41 @@ impl Share {
         self.nodes.get(&node).ok_or(libc::ESTALE)
     }
 
-    /// A directory node's descriptor and place.
+    /// A directory node's descriptor and place, while it is beneath the
+    /// root.
     fn directory(&self, node: u64) -> Result<(Rc<OwnedFd>, Place), i32> {
         let found = self.node(node)?;
         if !is(found.mode, libc::S_IFDIR) {
             return Err(libc::ENOTDIR);
         }
+        self.served(&found.fd)?;
         Ok((Rc::clone(&found.fd), found.place))
+    }
+
+    /// Refuses a directory that the host has moved out from under the
+    /// root, as if it were gone. Each directory above it is opened in turn,
+    /// with `O_PATH`, and only its identity is read, until the root, or the
+    /// top of the host's tree.
+    fn served(&self, directory: &OwnedFd) -> Result<(), i32> {
+        let root = self.node(ROOT)?;
+        let root = (root.device, root.inode);
+        let identity = |fd: BorrowedFd| {
+            sys::fstat(fd)
+                .map(|stat| (stat.st_dev, stat.st_ino))
+                .map_err(errno)
+        };
+        let mut here = identity(directory.as_fd())?;
+        let mut above: Option<OwnedFd> = None;
+        while here != root {
+            let from = above.as_ref().map_or(directory.as_fd(), AsFd::as_fd);
+            let up = sys::parent(from).map_err(errno)?;
+            let next = identity(up.as_fd())?;
+            if next == here {
+                return Err(libc::ENOENT);
+            }
+            (here, above) = (next, Some(up));
+        }
+        Ok(())
     }
 
     fn handle(&self, body: &[u8]) -> Result<&Handle, i32> {
@@ -576,6 +606,7 @@ impl Share {
         if let Some((_, file)) = &self.only {
             still_the_file(file, &found.parent, &found.name)?;
         }
+        self.served(&found.parent)?;
         let fd = sys::open_beneath(found.parent.as_fd(), &found.name, flags).map_err(errno)?;
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
         if (stat.st_dev, stat.st_ino) != (found.device, found.inode) {
@@ -644,10 +675,7 @@ impl Share {
             let (root, place) = (Rc::clone(&self.root), self.node(ROOT)?.place);
             return self.remember(root, place, name, fd);
         }
-        let (directory, place) = {
-            let found = self.node(parent)?;
-            (Rc::clone(&found.fd), found.place)
-        };
+        let (directory, place) = self.directory(parent)?;
         self.found(directory, place, name)
     }
 
@@ -704,6 +732,7 @@ impl Share {
         if !is(found.mode, libc::S_IFDIR) {
             return Err(libc::ENOTDIR);
         }
+        self.served(&found.fd)?;
         let flags = libc::O_RDONLY | libc::O_DIRECTORY;
         let fd = sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno)?;
         Ok(open_out(self.add_handle(fd, node)))
@@ -722,7 +751,9 @@ impl Share {
     /// Lists a directory as `struct fuse_dirent`s, from the offset the last
     /// listing ended at, as many as fit in the size the guest asks for.
     fn readdir(&self, body: &[u8]) -> Answer {
-        let fd = self.handle(body)?.fd.as_fd();
+        let handle = self.handle(body)?;
+        self.served(&self.node(handle.node)?.fd)?;
+        let fd = handle.fd.as_fd();
         let offset = u64_at(body, 8).ok_or(libc::EINVAL)?;
         let size = (u32_at(body, 16).ok_or(libc::EINVAL)? as usize).min(MAX_READ);
         let mut raw = vec![0; size];
@@ -846,6 +877,7 @@ impl Share {
             }
             handle.fd.as_fd()
         } else if is(found.mode, libc::S_IFDIR) {
+            self.served(&found.fd)?;
             let flags = libc::O_RDONLY | libc::O_DIRECTORY;
             own = sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno)?;
             own.as_fd()
@@ -917,6 +949,7 @@ impl Share {
         {
             return Err(libc::EPERM);
         }
+        self.served(&found.parent)?;
         let inode = (found.device, found.inode);
         sys::linkat(found.parent.as_fd(), &found.name, directory.as_fd(), &name).map_err(errno)?;
         let flags = libc::O_PATH | libc::O_NOFOLLOW;

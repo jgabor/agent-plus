@@ -1,5 +1,6 @@
 //! The system calls the share server makes on files, each one exactly the
-//! call its filter allows. None takes a path that can leave a descriptor.
+//! call its filter allows. None takes a path that can leave a descriptor,
+//! but [`parent`], which goes one directory up and reads nothing.
 
 use std::ffi::{CStr, c_long};
 use std::io;
@@ -11,7 +12,8 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
-const BENEATH: u64 = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
+const NO_SYMLINKS: u64 = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
+const BENEATH: u64 = RESOLVE_BENEATH | NO_SYMLINKS;
 
 /// `struct open_how`.
 #[repr(C)]
@@ -31,10 +33,21 @@ fn check(result: c_long) -> io::Result<c_long> {
 /// Opens `name` beneath `directory`, following no symlink on the way. With
 /// `O_PATH | O_NOFOLLOW`, a symlink opens as itself.
 pub fn open_beneath(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<OwnedFd> {
+    openat2(directory, name, flags, BENEATH)
+}
+
+/// The directory above `directory`, opened with `O_PATH`, so it reads
+/// nothing. Above the top of the tree is the top itself.
+pub fn parent(directory: BorrowedFd) -> io::Result<OwnedFd> {
+    let flags = libc::O_PATH | libc::O_DIRECTORY;
+    openat2(directory, c"..", flags, NO_SYMLINKS)
+}
+
+fn openat2(directory: BorrowedFd, name: &CStr, flags: i32, resolve: u64) -> io::Result<OwnedFd> {
     let how = OpenHow {
         flags: (flags | libc::O_CLOEXEC) as u64,
         mode: 0,
-        resolve: BENEATH,
+        resolve,
     };
     // SAFETY: `name` is NUL-terminated and `how` is a `struct open_how`,
     // both outliving the call, which returns a new descriptor or -1.

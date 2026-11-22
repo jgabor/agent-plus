@@ -1476,7 +1476,10 @@ fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_v
     assert_ne!(first, HIDDEN_VALUE);
     for placeholder in [&first, &second] {
         assert_eq!(placeholder.len(), 32, "{placeholder}");
-        assert!(placeholder.bytes().all(|b| b.is_ascii_hexdigit()), "{placeholder}");
+        assert!(
+            placeholder.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{placeholder}"
+        );
     }
     assert_ne!(first, second, "two runs got the same placeholder");
 }

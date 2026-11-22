@@ -21,11 +21,11 @@
 //! one that would is refused with `EOPNOTSUPP`, as C virtiofsd does.
 
 use std::collections::BTreeMap;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Component;
+use std::path::{Component, PathBuf};
 use std::rc::Rc;
 
 use crate::landlock::Access;
@@ -111,6 +111,8 @@ const FATTR_MTIME_NOW: u32 = 1 << 8;
 const GIT_FILES: [&str; 5] = ["config", "config.worktree", "commondir", "gitdir", "hooks"];
 const AGENTFILES: [&str; 2] = ["agentfile", "agentfile.lock"];
 const DOT_GIT: &str = ".git";
+/// The entries git finds a bare repository by, folded.
+const BARE: [&str; 4] = ["head", "objects", "refs", "commondir"];
 
 /// What a share allows. A copy-on-write share keeps the agent's changes
 /// in a directory of its own, `P`.
@@ -177,6 +179,8 @@ enum Place {
     Git {
         nested: bool,
     },
+    /// A git directory by what it holds, as git finds a bare repository.
+    Bare,
     /// `modules` or `worktrees` in a git directory.
     Holder,
     /// Read-only, with everything beneath it.
@@ -191,8 +195,10 @@ impl Place {
             (Place::Fixed, _) => Place::Fixed,
             (_, Some(name)) if AGENTFILES.contains(&name) => Place::Fixed,
             (_, Some(DOT_GIT)) => Place::Git { nested: false },
-            (Place::Git { .. }, Some(name)) if GIT_FILES.contains(&name) => Place::Fixed,
-            (Place::Git { .. }, Some("modules" | "worktrees")) => Place::Holder,
+            (Place::Git { .. } | Place::Bare, Some(name)) if GIT_FILES.contains(&name) => {
+                Place::Fixed
+            }
+            (Place::Git { .. } | Place::Bare, Some("modules" | "worktrees")) => Place::Holder,
             (Place::Holder | Place::Git { nested: true }, _) => Place::Git { nested: true },
             _ => Place::Plain,
         }
@@ -214,6 +220,26 @@ impl Place {
         self.of(name) == Place::Fixed || fold(name).as_deref() == Some(DOT_GIT)
     }
 
+    /// Whether the entry `name` in a directory at this place can't be
+    /// removed, or moved out of it. A bare repository keeps what git finds
+    /// it by.
+    fn keeps(self, name: &[u8]) -> bool {
+        self.fixes(name)
+            || self == Place::Bare && fold(name).is_some_and(|name| BARE.contains(&name.as_str()))
+    }
+
+    /// Whether making the entry `name` in `directory`, at this place, makes
+    /// it a bare repository, as git finds one.
+    fn completes(self, directory: BorrowedFd, name: &[u8]) -> bool {
+        let Some(made) = fold(name).filter(|name| BARE.contains(&name.as_str())) else {
+            return false;
+        };
+        self == Place::Plain
+            && bare(|entry| {
+                fold(entry.to_bytes()).as_deref() == Some(made.as_str()) || holds(directory, entry)
+            })
+    }
+
     /// Whether a file of `mode` may land at `name` in a directory at this
     /// place. A directory or a symlink lands only where git looks for no
     /// git directory, so nothing the agent wrote becomes one, or leads to
@@ -222,6 +248,18 @@ impl Place {
         let leads = is(mode, libc::S_IFDIR) || is(mode, libc::S_IFLNK);
         !leads || self.of(name) == Place::Plain
     }
+}
+
+/// Whether a directory holds what git finds a bare repository by: `HEAD`,
+/// and either `commondir` or both `objects` and `refs`. `holds` says
+/// whether it holds an entry.
+fn bare(holds: impl Fn(&CStr) -> bool) -> bool {
+    holds(c"HEAD") && (holds(c"commondir") || holds(c"objects") && holds(c"refs"))
+}
+
+/// Whether `directory` holds the entry `name`, of any kind.
+fn holds(directory: BorrowedFd, name: &CStr) -> bool {
+    sys::open_beneath(directory, name, libc::O_PATH | libc::O_NOFOLLOW).is_ok()
 }
 
 /// A name as a case-insensitive filesystem compares it, as far as the names
@@ -546,6 +584,20 @@ impl Share {
         })
     }
 
+    /// The place of the file `fd`, of `mode`, at `name` in a directory at
+    /// `place`. In a share that can change, a plain directory that holds
+    /// what git finds a bare repository by is a git directory.
+    fn place_of(&self, place: Place, name: &[u8], fd: BorrowedFd, mode: u32) -> Place {
+        match place.of_file(name, mode) {
+            Place::Plain
+                if !self.read_only && is(mode, libc::S_IFDIR) && bare(|e| holds(fd, e)) =>
+            {
+                Place::Bare
+            }
+            place => place,
+        }
+    }
+
     fn node(&self, node: u64) -> Result<&Node, i32> {
         self.nodes.get(&node).ok_or(libc::ESTALE)
     }
@@ -630,7 +682,7 @@ impl Share {
         fd: OwnedFd,
     ) -> Answer {
         let stat = sys::fstat(fd.as_fd()).map_err(errno)?;
-        let place = place.of_file(name.as_bytes(), stat.st_mode);
+        let place = self.place_of(place, name.as_bytes(), fd.as_fd(), stat.st_mode);
         let key = (stat.st_dev, stat.st_ino);
         if let Some(&found) = self.known.get(&key) {
             let node = self.nodes.get_mut(&found).ok_or(libc::EIO)?;
@@ -808,7 +860,7 @@ impl Share {
         let umask = u32_at(body, 8).ok_or(libc::EINVAL)?;
         let name = entry_name(body.get(16..).ok_or(libc::EINVAL)?)?;
         let (directory, place) = self.directory(parent)?;
-        if place.fixes(name.as_bytes()) {
+        if place.fixes(name.as_bytes()) || place.completes(directory.as_fd(), name.as_bytes()) {
             return Err(libc::EPERM);
         }
         // A file that was there is truncated only once it is known not to be
@@ -916,7 +968,7 @@ impl Share {
         let umask = u32_at(body, 4).ok_or(libc::EINVAL)?;
         let name = entry_name(body.get(8..).ok_or(libc::EINVAL)?)?;
         let (directory, place) = self.directory(parent)?;
-        if place.fixes(name.as_bytes()) {
+        if place.fixes(name.as_bytes()) || place.completes(directory.as_fd(), name.as_bytes()) {
             return Err(libc::EPERM);
         }
         sys::mkdirat(directory.as_fd(), &name, mode & !umask & 0o7777).map_err(errno)?;
@@ -932,7 +984,10 @@ impl Share {
             return Err(libc::ENOENT);
         }
         let (directory, place) = self.directory(parent)?;
-        if place.fixes(name.as_bytes()) || !place.takes(name.as_bytes(), libc::S_IFLNK) {
+        if place.fixes(name.as_bytes())
+            || place.completes(directory.as_fd(), name.as_bytes())
+            || !place.takes(name.as_bytes(), libc::S_IFLNK)
+        {
             return Err(libc::EPERM);
         }
         sys::symlinkat(target, directory.as_fd(), &name).map_err(errno)?;
@@ -948,6 +1003,7 @@ impl Share {
         if found.place == Place::Fixed
             || is(found.mode, libc::S_IFDIR)
             || place.fixes(name.as_bytes())
+            || place.completes(directory.as_fd(), name.as_bytes())
             || !place.takes(name.as_bytes(), found.mode)
         {
             return Err(libc::EPERM);
@@ -970,7 +1026,7 @@ impl Share {
     fn remove(&self, parent: u64, body: &[u8], flags: i32) -> Answer {
         let name = entry_name(body)?;
         let (directory, place) = self.directory(parent)?;
-        if place.fixes(name.as_bytes()) {
+        if place.keeps(name.as_bytes()) {
             return Err(libc::EPERM);
         }
         sys::unlinkat(directory.as_fd(), &name, flags).map_err(errno)?;
@@ -994,6 +1050,15 @@ impl Share {
         if from_place.fixes(old.as_bytes()) || into_place.fixes(new.as_bytes()) {
             return Err(libc::EPERM);
         }
+        // An exchange leaves both names, so it takes no entry away and
+        // makes none.
+        let exchange = flags & libc::RENAME_EXCHANGE != 0;
+        if !exchange
+            && (from_place.keeps(old.as_bytes())
+                || into_place.completes(into.as_fd(), new.as_bytes()))
+        {
+            return Err(libc::EPERM);
+        }
         let mode = |directory: &OwnedFd, name: &CStr| {
             let flags = libc::O_PATH | libc::O_NOFOLLOW;
             let fd = sys::open_beneath(directory.as_fd(), name, flags).map_err(errno)?;
@@ -1004,7 +1069,6 @@ impl Share {
         if !into_place.takes(new.as_bytes(), mode(&from, &old)?) {
             return Err(libc::EPERM);
         }
-        let exchange = flags & libc::RENAME_EXCHANGE != 0;
         if exchange && !from_place.takes(old.as_bytes(), mode(&into, &new)?) {
             return Err(libc::EPERM);
         }
@@ -1027,6 +1091,7 @@ impl Share {
         let Ok(stat) = sys::fstat(fd.as_fd()) else {
             return;
         };
+        let place = self.place_of(place, name.to_bytes(), fd.as_fd(), stat.st_mode);
         let Some(node) = self
             .known
             .get(&(stat.st_dev, stat.st_ino))
@@ -1037,7 +1102,7 @@ impl Share {
         node.parent = Rc::clone(directory);
         node.name = name.to_owned();
         if node.place != Place::Fixed {
-            node.place = place.of_file(name.to_bytes(), stat.st_mode);
+            node.place = place;
         }
     }
 
@@ -1189,18 +1254,31 @@ fn init(body: &[u8]) -> Answer {
 }
 
 /// The place of a root, from the names along its host path, so that a root
-/// in a git directory, or one that is protected, keeps its place.
+/// in a git directory, or one that is protected, keeps its place. A
+/// directory along it that holds what git finds a bare repository by is a
+/// git directory.
 fn root_place(root: &OwnedFd) -> Place {
     let link = format!("/proc/self/fd/{}", root.as_raw_fd());
     let Ok(path) = std::fs::read_link(link) else {
         return Place::Plain;
     };
+    let mut at = PathBuf::from("/");
     path.components()
         .filter_map(|component| match component {
             Component::Normal(name) => Some(name),
             _ => None,
         })
-        .fold(Place::Plain, |place, name| place.of(name.as_bytes()))
+        .fold(Place::Plain, |place, name| {
+            at.push(name);
+            let holds = |entry: &CStr| {
+                let entry = OsStr::from_bytes(entry.to_bytes());
+                at.join(entry).symlink_metadata().is_ok()
+            };
+            match place.of(name.as_bytes()) {
+                Place::Plain if bare(holds) => Place::Bare,
+                place => place,
+            }
+        })
 }
 
 impl Server {

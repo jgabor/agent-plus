@@ -652,7 +652,12 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
 fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let tree = Tree::new("bare");
     let root = &tree.root;
-    for dir in ["repo.git/objects", "repo.git/refs", "repo.git/hooks", "linked"] {
+    for dir in [
+        "repo.git/objects",
+        "repo.git/refs",
+        "repo.git/hooks",
+        "linked",
+    ] {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
     for file in [
@@ -679,12 +684,18 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     assert_eq!(guest.create(hooks, b"post-receive", 0), Err(EPERM));
     assert_eq!(guest.create(repo, b"config.worktree", 0), Err(EPERM));
     // `HEAD` changes, as git changes it, by a rename over it.
-    guest.overwrite("repo.git/HEAD", b"ref: refs/heads/agent").unwrap();
+    guest
+        .overwrite("repo.git/HEAD", b"ref: refs/heads/agent")
+        .unwrap();
     let (_, handle) = guest.create(repo, b"HEAD.lock", 0).unwrap();
     guest.release(handle);
     assert_eq!(guest.rename(repo, b"HEAD.lock", repo, b"HEAD", 0), 0);
     // What git finds the repository by stays.
-    for (name, opcode) in [(&b"HEAD"[..], UNLINK), (b"objects", RMDIR), (b"refs", RMDIR)] {
+    for (name, opcode) in [
+        (&b"HEAD"[..], UNLINK),
+        (b"objects", RMDIR),
+        (b"refs", RMDIR),
+    ] {
         assert_eq!(guest.remove(opcode, repo, name), EPERM, "{name:?}");
         assert_eq!(guest.rename(repo, name, 1, b"out", 0), EPERM, "{name:?}");
     }
@@ -750,7 +761,10 @@ fn no_directory_the_agent_writes_becomes_a_bare_repository() {
         "common/commondir",
         "head/HEAD",
     ] {
-        assert!(fs::symlink_metadata(tree.root.join(path)).is_err(), "{path}");
+        assert!(
+            fs::symlink_metadata(tree.root.join(path)).is_err(),
+            "{path}"
+        );
     }
     assert!(tree.root.join("staged").is_dir());
 }

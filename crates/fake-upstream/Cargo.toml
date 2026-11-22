@@ -10,5 +10,5 @@ ap = { path = "../ap" }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12"] }
 rustls-graviola = "0.4"
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

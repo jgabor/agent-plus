@@ -9,5 +9,5 @@ publish.workspace = true
 git = { path = "../git" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

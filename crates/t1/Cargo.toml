@@ -6,7 +6,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-vmm = { path = "../vmm" }
 guest = { path = "../guest" }
 store = { path = "../store" }
 
@@ -17,6 +16,7 @@ erofs = { path = "../erofs" }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 rustls-graviola = "0.4"
 share = { path = "../share" }
+vmm = { path = "../vmm" }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

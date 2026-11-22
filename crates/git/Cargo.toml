@@ -9,5 +9,5 @@ publish.workspace = true
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 sha1_smol = { version = "1.0.1", default-features = false }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

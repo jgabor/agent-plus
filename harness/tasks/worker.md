@@ -30,15 +30,18 @@ can't continue alone, park the issue as AGENTS.md says.
    works, and say in the PR which one ran:
 
    ```json
-   {"providerInstanceId": "acpRegistry_factory_droid", "model": "gpt-6.2-sol"}
+   {"providerInstanceId": "acpRegistry_factory_droid", "model": "gemini-4-neon",
+    "options": {"reasoning_effort": "high"}}
    ```
 
    ```json
-   {"providerInstanceId": "opencode", "model": "opencode/big-pickle"}
+   {"providerInstanceId": "antigravity", "model": "gemini-4-neon",
+    "options": {"thought_level": "high"}}
    ```
 
    ```json
-   {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5"}
+   {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5",
+    "options": {"effort": "high"}}
    ```
 
    When the PR adds a crate, or writes code a crate could do, ask the

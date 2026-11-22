@@ -414,6 +414,69 @@ fn a_write_never_reaches_outside_a_read_write_share() {
     assert!(!tree.base.join("planted").exists());
 }
 
+// spec(SHARE): The agent sees only what is under the share's root.
+#[test]
+fn a_directory_the_host_moves_outside_the_root_is_no_longer_served() {
+    let tree = Tree::new("moved-out");
+    fs::create_dir(tree.root.join("dir/deeper")).unwrap();
+    fs::write(tree.root.join("dir/deeper/kept.txt"), INSIDE).unwrap();
+    let mut guest = Guest::new(&tree.root);
+    let dir = guest.walk("dir").unwrap();
+    let deeper = guest.walk("dir/deeper").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    let (error, out) = guest.call(OPENDIR, dir, &[0; 8]);
+    assert_eq!(error, 0);
+    let listing = u64::from_le_bytes(out[..8].try_into().unwrap());
+    let away = tree.base.join("outside/dir");
+    fs::rename(tree.root.join("dir"), &away).unwrap();
+    fs::write(away.join("new.txt"), CANARY).unwrap();
+    fs::write(away.join("deeper/new.txt"), CANARY).unwrap();
+    // Neither the directory nor one beneath it is served, wherever the
+    // guest starts from.
+    for node in [dir, deeper] {
+        assert_eq!(guest.lookup(node, b"new.txt"), Err(ENOENT));
+        assert_eq!(guest.call(OPENDIR, node, &[0; 8]).0, ENOENT);
+    }
+    assert_eq!(guest.lookup(deeper, b"kept.txt"), Err(ENOENT));
+    assert_eq!(guest.open(nested, 0), Err(ENOENT));
+    assert_eq!(guest.read(READDIR, listing, 0, 4096).0, ENOENT);
+    assert_eq!(guest.read_file("dir/new.txt"), Err(ENOENT));
+    // Moved back beneath the root, it is served again.
+    fs::rename(&away, tree.root.join("back")).unwrap();
+    assert_eq!(guest.read_file("back/deeper/new.txt").unwrap(), CANARY);
+    assert!(guest.lookup(deeper, b"kept.txt").is_ok());
+    assert!(guest.open(nested, 0).is_ok());
+}
+
+#[test]
+fn a_write_never_reaches_a_directory_the_host_moves_outside_the_root() {
+    let tree = Tree::new("rw-moved-out");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    let away = tree.base.join("outside/dir");
+    fs::rename(tree.root.join("dir"), &away).unwrap();
+    assert_eq!(guest.create(dir, b"planted", 0), Err(ENOENT));
+    assert_eq!(guest.mkdir(dir, b"planted"), Err(ENOENT));
+    assert_eq!(guest.symlink(dir, b"planted", b"x"), Err(ENOENT));
+    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), ENOENT);
+    assert_eq!(guest.rename(dir, b"nested.txt", 1, b"taken", 0), ENOENT);
+    assert_eq!(guest.rename(1, b"hello.txt", dir, b"given", 0), ENOENT);
+    assert_eq!(guest.link(nested, 1, b"taken"), Err(ENOENT));
+    assert_eq!(guest.open(nested, O_WRONLY), Err(ENOENT));
+    assert_eq!(guest.setattr(dir, FATTR_MODE, 0, 0o777), ENOENT);
+    assert_eq!(guest.setattr(nested, FATTR_SIZE, 0, 0), ENOENT);
+    let mut names: Vec<_> = fs::read_dir(&away)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["nested.txt"]);
+    assert_eq!(fs::read(away.join("nested.txt")).unwrap(), b"nested");
+    assert!(tree.root.join("hello.txt").exists());
+    assert!(!tree.root.join("taken").exists());
+}
+
 // spec(SHARE): In `rw` shares, the files your host acts on are read-only to the agent.
 // spec(SHARE): An entry named `Agentfile` or `Agentfile.lock` can't be created, changed, removed, or renamed, so an agent can't change what a later build does.
 // spec(SHARE): A change these rules refuse fails with an `Operation not permitted` error.

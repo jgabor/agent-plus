@@ -13,12 +13,13 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
   echo "ANTHROPIC_API_KEY is empty, so the step can't sign Claude Code in" >&2
   exit 1
 fi
-key=$ANTHROPIC_API_KEY
 
 # Prints the files `$@` to standard error, with the key, if one holds it,
-# shown as `<key>`.
+# shown as `<key>`. `awk` reads the key from its environment, so it stays
+# off every command line.
 show() {
-  awk -v key="$key" '{
+  awk '{
+    key = ENVIRON["ANTHROPIC_API_KEY"]
     while ((at = index($0, key)) > 0)
       $0 = substr($0, 1, at - 1) "<key>" substr($0, at + length(key))
     print
@@ -82,6 +83,11 @@ if [ "$status" -ne 0 ]; then
   fail "ap run repo exited $status" repo.out repo.err
 fi
 untouched "the run changed your repository before ap apply"
+if [ "$(git -C repo/share for-each-ref --format='%(refname)')" != \
+  refs/heads/main ]; then
+  git -C repo/share for-each-ref >repo.refs 2>&1
+  fail "the run added a ref to your repository before ap apply" repo.refs
+fi
 
 # Runs `ap $1 repo` into `repo.$1`, and fails unless it exits 0.
 ap_ok() {
@@ -113,15 +119,20 @@ if [ "$(git -C repo/share show "$branch:notes.txt")" != final ]; then
   git -C repo/share show "$branch:notes.txt" >repo.branch 2>&1 || true
   fail "notes.txt on $branch isn't the agent's edit" repo.branch
 fi
-ap_ok diff
-if [ -s repo.diff ]; then
-  fail "ap diff still shows changes after ap apply" repo.diff
+# The second `ap diff` writes to files of its own, so the first one's are
+# still there for the check below.
+if ! timeout -k 5 60 ap diff repo </dev/null >repo.after 2>repo.after.err; then
+  fail "ap diff repo failed after ap apply" repo.after repo.after.err
+fi
+if [ -s repo.after ]; then
+  fail "ap diff still shows changes after ap apply" repo.after
 fi
 
 # Nothing `ap` wrote for this step holds the key.
 for file in repo.build repo.out repo.err repo.diff repo.diff.err repo.apply \
-  repo.apply.err; do
-  if grep -qF -- "$key" "$file"; then
+  repo.apply.err repo.after repo.after.err; do
+  if awk 'index($0, ENVIRON["ANTHROPIC_API_KEY"]) { found = 1 }
+    END { exit !found }' "$file"; then
     echo "$file holds the key" >&2
     exit 1
   fi

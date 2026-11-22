@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use agentfile::{
-    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Sources,
-    Text,
+    Auth, Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings,
+    Sources, Text,
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
@@ -544,7 +544,7 @@ fn plan(
     }
     let sources = take(&mut errors, Sources::read(instructions));
     let files = take(&mut errors, Files::read(instructions));
-    take(&mut errors, Secrets::read(instructions));
+    let secrets = take(&mut errors, Secrets::read(instructions));
     take(&mut errors, Network::read(instructions));
     take(&mut errors, Policy::read(instructions));
     let guest = take(&mut errors, GuestPath::read(instructions, dir_name));
@@ -588,8 +588,8 @@ fn plan(
         }
     }
     // Checking `ADD` and `SHARE` on the host needs their typed values.
-    let (Some(settings), Some(sources), Some(files), Some(guest)) =
-        (settings, sources, files, guest)
+    let (Some(settings), Some(sources), Some(files), Some(guest), Some(secrets)) =
+        (settings, sources, files, guest, secrets)
     else {
         errors.sort_by_key(|error| error.line);
         errors.dedup();
@@ -661,7 +661,7 @@ fn plan(
         return Err(errors);
     }
     let line = text_line.unwrap_or(1);
-    let image = configuration(&settings, &system, prompt.as_deref())
+    let image = configuration(&settings, secrets.auth, &system, prompt.as_deref())
         .map_err(|error| vec![fail(line, error.to_string())])?;
     planned.push(Planned {
         line,
@@ -719,10 +719,11 @@ fn read_text(host: &HostPath) -> io::Result<Vec<u8>> {
 }
 
 /// The harness configuration layer, as an uncompressed EROFS image: the
-/// files the harness's adapter renders, and the prompt at [`PROMPT`]. What
+/// files the harness's adapter renders for `auth`, and the prompt at [`PROMPT`]. What
 /// it puts in the agent's home is the agent's, so the harness can change it.
 fn configuration(
     settings: &Settings,
+    auth: Option<Auth>,
     system: &[Vec<u8>],
     prompt: Option<&[u8]>,
 ) -> io::Result<Vec<u8>> {
@@ -731,7 +732,7 @@ fn configuration(
         entries: BTreeMap::new(),
     };
     let files = match settings.agent.harness {
-        Harness::Claude => ap::adapter::claude::files(system, settings.mode),
+        Harness::Claude => ap::adapter::claude::files(system, settings.mode, auth),
         Harness::Codex => ap::adapter::codex::files(system),
     };
     for (path, content) in files {

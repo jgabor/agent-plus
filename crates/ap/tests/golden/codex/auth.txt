@@ -1,0 +1,3 @@
+AUTH login: none
+AUTH key: CODEX_API_KEY hidden @api.openai.com
+AUTH token: none

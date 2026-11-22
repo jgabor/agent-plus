@@ -401,13 +401,10 @@ impl Proxy {
                 }
             }
             Target::Addresses(name, addresses) => {
-                let bound = name
-                    .as_deref()
-                    .is_some_and(|name| self.injection.binds(name));
                 let (allowed, check) = allowed(
                     network,
                     &hosts,
-                    (name.as_deref(), bound),
+                    (name.as_deref(), &self.injection),
                     destination.port(),
                     &addresses,
                     tcp,
@@ -482,9 +479,14 @@ impl Proxy {
                 let opening = &mut self.opening[at];
                 let port = flow_destination(&opening.flow).port();
                 let name = opening.name.as_deref();
-                let bound = name.is_some_and(|name| self.injection.binds(name));
-                let (allowed, check) =
-                    allowed(network, &hosts, (name, bound), port, &addresses, true);
+                let (allowed, check) = allowed(
+                    network,
+                    &hosts,
+                    (name, &self.injection),
+                    port,
+                    &addresses,
+                    true,
+                );
                 // Each request is a decision of its own.
                 if check != Check::Requests || allowed.is_empty() {
                     answered(
@@ -518,9 +520,14 @@ impl Proxy {
             if let Some(flow) = flow {
                 let port = flow.destination.port();
                 let name = flow.name.as_deref();
-                let bound = name.is_some_and(|name| self.injection.binds(name));
-                let (allowed, check) =
-                    allowed(network, &hosts, (name, bound), port, &addresses, false);
+                let (allowed, check) = allowed(
+                    network,
+                    &hosts,
+                    (name, &self.injection),
+                    port,
+                    &addresses,
+                    false,
+                );
                 answered(
                     self.reporter.as_deref(),
                     flow.name.as_deref(),
@@ -844,22 +851,25 @@ fn flow_destination(flow: &Flow) -> SocketAddr {
 }
 
 /// The addresses of `addresses` that the proxy may connect to on `port`,
-/// for a connection attributed to `name`, which is a hidden secret's bound
-/// host if `bound` says so, over TCP if `tcp`, and what reads it: the
+/// for a connection attributed to `name`, which may be a bound host of a
+/// hidden secret of `injection`, over TCP if `tcp`, and what reads it: the
 /// request check, if the name has URL rules, decryption for the secret, if
 /// it is bound, or else the name check, if a name decided any of them.
 fn allowed(
     network: &Network,
     harness: &[&str],
-    (name, bound): (Option<&str>, bool),
+    (name, injection): (Option<&str>, &Injection),
     port: u16,
     addresses: &[IpAddr],
     tcp: bool,
 ) -> (Vec<IpAddr>, Check) {
     let url = name.is_some_and(|name| url_rules(network, name));
+    let bound = name.is_some_and(|name| injection.binds(name));
     // UDP to such a host, QUIC among it, isn't HTTP. QUIC to a bound host
-    // would carry the placeholder where the proxy can't reach it.
-    if (url || bound && port == 443) && !tcp {
+    // would carry the placeholder where the proxy can't reach it. A host
+    // whose every request must carry a placeholder gets no UDP at all.
+    let required = name.is_some_and(|name| injection.requires(name));
+    if (url || bound && port == 443 || required) && !tcp {
         return (Vec::new(), Check::NotHttp);
     }
     let requests = url;

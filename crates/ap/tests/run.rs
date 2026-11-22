@@ -323,8 +323,46 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
     scratch.build("signed", &format!("{RUNNABLE}AUTH login\n"));
     refused(
         &scratch.ap(&["run", "signed", "-p", "hi"], &[]),
-        "`AUTH` is not built yet",
+        "`AUTH login` is not built yet",
     );
+}
+
+// spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
+// spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
+// spec(SECRET): A missing value makes the run fail, and the error names the secret.
+#[test]
+fn auth_key_and_token_need_their_variable_before_the_vm_starts() {
+    let scratch = Scratch::new("auth");
+    let codex = RUNNABLE.replace("claude:0.0.0", "codex:0.169.0");
+    for (name, agentfile, variable) in [
+        (
+            "keyed",
+            format!("{RUNNABLE}AUTH key\n"),
+            "ANTHROPIC_API_KEY",
+        ),
+        (
+            "tokened",
+            format!("{RUNNABLE}AUTH token\n"),
+            "CLAUDE_CODE_OAUTH_TOKEN",
+        ),
+        ("codex-keyed", format!("{codex}AUTH key\n"), "CODEX_API_KEY"),
+    ] {
+        scratch.build(name, &agentfile);
+        let missing = scratch.ap(&["run", name, "-p", "hi"], &[]);
+        refused(&missing, &format!("`{variable}`"));
+        let stderr = String::from_utf8_lossy(&missing.stderr);
+        assert!(!stderr.contains("not built"), "{stderr}");
+        // Another harness's variable is no value for this one.
+        let other = match variable {
+            "CODEX_API_KEY" => "ANTHROPIC_API_KEY",
+            _ => "CODEX_API_KEY",
+        };
+        refused(
+            &scratch.ap(&["run", name, "-p", "hi"], &[(other, "sk-1")]),
+            &format!("`{variable}`"),
+        );
+        past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[(variable, "sk-1")]));
+    }
 }
 
 /// Fails unless `output` is a run that got past its checks, and failed

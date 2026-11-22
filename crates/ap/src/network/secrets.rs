@@ -18,6 +18,8 @@ pub struct Hidden {
     pub placeholder: Vec<u8>,
     /// The hosts it is bound to.
     pub hosts: Vec<String>,
+    /// Every request to its hosts must carry it, as for `AUTH key`.
+    pub required: bool,
 }
 
 /// What the network process puts in requests: the headers the harness's
@@ -57,6 +59,21 @@ impl Injection {
             .collect()
     }
 
+    /// Whether every request to `name` must carry a placeholder, and gets
+    /// refused without one.
+    pub fn requires(&self, name: &str) -> bool {
+        let name = name.strip_suffix('.').unwrap_or(name);
+        (self.secrets.iter())
+            .filter(|secret| secret.required)
+            .any(|secret| {
+                (secret.hosts.iter()).any(|host| {
+                    host.strip_suffix('.')
+                        .unwrap_or(host)
+                        .eq_ignore_ascii_case(name)
+                })
+            })
+    }
+
     /// The headers, as [`net::inject`] takes them.
     pub fn header_names(&self) -> Vec<&str> {
         self.headers.iter().map(String::as_str).collect()
@@ -77,6 +94,7 @@ impl Injection {
             for host in &secret.hosts {
                 field(&mut out, host.as_bytes());
             }
+            out.push(u8::from(secret.required));
         }
         out
     }
@@ -96,6 +114,7 @@ impl Injection {
                     hosts: (0..number(bytes)?)
                         .map(|_| text(bytes))
                         .collect::<Option<_>>()?,
+                    required: flag(bytes)?,
                 })
             })
             .collect::<Option<_>>()?;
@@ -148,6 +167,15 @@ fn number(bytes: &mut &[u8]) -> Option<usize> {
     let (number, rest) = bytes.split_first_chunk::<4>()?;
     *bytes = rest;
     Some(u32::from_le_bytes(*number) as usize)
+}
+
+fn flag(bytes: &mut &[u8]) -> Option<bool> {
+    let (&flag, rest) = bytes.split_first()?;
+    *bytes = rest;
+    match flag {
+        0 | 1 => Some(flag == 1),
+        _ => None,
+    }
 }
 
 fn take<'a>(bytes: &mut &'a [u8]) -> Option<&'a [u8]> {
@@ -209,6 +237,12 @@ mod tests {
                     value: vec![b'v'; 3 * CHUNK],
                     placeholder: b"0123".to_vec(),
                     hosts: vec!["api.stripe.com".into()],
+                    required: false,
+                },
+                Hidden {
+                    hosts: vec!["api.anthropic.com".into()],
+                    required: true,
+                    ..Hidden::default()
                 },
                 Hidden::default(),
             ],
@@ -219,6 +253,8 @@ mod tests {
         assert_eq!(Injection::receive(theirs.as_fd()).unwrap(), injection);
         assert!(injection.binds("API.stripe.com."));
         assert!(!injection.binds("stripe.com"));
+        assert!(!injection.requires("api.stripe.com"));
+        assert!(injection.requires("API.anthropic.com."));
         // Bytes that stop short don't read.
         let bytes = injection.encode();
         assert_eq!(Injection::decode(&bytes[..bytes.len() - 1]), None);

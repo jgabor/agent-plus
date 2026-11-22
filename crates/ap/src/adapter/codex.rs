@@ -43,6 +43,12 @@ pub const SET: &[&str] = &[];
 /// three before its stored sign-in.
 pub const SIGN_IN: &[&str] = &["CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"];
 
+/// The variable that `AUTH key` reads on your host and sets in the guest.
+/// `codex exec` 0.169.0 sends it in `Authorization` to `api.openai.com`.
+pub const KEY: &str = "CODEX_API_KEY";
+/// The hosts the proxy swaps the key's value in on.
+pub const KEY_HOSTS: &[&str] = &["api.openai.com"];
+
 /// The request headers that the proxy may put a hidden secret's value in,
 /// from SPEC.md's SECRET section. Codex sends its key in `Authorization`,
 /// and other clients a key in `X-Api-Key`.

@@ -15,7 +15,12 @@
 //! in, as [`Reads::Injects`] says. On a TLS connection whose server name
 //! names the attributed name, each request whose `Host` names it too gets
 //! the value in the headers that [`Injection`] allows, by [`net::inject`].
+//! On a host whose every request must carry a placeholder, as `AUTH key`'s
+//! must, anything else is refused: TLS that names another host or none,
+//! traffic that isn't TLS, a server that speaks first, and a request that
+//! didn't get the value.
 
+use std::cell::Cell;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
@@ -272,9 +277,10 @@ impl Decrypted {
         decide: &mut Decide,
     ) -> io::Result<()> {
         let mut buffer = [0; BUFFER];
-        // A guest that sends nothing first may wait for the server. Its
-        // first byte still says whether its TLS is decrypted.
-        let silent = self.since.elapsed() >= SILENT_WAIT;
+        // A guest that sends nothing first may wait for the server, unless
+        // every request must carry a placeholder. Its first byte still says
+        // whether its TLS is decrypted.
+        let silent = self.since.elapsed() >= SILENT_WAIT && !injection.requires(&self.name);
         if let (Stage::First, Reads::Injects { .. }, true) = (&self.stage, self.reads, silent) {
             self.allowed = true;
         }
@@ -401,9 +407,13 @@ impl Decrypted {
         injection: &Injection,
         decide: &mut Decide,
     ) -> io::Result<()> {
+        // Every request to the host must carry a placeholder, which only
+        // TLS that names the host can.
+        let required = injection.requires(&self.name);
         if let Stage::First = self.stage {
             match (input[0], self.reads) {
                 (0x16, _) => self.stage = Stage::Hello(Box::default(), Vec::new()),
+                (_, _) if required => return Err(refused("a request without its key")),
                 (_, Reads::Requests) => self.stage = Stage::Plain,
                 (_, Reads::Injects { by_name }) => self.passing(by_name),
             }
@@ -461,6 +471,7 @@ impl Decrypted {
                 });
                 match (self.reads, agrees) {
                     (_, Some(true)) => self.injects = injection.binds(&self.name),
+                    _ if required => return Err(refused("a request without its key")),
                     (Reads::Requests, None) => {}
                     (Reads::Requests, Some(false)) => {
                         return Err(refused("a server name that disagrees"));
@@ -517,9 +528,23 @@ impl Decrypted {
         };
         let headers = injection.header_names();
         let name = &self.name;
-        let mut rewrite = |head: &[u8], out: &mut Vec<u8>| match swaps.is_empty() {
-            true => out.extend_from_slice(head),
-            false => net::inject(head, name, &headers, &swaps, out),
+        // Where `passed` ends at the first head that had to carry a
+        // placeholder, and didn't.
+        let required = injection.requires(name);
+        let refused_at = Cell::new(None);
+        let mut rewrite = |head: &[u8], out: &mut Vec<u8>| {
+            if refused_at.get().is_some() {
+                return;
+            }
+            let start = out.len();
+            match swaps.is_empty() {
+                true => out.extend_from_slice(head),
+                false => net::inject(head, name, &headers, &swaps, out),
+            }
+            if required && out[start..] == *head {
+                out.truncate(start);
+                refused_at.set(Some(start));
+            }
         };
         let mut buffer = [0; BUFFER];
         let mut passed = Vec::new();
@@ -540,9 +565,17 @@ impl Decrypted {
                         &mut decide,
                         &mut rewrite,
                     );
+                    // What came before the refused head still goes.
+                    let without = refused_at.get();
+                    if let Some(at) = without {
+                        passed.truncate(at);
+                    }
                     client.writer().write_all(&passed)?;
                     self.allowed |= !passed.is_empty();
                     passed.clear();
+                    if without.is_some() {
+                        return Err(refused("a request without its key"));
+                    }
                     fed.map_err(|_| refused("a request the rules deny"))?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,

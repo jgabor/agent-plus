@@ -867,7 +867,7 @@ impl ToRun {
 /// the VM goes with it.
 fn stop(input: &Input, output: &ToRun) {
     // Without the guest, nothing reaches the harness, and the grace runs out.
-    let _ = input.send(&ToGuest::Terminate);
+    let _ = input.terminate();
     if output.wait_for_end(GRACE) || !output.claim_end() {
         return;
     }

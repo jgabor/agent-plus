@@ -1253,6 +1253,29 @@ fn ap_exec_answers_while_an_interactive_harness_leaves_your_keys_unread() {
     printed(&exec_within(&scratch, &name, &["id", "-un"]), "agent\n");
 }
 
+#[test]
+fn ap_stop_reaches_an_interactive_harness_that_leaves_your_keys_unread() {
+    let scratch = Scratch::new("stop-unread");
+    scratch.build("deaf", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let mut run = Interactive::start(&scratch, &["deaf"], size(30, 100));
+    run.wait_for("\"user\":");
+    // The harness reads nothing after `exit`, until it ends.
+    run.type_line("exit");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+
+    let typed = type_until_held_back(run.controller.try_clone().unwrap());
+    assert!(typed > UNREAD, "{typed}");
+    let started = Instant::now();
+    printed(&scratch.ap(&["stop", &name]), "");
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(15), "{took:?}");
+    // The fake harness ends by `SIGTERM`, so the stop reached it, and the
+    // VM wasn't powered off.
+    assert_eq!(run.exit_status().code(), Some(128 + 15));
+}
+
 /// The most commands beside the harness that can run at once: the VMM
 /// takes 64 connections from the guest, and the init holds one.
 const MOST_EXECS: usize = 63;

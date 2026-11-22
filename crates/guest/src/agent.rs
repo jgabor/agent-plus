@@ -16,10 +16,12 @@
 //! A start with a terminal runs the harness in a new one, which it gets as
 //! its controlling terminal, and owns. What the terminal shows goes to the
 //! host as standard output. What the host types, and the terminal's new
-//! sizes, come in on another thread, which is then the channel's only
-//! reader. A harness with pipes has an empty input, and that thread only
-//! waits for a [`ToGuest::Terminate`], which either kind takes as a request
-//! to send it `SIGTERM`. Once the harness ends, nothing more is served.
+//! sizes, come on a connection of their own to
+//! [`KEYS_PORT`](crate::protocol::KEYS_PORT), so a harness that doesn't read
+//! them holds back only them. A harness with pipes has an empty input.
+//! Either way, another thread is then the channel's only reader, and waits
+//! for a [`ToGuest::Terminate`], which it takes as a request to send the
+//! harness `SIGTERM`. Once the harness ends, nothing more is served.
 //!
 //! Once the harness has started, the agent keeps one connection of its own
 //! open to the host's [`EXEC_PORT`](crate::protocol::EXEC_PORT), and waits there for an [`Exec`]. When
@@ -35,7 +37,9 @@
 //! for a command beside it.
 
 use crate::linux::{self, bytes_waiting, program_has_ended, readable_within};
-use crate::protocol::{Exec, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost};
+use crate::protocol::{
+    EXEC_PORT, Exec, KEYS_PORT, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
+};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, IsTerminal, PipeReader, PipeWriter, Read, Write};
@@ -126,9 +130,8 @@ impl Split for File {
     }
 }
 
-/// Opens a new connection to the host's
-/// [`EXEC_PORT`](crate::protocol::EXEC_PORT).
-pub type Connect = fn() -> io::Result<File>;
+/// Opens a new connection to this port on the host.
+pub type Connect = fn(u32) -> io::Result<File>;
 
 /// Serves requests until the host hangs up, or until a harness has ended. With `connect`, a harness that starts can have
 /// commands run beside it.
@@ -159,7 +162,25 @@ pub fn serve(channel: &mut impl Split, connect: Option<Connect>) -> Result<(), P
                         return run(command, channel, from_host, harness_refused);
                     }
                     (Ok(command), Some(size)) => {
-                        return run_in_terminal(command, size, channel, harness_refused);
+                        let keys = connect
+                            .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))
+                            .and_then(|connect| connect(KEYS_PORT));
+                        let keys: Box<dyn Read + Send> = match keys {
+                            Ok(keys) => Box::new(keys),
+                            Err(error) => {
+                                let reason = format!("can't take the terminal's keys: {error}");
+                                return ToHost::Failed(reason.into_bytes()).write(channel);
+                            }
+                        };
+                        let stops = channel.split_reader()?;
+                        return run_in_terminal(
+                            command,
+                            size,
+                            channel,
+                            keys,
+                            Some(stops),
+                            harness_refused,
+                        );
                     }
                     (Err(reason), _) => ToHost::Failed(reason.into_bytes()).write(channel)?,
                 }
@@ -192,7 +213,7 @@ struct Context {
 fn offer_exec(context: Arc<Context>, connect: Connect) {
     thread::spawn(move || {
         let mut channel = loop {
-            match connect() {
+            match connect(EXEC_PORT) {
                 Ok(channel) => break channel,
                 Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {
                     thread::sleep(REFUSED_RETRY);
@@ -227,7 +248,10 @@ fn run_exec(exec: &Exec, context: &Context, channel: &mut File) -> Result<(), Pr
             let input = channel.split_reader()?;
             run(command, channel, FromHost::Input(input), exec_refused)
         }
-        Some(size) => run_in_terminal(command, size, channel, exec_refused),
+        Some(size) => {
+            let keys = channel.split_reader()?;
+            run_in_terminal(command, size, channel, keys, None, exec_refused)
+        }
     }
 }
 
@@ -509,12 +533,15 @@ fn feed(mut from_host: Box<dyn Read + Send>, mut stdin: Option<ChildStdin>, pid:
 }
 
 /// Runs `command` in a new terminal of this size, and streams back what the
-/// terminal shows and the status. What the host sends meanwhile reaches the
-/// terminal.
+/// terminal shows and the status. What the host sends `keys` meanwhile
+/// reaches the terminal, and a request to stop on `stops` sends the program
+/// `SIGTERM`.
 fn run_in_terminal(
     mut command: Command,
     size: Size,
-    channel: &mut impl Split,
+    channel: &mut impl Write,
+    keys: Box<dyn Read + Send>,
+    stops: Option<Box<dyn Read + Send>>,
     refused: fn(&io::Error) -> ToHost,
 ) -> Result<(), ProtocolError> {
     let (controller, terminal) = match linux::open_terminal(size) {
@@ -549,28 +576,25 @@ fn run_in_terminal(
         updates.clone(),
         ended,
     );
-    type_into(channel.split_reader()?, controller, child.id());
+    type_into(keys, controller);
+    if let Some(stops) = stops {
+        feed(stops, None, child.id());
+    }
     wait(status, updates, ended_writer);
     report(&received, channel)
 }
 
-/// Passes what the host types to the terminal, resizes it, and sends the
-/// program `pid` `SIGTERM` when the host asks, until the host sends
-/// something else or hangs up. The end of input changes nothing, as a
-/// terminal's own input has no end. A write blocks while the program
+/// Passes what the host types to the terminal, and resizes it, until the
+/// host sends something else or hangs up. The end of input changes nothing,
+/// as a terminal's own input has no end. A write blocks while the program
 /// doesn't read, which holds back the host in turn.
-fn type_into(mut from_host: impl Read + Send + 'static, mut terminal: File, pid: u32) {
+fn type_into(mut from_host: impl Read + Send + 'static, mut terminal: File) {
     thread::spawn(move || {
         while let Ok(Some(message)) = ToGuest::read(&mut from_host) {
             let typed = match message {
                 ToGuest::Input(bytes) => terminal.write_all(&bytes),
                 ToGuest::Resize(size) => linux::resize(terminal.as_fd(), size),
                 ToGuest::EndOfInput => Ok(()),
-                ToGuest::Terminate => {
-                    // A program that has ended has nothing to stop.
-                    let _ = linux::terminate(pid);
-                    Ok(())
-                }
                 _ => return,
             };
             if typed.is_err() {
@@ -809,7 +833,8 @@ mod tests {
             rows: 30,
             columns: 100,
         };
-        run_in_terminal(command, size, &mut host, harness_refused).unwrap();
+        let keys = host.split_reader().unwrap();
+        run_in_terminal(command, size, &mut host, keys, None, harness_refused).unwrap();
 
         let mut wire = host.received.as_slice();
         let mut shown = Vec::new();

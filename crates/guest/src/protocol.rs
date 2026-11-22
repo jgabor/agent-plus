@@ -16,6 +16,9 @@ pub const PORT: u32 = 1024;
 /// The vsock port the agent connects to on the host, once for each command
 /// it may be asked to run beside the harness.
 pub const EXEC_PORT: u32 = 1025;
+/// The vsock port the agent connects to on the host, once, for what the host
+/// types into a harness in a terminal, and the terminal's new sizes.
+pub const KEYS_PORT: u32 = 1026;
 
 const RUN: u8 = 1;
 const STDOUT: u8 = 2;

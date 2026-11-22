@@ -34,21 +34,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The same setup as the refresh. `refresh.yml` says why each step is
-      # there.
-      - name: Open KVM to the runner's user
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Let the runner's user map ids in a user namespace
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Start a systemd user session
-        run: |
-          sudo loginctl enable-linger "$USER"
-          sudo systemctl start "user@$(id -u).service"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      # The same setup as the refresh.
+      - uses: ./.github/actions/runner-setup
       # The merge timeout, because a hang is one of the faults this job is
       # for. A step that runs out of time fails, so the report below runs.
       - run: cargo xtask gate

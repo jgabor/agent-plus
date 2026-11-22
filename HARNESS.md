@@ -807,7 +807,9 @@ A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
 an issue gets `land-needed`, and on every push to `main`, one run at a time,
 with the workflow and `xtask` of `main`. GitHub-hosted x86_64 runners can
 run the VMM, once a udev rule opens KVM and a systemd user session is
-started.
+started. The `runner-setup` action in `.github/actions/` does both, and lets
+the runner's user map ids in a user namespace. The
+[runner gate](#runner-gate) uses it too, so a fix for the runner lands in both.
 
 1. Find each open PR whose issue has `land-needed` and whose auto-merge is
    armed, oldest first. Every other PR, and its status, is left alone.
@@ -879,9 +881,9 @@ this workflow, only the refresh runs our tests there, so such a fault waits
 until some unrelated PR is armed, and that PR pays for it.
 
 So `runner-gate.yml` runs `cargo xtask gate` on a GitHub-hosted runner at each
-push to `main`, after the same setup as the refresh. It finds such a fault
-within one merge of the commit that brought it, and it blocks no PR. The gate
-on the owner's machines still decides every merge.
+push to `main`, after the `runner-setup` action that the refresh uses. It finds
+such a fault within one merge of the commit that brought it, and it blocks no
+PR. The gate on the owner's machines still decides every merge.
 
 - The job that runs the gate has a token that can only read. It posts no
   `xtask/gate` status, and it merges and labels nothing.

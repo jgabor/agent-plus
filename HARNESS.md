@@ -418,8 +418,9 @@ needs = [1]
 script = "harness/journey/03-boot.sh"
 ```
 
-A step can also set `floor = "floor_guest_host"`. A step that spends sets
-`spend = "anthropic"` or `spend = "openai"`, the provider whose key it gets.
+A step can also set `floor = "floor_guest_host"`, or `spend = true`. A step
+that spends gets the Anthropic key, unless it also sets
+`provider = "openai"`.
 
 The `[[milestone]]` tables are in roadmap order. `summary` says what a user
 can do when the milestone is done, in words that need no knowledge of the

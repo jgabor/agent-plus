@@ -30,7 +30,8 @@ has() {
 has '^AGENT codex$' 1
 has "^printf 'AGENT codex\\\\n" 1
 has 'AGENT claude' 0
-has '^MODEL ' 0
+has 'MODEL' 0
 has 'ANTHROPIC_API_KEY' 0
+has 'CODEX_API_KEY:-' 1
 
 exec /bin/sh step.sh

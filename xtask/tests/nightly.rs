@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 mod common;
 
 const BUDGETS: &str = "[[budget]]\nkey = \"version_ms\"\nname = \"Boot\"\ntarget = 150.0\n\n[[budget]]\nkey = \"binary_bytes\"\nname = \"Size\"\n";
-const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = \"anthropic\"\n\n[[step]]\nid = 3\nname = \"after the model\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
+const JOURNEY: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"model\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"after the model\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 4\nname = \"last\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n";
 const NO_ISSUES: &str = "[]";
 const REPORT_ISSUE: &str =
     "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
@@ -71,8 +71,9 @@ const PAID_KEYS: &str = ".config/agent-plus/paid-checks";
 /// A journey step that records the keys it was given, and passes.
 const KEY_SCRIPT: &str = "#!/bin/sh\nprintf '%s %s' \"${ANTHROPIC_API_KEY-none}\" \"${CODEX_API_KEY-none}\" > \"$HOME/../key\"\n";
 
-/// Step 1 spends on Anthropic, and step 2 on OpenAI.
-const TWO_KEYS: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"claude\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\nspend = \"anthropic\"\n\n[[step]]\nid = 2\nname = \"codex\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = \"openai\"\n";
+/// Step 1 spends nothing, step 2 spends on Anthropic, which a step that
+/// names no provider spends on, and step 3 on OpenAI.
+const TWO_KEYS: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"free\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"claude\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"codex\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\nspend = true\nprovider = \"openai\"\n";
 
 const CLEAN: Recorded = Recorded {
     issue: 5,
@@ -1050,7 +1051,7 @@ fn nightly_gives_each_spend_step_only_its_own_key() {
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("journey 2 of 2\n"),
+        stdout(&output).contains("journey 3 of 3\n"),
         "{}",
         stdout(&output)
     );
@@ -1058,12 +1059,13 @@ fn nightly_gives_each_spend_step_only_its_own_key() {
         assert!(!stdout(&output).contains(key), "{}", stdout(&output));
         assert!(!stderr(&output).contains(key), "{}", stderr(&output));
     }
-    assert_eq!(repo.key_seen(1), "sk-ant-0xf7a1 none");
-    assert_eq!(repo.key_seen(2), "none sk-proj-0x3c9e");
+    assert_eq!(repo.key_seen(1), "none none");
+    assert_eq!(repo.key_seen(2), "sk-ant-0xf7a1 none");
+    assert_eq!(repo.key_seen(3), "none sk-proj-0x3c9e");
 }
 
-/// A spend step whose provider has no key is skipped, even when another
-/// provider has one.
+/// A spend step whose provider has no key, or an empty one, is skipped, even
+/// when another provider has one.
 #[test]
 fn nightly_skips_a_spend_step_without_its_own_key() {
     let repo = Repo::with(
@@ -1075,19 +1077,20 @@ fn nightly_skips_a_spend_step_without_its_own_key() {
         ],
     );
     repo.set_paid_key("anthropic", "sk-ant-0xf7a1");
+    repo.set_paid_key("openai", " \n");
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("journey 1 of 2\n"),
+        stdout(&output).contains("journey 2 of 3\n"),
         "{}",
         stdout(&output)
     );
     assert!(
-        stderr(&output).contains("skip step 2\n"),
+        stderr(&output).contains("skip step 3\n"),
         "{}",
         stderr(&output)
     );
-    assert!(!repo.root.join("target/journey/step-2/key").exists());
+    assert!(!repo.root.join("target/journey/step-3/key").exists());
     assert!(
         repo.comment()
             .contains("Journey steps that spend money, and weren't run: 1\n"),

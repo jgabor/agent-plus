@@ -17,7 +17,7 @@ const FAKE_UPSTREAM: &str = "fake-upstream";
 
 /// The model providers a step can spend on, each with the variable that
 /// carries its paid-check key into the step, as a user's `AUTH key` run gets
-/// it.
+/// it. The first is the one a step spends on when it names none.
 pub const PROVIDERS: [(&str, &str); 2] = [
     ("anthropic", "ANTHROPIC_API_KEY"),
     ("openai", "CODEX_API_KEY"),
@@ -182,18 +182,7 @@ fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
                 Some(Value::Str(floor)) => Some(floor.clone()),
                 Some(_) => return Err(bad("has a `floor` that isn't a string")),
             },
-            spend: match table.get("spend") {
-                None => None,
-                Some(Value::Str(spend)) => Some(
-                    PROVIDERS
-                        .into_iter()
-                        .find(|(provider, _)| provider == spend)
-                        .ok_or_else(|| {
-                            bad("has a `spend` that is neither \"anthropic\" nor \"openai\"")
-                        })?,
-                ),
-                Some(_) => return Err(bad("has a `spend` that isn't a string")),
-            },
+            spend: read_spend(&table).map_err(|what| bad(what))?,
         };
         if steps.insert(id, step).is_some() {
             return Err(Problem(format!("{JOURNEY_FILE}: step {id} appears twice")));
@@ -223,6 +212,31 @@ fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
         }
     }
     Ok((milestones, steps.into_values().collect()))
+}
+
+/// The provider whose key a step that spends gets, and its variable. A step
+/// that sets `spend = true` spends on Anthropic unless its `provider` names
+/// another, so a journey file written before `provider` reads the same.
+fn read_spend(table: &toml::Table) -> Result<Option<(&'static str, &'static str)>, &'static str> {
+    let spends = match table.get("spend") {
+        None => false,
+        Some(Value::Bool(spend)) => *spend,
+        Some(_) => return Err("has a `spend` that isn't true or false"),
+    };
+    let provider = match table.get("provider") {
+        None => PROVIDERS[0].0,
+        Some(_) if !spends => return Err("has a `provider` but doesn't spend"),
+        Some(Value::Str(provider)) => provider,
+        Some(_) => return Err("has a `provider` that isn't a string"),
+    };
+    if !spends {
+        return Ok(None);
+    }
+    PROVIDERS
+        .into_iter()
+        .find(|(known, _)| *known == provider)
+        .map(Some)
+        .ok_or("has a `provider` that is neither \"anthropic\" nor \"openai\"")
 }
 
 /// No milestone repeats a name, no command is listed twice in the file, and

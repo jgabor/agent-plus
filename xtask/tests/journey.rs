@@ -156,7 +156,7 @@ fn a_step_is_skipped_unless_every_need_passes() {
 #[test]
 fn a_spend_step_and_what_needs_it_do_not_run() {
     let toml = format!(
-        "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = \"anthropic\"\n\n{}",
+        "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = true\n\n{}",
         step(2, "1", "harness/journey/touch.sh"),
     );
     let root = workspace(
@@ -337,15 +337,34 @@ fn a_step_without_a_name_is_a_problem() {
     assert!(stderr(&output).contains("`name`"), "{}", stderr(&output));
 }
 
-/// A spend step names a provider whose key the journey knows.
+/// A step that spends names a provider whose key the journey knows, or none.
 #[test]
 fn a_mistyped_spend_is_a_problem() {
     for (name, spend, word) in [
-        ("spend-name", "\"true\"", "neither"),
-        ("spend-type", "true", "isn't a string"),
+        (
+            "spend-type",
+            "spend = \"true\"",
+            "`spend` that isn't true or false",
+        ),
+        (
+            "provider-name",
+            "spend = true\nprovider = \"google\"",
+            "neither",
+        ),
+        (
+            "provider-type",
+            "spend = true\nprovider = 1",
+            "`provider` that isn't a string",
+        ),
+        ("provider-free", "provider = \"openai\"", "doesn't spend"),
+        (
+            "provider-off",
+            "spend = false\nprovider = \"openai\"",
+            "doesn't spend",
+        ),
     ] {
         let toml = format!(
-            "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = {spend}\n"
+            "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n{spend}\n"
         );
         let root = workspace(name, &toml, &[("harness/journey/one.sh", PASS)]);
         let output = journey(&root);

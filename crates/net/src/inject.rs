@@ -16,14 +16,29 @@ pub struct Swap<'a> {
 /// Adds `head`, a request head on a connection to `name`, to `out`, with
 /// each placeholder of `swaps` replaced by its value in the headers that
 /// `headers` names, in any case. In an `Authorization: Basic` header, it
-/// replaces the placeholder in the decoded credentials. A head whose `Host`
-/// names another host is added unchanged, and so is a header whose value
-/// would hold a line break.
+/// replaces the placeholder in the decoded credentials, which it encodes
+/// again. A head whose `Host` names another host is added unchanged. A
+/// value that holds a line break replaces no placeholder outside `Basic`
+/// credentials, so no line break is ever put in a header. A head that would
+/// grow past [`LONGEST`] is added unchanged too.
 pub fn inject(head: &[u8], name: &str, headers: &[&str], swaps: &[Swap], out: &mut Vec<u8>) {
     if !hosts_name(head, name) {
         out.extend_from_slice(head);
         return;
     }
+    let mut rewritten = Vec::with_capacity(head.len());
+    rewrite(head, headers, swaps, &mut rewritten);
+    match rewritten.len() > LONGEST {
+        true => out.extend_from_slice(head),
+        false => out.append(&mut rewritten),
+    }
+}
+
+/// The longest head that [`inject`] makes. A guest's head with many
+/// placeholders would otherwise grow without bound.
+pub const LONGEST: usize = 1024 * 1024;
+
+fn rewrite(head: &[u8], headers: &[&str], swaps: &[Swap], out: &mut Vec<u8>) {
     let mut lines = head.split_inclusive(|&byte| byte == b'\n');
     // The request line.
     out.extend_from_slice(lines.next().unwrap_or_default());

@@ -471,3 +471,14 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
         r#"projects={"/srv/a\"b\\c"={trust_level="trusted"}}"#
     );
 }
+
+// spec(SECRET): Each adapter's allowlist is `Authorization` and `x-api-key`.
+#[test]
+fn each_adapter_lets_the_proxy_fill_authorization_and_x_api_key() {
+    for harness in [agentfile::Harness::Claude, agentfile::Harness::Codex] {
+        let headers: Vec<String> = (ap::adapter::headers(harness).iter())
+            .map(|header| header.to_ascii_lowercase())
+            .collect();
+        assert_eq!(headers, ["authorization", "x-api-key"], "{harness:?}");
+    }
+}

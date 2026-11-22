@@ -80,6 +80,7 @@ fn a_head_whose_host_names_another_host_passes_unchanged() {
     assert!(injected(&named).contains("x-api-key: sk-real-value\r\n"));
 }
 
+// spec(SECRET): A value that holds a line break replaces the placeholder only in `Basic` credentials, where it is encoded, so the proxy never puts a line break in a header.
 #[test]
 fn a_value_with_a_line_break_is_never_put_in_a_header() {
     let p = placeholder();
@@ -87,6 +88,31 @@ fn a_value_with_a_line_break_is_never_put_in_a_header() {
     let swaps = [Swap {
         placeholder: PLACEHOLDER,
         value: b"one\r\nX-Injected: two",
+    }];
+    let mut out = Vec::new();
+    inject(head.as_bytes(), NAME, HEADERS, &swaps, &mut out);
+    assert_eq!(out, head.as_bytes());
+    // In `Basic` credentials, which are encoded, it is.
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    let sent = STANDARD.encode(format!("git:{p}"));
+    let basic = format!("GET / HTTP/1.1\r\nHost: {NAME}\r\nAuthorization: Basic {sent}\r\n\r\n");
+    let mut out = Vec::new();
+    inject(basic.as_bytes(), NAME, HEADERS, &swaps, &mut out);
+    let real = STANDARD.encode("git:one\r\nX-Injected: two");
+    let expected = format!("GET / HTTP/1.1\r\nHost: {NAME}\r\nAuthorization: Basic {real}\r\n\r\n");
+    assert_eq!(String::from_utf8(out).unwrap(), expected);
+}
+
+#[test]
+fn a_head_that_would_grow_too_long_passes_unchanged() {
+    let p = placeholder();
+    let keys: String = (0..64).map(|_| format!("x-api-key: {p}\r\n")).collect();
+    let head = format!("GET / HTTP/1.1\r\nHost: {NAME}\r\n{keys}\r\n");
+    let value = vec![b'v'; net::LONGEST / 32];
+    let swaps = [Swap {
+        placeholder: PLACEHOLDER,
+        value: &value,
     }];
     let mut out = Vec::new();
     inject(head.as_bytes(), NAME, HEADERS, &swaps, &mut out);

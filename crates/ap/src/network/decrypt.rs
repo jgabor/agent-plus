@@ -20,7 +20,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use agentfile::Scheme;
 use net::{NameCheck, Request};
@@ -37,6 +37,8 @@ use super::{Authority, Injection};
 const BUFFER: usize = 16 * 1024;
 /// The most bytes a client hello may take.
 const HELLO_LIMIT: usize = 64 * 1024;
+/// How long a client hello may take to come whole.
+const HELLO_WAIT: Duration = Duration::from_secs(30);
 /// The only protocol either side is offered.
 const HTTP1: &[u8] = b"http/1.1";
 pub struct Decryption {
@@ -224,7 +226,9 @@ impl Decrypted {
             }
             Stage::Plain => open,
             Stage::Passing(_) => true,
-            Stage::First | Stage::Hello(..) => false,
+            // Only a guest that sent nothing first hears the server first.
+            Stage::First => open,
+            Stage::Hello(..) => false,
         };
         reading && !self.upstream_closed && self.to_guest.is_empty()
     }
@@ -268,12 +272,14 @@ impl Decrypted {
         decide: &mut Decide,
     ) -> io::Result<()> {
         let mut buffer = [0; BUFFER];
-        // A guest that sends nothing first may wait for the server, which
-        // gets what the guest sends unread, apart from the name check.
+        // A guest that sends nothing first may wait for the server. Its
+        // first byte still says whether its TLS is decrypted.
         let silent = self.since.elapsed() >= SILENT_WAIT;
-        if let (Stage::First, Reads::Injects { by_name }, true) = (&self.stage, self.reads, silent)
-        {
-            self.passing(by_name);
+        if let (Stage::First, Reads::Injects { .. }, true) = (&self.stage, self.reads, silent) {
+            self.allowed = true;
+        }
+        if matches!(self.stage, Stage::Hello(..)) && self.since.elapsed() >= HELLO_WAIT {
+            return Err(refused("a client hello that doesn't end"));
         }
         loop {
             let mut moved = false;

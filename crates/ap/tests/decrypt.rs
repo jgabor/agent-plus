@@ -1015,7 +1015,6 @@ fn a_bound_host_gets_the_value_in_the_allowed_headers_alone() {
 
 // spec(SECRET): A connection counts as one to a bound host only when the name behind the address it connects to (see [NETWORK](#network)), its TLS server name, and each request's `Host` or `:authority` all name that host, under either network default.
 // spec(SECRET): On any other connection, the placeholder passes through unchanged.
-// spec(SECRET): The real value is never sent to any other host.
 #[test]
 fn the_placeholder_passes_unchanged_anywhere_but_to_the_bound_host() {
     let (root, config) = server();
@@ -1099,4 +1098,47 @@ fn a_bound_host_s_server_may_still_speak_first() {
         thread::sleep(Duration::from_millis(1));
     }
     assert!(!greeted.is_empty());
+}
+
+#[test]
+fn a_guest_that_waits_before_its_hello_still_gets_the_value() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    // Past the quarter second after which the server may speak first.
+    let until = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < until {
+        guest.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let seen = settled(&seen);
+    assert!(
+        seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_client_hello_that_never_ends_is_reset() {
+    let (root, config) = server();
+    let (port, _) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    // The start of a handshake record, and nothing more.
+    send_raw(&mut guest, handle, &[0x16, 0x03, 0x01, 0x02, 0x00]);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        guest.poll();
+        if guest.sockets.get_mut::<tcp::Socket>(handle).state() == tcp::State::Closed {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the connection is still open");
 }

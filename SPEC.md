@@ -1243,6 +1243,10 @@ the real value only under both of these conditions.
 - in request headers on the adapter's allowlist (for example,
   `Authorization` and `x-api-key`), never in query strings or bodies
 
+Each adapter's allowlist is `Authorization` and `x-api-key`. A value that
+holds a line break replaces the placeholder only in `Basic` credentials,
+where it is encoded, so the proxy never puts a line break in a header.
+
 A connection counts as one to a bound host only when the name behind the
 address it connects to (see [NETWORK](#network)), its TLS server name, and
 each request's `Host` or `:authority` all name that host, under either

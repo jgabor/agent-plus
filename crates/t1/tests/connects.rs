@@ -1000,7 +1000,8 @@ fn a_hidden_secret_s_value_reaches_its_bound_host_from_the_network_process_alone
     }
     let environment = fs::read(format!("/proc/{}/environ", network[0])).unwrap();
     assert!(
-        (environment.split(|&byte| byte == 0)).any(|variable| variable.starts_with(b"SSL_CERT_FILE=")),
+        (environment.split(|&byte| byte == 0))
+            .any(|variable| variable.starts_with(b"SSL_CERT_FILE=")),
         "the network process has no environment"
     );
 

@@ -15,9 +15,9 @@ use net::{Blocked, Connection, NameCheck, YOUR_HOST, could_request, proxied, url
 use netstack::{ConnectionId, Flow, Guard, Pipe, Resolver, Stack, Verdict};
 use vmm::net::MAX_FRAME;
 
+use super::Injection;
 use super::RECEIVE_WAIT;
 use super::blocked::Reporter;
-use super::Injection;
 use super::decrypt::{Decrypted, Decryption, Reads};
 use super::lookup::Asker;
 
@@ -262,9 +262,8 @@ impl Proxy {
             let (policy, reporter) = (&self.policy, self.reporter.as_deref());
             let (decryption, injection) = (self.decryption.as_ref(), &self.injection);
             let mut decide = |connection: &Connection| decide_request(policy, reporter, connection);
-            (self.decrypted).retain_mut(|decrypted| {
-                decrypted.pump(stack, decryption, injection, &mut decide)
-            });
+            (self.decrypted)
+                .retain_mut(|decrypted| decrypted.pump(stack, decryption, injection, &mut decide));
             stack.poll(Instant::now());
             while let Some(frame) = stack.transmit() {
                 match (&*link).write(&frame) {
@@ -402,7 +401,9 @@ impl Proxy {
                 }
             }
             Target::Addresses(name, addresses) => {
-                let bound = name.as_deref().is_some_and(|name| self.injection.binds(name));
+                let bound = name
+                    .as_deref()
+                    .is_some_and(|name| self.injection.binds(name));
                 let (allowed, check) = allowed(
                     network,
                     &hosts,

@@ -107,7 +107,9 @@ impl Injection {
     pub fn send(&self, socket: BorrowedFd) -> io::Result<()> {
         let bytes = self.encode();
         send(socket, &(bytes.len() as u64).to_le_bytes())?;
-        bytes.chunks(CHUNK).try_for_each(|chunk| send(socket, chunk))
+        bytes
+            .chunks(CHUNK)
+            .try_for_each(|chunk| send(socket, chunk))
     }
 
     /// What [`Injection::send`] sent on `socket`, which waits as its
@@ -168,7 +170,9 @@ fn send(socket: BorrowedFd, message: &[u8]) -> io::Result<()> {
     match sent {
         -1 => Err(io::Error::last_os_error()),
         sent if sent as usize == message.len() => Ok(()),
-        _ => Err(io::Error::other("a message to the network process was cut short")),
+        _ => Err(io::Error::other(
+            "a message to the network process was cut short",
+        )),
     }
 }
 

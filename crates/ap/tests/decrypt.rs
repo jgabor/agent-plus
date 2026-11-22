@@ -1073,7 +1073,10 @@ fn a_bound_host_with_url_rules_gets_the_value_in_the_requests_they_allow() {
     assert!(answer.is_ok(), "{answer:?}");
     let seen = settled(&seen);
     assert_eq!(seen.len(), 1);
-    assert!(seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")), "{seen:?}");
+    assert!(
+        seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
 }
 
 #[test]

@@ -225,7 +225,9 @@ fn run_agent(
         .map_err(fail("can't start the network process"))?;
     start.authority = authority;
     // The values live in the network process alone from here.
-    let names: Vec<String> = (injection.secrets.iter()).map(|secret| secret.name.clone()).collect();
+    let names: Vec<String> = (injection.secrets.iter())
+        .map(|secret| secret.name.clone())
+        .collect();
     drop(injection);
     let share_socket = match shares.is_empty() {
         true => None,
@@ -697,7 +699,12 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         given.push((secret.name.as_bytes().to_vec(), placeholder.clone()));
         // A name on several lines is bound to each of their hosts.
         let mut hosts: Vec<String> = Vec::new();
-        for host in secrets.secrets.iter().filter(same).flat_map(|other| &other.hosts) {
+        for host in secrets
+            .secrets
+            .iter()
+            .filter(same)
+            .flat_map(|other| &other.hosts)
+        {
             if !hosts.contains(host) {
                 hosts.push(host.clone());
             }

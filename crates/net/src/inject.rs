@@ -39,7 +39,8 @@ pub fn inject(head: &[u8], name: &str, headers: &[&str], swaps: &[Swap], out: &m
         };
         let (field, value) = line.split_at(colon + 1);
         out.extend_from_slice(field);
-        let basic = field[..colon].eq_ignore_ascii_case(b"authorization")
+        let basic = field[..colon]
+            .eq_ignore_ascii_case(b"authorization")
             .then(|| basic(value, swaps))
             .flatten();
         match basic {
@@ -73,7 +74,10 @@ fn hosts_name(head: &[u8], name: &str) -> bool {
 fn replaced(value: &[u8], swaps: &[Swap]) -> Vec<u8> {
     let mut value = value.to_vec();
     for swap in swaps {
-        let breaks = swap.value.iter().any(|&byte| matches!(byte, b'\r' | b'\n' | 0));
+        let breaks = swap
+            .value
+            .iter()
+            .any(|&byte| matches!(byte, b'\r' | b'\n' | 0));
         if !breaks && !swap.placeholder.is_empty() {
             value = replace(&value, swap.placeholder, swap.value);
         }
@@ -85,7 +89,9 @@ fn replaced(value: &[u8], swaps: &[Swap]) -> Vec<u8> {
 /// placeholders replaced in its credentials, if it is `Basic`, and its
 /// credentials decode.
 fn basic(value: &[u8], swaps: &[Swap]) -> Option<Vec<u8>> {
-    let start = value.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))?;
     let named = value.get(start..start + 5)?;
     if !named.eq_ignore_ascii_case(b"basic") {
         return None;

@@ -271,7 +271,8 @@ impl Decrypted {
         // A guest that sends nothing first may wait for the server, which
         // gets what the guest sends unread, apart from the name check.
         let silent = self.since.elapsed() >= SILENT_WAIT;
-        if let (Stage::First, Reads::Injects { by_name }, true) = (&self.stage, self.reads, silent) {
+        if let (Stage::First, Reads::Injects { by_name }, true) = (&self.stage, self.reads, silent)
+        {
             self.passing(by_name);
         }
         loop {
@@ -527,8 +528,12 @@ impl Decrypted {
                 }
                 Ok(n) => {
                     let mut decide = |target: &str| allows(Scheme::Https, target);
-                    let fed =
-                        (self.check).feed_rewriting(&buffer[..n], &mut passed, &mut decide, &mut rewrite);
+                    let fed = (self.check).feed_rewriting(
+                        &buffer[..n],
+                        &mut passed,
+                        &mut decide,
+                        &mut rewrite,
+                    );
                     client.writer().write_all(&passed)?;
                     self.allowed |= !passed.is_empty();
                     passed.clear();

@@ -274,14 +274,18 @@ each journey step above can't pass until its check exists.
 | T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
 | Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
 
-**Paid checks (T3).** They run on a Claude Console workspace used only for
-them, whose monthly spend limit the owner sets. The provider enforces the
-limit, so no program here can pass it. The key is a service account key scoped
-to that workspace, with an expiry. The nightly job reads it from
-`~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it only to the
-steps marked `spend`, as `ANTHROPIC_API_KEY`, the way a user's `AUTH key` run
-gets it. Nothing prints it. Without the file, those steps don't run. Claude
-Code runs on Haiku 5.5, `claude-haiku-5-5`.
+**Paid checks (T3).** They run on a Claude Console workspace and an OpenAI
+project used only for them, each with a monthly spend limit the owner sets.
+The providers enforce the limits, so no program here can pass them. Each key
+is scoped to its workspace or project, with an expiry. A step marked `spend`
+names its provider, and the nightly job gives it that provider's key and no
+other, the way a user's `AUTH key` run gets it. It reads the Anthropic key
+from `~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it as
+`ANTHROPIC_API_KEY`. It reads the OpenAI key from
+`~/.config/agent-plus/paid-checks/openai-api-key`, and gives it only to step
+13, as `CODEX_API_KEY`. Nothing prints a key. Without its file, a step
+doesn't run. Claude Code runs on Haiku 5.5, `claude-haiku-5-5`, and Codex on
+its default model.
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
 change can affect a budget when its diff touches `crates/`, `.cargo/`,
@@ -414,7 +418,8 @@ needs = [1]
 script = "harness/journey/03-boot.sh"
 ```
 
-A step can also set `floor = "floor_guest_host"`, or `spend = true`.
+A step can also set `floor = "floor_guest_host"`. A step that spends sets
+`spend = "anthropic"` or `spend = "openai"`, the provider whose key it gets.
 
 The `[[milestone]]` tables are in roadmap order. `summary` says what a user
 can do when the milestone is done, in words that need no knowledge of the
@@ -1071,9 +1076,10 @@ passes. No scheduled work runs on GitHub.
 - Turn the scheduled tasks on.
 - Set up the [paid checks](#check-tiers): create the Claude Console workspace
   and its monthly spend limit, a service account scoped to it, and a key with
-  an expiry. Put the key in
-  `~/.config/agent-plus/paid-checks/anthropic-api-key` on the machine that
-  runs the nightly job, readable only by you. Never commit or paste it.
+  an expiry. Do the same with an OpenAI project. Put the keys in
+  `~/.config/agent-plus/paid-checks/anthropic-api-key` and
+  `~/.config/agent-plus/paid-checks/openai-api-key` on the machine that runs
+  the nightly job, readable only by you. Never commit or paste them.
 - Answer `answer-needed` issues. The owner can set or clear `land-needed` and
   `answer-needed` on the issue or on the open PR that closes it. A workflow
   runs `cargo xtask mirror` to copy the change to the other side, and only the
@@ -1101,7 +1107,6 @@ The harness is built before product features.
 | Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
 | Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
 | Limit on model spend for workers | Workers run no step marked `spend` |
-| Credential and spend limit for Codex in journey step 13 | Step 13 gets no Codex credential |
 | Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
 | The binary size target, and bands for every budget except boot, idle overhead, a build with nothing changed, `ap --version`, and the binary | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |

@@ -1517,6 +1517,18 @@ fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable(
     drop(run);
 }
 
+// spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
+#[test]
+fn auth_token_hands_the_harness_its_token() {
+    let scratch = Scratch::new("auth-token");
+    scratch.build("tokened", &fake("ENV FAKE_HARNESS_SLEEP 300\nAUTH token\n"));
+    let token = "sk-ant-oat01-token-3f9e";
+    let (run, _, report) =
+        start_reporting(&scratch, "tokened", &[("CLAUDE_CODE_OAUTH_TOKEN", token)]);
+    assert_eq!(seen(&report, "CLAUDE_CODE_OAUTH_TOKEN"), token, "{report}");
+    drop(run);
+}
+
 // spec(SECRET): A missing value makes the run fail, and the error names the secret.
 // spec(Run): **Exit status.** If `ap` fails before the harness starts, for example on a missing secret or a refused approval, it exits with status 125.
 #[test]

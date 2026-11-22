@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::Path;
 
-use agentfile::{Effort, Mode};
+use agentfile::{Auth, Effort, Mode};
 use ap::adapter::{claude, codex};
 
 const EFFORTS: [Effort; 5] = [
@@ -481,4 +481,47 @@ fn each_adapter_lets_the_proxy_fill_authorization_and_x_api_key() {
             .collect();
         assert_eq!(headers, ["authorization", "x-api-key"], "{harness:?}");
     }
+}
+
+/// How each `AUTH` method signs `harness` in, one line each.
+fn sign_ins(harness: agentfile::Harness) -> String {
+    let mut lines = String::new();
+    for (method, auth) in [
+        ("login", Auth::Login),
+        ("key", Auth::Key),
+        ("token", Auth::Token),
+    ] {
+        let shown = match ap::adapter::sign_in(harness, auth) {
+            None => "none".to_owned(),
+            Some(sign_in) if sign_in.hosts.is_empty() => format!("{} visible", sign_in.variable),
+            Some(sign_in) => {
+                let mut shown = format!("{} hidden", sign_in.variable);
+                for host in sign_in.hosts {
+                    shown.push_str(&format!(" @{host}"));
+                }
+                shown
+            }
+        };
+        lines.push_str(&format!("AUTH {method}: {shown}\n"));
+    }
+    lines
+}
+
+// spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
+#[test]
+fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
+    golden("auth.txt", sign_ins(agentfile::Harness::Claude).as_bytes());
+    golden_in(
+        "codex",
+        "auth.txt",
+        sign_ins(agentfile::Harness::Codex).as_bytes(),
+    );
+    // A key's hosts are the harness's own, which a `SECRET` can't bind.
+    for harness in [agentfile::Harness::Claude, agentfile::Harness::Codex] {
+        let sign_in = ap::adapter::sign_in(harness, Auth::Key).unwrap();
+        let own = ap::adapter::reserved(harness);
+        assert!(sign_in.hosts.iter().all(|host| own.hosts.contains(host)));
+        assert!(own.sign_in.contains(&sign_in.variable));
+    }
+    assert!(claude::SIGN_IN.contains(&claude::TOKEN));
 }

@@ -6,7 +6,7 @@
 pub mod claude;
 pub mod codex;
 
-use agentfile::{Harness, Reserved};
+use agentfile::{Auth, Harness, Reserved};
 
 /// The variables that point tools at the run's certificate authority, from
 /// SPEC.md's SECRET section. Every harness gets them.
@@ -39,6 +39,37 @@ pub fn headers(harness: Harness) -> &'static [&'static str] {
     match harness {
         Harness::Claude => claude::HEADERS,
         Harness::Codex => codex::HEADERS,
+    }
+}
+
+/// How `AUTH key` or `AUTH token` signs a harness in, from SPEC.md's AUTH
+/// section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SignIn {
+    /// The variable that `ap` reads on your host, and sets in the guest.
+    pub variable: &'static str,
+    /// The hosts the proxy swaps a key's value in on. A token has none, and
+    /// the guest gets its value.
+    pub hosts: &'static [&'static str],
+}
+
+/// How `auth` signs `harness` in, or `None` for `AUTH login`, which isn't
+/// built yet, and for a method the harness doesn't have.
+pub fn sign_in(harness: Harness, auth: Auth) -> Option<SignIn> {
+    match (harness, auth) {
+        (_, Auth::Login) | (Harness::Codex, Auth::Token) => None,
+        (Harness::Claude, Auth::Key) => Some(SignIn {
+            variable: claude::KEY,
+            hosts: claude::KEY_HOSTS,
+        }),
+        (Harness::Claude, Auth::Token) => Some(SignIn {
+            variable: claude::TOKEN,
+            hosts: &[],
+        }),
+        (Harness::Codex, Auth::Key) => Some(SignIn {
+            variable: codex::KEY,
+            hosts: codex::KEY_HOSTS,
+        }),
     }
 }
 

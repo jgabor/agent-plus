@@ -30,6 +30,12 @@
 //! No process that `ap run` starts, such as the run process, the network
 //! process, the share server, or the cleanup process, starts with a hidden
 //! secret's variable.
+//!
+//! `AUTH key` and `AUTH token` read the variable that the harness's adapter
+//! names, in the same way. A key is a hidden secret bound to the hosts the
+//! adapter lists for it, and the network process refuses a request to them
+//! that doesn't carry its placeholder. A token is visible. `AUTH login`
+//! fails with 125, as not built yet.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsString};
@@ -48,7 +54,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentfile::{
-    Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share, ShareMode,
+    Auth, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share,
+    ShareMode,
 };
 use ap::boot::Error;
 use ap::filter::Filter;
@@ -77,8 +84,7 @@ const FLAGS_NOT_BUILT: [&str; 4] = ["-t", "--resume", "--gui", "--approve"];
 
 /// The instructions a run can't honor yet. `ap build` refuses the ones that
 /// need a fetch, so an agent that has them can't be built either.
-const NOT_BUILT: [&str; 9] = [
-    "AUTH",
+const NOT_BUILT: [&str; 8] = [
     "PERSIST",
     "PORT",
     "PERMISSIONS",
@@ -720,7 +726,45 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             value,
             placeholder,
             hosts,
+            required: false,
         });
+    }
+    // SPEC.md's AUTH: `key` and `token` read their variable as a secret
+    // does. A key is hidden, and every request to its hosts must carry its
+    // placeholder. A token is visible.
+    let harness = Settings::read(&instructions)
+        .map_err(unreadable)?
+        .agent
+        .harness;
+    match secrets.auth {
+        None => {}
+        Some(Auth::Login) => return Err(fail("`AUTH login` is not built yet".to_owned())),
+        Some(auth) => {
+            let method = if auth == Auth::Key { "key" } else { "token" };
+            let sign_in = ap::adapter::sign_in(harness, auth)
+                .ok_or_else(|| fail(format!("agent {name} can't run: `AUTH {method}`")))?;
+            let variable = sign_in.variable;
+            let value = std::env::var_os(variable).ok_or_else(|| {
+                fail(format!(
+                    "`AUTH {method}` has no value. Set the environment variable `{variable}`"
+                ))
+            })?;
+            let value = value.into_vec();
+            if sign_in.hosts.is_empty() {
+                given.push((variable.as_bytes().to_vec(), value));
+            } else {
+                let placeholder = random_placeholder()
+                    .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
+                given.push((variable.as_bytes().to_vec(), placeholder.clone()));
+                hidden.push(Hidden {
+                    name: variable.to_owned(),
+                    value,
+                    placeholder,
+                    hosts: sign_in.hosts.iter().map(|host| host.to_string()).collect(),
+                    required: true,
+                });
+            }
+        }
     }
     let files = Files::read(&instructions).map_err(unreadable)?;
     let home_dir = home.clone().unwrap_or_default();

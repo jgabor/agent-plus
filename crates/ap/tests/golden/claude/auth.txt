@@ -1,0 +1,3 @@
+AUTH login: none
+AUTH key: ANTHROPIC_API_KEY hidden @api.anthropic.com
+AUTH token: CLAUDE_CODE_OAUTH_TOKEN visible

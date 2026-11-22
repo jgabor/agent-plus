@@ -130,13 +130,26 @@ impl Guest {
         port: u16,
         injection: Injection,
     ) -> Guest {
+        Guest::with_harness(lines, roots, port, injection, Vec::new())
+    }
+
+    /// A guest as [`Guest::injecting`]'s, whose harness has `harness` as its
+    /// hosts.
+    fn with_harness(
+        lines: &str,
+        roots: Vec<CertificateDer<'static>>,
+        port: u16,
+        injection: Injection,
+        harness: Vec<String>,
+    ) -> Guest {
         let (mine, theirs) = link();
         let (sent, got) = mpsc::channel();
         let lines = lines.to_owned();
         thread::spawn(move || {
             let instructions = parse(&format!("AGENT claude\n{lines}")).unwrap();
             let network = Network::read(&instructions).unwrap();
-            let mut args = vec!["--".into()];
+            let mut args: Vec<std::ffi::OsString> = (harness.iter()).map(Into::into).collect();
+            args.push("--".into());
             args.extend((lines.lines()).map(|line| line.strip_prefix("NETWORK ").unwrap().into()));
             let mut resolver = ap::network::resolver(&args).unwrap();
             let answer = resolver.answer(&query(NAME)).unwrap();
@@ -147,7 +160,7 @@ impl Guest {
             let decryption = Decryption::new(authority, roots).unwrap();
             // Your host's name asks for no lookup.
             let (lookups, _) = UnixDatagram::pair().unwrap();
-            let mut proxy = (Proxy::new(network, Vec::new(), lookups))
+            let mut proxy = (Proxy::new(network, harness, lookups))
                 .decrypting(decryption)
                 .injecting(injection);
             let mut stack = ap::network::stack();
@@ -911,8 +924,22 @@ fn bound_to(host: &str) -> Injection {
             value: VALUE.as_bytes().to_vec(),
             placeholder: PLACEHOLDER.as_bytes().to_vec(),
             hosts: vec![host.to_owned()],
+            required: false,
         }],
     }
+}
+
+/// The run's `AUTH key`, as [`bound_to`]'s secret, whose placeholder every
+/// request to `host` must carry.
+fn key_for(host: &str) -> Injection {
+    let mut injection = bound_to(host);
+    injection.secrets[0].required = true;
+    injection
+}
+
+/// A request to `host` that holds no placeholder.
+fn without_placeholder(host: &str) -> Vec<u8> {
+    format!("GET /bare HTTP/1.1\r\nHost: {host}\r\nX-Api-Key: mine\r\n\r\n").into_bytes()
 }
 
 /// A fake destination as [`destination`]'s, which notes the whole of each
@@ -1141,4 +1168,119 @@ fn a_client_hello_that_never_ends_is_reset() {
         thread::sleep(Duration::from_millis(5));
     }
     panic!("the connection is still open");
+}
+
+// spec(AUTH): The proxy swaps in the real value on the hosts the adapter lists for that key, with the same checks as for a hidden secret.
+// spec(NETWORK): With `AUTH key`, the proxy allows only requests that carry the key's placeholder on the key's hosts.
+#[test]
+fn a_key_s_host_takes_only_the_requests_that_carry_its_placeholder() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, key_for(NAME));
+    let authority = guest.authority.clone();
+
+    // A request that carries the placeholder gets the value. One after it
+    // that doesn't is refused, and so is its connection.
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&authority);
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let answer = guest.exchange(handle, Some(&mut tls), &without_placeholder(NAME));
+    assert!(answer.is_err(), "{answer:?}");
+
+    // On connections of their own, the proxy refuses a request without the
+    // placeholder, one whose `Host` names another host, TLS for another
+    // server name, and plain HTTP, though each holds the placeholder but
+    // the first.
+    let mut refused = |request: Vec<u8>, server: Option<&str>| {
+        let handle = guest.connect();
+        let mut tls = server.map(|server| Guest::tls_for(&authority, &[b"http/1.1"], server));
+        let answer = guest.exchange(handle, tls.as_mut(), &request);
+        assert!(answer.is_err(), "{answer:?}");
+    };
+    refused(without_placeholder(NAME), Some(NAME));
+    refused(holding_placeholder("example.com"), Some(NAME));
+    refused(holding_placeholder(NAME), Some("example.com"));
+    refused(holding_placeholder(NAME), None);
+
+    // Only the first request reached the destination.
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(
+        seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
+    assert!(seen[0].starts_with("POST /path?"), "{seen:?}");
+}
+
+#[test]
+fn a_key_s_host_gets_no_udp() {
+    let echo = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = echo.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buffer = [0; 64];
+        while let Ok((n, from)) = echo.recv_from(&mut buffer) {
+            let _ = echo.send_to(&buffer[..n], from);
+        }
+    });
+    // A hidden secret's bound host still gets UDP on a port that isn't
+    // QUIC's. A key's host gets none.
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut bound = Guest::injecting(&rules, Vec::new(), port, bound_to(NAME));
+    assert!(echoed(&mut bound, port));
+    let mut keyed = Guest::injecting(&rules, Vec::new(), port, key_for(NAME));
+    assert!(!echoed(&mut keyed, port));
+}
+
+#[test]
+fn a_key_s_server_never_speaks_first() {
+    // The greeter speaks first, which a bound host's guest hears, as
+    // `a_bound_host_s_server_may_still_speak_first` shows. A key's host
+    // takes only requests, so nothing reaches the guest.
+    let (port, _) = greeter();
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, Vec::new(), port, key_for(NAME));
+    let handle = guest.connect();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        assert!(!socket.can_recv(), "the server spoke first");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+// spec(NETWORK): `AUTH key` is the one case where the proxy decrypts a harness host's traffic.
+#[test]
+fn a_harness_host_is_decrypted_only_for_its_key() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let harness = vec![NAME.to_owned()];
+    // Without a key, the guest sees the destination's own certificate.
+    let mut guest = Guest::with_harness(
+        &rules,
+        Vec::new(),
+        port,
+        Injection::default(),
+        harness.clone(),
+    );
+    let handle = guest.connect();
+    let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    // With one, the run's authority signs what the guest sees.
+    let mut guest = Guest::with_harness(&rules, vec![root], port, key_for(NAME), harness);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(!seen[0].contains(VALUE), "{seen:?}");
+    assert!(
+        seen[1].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
 }

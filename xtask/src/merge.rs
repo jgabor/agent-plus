@@ -447,7 +447,7 @@ impl Drop for Status<'_> {
 }
 
 /// How the comment that lists what merging accepts begins.
-const ACCEPTS: &str = "Merging this PR at `";
+pub const ACCEPTS: &str = "Merging this PR at `";
 /// What marks a reason that only `main`'s xtask accepted.
 const BY_MAINS: &str = "by `main`'s xtask, ";
 
@@ -527,7 +527,8 @@ fn hold_back(
 ) -> Result<(), Problem> {
     let lists = acceptances(earlier);
     let new = unapproved(lists.last().map(|(_, reasons)| &reasons[..]), accepted);
-    // Read after the comment, so an owner who arms it now has seen it.
+    // Read after the comment, so no approval given before it stands. One
+    // given just after it is taken back too, which keeps the PR open.
     if new.is_empty() || !gh.armed(number)?.auto_merge {
         return Ok(());
     }

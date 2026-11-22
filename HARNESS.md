@@ -798,9 +798,10 @@ A PR that waits for the owner is approved when the owner arms auto-merge on
 it, or clicks Merge on it while it is behind `main`, which arms auto-merge.
 Nothing proves a waiting PR before that, so until then it shows as behind.
 The approval covers the reasons that the PR's newest "Merging this PR at
-`<head>` accepts:" comment listed when the owner gave it. The head in that line
-doesn't count. A count that fell is covered by a fall at least as big, on any
-`main`, and a reason is the same whichever xtask found it.
+`<head>` accepts:" comment listed when the owner gave it, and nothing if there
+was none. The head in that line doesn't count. A count that fell is covered by
+a fall at least as big, on any `main`, and a reason is the same whichever xtask
+found it.
 
 A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
 an issue gets `land-needed`, and on every push to `main`, one run at a time,

@@ -379,8 +379,11 @@ impl Gh {
     /// does, one after another.
     pub fn acceptances(&self, number: u64) -> Result<String, Problem> {
         let path = format!("{ISSUES}/{number}/comments");
-        let filter = ".[] | select(.body | startswith(\"Merging this PR at `\")) | .body";
-        self.text(&["api", &path, "--paginate", "--jq", filter], None)
+        let filter = format!(
+            ".[] | select(.body | startswith({})) | .body",
+            json::quoted(crate::merge::ACCEPTS)
+        );
+        self.text(&["api", &path, "--paginate", "--jq", &filter], None)
     }
 
     /// Turns auto-merge off, which `gh` does before it reads any branch.

@@ -22,13 +22,15 @@ mkdir -p "$XDG_CACHE_HOME/ap"
 cp "$fake" "$XDG_CACHE_HOME/ap/$digest"
 
 # The upstream says where it listens on its first line, then notes what
-# reached it in `upstream/seen`. The timeout stops it if this script dies
-# without its trap.
+# reached it in `upstream/seen`. When the script ends, its trap stops the
+# upstream, and the run that a failed check left going. The timeouts stop
+# them if the script dies without its trap.
 mkdir upstream
 mkfifo upstream.out
 timeout -k 5 900 fake-upstream upstream >upstream.out &
 upstream=$!
-trap 'kill "$upstream" 2>/dev/null || true' EXIT
+running=
+trap 'kill $upstream $running 2>/dev/null || true' EXIT
 read -r _ plain _ tls _ address port <upstream.out || true
 if [ -z "${port:-}" ]; then
   echo "fake-upstream didn't say where it listens" >&2
@@ -78,8 +80,10 @@ lookup() {
 # Runs the agent `$1` headless, with the network variables in `$2`, tries
 # the script `$3` in its guest, and stops it. The guest's lines go to
 # `$1.tried`, the run's standard error to `$1.err`, and `ap logs` to
-# `$1.logs` and `$1.logs.err`. The timeout stops a run that hangs, and with
-# it the VM that its `ap run` holds.
+# `$1.logs` and `$1.logs.err`. The harness ends on `ap stop`'s `SIGTERM`,
+# so `ap run` must exit with its status, 143. The timeout stops a run that
+# hangs, and with it the VM that its `ap run` holds, after the guest's
+# script has had its time.
 run() {
   mkfifo "$1.out"
   env $2 timeout -k 10 240 ap run "$1" -p 'Try the network.' </dev/null \
@@ -92,7 +96,7 @@ run() {
     exit 1
   fi
   name=$(ap ps </dev/null | sed -n '2s/ .*//p')
-  if ! timeout -k 5 300 ap exec "$name" bash -c "$try$3" </dev/null \
+  if ! timeout -k 5 180 ap exec "$name" bash -c "$try$3" </dev/null \
     >"$1.tried" 2>"$1.tried.err"; then
     echo "ap exec $name failed:" >&2
     cat "$1.tried" "$1.tried.err" >&2
@@ -105,7 +109,14 @@ run() {
   fi
   cat <&4 >/dev/null
   exec 4<&-
-  wait "$running" || true
+  status=0
+  wait "$running" || status=$?
+  running=
+  if [ "$status" -ne 143 ]; then
+    echo "ap run $1 exited $status after ap stop, not the harness's 143:" >&2
+    cat "$1.err" >&2
+    exit 1
+  fi
   if ! timeout -k 5 60 ap logs "$name" </dev/null >"$1.logs" \
     2>"$1.logs.err"; then
     echo "ap logs $name failed:" >&2

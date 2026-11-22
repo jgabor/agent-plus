@@ -1129,9 +1129,9 @@ const PROTECTED: [&str; 4] = [
 ];
 
 /// Plays a guest of an `rw` share, as [`fuse_input`] does, in a tree of its
-/// own that it removes afterwards. Panics as it does, and also if anything outside the root, or
-/// anything [`PROTECTED`] in it, changed, or if anything appeared beside
-/// the root.
+/// own that it removes afterwards. Panics as it does, and also if anything
+/// outside the root, or anything [`PROTECTED`] in it, changed, or if
+/// anything appeared beside the root.
 fn fuse_rw_input(input: &str) -> usize {
     fuse_rw_input_at(input, "root", &fuse_rw_base())
 }

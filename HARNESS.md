@@ -811,10 +811,11 @@ started.
    branch, and `prepare` fails if the tip has none.
 4. Once a PR's head has `success`, `refresh` squashes it, if its auto-merge is
    still armed, its head is the one that was proven, and no review requests
-   changes. Any other PR stays open. A merge moves `main`, so the PRs after
-   it are checked against the new `main`. After the squash, `refresh`
-   removes `land-needed` from the PR and its issue, because GitHub starts no
-   workflow for a merge made with the workflow's own token.
+   changes. Any other PR stays open. A merge moves `main`, so the PRs after it
+   are checked against the new `main`. After the squash, `refresh` removes
+   `land-needed` from the PR and its issue, because GitHub starts no workflow
+   for a merge made with the workflow's own token. Then it closes that issue,
+   which GitHub leaves open after such a merge.
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
    and says why. If it ended with neither a `success` nor a `failure` on the
    PR's head, as at the merge timeout, `refresh` posts `failure` as `Not

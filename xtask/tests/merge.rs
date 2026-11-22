@@ -395,7 +395,8 @@ maybe_kill before
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") case "$4" in */labels*) n="${{4%/labels*}}"; n="${{n##*/}}"
       if [ -f "{bin}/refuse-label-$n" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
-      exit 0 ;; esac
+      exit 0 ;;
+      */issues/*) exit 0 ;; esac
     if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
@@ -2645,6 +2646,13 @@ fn merged(number: u64, head: &str) -> String {
     format!("gh pr merge {number} -R o/r --squash --delete-branch --match-head-commit {head}")
 }
 
+/// The call that closes an issue as completed.
+fn closed(number: u64) -> String {
+    format!(
+        "gh api -X PATCH repos/{{owner}}/{{repo}}/issues/{number} -f state=closed -f state_reason=completed\n"
+    )
+}
+
 fn unlabeled(number: u64) -> String {
     format!("gh api -X DELETE repos/{{owner}}/{{repo}}/issues/{number}/labels/land-needed")
 }
@@ -2815,11 +2823,18 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     for number in [5, 8, 9, 7] {
         assert!(merged_five < at(&unlabeled(number)), "{calls}");
     }
+    // Nor does GitHub close the issue of a PR that the workflow merged.
+    for issue in [8, 7] {
+        assert!(at(&unlabeled(issue)) < at(&closed(issue)), "{calls}");
+    }
     for (number, branch, head) in [(6, "2-z", &before[2]), (4, "6-up", &before[3])] {
         assert_eq!(&repo.head_of(branch), head);
         assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
         assert!(!calls.contains(&format!("gh pr merge {number}")), "{calls}");
         assert!(!calls.contains(&unlabeled(number)), "{calls}");
+    }
+    for issue in [2, 6] {
+        assert!(!calls.contains(&closed(issue)), "{calls}");
     }
     assert!(!calls.contains("pr comment"), "{calls}");
     let out = stdout(&output);

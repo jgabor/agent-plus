@@ -211,6 +211,10 @@ fn merge_if_armed(
     }
     // A merge with the workflow's token starts no `mirror-labels` run.
     remove_land_needed(gh, pr)?;
+    // Nor does GitHub close the issues of a PR that such a merge lands.
+    for number in &pr.closing_issues {
+        gh.close_issue(*number)?;
+    }
     Ok(None)
 }
 

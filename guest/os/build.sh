@@ -23,7 +23,7 @@ mkdir -p "$out"
 epoch=$(echo "$snapshot" | sed -E 's/(....)(..)(..)T(..)(..)(..)Z/\1-\2-\3 \4:\5:\6Z/')
 epoch=$(date -u -d "$epoch" +%s)
 # The tar comes back on stdout, so the container writes nothing here. The
-# image names several platforms, and the guest is x86-64 on every host.
+# image names several platforms, and this script builds the x86-64 root.
 docker run --rm -i --platform linux/amd64 --env SOURCE_DATE_EPOCH="$epoch" \
   --env DEBIAN_FRONTEND=noninteractive "$image" \
   sh -s "$snapshot" "$releases" < "$here/debian.sh" > "$out/root.tar.part"

@@ -963,6 +963,37 @@ fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
     assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
 }
 
+// spec(ap stop): If the run's `ap run` is suspended, `ap stop` resumes it.
+#[test]
+fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
+    let scratch = Scratch::new("suspended");
+    scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let (mut run, name) = start_headless(&scratch, "sleepy");
+    let vm = run_process(run.0.id());
+
+    // As Ctrl-Z would. The run process goes on, in a process group of its
+    // own, but the run's socket is served by `ap run`.
+    signal("-STOP", run.0.id());
+    let mut stop = Started(
+        Command::new(&shared().0)
+            .args(["stop", &name])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let status = wait_within(&mut stop, Duration::from_secs(30));
+    assert_eq!(status.code(), Some(0), "{status:?}");
+    assert!(!running(vm), "the VM outlived ap stop");
+    let status = wait_within(&mut run, Duration::from_secs(10));
+    assert_eq!(status.code(), Some(128 + 15), "{status:?}");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+}
+
 /// Sends `signal` to the process `pid`, which this test started.
 fn signal(signal: &str, pid: u32) {
     let status = Command::new("kill")

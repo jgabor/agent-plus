@@ -1,11 +1,13 @@
 //! `ap stop <run>`, from SPEC.md's `ap stop` section. It connects to the
 //! run's socket, which the run's `ap run` serves, and asks it to stop, as
 //! [`ap::runs`] says. It returns once `ap run` hangs up, which it does only
-//! when it exits, after the run process that holds the VM.
+//! when it exits, after the run process that holds the VM. A suspended
+//! `ap run` can't take the connection, or exit, so `ap stop` resumes it.
 
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 
 use ap::runs;
@@ -52,6 +54,7 @@ fn stop(name: &str) -> Result<(), String> {
         // The path names the open directory, so it must stay open.
         let opened = File::open(&dir)?;
         let mut stream = UnixStream::connect(runs::short_path(&opened, &runs::socket_name(name)))?;
+        resume(&stream)?;
         runs::send_stop(&mut stream)?;
         io::copy(&mut stream, &mut io::sink())
     };
@@ -61,4 +64,35 @@ fn stop(name: &str) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+/// Resumes the `ap run` that serves the socket at the other end of
+/// `stream`, in case it is suspended. The kernel names the process that
+/// listens on the socket, and `SIGCONT` does nothing to one that runs.
+fn resume(stream: &UnixStream) -> io::Result<()> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `credentials` and `length` are valid for the call, and
+    // `length` is the size of `credentials`.
+    let read = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut credentials).cast(),
+            &mut length,
+        )
+    };
+    if read != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `kill` takes and returns plain integers.
+    if credentials.pid > 0 && unsafe { libc::kill(credentials.pid, libc::SIGCONT) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

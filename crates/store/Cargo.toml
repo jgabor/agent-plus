@@ -12,5 +12,5 @@ getrandom = "0.4"
 ruzstd = "0.9"
 structured-zstd = { version = "0.3", default-features = false, features = ["std", "hash"] }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

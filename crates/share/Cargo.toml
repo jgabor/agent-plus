@@ -10,5 +10,5 @@ git = { path = "../git" }
 libc = "0.2"
 vmm = { path = "../vmm" }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

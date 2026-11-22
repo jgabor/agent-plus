@@ -443,6 +443,28 @@ fn a_copy_made_while_its_layer_is_freed_is_freed_too() {
 }
 
 #[test]
+fn a_run_holds_the_layers_only_of_an_agent_still_in_the_store() {
+    let root = store_root("hold-layers");
+    let agents = Agents::new(&root);
+    let a = layers(&root, &["shared", "only a"]);
+    let b = layers(&root, &["shared"]);
+    agents
+        .record(&agent("a", "/work/a", a.clone()), false)
+        .unwrap();
+    agents.record(&agent("b", "/work/b", b), false).unwrap();
+    let digests: Vec<&str> = a.iter().map(|layer| layer.digest.as_str()).collect();
+
+    assert!(agents.hold_layers("a", &digests).unwrap().is_some());
+    assert!(agents.hold_layers("a", &["../../etc"]).unwrap().is_none());
+    agents.remove("a").unwrap();
+    // The agent is gone, and so is one of its layers.
+    assert!(agents.hold_layers("a", &digests).unwrap().is_none());
+    // Another agent that names a layer `a` freed doesn't hold it either.
+    assert!(agents.hold_layers("b", &digests).unwrap().is_none());
+    assert!(agents.hold_layers("b", &digests[..1]).unwrap().is_some());
+}
+
+#[test]
 fn removing_an_agent_leaves_layers_no_agent_recorded() {
     let root = store_root("unrecorded");
     let agents = Agents::new(&root);

@@ -588,9 +588,11 @@ fn wait_for_hang_up(stream: &UnixStream) {
 /// process id is the first argument, for the run named by the second, with
 /// its end of a socket pair with `ap run` as its standard input. The third
 /// argument is the number of an inherited descriptor, the VMM's end of the
-/// network process's link, and the fourth another's, its end of the pair
-/// that brings your keys. A run with shares has a fifth: the number of
-/// another, the VMM's end of the share server's socket. It returns
+/// network process's link, the fourth another's, its end of the pair that
+/// brings your keys, and the fifth another's, the shared lock on the store's
+/// agents that keeps the run's layers until it has opened them. A run with
+/// shares has a sixth: the number of another, the VMM's end of the share
+/// server's socket. It returns
 /// the status to exit with, which nobody reads, because it reports how the
 /// run ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
@@ -602,7 +604,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if !(4..=5).contains(&args.len()) || orphaned {
+    if !(5..=6).contains(&args.len()) || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
@@ -612,10 +614,14 @@ pub fn run_process(args: &[OsString]) -> u8 {
         fd if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
         _ => None,
     };
-    let (Some(link), Some(keys)) = (inherited(&args[2]), inherited(&args[3])) else {
+    let (Some(link), Some(keys), Some(held_layers)) = (
+        inherited(&args[2]),
+        inherited(&args[3]),
+        inherited(&args[4]),
+    ) else {
         return 125;
     };
-    let shares = match args.get(4).map(inherited) {
+    let shares = match args.get(5).map(inherited) {
         None => None,
         Some(Some(fd)) => Some(fd),
         Some(None) => return 125,
@@ -639,6 +645,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         keys,
         link,
         shares,
+        held_layers,
         &output,
     ) {
         Ok(status) => End::Exited(status),
@@ -681,15 +688,17 @@ fn record_exit(status: u8) {
 }
 
 /// Locks the record of the run named `name` into [`RECORD`], reads the
-/// request from `stream`, and boots the agent with its output sent to
-/// `output`, its keys read from `keys`, its network on `link`, and the
-/// shares the server at the end of `shares` serves.
+/// request from `stream`, opens the layers it names, then lets go of
+/// `held_layers`, and boots the agent with its output sent to `output`, its
+/// keys read from `keys`, its network on `link`, and the shares the server
+/// at the end of `shares` serves.
 fn serve(
     name: &str,
     stream: &UnixStream,
     keys: File,
     link: OwnedFd,
     shares: Option<OwnedFd>,
+    held_layers: OwnedFd,
     output: &Arc<ToRun>,
 ) -> Result<u8, Error> {
     let root = crate::store::default_root(
@@ -741,6 +750,8 @@ fn serve(
             })
         })
         .collect::<Result<_, Error>>()?;
+    // Freeing a layer now leaves what this process opened.
+    drop(held_layers);
 
     // Confined, this process can `read` but not `recv`, so it reads `ap run`
     // as a file too.

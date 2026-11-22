@@ -7,6 +7,11 @@
 //! keeps its log, until `ap rm` of that name runs again, which then removes
 //! the log even though the agent is gone.
 //!
+//! It holds the lock on the store's agents until it has removed the runs. A
+//! run that starts meanwhile either finds its agent gone, and fails before
+//! its VM starts, or holds the lock first. Then `ap rm` waits until the run
+//! is active and has opened its layers.
+//!
 //! It refuses, and removes nothing, while any run of the agent has pending
 //! changes, as the SHARE section says, so they can still be found by the
 //! agent's name. That holds for the runs an earlier `ap rm` left, too.
@@ -74,12 +79,19 @@ fn remove(name: &str, force: bool) -> Result<(), String> {
             pending.join("\n")
         ));
     }
-    let removed = ::store::Agents::new(&root)
-        .remove(name)
-        .map_err(|error| format!("ap: {error}"))?;
+    // The runs go before the lock does, so no run of the agent starts while
+    // they are looked at, and none is found finished before it has begun.
     // An agent removed while it ran leaves that run's log, which goes now.
-    let runs = remove_runs(&runs, name, force)
-        .map_err(|error| format!("ap: can't remove the runs of {name}: {error}"))?;
+    let (removed, runs) = ::store::Agents::new(&root)
+        .remove_then(name, || {
+            remove_runs(&runs, name, force).map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("can't remove the runs of {name}: {error}"),
+                )
+            })
+        })
+        .map_err(|error| format!("ap: {error}"))?;
     match removed || runs > 0 {
         true => Ok(()),
         false => Err(unknown()),

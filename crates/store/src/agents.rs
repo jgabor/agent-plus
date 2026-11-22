@@ -25,7 +25,10 @@
 //! A record appears under its name complete and synced, or not at all.
 //! A record names only layers that are synced. Writers hold a lock on the
 //! store's agents while they change one, and free a layer only when no
-//! record still names it. A layer that a build has put
+//! record still names it. A run that is starting holds the lock shared,
+//! from finding its agent and layers still in the store until it has opened
+//! the layers, so that none is freed before it has it open. A layer that a
+//! build has put
 //! and not yet recorded can be freed in that time, so recording it is then
 //! an error, and the build puts it again.
 
@@ -206,15 +209,49 @@ impl Agents {
     /// Removes the agent with this name, and frees the layers no other agent
     /// uses. It returns whether there was one.
     pub fn remove(&self, name: &str) -> io::Result<bool> {
+        self.remove_then(name, || Ok(()))
+            .map(|(removed, ())| removed)
+    }
+
+    /// Removes the agent with this name, as [`Agents::remove`] does, then
+    /// calls `then` before it lets go of the lock, so that no run of the
+    /// agent starts until `then` returns.
+    pub fn remove_then<T>(
+        &self,
+        name: &str,
+        then: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<(bool, T)> {
         check_name(name)?;
         let _lock = self.lock()?;
-        let Some(agent) = self.read(name)? else {
-            return Ok(false);
+        let removed = match self.read(name)? {
+            None => false,
+            Some(agent) => {
+                fs::remove_file(self.dir.join(name))?;
+                File::open(&self.dir)?.sync_all()?;
+                self.free(agent.layers)?;
+                true
+            }
         };
-        fs::remove_file(self.dir.join(name))?;
-        File::open(&self.dir)?.sync_all()?;
-        self.free(agent.layers)?;
-        Ok(true)
+        Ok((removed, then()?))
+    }
+
+    /// Takes the lock on the store's agents shared, for a run of the agent
+    /// with this name that reads these layers, and returns it if the store
+    /// still has the agent and each layer. No writer frees a layer until the
+    /// returned file closes, so the run can open its layers first.
+    pub fn hold_layers(&self, name: &str, digests: &[&str]) -> io::Result<Option<File>> {
+        check_name(name)?;
+        let file = self.lock_file()?;
+        file.lock_shared()?;
+        if !self.dir.join(name).try_exists()? {
+            return Ok(None);
+        }
+        for digest in digests {
+            if !is_digest(digest) || !self.layers.path(digest).try_exists()? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(file))
     }
 
     /// The digest of a layer with this key that an agent recorded, so that a
@@ -254,14 +291,18 @@ impl Agents {
     /// Takes the lock on the store's agents, which lasts until the file
     /// closes.
     fn lock(&self) -> io::Result<File> {
+        let file = self.lock_file()?;
+        file.lock()?;
+        Ok(file)
+    }
+
+    fn lock_file(&self) -> io::Result<File> {
         fs::create_dir_all(&self.dir)?;
-        let file = OpenOptions::new()
+        OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(self.dir.join(".lock"))?;
-        file.lock()?;
-        Ok(file)
+            .open(self.dir.join(".lock"))
     }
 
     /// Reads the record with this name, which the caller has checked.

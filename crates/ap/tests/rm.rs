@@ -8,9 +8,12 @@
 
 mod common;
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use store::{Agents, Approvals, Runs};
 
@@ -48,6 +51,21 @@ impl Scratch {
 
     fn ap(&self, args: &[&str]) -> Output {
         self.ap_in(&self.root, args)
+    }
+
+    /// Starts `ap` as [`Scratch::ap`] runs it, with its output piped.
+    fn spawn(&self, args: &[&str]) -> Started {
+        let child = Command::new(env!("CARGO_BIN_EXE_ap"))
+            .args(args)
+            .current_dir(&self.root)
+            .env_clear()
+            .env("HOME", &self.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        Started(Some(child))
     }
 
     /// Makes the directory `name` with this Agentfile, and a file `data`
@@ -91,6 +109,58 @@ impl Scratch {
     fn has_layer(&self, digest: &str) -> bool {
         self.store().join("zstd-layers").join(digest).exists()
     }
+}
+
+/// An `ap` the test started, killed if the test ends before it does.
+struct Started(Option<Child>);
+
+impl Started {
+    fn id(&self) -> u32 {
+        self.0.as_ref().unwrap().id()
+    }
+
+    fn exited(&mut self) -> bool {
+        self.0.as_mut().unwrap().try_wait().unwrap().is_some()
+    }
+
+    fn output(mut self) -> Output {
+        self.0.take().unwrap().wait_with_output().unwrap()
+    }
+}
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Waits until `done` is true, and fails the test after a minute.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what} took over a minute");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Whether the process `pid` waits for a lock on a file, as `/proc/locks`
+/// lists a waiter: `1: -> FLOCK  ADVISORY  WRITE <pid> ...`.
+fn waits_for_a_lock(pid: u32) -> bool {
+    let locks = fs::read_to_string("/proc/locks").unwrap();
+    let pid = pid.to_string();
+    locks.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        fields.get(1) == Some(&"->") && fields.get(5) == Some(&pid.as_str())
+    })
+}
+
+fn mkfifo(path: &Path) {
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `name` is a valid C string.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
 }
 
 fn stdout(output: &Output) -> String {
@@ -218,6 +288,76 @@ fn rm_deletes_the_logs_of_finished_runs_and_keeps_an_active_run_s() {
     let output = scratch.ap(&["rm", "notes"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(runs.log(&other.name).unwrap().is_some());
+}
+
+// spec(Build): `ap rm` and rebuilds free a layer only when no agent or active run still needs it, and no repository an agent kept still depends on it (see [REPO](#repo)).
+#[test]
+fn rm_waits_for_a_starting_run_to_open_its_layers() {
+    let scratch = Scratch::new("starting");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let digests = scratch.digests("notes");
+    // The run stops at its first layer, whose uncompressed copy is a FIFO
+    // that opens once the test opens it to write. A second link keeps it
+    // within the test's reach after `ap rm` frees the layer.
+    let plain = scratch.store().join("plain-layers");
+    fs::create_dir_all(&plain).unwrap();
+    mkfifo(&plain.join(&digests[0]));
+    let gate = scratch.root.join("gate");
+    fs::hard_link(plain.join(&digests[0]), &gate).unwrap();
+    let runs = Runs::new(scratch.store());
+    let mut run = scratch.spawn(&["run", "notes", "-p", "hi"]);
+    wait_until("the run's start", || {
+        let listed = runs.list().unwrap();
+        run.exited() || listed.iter().any(|run| runs.active(&run.name).unwrap())
+    });
+
+    let mut rm = scratch.spawn(&["rm", "notes"]);
+    wait_until("ap rm", || rm.exited() || waits_for_a_lock(rm.id()));
+    drop(OpenOptions::new().write(true).open(&gate).unwrap());
+
+    let run = run.output();
+    let rm = rm.output();
+    assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
+    // The run read every layer, so it got as far as its boot, which a
+    // dynamically linked `ap` refuses.
+    assert_eq!(run.status.code(), Some(125), "{}", stderr(&run));
+    assert!(
+        stderr(&run).contains("dynamically linked"),
+        "{}",
+        stderr(&run)
+    );
+    // `ap rm` frees the layers once the run has them open.
+    assert_eq!(scratch.ok_in(&scratch.root, &["ls"]), "");
+    for digest in &digests {
+        assert!(!scratch.has_layer(digest), "{digest}");
+    }
+}
+
+#[test]
+fn a_run_whose_agent_is_removed_while_it_starts_fails_with_no_record() {
+    let scratch = Scratch::new("removed-while-starting");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    // The test stands in for an `ap rm` that holds the lock on the store's
+    // agents, which writers take.
+    let lock = File::open(scratch.store().join("agents/.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut run = scratch.spawn(&["run", "notes", "-p", "hi"]);
+    wait_until("the run's start", || {
+        run.exited() || waits_for_a_lock(run.id())
+    });
+    fs::remove_file(scratch.store().join("agents/notes")).unwrap();
+    drop(lock);
+
+    let run = run.output();
+    assert_eq!(run.status.code(), Some(125), "{}", stderr(&run));
+    assert_eq!(
+        stderr(&run),
+        "ap: agent notes was removed or rebuilt while the run started\n"
+    );
+    let runs = Runs::new(scratch.store());
+    assert_eq!(runs.list().unwrap(), Vec::new());
 }
 
 /// Records a finished run of `agent` with one copy-on-write share, and

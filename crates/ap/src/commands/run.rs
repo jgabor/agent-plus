@@ -190,9 +190,22 @@ fn run_agent(
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
+    let name = args.agent.to_string_lossy();
+    // Held from before the run is recorded until its run process has locked
+    // the record and opened the layers, so `ap rm` and rebuilds wait, and
+    // never find the run finished or free a layer it is about to read.
+    let digests: Vec<&str> = layers.iter().map(|layer| layer.digest.as_str()).collect();
+    let held_layers = ::store::Agents::new(root)
+        .hold_layers(&name, &digests)
+        .map_err(fail("can't read the agent"))?
+        .ok_or_else(|| {
+            Error::Failed(format!(
+                "agent {name} was removed or rebuilt while the run started"
+            ))
+        })?;
     let runs = ::store::Runs::new(root);
     let run = runs
-        .create(&args.agent.to_string_lossy(), started)
+        .create(&name, started)
         .map_err(fail("can't record the run"))?;
     let shares = keep_pending(&runs, &run.name, shares)?;
     // No process this one starts gets a hidden value, not even through the
@@ -263,6 +276,9 @@ fn run_agent(
     let (keys, keys_end) = UnixStream::pair().map_err(fail("can't start the run"))?;
     let their_keys = share::inheritable(keys_end.as_fd()).map_err(fail("can't start the run"))?;
     drop(keys_end);
+    let their_layers =
+        share::inheritable(held_layers.as_fd()).map_err(fail("can't start the run"))?;
+    drop(held_layers);
     drop(network_process);
     let mut command = Command::new(exe);
     for secret in &names {
@@ -273,7 +289,8 @@ fn run_agent(
         .arg(std::process::id().to_string())
         .arg(&run.name)
         .arg(link.as_raw_fd().to_string())
-        .arg(their_keys.as_raw_fd().to_string());
+        .arg(their_keys.as_raw_fd().to_string())
+        .arg(their_layers.as_raw_fd().to_string());
     if let Some(socket) = &share_socket {
         command.arg(socket.as_raw_fd().to_string());
     }
@@ -288,6 +305,7 @@ fn run_agent(
     drop(command);
     drop(link);
     drop(their_keys);
+    drop(their_layers);
     drop(share_socket);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.

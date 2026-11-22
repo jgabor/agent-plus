@@ -1,17 +1,17 @@
 issue = 400
 pr = 672
-commit = "f753cd2f61e45a0fb3083f6dc6fa0dd1b8b8db6c"
-base = "7735716104f15b8812301ef0e59d64967287e858"
+commit = "e235e092e21b01eafec1de22aa3ab4ed9cbab538"
+base = "939779110f6993b4abcd51fb8563f982ce05bc5e"
 date = "2026-11-22"
 host = "linux-x86_64"
-spec = { proven = 501, promises = 906 }
+spec = { proven = 502, promises = 907 }
 journey = { passing = 11, steps = 19 }
 reason = ""
 
 [budgets]
-binary_bytes = 7996336
-boot_ms = 106.14
-idle_mib = 41.83
-noop_build_ms = 1.25
-run_ms = 128.56
-version_ms = 0.26
+binary_bytes = 8000432
+boot_ms = 93.09
+idle_mib = 49.16
+noop_build_ms = 1.29
+run_ms = 112.14
+version_ms = 0.25

@@ -13,11 +13,13 @@ pub enum Secret {
 }
 
 /// Reads `ap secret`'s arguments. `set` and `rm` take exactly one name, so a
-/// value given as an argument is bad usage.
+/// value given as an argument is bad usage. A name can't hold `=`, as in
+/// `SECRET`, so `NAME=VALUE` is bad usage too, and its value isn't printed.
 pub fn parse(args: &[OsString]) -> Option<Secret> {
     let name = |name: &OsString| {
         let name = name.to_str()?;
-        (!name.is_empty() && !name.starts_with('-')).then(|| name.to_owned())
+        let valid = !name.is_empty() && !name.starts_with('-') && !name.contains('=');
+        valid.then(|| name.to_owned())
     };
     match args {
         [command] if command == "ls" => Some(Secret::Ls),
@@ -31,10 +33,8 @@ pub fn parse(args: &[OsString]) -> Option<Secret> {
 pub fn run(secret: &Secret) -> u8 {
     let variable = match secret {
         Secret::Set(name) | Secret::Rm(name) => {
-            format!(
-                "give it in the environment variable {}",
-                name.escape_debug()
-            )
+            let name = agentfile::print_argument(name);
+            format!("give it in the environment variable {name}")
         }
         Secret::Ls => "give each secret in the environment variable named after it".to_owned(),
     };

@@ -120,9 +120,11 @@ fn set_keeps_nothing_on_disk() {
 #[test]
 fn set_refuses_a_value_argument_without_printing_it() {
     let scratch = Scratch::new("argument");
+    let assignment = format!("GITHUB_TOKEN={VALUE}");
     for args in [
         &["secret", "set", "GITHUB_TOKEN", VALUE][..],
         &["secret", "set", "GITHUB_TOKEN", "--value", VALUE][..],
+        &["secret", "set", &assignment][..],
     ] {
         let output = scratch.ap(args, "");
         let message = stderr(&output);

@@ -123,7 +123,6 @@ fn loopback_and_unspecified_addresses_are_denied() {
     denies("NETWORK +\n", "1.1.1.1", false);
 }
 
-// spec(NETWORK): **IP rules** are checked against the real destination address.
 #[test]
 fn an_ipv6_rule_never_matches_an_ipv4_address() {
     denies(

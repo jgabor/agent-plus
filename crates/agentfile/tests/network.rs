@@ -297,7 +297,7 @@ fn a_host_name_is_at_most_253_characters() {
         destination_of(&format!("NETWORK +{name}\n")),
         host(&name, None)
     );
-    error_of(&format!("NETWORK +a{name}\n"));
+    error_of(&format!("NETWORK +{name}a\n"));
 }
 
 #[test]

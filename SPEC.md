@@ -442,7 +442,11 @@ directory) and writes an image into the local store.
   Harnesses read project instructions and settings from their working
   directory, and Claude Code keys session history by its path. The Codex
   adapter marks every share as trusted (`trust_level = "trusted"`), so
-  Codex loads a repository's own configuration, hooks, and rules.
+  Codex loads a repository's own configuration, hooks, and rules. The
+  Claude Code adapter marks `/` as trusted
+  (`projects["/"].hasTrustDialogAccepted` in `~/.claude.json`), so an
+  interactive run whose working directory isn't in a git repository doesn't
+  ask whether to trust it.
 - **Ephemeral.** Every run starts from the image with an empty writable
   overlay, and the overlay is discarded when the run ends. Three things
   outlast it: the state that `AUTH login` and `PERSIST` keep (see

@@ -513,6 +513,7 @@ fn the_adapter_layer_is_the_same_for_two_builds() {
         "\"skipDangerousModePermissionPrompt\": true",
         ".claude.json",
         "\"hasCompletedOnboarding\": true",
+        "\"hasTrustDialogAccepted\": true",
     ] {
         assert!(holds(image, text), "the layer doesn't hold {text}");
     }

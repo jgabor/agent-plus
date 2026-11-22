@@ -2,7 +2,7 @@
 //! from, its layers in order, and what its Agentfile declared. Removing or
 //! rebuilding an agent frees the layers no other agent uses.
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -454,9 +454,25 @@ fn a_run_holds_the_layers_only_of_an_agent_still_in_the_store() {
     agents.record(&agent("b", "/work/b", b), false).unwrap();
     let digests: Vec<&str> = a.iter().map(|layer| layer.digest.as_str()).collect();
 
-    assert!(agents.hold_layers("a", &digests).unwrap().is_some());
+    let lock = || File::open(root.join("agents/.lock")).unwrap();
+    let held = agents.hold_layers("a", &digests).unwrap().unwrap();
+    // Shared, so writers wait and other runs don't.
+    assert!(matches!(lock().try_lock(), Err(TryLockError::WouldBlock)));
+    lock().try_lock_shared().unwrap();
+    drop(held);
+    lock().try_lock().unwrap();
     assert!(agents.hold_layers("a", &["../../etc"]).unwrap().is_none());
-    agents.remove("a").unwrap();
+    // A removal holds the lock until what it calls after has returned.
+    let (removed, ()) = agents
+        .remove_then("a", || {
+            assert!(matches!(
+                lock().try_lock_shared(),
+                Err(TryLockError::WouldBlock)
+            ));
+            Ok(())
+        })
+        .unwrap();
+    assert!(removed);
     // The agent is gone, and so is one of its layers.
     assert!(agents.hold_layers("a", &digests).unwrap().is_none());
     // Another agent that names a layer `a` freed doesn't hold it either.

@@ -10,6 +10,7 @@ mod common;
 
 use std::fs::{self, File, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -314,7 +315,19 @@ fn rm_waits_for_a_starting_run_to_open_its_layers() {
 
     let mut rm = scratch.spawn(&["rm", "notes"]);
     wait_until("ap rm", || rm.exited() || waits_for_a_lock(rm.id()));
-    drop(OpenOptions::new().write(true).open(&gate).unwrap());
+    // Opened once the run waits at the layer, or never if it ended first.
+    let mut opened = None;
+    wait_until("the run's first layer", || {
+        let mut options = OpenOptions::new();
+        options.write(true).custom_flags(libc::O_NONBLOCK);
+        match options.open(&gate) {
+            Ok(file) => opened = Some(file),
+            Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {}
+            Err(error) => panic!("{error}"),
+        }
+        opened.is_some() || run.exited()
+    });
+    drop(opened);
 
     let run = run.output();
     let rm = rm.output();

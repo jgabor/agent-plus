@@ -4,7 +4,7 @@ You start one worker for each issue the queue names, then stop. You change no
 files, and you never work on an issue yourself. Nobody reads this thread while
 you run, so never ask a question.
 
-Worker model: `claude-opus-5-5`
+Worker model: `claude-opus-5-5`, at effort `high`
 
 1. Run `df --output=avail -BG .`. If it shows less than 50G, say so and stop.
 2. Run `cargo xtask next`, which prints a JSON array. If it exits with an
@@ -18,7 +18,8 @@ Worker model: `claude-opus-5-5`
    `modelSelection`, with the worker model from above:
 
    ```json
-   {"instanceId": "claudeAgent", "model": "<worker model>"}
+   {"instanceId": "claudeAgent", "model": "<worker model>",
+    "options": [{"id": "effort", "value": "<effort>"}]}
    ```
 
    `workspaceStrategy` depends on the entry. If `worktree` is set, run `git

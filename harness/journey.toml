@@ -144,6 +144,7 @@ milestone = "Network and secrets"
 needs = [12]
 script = "harness/journey/13-other-harness.sh"
 spend = true
+provider = "openai"
 
 [[step]]
 id = 14

@@ -15,9 +15,10 @@ const STATUS: &str = "xtask/nightly";
 const PASS: &str = "pass";
 const FAIL: &str = "fail";
 const SKIP: &str = "skip";
-/// Where the owner puts the key for the paid checks, under `HOME`. It belongs
-/// to a workspace whose spend limit the provider enforces.
-const PAID_KEY: &str = ".config/agent-plus/paid-checks/anthropic-api-key";
+/// Where the owner puts each provider's key for the paid checks, under `HOME`,
+/// as `<provider>-api-key`. Each belongs to a workspace or project whose spend
+/// limit the provider enforces.
+const PAID_KEYS: &str = ".config/agent-plus/paid-checks";
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
@@ -38,7 +39,7 @@ pub fn run() -> Result<Verdict, Problem> {
     checks.push(("t2", t2(&root)));
     // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
-    let walked = paid_key().and_then(|key| journey::outcomes(&root, key.as_deref()));
+    let walked = paid_keys().and_then(|keys| journey::outcomes(&root, &keys));
     checks.push(("journey", state(journey_holds(&root, &walked))));
     checks.push((
         "fuzz",
@@ -87,18 +88,27 @@ pub fn run() -> Result<Verdict, Problem> {
     Ok(verdict)
 }
 
-/// The key for the paid checks, if the owner has put one in place. The key is
-/// never printed, so no message here quotes the file.
-fn paid_key() -> Result<Option<String>, Problem> {
+/// The keys for the paid checks that the owner has put in place. A key is
+/// never printed, so no message here quotes a file.
+fn paid_keys() -> Result<journey::Keys, Problem> {
+    let mut keys = journey::Keys::new();
     let Some(home) = env::var_os("HOME") else {
-        return Ok(None);
+        return Ok(keys);
     };
-    let path = PathBuf::from(home).join(PAID_KEY);
-    match fs::read_to_string(&path) {
-        Ok(text) => Ok(Some(text.trim().to_string()).filter(|key| !key.is_empty())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(Problem(format!("couldn't read {}: {e}", path.display()))),
+    for (provider, _) in journey::PROVIDERS {
+        let path = PathBuf::from(&home)
+            .join(PAID_KEYS)
+            .join(format!("{provider}-api-key"));
+        match fs::read_to_string(&path) {
+            Ok(text) if !text.trim().is_empty() => {
+                keys.insert(provider, text.trim().to_string());
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Problem(format!("couldn't read {}: {e}", path.display()))),
+        }
     }
+    Ok(keys)
 }
 
 /// HEAD, which has to be `main` as everyone else sees it, or the report and the

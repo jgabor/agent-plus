@@ -337,13 +337,40 @@ fn a_step_without_a_name_is_a_problem() {
     assert!(stderr(&output).contains("`name`"), "{}", stderr(&output));
 }
 
+/// A step that spends names a provider whose key the journey knows, or none.
 #[test]
 fn a_mistyped_spend_is_a_problem() {
-    let toml = "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\nspend = \"true\"\n";
-    let root = workspace("spend-type", toml, &[("harness/journey/one.sh", PASS)]);
-    let output = journey(&root);
-    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
-    assert!(stderr(&output).contains("spend"), "{}", stderr(&output));
+    for (name, spend, word) in [
+        (
+            "spend-type",
+            "spend = \"true\"",
+            "`spend` that isn't true or false",
+        ),
+        (
+            "provider-name",
+            "spend = true\nprovider = \"google\"",
+            "neither",
+        ),
+        (
+            "provider-type",
+            "spend = true\nprovider = 1",
+            "`provider` that isn't a string",
+        ),
+        ("provider-free", "provider = \"openai\"", "doesn't spend"),
+        (
+            "provider-off",
+            "spend = false\nprovider = \"openai\"",
+            "doesn't spend",
+        ),
+    ] {
+        let toml = format!(
+            "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/one.sh\"\n{spend}\n"
+        );
+        let root = workspace(name, &toml, &[("harness/journey/one.sh", PASS)]);
+        let output = journey(&root);
+        assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+        assert!(stderr(&output).contains(word), "{}", stderr(&output));
+    }
 }
 
 #[test]

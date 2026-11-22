@@ -65,11 +65,15 @@ struct Recorded<'a> {
     reason: &'a str,
 }
 
-const PAID_KEY: &str = ".config/agent-plus/paid-checks/anthropic-api-key";
+/// Where the owner puts each paid-check key, under `HOME`.
+const PAID_KEYS: &str = ".config/agent-plus/paid-checks";
 
-/// A journey step that records the key it was given, and passes.
-const KEY_SCRIPT: &str =
-    "#!/bin/sh\nprintf '%s' \"${ANTHROPIC_API_KEY-none}\" > \"$HOME/../key\"\n";
+/// A journey step that records the keys it was given, and passes.
+const KEY_SCRIPT: &str = "#!/bin/sh\nprintf '%s %s' \"${ANTHROPIC_API_KEY-none}\" \"${CODEX_API_KEY-none}\" > \"$HOME/../key\"\n";
+
+/// Step 1 spends nothing, step 2 spends on Anthropic, which a step that
+/// names no provider spends on, and step 3 on OpenAI.
+const TWO_KEYS: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"free\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"claude\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 3\nname = \"codex\"\nmilestone = \"m\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\nspend = true\nprovider = \"openai\"\n";
 
 const CLEAN: Recorded = Recorded {
     issue: 5,
@@ -199,14 +203,18 @@ impl Repo {
         self.root.parent().unwrap().join("home")
     }
 
-    /// Puts a key where the nightly looks for the paid checks' key.
-    fn set_paid_key(&self, key: &str) {
-        let path = self.home().join(PAID_KEY);
+    /// Puts a key where the nightly looks for `provider`'s paid-check key.
+    fn set_paid_key(&self, provider: &str, key: &str) {
+        let path = self
+            .home()
+            .join(PAID_KEYS)
+            .join(format!("{provider}-api-key"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, key).unwrap();
     }
 
-    /// What a step running `harness/journey/key.sh` saw of the key.
+    /// What a step running [`KEY_SCRIPT`] saw of the Anthropic key, then of
+    /// the OpenAI key.
     fn key_seen(&self, step: u32) -> String {
         fs::read_to_string(self.root.join(format!("target/journey/step-{step}/key"))).unwrap()
     }
@@ -968,7 +976,7 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
         "fn main() {}\n",
         &[("harness/journey/ok.sh", KEY_SCRIPT)],
     );
-    repo.set_paid_key("sk-key-0xf7a1\n");
+    repo.set_paid_key("anthropic", "sk-key-0xf7a1\n");
     repo.set_roadmap_issues("OPEN", "typed by hand", Some("typed by hand"));
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -988,9 +996,9 @@ fn nightly_runs_the_spend_steps_with_the_paid_checks_key() {
         stderr(&output)
     );
     // Only a step that spends gets the key.
-    assert_eq!(repo.key_seen(1), "none");
-    assert_eq!(repo.key_seen(2), "sk-key-0xf7a1");
-    assert_eq!(repo.key_seen(3), "none");
+    assert_eq!(repo.key_seen(1), "none none");
+    assert_eq!(repo.key_seen(2), "sk-key-0xf7a1 none");
+    assert_eq!(repo.key_seen(3), "none none");
     let comment = repo.comment();
     assert!(
         comment.contains("Journey steps that spend money, and weren't run: 0\n"),
@@ -1027,12 +1035,84 @@ fn nightly_without_the_paid_checks_key_runs_no_spend_step() {
     );
 }
 
+/// Each spend step gets its own provider's key, and no other.
+#[test]
+fn nightly_gives_each_spend_step_only_its_own_key() {
+    let repo = Repo::with(
+        "two-keys",
+        "fn main() {}\n",
+        &[
+            ("harness/journey.toml", TWO_KEYS),
+            ("harness/journey/ok.sh", KEY_SCRIPT),
+        ],
+    );
+    repo.set_paid_key("anthropic", "sk-ant-0xf7a1\n");
+    repo.set_paid_key("openai", "sk-proj-0x3c9e\n");
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("journey 3 of 3\n"),
+        "{}",
+        stdout(&output)
+    );
+    for key in ["sk-ant-0xf7a1", "sk-proj-0x3c9e"] {
+        assert!(!stdout(&output).contains(key), "{}", stdout(&output));
+        assert!(!stderr(&output).contains(key), "{}", stderr(&output));
+    }
+    assert_eq!(repo.key_seen(1), "none none");
+    assert_eq!(repo.key_seen(2), "sk-ant-0xf7a1 none");
+    assert_eq!(repo.key_seen(3), "none sk-proj-0x3c9e");
+}
+
+/// A spend step whose provider has no key, or an empty one, is skipped, even
+/// when another provider has one.
+#[test]
+fn nightly_skips_a_spend_step_without_its_own_key() {
+    for openai in [None, Some(" \n")] {
+        skips_without_its_own_key(openai);
+    }
+}
+
+fn skips_without_its_own_key(openai: Option<&str>) {
+    let repo = Repo::with(
+        &format!("one-key-{}", openai.is_some()),
+        "fn main() {}\n",
+        &[
+            ("harness/journey.toml", TWO_KEYS),
+            ("harness/journey/ok.sh", KEY_SCRIPT),
+        ],
+    );
+    repo.set_paid_key("anthropic", "sk-ant-0xf7a1");
+    if let Some(key) = openai {
+        repo.set_paid_key("openai", key);
+    }
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("journey 2 of 3\n"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("skip step 3\n"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!repo.root.join("target/journey/step-3/key").exists());
+    assert!(
+        repo.comment()
+            .contains("Journey steps that spend money, and weren't run: 1\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
 /// The ledger counts no step that spends, so a passing one can't hide a step
 /// that fell.
 #[test]
 fn a_passing_spend_step_does_not_hide_a_fall() {
     let repo = Repo::new("paid-hides-fall");
-    repo.set_paid_key("sk-key-0xf7a1");
+    repo.set_paid_key("anthropic", "sk-key-0xf7a1");
     repo.merge(
         "Claims two (#9)",
         30,

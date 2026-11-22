@@ -32,7 +32,7 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
         true => lock::testing(&root)?,
         false => lock::shared(&root)?,
     };
-    let outcomes = journey::outcomes(&root, None)?;
+    let outcomes = journey::outcomes(&root, &journey::Keys::new())?;
     // Only the details count proven promises, which takes a run of the tests.
     let score = match details {
         true => Some(score::compute(&root, &testrun::run(&root, &hold)?)?),

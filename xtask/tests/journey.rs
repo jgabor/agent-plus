@@ -156,7 +156,7 @@ fn a_step_is_skipped_unless_every_need_passes() {
 #[test]
 fn a_spend_step_and_what_needs_it_do_not_run() {
     let toml = format!(
-        "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = true\n\n{}",
+        "[[step]]\nid = 1\nname = \"s\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/touch.sh\"\nspend = \"anthropic\"\n\n{}",
         step(2, "1", "harness/journey/touch.sh"),
     );
     let root = workspace(

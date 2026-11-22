@@ -18,7 +18,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     } else {
         Verdict::Fail
     };
-    let outcomes = journey::outcomes(&root, None)?;
+    let outcomes = journey::outcomes(&root, &journey::Keys::new())?;
     drop(hold);
     let values = ledger::at_head(&root)?.map_or_else(BTreeMap::new, |record| record.budgets);
     let budgets = bench::read_budgets(&root)?;

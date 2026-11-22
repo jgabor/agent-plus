@@ -135,7 +135,7 @@ name = "A real headless prompt edits a share and lands on a branch"
 milestone = "Network and secrets"
 needs = [8, 9, 11]
 script = "harness/journey/12-prompt.sh"
-spend = true
+spend = "anthropic"
 
 [[step]]
 id = 13
@@ -143,7 +143,7 @@ name = "The same Agentfile works with one line changed to the other harness"
 milestone = "Network and secrets"
 needs = [12]
 script = "harness/journey/13-other-harness.sh"
-spend = true
+spend = "openai"
 
 [[step]]
 id = 14

@@ -15,6 +15,17 @@ const FAKE_HARNESS: &str = "fake-harness";
 /// The server on your host that step 10 reaches from the guest.
 const FAKE_UPSTREAM: &str = "fake-upstream";
 
+/// The model providers a step can spend on, each with the variable that
+/// carries its paid-check key into the step, as a user's `AUTH key` run gets
+/// it.
+pub const PROVIDERS: [(&str, &str); 2] = [
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("openai", "CODEX_API_KEY"),
+];
+
+/// Each provider's paid-check key, by the provider's name.
+pub type Keys = BTreeMap<&'static str, String>;
+
 struct Step {
     id: i64,
     name: String,
@@ -22,7 +33,8 @@ struct Step {
     needs: Vec<i64>,
     script: String,
     floor: Option<String>,
-    spend: bool,
+    /// The provider whose key the step needs, and the variable it comes in.
+    spend: Option<(&'static str, &'static str)>,
 }
 
 /// A named group of steps, and the `ap` commands it delivers.
@@ -49,7 +61,7 @@ pub struct Outcome {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let _hold = lock::shared(&root)?;
-    let (passing, steps) = tally(&walk(&root, None, |line| println!("{line}"))?);
+    let (passing, steps) = tally(&walk(&root, &Keys::new(), |line| println!("{line}"))?);
     println!("journey {passing} of {steps}");
     Ok(Verdict::Pass)
 }
@@ -57,15 +69,15 @@ pub fn run() -> Result<Verdict, Problem> {
 /// How many steps pass, and how many there are, for a caller whose stdout is
 /// its result. The caller holds the activity lock.
 pub fn count(root: &Path) -> Result<(usize, usize), Problem> {
-    Ok(tally(&outcomes(root, None)?))
+    Ok(tally(&outcomes(root, &Keys::new())?))
 }
 
 /// Each step's result in journey order, for a caller whose stdout is its
-/// result. The caller holds the activity lock. With a model provider's key,
-/// the steps that spend money run too, and only they see it, as
-/// `ANTHROPIC_API_KEY`.
-pub fn outcomes(root: &Path, key: Option<&str>) -> Result<Vec<Outcome>, Problem> {
-    walk(root, key, |line| eprintln!("{line}"))
+/// result. The caller holds the activity lock. A step that spends money runs
+/// only with its provider's key in `keys`, and only it sees that key, under
+/// the provider's variable in [`PROVIDERS`].
+pub fn outcomes(root: &Path, keys: &Keys) -> Result<Vec<Outcome>, Problem> {
+    walk(root, keys, |line| eprintln!("{line}"))
 }
 
 /// The milestones, in roadmap order.
@@ -77,7 +89,7 @@ pub fn milestones(root: &Path) -> Result<Vec<Milestone>, Problem> {
 pub fn left_out(root: &Path) -> Result<usize, Problem> {
     let mut out = HashSet::new();
     for step in read_steps(root)? {
-        if step.spend || step.needs.iter().any(|need| out.contains(need)) {
+        if step.spend.is_some() || step.needs.iter().any(|need| out.contains(need)) {
             out.insert(step.id);
         }
     }
@@ -90,7 +102,7 @@ pub fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     (passing, outcomes.len())
 }
 
-fn walk(root: &Path, key: Option<&str>, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
+fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
@@ -99,12 +111,14 @@ fn walk(root: &Path, key: Option<&str>, report: impl Fn(&str)) -> Result<Vec<Out
     let mut spending = HashSet::new();
     let mut outcomes = Vec::new();
     for step in &steps {
-        let spends = step.spend || step.needs.iter().any(|need| spending.contains(need));
+        let spends = step.spend.is_some() || step.needs.iter().any(|need| spending.contains(need));
         if spends {
             spending.insert(step.id);
         }
-        let given = if step.spend { key } else { None };
-        let word = if (step.spend && key.is_none())
+        let given = step
+            .spend
+            .and_then(|(provider, name)| Some((name, keys.get(provider)?.as_str())));
+        let word = if (step.spend.is_some() && given.is_none())
             || !step.needs.iter().all(|need| passed.contains(need))
         {
             "skip"
@@ -169,9 +183,16 @@ fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
                 Some(_) => return Err(bad("has a `floor` that isn't a string")),
             },
             spend: match table.get("spend") {
-                None => false,
-                Some(Value::Bool(spend)) => *spend,
-                Some(_) => return Err(bad("has a `spend` that isn't true or false")),
+                None => None,
+                Some(Value::Str(spend)) => Some(
+                    PROVIDERS
+                        .into_iter()
+                        .find(|(provider, _)| provider == spend)
+                        .ok_or_else(|| {
+                            bad("has a `spend` that is neither \"anthropic\" nor \"openai\"")
+                        })?,
+                ),
+                Some(_) => return Err(bad("has a `spend` that isn't a string")),
             },
         };
         if steps.insert(id, step).is_some() {
@@ -316,7 +337,7 @@ fn run_step(
     journey: &Path,
     bin: &Path,
     step: &Step,
-    key: Option<&str>,
+    key: Option<(&str, &str)>,
 ) -> Result<bool, Problem> {
     if let Some(floor) = &step.floor
         && !floor_check_exists(root, floor)?
@@ -347,8 +368,8 @@ fn run_step(
         .env("HOME", &home)
         .env("XDG_CACHE_HOME", &cache)
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-    if let Some(key) = key {
-        command.env("ANTHROPIC_API_KEY", key);
+    if let Some((name, key)) = key {
+        command.env(name, key);
     }
     let status = command
         .stdin(Stdio::null())

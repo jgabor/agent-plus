@@ -1466,6 +1466,7 @@ fn placeholder(scratch: &Scratch) -> String {
 // spec(SECRET): **Where the value comes from.** At run time, `ap` reads the value from the host environment variable `<name>`.
 // spec(SECRET): **Hidden (the default).** Inside the guest, the environment variable `<name>` holds a placeholder.
 // spec(SECRET): **`visible`** hands the real value to the agent.
+// spec(SECRET): A placeholder is 32 random hexadecimal characters, new on each run.
 #[test]
 fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_visible_one() {
     let scratch = Scratch::new("secrets");
@@ -1473,6 +1474,13 @@ fn a_run_gives_the_guest_a_placeholder_for_a_hidden_secret_and_the_value_for_a_v
     let first = placeholder(&scratch);
     let second = placeholder(&scratch);
     assert_ne!(first, HIDDEN_VALUE);
+    for placeholder in [&first, &second] {
+        assert_eq!(placeholder.len(), 32, "{placeholder}");
+        assert!(
+            placeholder.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{placeholder}"
+        );
+    }
     assert_ne!(first, second, "two runs got the same placeholder");
 }
 

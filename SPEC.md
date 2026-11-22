@@ -1258,9 +1258,9 @@ decodes the credentials, replaces the placeholder in them, and encodes them
 again. When `GITHUB_TOKEN` or `GH_TOKEN` is bound to `github.com`, `ap` also
 configures git in the guest to use it, so `git push` works over HTTPS.
 
-The real value is never sent to any other host. *Proposed:* placeholders
-keep the real value's known prefix and length, so clients that check formats
-(`sk-ant-`, `ghp_`) accept them.
+The real value is never sent to any other host.
+
+A placeholder is 32 random hexadecimal characters, new on each run.
 
 Bound hosts:
 

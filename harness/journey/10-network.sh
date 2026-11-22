@@ -118,7 +118,8 @@ run() {
 holds() {
   file=$1
   shift
-  printf '%s\n' "$@" >"$file.expected"
+  : >"$file.expected"
+  if [ "$#" -gt 0 ]; then printf '%s\n' "$@" >"$file.expected"; fi
   if ! cmp -s "$file" "$file.expected"; then
     echo "$file should hold:" >&2
     cat "$file.expected" >&2
@@ -152,7 +153,7 @@ decided() {
   agent=$1
   shift
   sed -n 's/^[0-9-]*T[0-9:]*Z  //p' "$agent.logs.err" |
-    sed 's/  */  /g' >"$agent.decided"
+    sed 's/   */  /g' >"$agent.decided"
   holds "$agent.decided" "$@"
   if grep -qE '^(allow|deny)' "$agent.logs"; then
     echo "ap logs printed decisions with the run's output:" >&2
@@ -167,9 +168,9 @@ blocked() {
   agent=$1
   shift
   sed -n '/^ap: NETWORK blocked /,$p' "$agent.err" | sed -n 's/^  //p' |
-    sed 's/  */  /g' >"$agent.blocked"
+    sed 's/   */  /g' >"$agent.blocked"
   holds "$agent.blocked" "$@"
-  if [ "$#" -gt 0 ] && ! grep -q "^ap: NETWORK blocked $# hosts*\.$" \
+  if [ "$#" -gt 0 ] && ! grep -qE "^ap: NETWORK blocked $# hosts?\. " \
     "$agent.err"; then
     echo "ap run $agent didn't say it blocked $# hosts:" >&2
     cat "$agent.err" >&2
@@ -243,7 +244,7 @@ reached "tls /allowed/repo/info/refs?service=git-upload-pack"
 decided url \
   "allow  host.ap.internal:$tls  NETWORK +$url/allowed" \
   "deny  host.ap.internal:$tls  the default"
-blocked url "host.ap.internal  NETWORK +$url/denied/repo/info/refs"
+blocked url 'host.ap.internal  NETWORK +host.ap.internal'
 
 # Under an address rule, that address connects, and another doesn't. No
 # name resolves, so your host's name doesn't either.

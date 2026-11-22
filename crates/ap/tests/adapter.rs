@@ -508,7 +508,6 @@ fn sign_ins(harness: agentfile::Harness) -> String {
 }
 
 // spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
-// spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
 #[test]
 fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
     golden("auth.txt", sign_ins(agentfile::Harness::Claude).as_bytes());

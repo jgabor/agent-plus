@@ -941,6 +941,11 @@ does the following on `main`:
 6. Write the [roadmap](#roadmap) and its details, with this run of the
    journey, to the open issues titled `Roadmap` and `Roadmap details`.
 
+The command has one limit for the whole run, and keeps the report's share of
+it. A step with a limit of its own stops at that limit, or at the time the run
+has left before the report's share, whichever comes first. It ends as it does at
+its own limit, and a step with no time left fails.
+
 The command's result is final. If it fails, the agent files an issue describing
 the failure, with no `auto:*` label.
 
@@ -1025,7 +1030,8 @@ passes. No scheduled work runs on GitHub.
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
 | Triage time | 06:00 local |
-| Fuzzing and mutation limit | 1 hour each |
+| Nightly limit | 110 minutes, the last 10 kept for the report |
+| Fuzzing and mutation limit | 1 hour each, or what the nightly limit leaves |
 | Memory for fuzzing, mutation, the gate's tests, and `cargo xtask run` | 8 GiB per job |
 | Lease length | 12 hours |
 | Merge timeout | 30 minutes |

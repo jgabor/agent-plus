@@ -1,8 +1,9 @@
 //! The nightly fuzz step: runs `crates/fuzz` inside its limits.
 
+use crate::limit::{self, Deadline};
 use crate::lock::Hold;
 use crate::workspace;
-use crate::{Problem, Verdict, limit};
+use crate::{Problem, Verdict};
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -13,13 +14,14 @@ const SECONDS_OVERRIDE: &str = "XTASK_FUZZ_SECONDS";
 const MARGIN: u64 = 300;
 const BUILD_SECONDS: u64 = 300;
 
-/// `None` when the workspace has no fuzzer.
-pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
+/// `None` when the workspace has no fuzzer. Each job stops at its own limit, or
+/// at `deadline`, whichever comes first.
+pub fn run(root: &Path, hold: &Hold, deadline: Deadline) -> Result<Option<Verdict>, Problem> {
     let packages = workspace::packages(root)?;
     if !packages.iter().any(|package| package.name == PACKAGE) {
         return Ok(None);
     }
-    let seconds = limit::seconds(SECONDS_OVERRIDE, SECONDS)?;
+    let own = limit::seconds(SECONDS_OVERRIDE, SECONDS)?;
     let target = root.join("target");
     let build: Vec<String> = [
         "build",
@@ -47,11 +49,12 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
             ("CC", no_compiler),
             ("CXX", no_compiler),
         ],
-        BUILD_SECONDS,
+        deadline.limit(BUILD_SECONDS)?,
     )?;
     if !built.status.success() {
         return Err(Problem("couldn't build the fuzzer".to_string()));
     }
+    let seconds = deadline.limit(own)?;
     let finished = limit::run(
         hold,
         root,

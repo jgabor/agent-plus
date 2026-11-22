@@ -43,6 +43,38 @@ const MEMORY_OVERRIDE: &str = "XTASK_MEMORY_MAX";
 /// What a job gets to wind down, once the time limit has asked it to stop.
 const STOP_SECONDS: u64 = 30;
 
+/// When the steps of a run must end, so that what comes after them keeps its
+/// share of the run's limit.
+#[derive(Clone, Copy)]
+pub struct Deadline {
+    end: Instant,
+}
+
+impl Deadline {
+    /// `seconds` from now, less the `kept` seconds that follow the steps.
+    pub fn after(seconds: u64, kept: u64) -> Deadline {
+        Deadline::from(Instant::now(), seconds, kept)
+    }
+
+    fn from(start: Instant, seconds: u64, kept: u64) -> Deadline {
+        Deadline {
+            end: start + Duration::from_secs(seconds.saturating_sub(kept)),
+        }
+    }
+
+    /// `own`, or the whole seconds left, whichever is shorter. A step that
+    /// starts with none left can't run.
+    pub fn limit(&self, own: u64) -> Result<u64, Problem> {
+        self.limit_at(Instant::now(), own)
+            .ok_or_else(|| Problem("no time is left before the night's limit".to_string()))
+    }
+
+    fn limit_at(&self, now: Instant, own: u64) -> Option<u64> {
+        let left = self.end.saturating_duration_since(now).as_secs();
+        (left > 0).then_some(own.min(left))
+    }
+}
+
 pub struct Finished {
     pub status: ExitStatus,
     pub timed_out: bool,
@@ -181,7 +213,23 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::in_user_manager;
+    use super::{Deadline, in_user_manager};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_step_gets_only_the_time_left_before_the_kept_share() {
+        let start = Instant::now();
+        let deadline = Deadline::from(start, 100, 30);
+        let at = |seconds: u64| start + Duration::from_secs(seconds);
+        assert_eq!(deadline.limit_at(at(0), 3600), Some(70));
+        assert_eq!(deadline.limit_at(at(0), 10), Some(10));
+        assert_eq!(deadline.limit_at(at(50), 3600), Some(20));
+        assert_eq!(deadline.limit_at(at(50), 20), Some(20));
+        assert_eq!(deadline.limit_at(at(69), 3600), Some(1));
+        assert_eq!(deadline.limit_at(at(70), 3600), None);
+        assert_eq!(deadline.limit_at(at(90), 3600), None);
+        assert_eq!(Deadline::from(start, 10, 30).limit_at(at(0), 5), None);
+    }
 
     #[test]
     fn only_a_process_under_a_user_manager_can_inherit_its_slice() {

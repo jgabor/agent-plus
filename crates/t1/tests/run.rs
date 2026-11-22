@@ -992,10 +992,12 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
             .unwrap(),
     );
     let status = wait_within(&mut stop, Duration::from_secs(30));
+    let (mut stdout, mut stderr) = (stop.0.stdout.take().unwrap(), stop.0.stderr.take().unwrap());
     let mut printed = String::new();
-    stop.0.stdout.take().unwrap().read_to_string(&mut printed).unwrap();
-    stop.0.stderr.take().unwrap().read_to_string(&mut printed).unwrap();
-    assert_eq!((status.code(), printed.as_str()), (Some(0), ""), "{status:?}");
+    stdout.read_to_string(&mut printed).unwrap();
+    stderr.read_to_string(&mut printed).unwrap();
+    assert_eq!(status.code(), Some(0), "{printed}");
+    assert_eq!(printed, "", "{status:?}");
     assert!(!running(vm), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");

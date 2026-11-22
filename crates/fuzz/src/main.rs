@@ -1149,9 +1149,8 @@ fn fuse_rw_base() -> PathBuf {
 /// `served` in it, which a test moves to stand in for a server that
 /// escaped it.
 fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
-    let base = base.to_path_buf();
-    let _ = fs::remove_dir_all(&base);
-    let _tree = Tree(base.clone());
+    let _ = fs::remove_dir_all(base);
+    let _tree = Tree(base);
     let root = base.join("root");
     fs::create_dir_all(root.join("dir")).expect("the fuzz tree");
     fs::create_dir_all(root.join(".git/hooks")).expect("the fuzz tree");
@@ -1176,7 +1175,7 @@ fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
     let answered = fuse_answers(&mut server, input);
     // The guest may change the mode of any other directory, so the check
     // reaches past it.
-    reach(&base, &kept);
+    reach(base, &kept);
     for name in PROTECTED {
         let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
         let found = fs::read(base.join(name)).ok();
@@ -1187,7 +1186,7 @@ fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
         );
     }
     for (path, before) in kept.iter().zip(modes) {
-        let name = path.strip_prefix(&base).expect("the fuzz tree").display();
+        let name = path.strip_prefix(base).expect("the fuzz tree").display();
         assert_eq!(mode(path), before, "{name}'s mode changed: {input:?}");
     }
     let names = |dir: &Path| -> Vec<_> {
@@ -1199,7 +1198,7 @@ fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
         names
     };
     assert_eq!(
-        names(&base),
+        names(base),
         ["outside", "root"],
         "a file beside the root: {input:?}"
     );
@@ -1213,12 +1212,12 @@ fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
 
 /// A tree of [`fuse_rw_input`]'s, which it removes when it drops, even
 /// after a panic, whatever modes the guest set in it.
-struct Tree(PathBuf);
+struct Tree<'a>(&'a Path);
 
-impl Drop for Tree {
+impl Drop for Tree<'_> {
     fn drop(&mut self) {
-        reach(&self.0, &[]);
-        let _ = fs::remove_dir_all(&self.0);
+        reach(self.0, &[]);
+        let _ = fs::remove_dir_all(self.0);
     }
 }
 
@@ -1576,7 +1575,9 @@ mod tests {
         let input = format!("1 1 root\n1 2 hello.txt\n4 3 {LOCK}\n4 2 {LOCK}\n4 1 {LOCK}\n");
         let base = fuse_rw_base();
         let run = panic::catch_unwind(|| fuse_rw_input_at(&input, ".", &base));
-        assert!(run.is_err(), "the input passed");
+        let failure = run.expect_err("the input passed");
+        let message = failure.downcast_ref::<String>().expect("a message");
+        assert!(message.contains("outside/secret changed"), "{message}");
         assert!(!base.exists(), "the tree stayed");
     }
 

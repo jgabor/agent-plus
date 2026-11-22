@@ -434,7 +434,8 @@ fn floor_auth_key() {
         .unwrap();
     assert!(report.starts_with("{\"arguments\":"), "{report}");
     assert!(!report.contains(VALUE), "{report}");
-    // The harness starts with the placeholder.
+    // The harness starts with the placeholder, in the variable Claude Code
+    // signs in with.
     let placeholder = reported(&report, "ANTHROPIC_API_KEY").to_owned();
     assert_eq!(placeholder.len(), 32, "{report}");
     assert_ne!(placeholder, VALUE);

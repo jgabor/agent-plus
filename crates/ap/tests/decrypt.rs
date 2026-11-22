@@ -1214,7 +1214,6 @@ fn a_key_s_host_takes_only_the_requests_that_carry_its_placeholder() {
     assert!(seen[0].starts_with("POST /path?"), "{seen:?}");
 }
 
-// spec(NETWORK): With `AUTH key`, the proxy allows only requests that carry the key's placeholder on the key's hosts.
 #[test]
 fn a_key_s_host_gets_no_udp() {
     let echo = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

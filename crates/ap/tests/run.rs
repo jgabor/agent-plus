@@ -328,8 +328,6 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
 }
 
 // spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
-// spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
-// spec(SECRET): A missing value makes the run fail, and the error names the secret.
 #[test]
 fn auth_key_and_token_need_their_variable_before_the_vm_starts() {
     let scratch = Scratch::new("auth");

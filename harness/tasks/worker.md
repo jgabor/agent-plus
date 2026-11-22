@@ -30,7 +30,8 @@ can't continue alone, park the issue as AGENTS.md says.
    works, and say in the PR which one ran:
 
    ```json
-   {"providerInstanceId": "acpRegistry_factory_droid", "model": "gpt-6.2-sol"}
+   {"providerInstanceId": "acpRegistry_factory_droid", "model": "gemini-4-neon",
+    "options": {"reasoning_effort": "high"}}
    ```
 
    ```json

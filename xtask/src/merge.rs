@@ -316,8 +316,9 @@ fn sequence(
 fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
     let directory = bench::temp_outside(root)?.join(format!("xtask-checks-{}", repository(root)?));
     let tree = Tree::at(root, directory.join("tree"), main)?;
-    let program = build_xtask(&tree.path, &directory.join("target"))?;
+    let built = build_xtask(&tree.path, &directory.join("target"))?;
     drop(tree);
+    let program = keep(&directory.join("bin"), &built, main)?;
     let problem = process::Command::new(program)
         .args(env::args_os().skip(1))
         .current_dir(root)
@@ -330,6 +331,48 @@ fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
     Err(Problem(format!(
         "couldn't run the xtask of `main`: {problem}"
     )))
+}
+
+/// A copy of the xtask built from `main`, named by that commit, which no later
+/// build replaces. The next merge builds in the same target while this one
+/// runs, and the checks run this program again by its path. The caller holds
+/// the merge slot, so nothing else writes here, and the slot is let go only
+/// once the copy runs.
+fn keep(bin: &Path, built: &Path, main: &str) -> Result<PathBuf, Problem> {
+    let problem = |e: io::Error| Problem(format!("couldn't keep {}: {e}", built.display()));
+    fs::create_dir_all(bin).map_err(problem)?;
+    sweep_kept(bin);
+    let kept = bin.join(main);
+    if !kept.exists() {
+        let partial = bin.join(format!("{main}.{}", process::id()));
+        fs::copy(built, &partial).map_err(problem)?;
+        fs::rename(&partial, &kept).map_err(problem)?;
+    }
+    Ok(kept)
+}
+
+/// Removes the copies that no process runs, which a run leaves when it ends.
+/// It sees only the processes of its own PID namespace. Where the processes
+/// can't be listed, as on macOS, it keeps them all.
+fn sweep_kept(bin: &Path) {
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return;
+    };
+    let running: Vec<(u64, u64)> = processes
+        .filter_map(|entry| fs::metadata(entry.ok()?.path().join("exe")).ok())
+        .map(|m| (m.dev(), m.ino()))
+        .collect();
+    let Ok(entries) = fs::read_dir(bin) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(copy) = entry.metadata() else {
+            continue;
+        };
+        if !running.contains(&(copy.dev(), copy.ino())) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Builds the xtask of a tree, and says where it is. A build shares the
@@ -1331,9 +1374,12 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 #[cfg(test)]
 mod tests {
     use super::{
-        GOING, SLOT, TREE_PATH, WAITING, acceptance, acceptances, left_after, long, unapproved,
+        GOING, SLOT, TREE_PATH, WAITING, acceptance, acceptances, keep, left_after, long,
+        unapproved,
     };
+    use std::fs;
     use std::path::Path;
+    use std::process::{Command, Stdio};
     use std::time::Duration;
 
     #[test]
@@ -1438,5 +1484,41 @@ mod tests {
             path,
             Path::new(&deep).join("xtask-merge-0123456789abcdef-9")
         );
+    }
+
+    /// A copy stays while a process runs it, and goes once none does.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_kept_xtask_stays_while_it_runs() {
+        let bin = std::env::temp_dir().join(format!("xtask-kept-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&bin);
+        let running = keep(&bin, Path::new("/bin/sh"), "running").unwrap();
+        let spawn = || {
+            Command::new(&running)
+                .args(["-c", "read line"])
+                .stdin(Stdio::piped())
+                .spawn()
+        };
+        // Another test that forks while the copy is open for writing makes
+        // it busy until that child runs its program.
+        let mut tries = 0;
+        let mut child = loop {
+            match spawn() {
+                Err(e) if e.raw_os_error() == Some(26) && tries < 1000 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                spawned => break spawned.unwrap(),
+            }
+        };
+        let idle = keep(&bin, Path::new("/bin/sh"), "idle").unwrap();
+        let kept = keep(&bin, Path::new("/bin/sh"), "next").unwrap();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+
+        assert!(running.is_file());
+        assert!(!idle.exists());
+        assert!(kept.is_file());
+        fs::remove_dir_all(&bin).unwrap();
     }
 }

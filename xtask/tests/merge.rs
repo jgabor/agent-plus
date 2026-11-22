@@ -4146,6 +4146,26 @@ fn a_merge_builds_the_xtask_of_main_again_if_main_moves() {
     repo.origin(&["merge-base", "--is-ancestor", &later, &repo.head()]);
 }
 
+/// Another merge builds the xtask of `main` in the same place while this one
+/// runs its checks, and this one goes on running its own.
+#[test]
+fn a_merge_keeps_its_xtask_of_main_while_another_builds_one() {
+    let repo = Repo::new("checks-shared");
+    repo.forget_calls();
+    let other =
+        "cargo build --quiet --package xtask --target-dir \"$TMPDIR\"/xtask-checks-*/target";
+    let output = repo.merge_running("cargo tree", other);
+
+    assert_merged(&repo, &output);
+    assert_eq!(builds(&repo), 2, "{}", repo.calls());
+    let kept: Vec<_> = fs::read_dir(&repo.temp)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.join("target/debug/xtask").is_file() && path.join("bin").is_dir())
+        .collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+}
+
 /// The xtask that a revert puts back was measured already, and may not know
 /// how to `prove`.
 #[test]

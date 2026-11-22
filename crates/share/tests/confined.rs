@@ -105,6 +105,12 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     }
     assert_eq!(guest.remove(RMDIR, 1, b"made"), 0);
     assert_eq!(guest.create(1, b"Agentfile", 0), Err(EPERM));
+    // A directory the host moves outside the root is gone, and the server
+    // finds that out within its filter.
+    let away = guest.mkdir(1, b"away").unwrap();
+    fs::rename(root.join("away"), tree.base.join("outside/away")).unwrap();
+    assert_eq!(guest.create(away, b"planted", 0), Err(ENOENT));
+    assert!(!tree.base.join("outside/away/planted").exists());
 
     // The `ro` share, beside it, refuses every write, and still locks.
     let (error, entry) = guest.call_share(1, LOOKUP, 1, b"hello.txt\0");

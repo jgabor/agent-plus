@@ -189,7 +189,7 @@ fn merge_if_armed(
     let now = gh.armed(number)?;
     // GitHub's own auto-merge can get there first, and then GitHub closes
     // the PR's issues itself.
-    let mut squashed = false;
+    let mut close = false;
     if now.state != "MERGED" {
         if now.state != "OPEN" {
             return Ok(Some(format!("it is {}", now.state)));
@@ -210,20 +210,22 @@ fn merge_if_armed(
         if read.closing_issues != pr.closing_issues {
             return Ok(Some("the issue it closes changed".to_string()));
         }
-        match gh.merge_pr(number, head, &slot) {
-            Ok(()) => squashed = true,
-            Err(problem) => {
-                if gh.armed(number)?.state != "MERGED" {
-                    return Err(problem);
-                }
-            }
+        if let Err(problem) = gh.merge_pr(number, head, &slot)
+            && gh.armed(number)?.state != "MERGED"
+        {
+            return Err(problem);
         }
         println!("refresh: PR {number} merged at {head}");
+        // `gh` doesn't say whose merge landed the PR. It succeeds when
+        // GitHub's auto-merge got there during the call, and it can fail
+        // after its own squash. So the issues are closed either way, and one
+        // that GitHub closed stays as it is.
+        close = true;
     }
     // A merge with the workflow's token starts no `mirror-labels` run.
     remove_land_needed(gh, pr)?;
     // Nor does GitHub close the issues of a PR that such a merge lands.
-    if squashed {
+    if close {
         for number in &pr.closing_issues {
             gh.close_issue(*number)?;
         }

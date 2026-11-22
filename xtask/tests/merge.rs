@@ -391,7 +391,8 @@ maybe_kill before
     cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
-    if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi ;;
+    if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi
+    if [ -f '{bin}/merge-fails-late' ]; then echo 'no branch to delete' >&2; exit 1; fi ;;
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") case "$4" in */labels*) n="${{4%/labels*}}"; n="${{n##*/}}"
       if [ -f "{bin}/refuse-label-$n" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
@@ -3595,6 +3596,30 @@ fn a_refresh_merges_no_green_pr_that_came_to_close_another_issue() {
     assert!(!calls.contains("gh pr merge"), "{calls}");
     assert!(!calls.contains("-X DELETE"), "{calls}");
     assert!(!calls.contains("-X PATCH"), "{calls}");
+}
+
+/// `gh pr merge` can fail after its squash, as when it can't delete the
+/// branch. The PR merged all the same, so its issue is closed.
+#[test]
+fn a_refresh_closes_the_issue_when_gh_fails_after_its_squash() {
+    let repo = Repo::new("refresh-late-failure");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    fs::write(repo.bin.join("merge-fails-late"), "").unwrap();
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    let (unlabel, close) = (calls.find(&unlabeled(7)), calls.find(&closed(7)));
+    assert!(unlabel.is_some() && unlabel < close, "{calls}");
 }
 
 /// Each merge moves `main`, so a PR that was green on the old one is proven

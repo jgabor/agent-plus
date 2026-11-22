@@ -720,6 +720,13 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let (config, _) = guest.lookup(later, b"config").unwrap();
     assert_eq!(guest.open(config, O_WRONLY), Err(EPERM));
     assert_eq!(guest.create(later, b"config.worktree", 0), Err(EPERM));
+    // A root whose entries can't be looked for counts as one.
+    fs::create_dir(root.join("shut")).unwrap();
+    let mut shut = Guest::with(&root.join("shut"), Mode::ReadWrite);
+    fs::set_permissions(root.join("shut"), fs::Permissions::from_mode(0o600)).unwrap();
+    let refused = shut.remove(UNLINK, 1, b"HEAD");
+    fs::set_permissions(root.join("shut"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(refused, EPERM);
     // So is a root that is one, or that is beneath one.
     let mut bare = Guest::with(&root.join("repo.git"), Mode::ReadWrite);
     assert_eq!(bare.overwrite("config", b"agent"), Err(EPERM));

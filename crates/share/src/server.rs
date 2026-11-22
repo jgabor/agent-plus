@@ -264,13 +264,15 @@ fn bare(holds: impl Fn(&CStr) -> bool) -> bool {
     holds(c"HEAD") && (holds(c"commondir") || holds(c"objects") && holds(c"refs"))
 }
 
-/// Whether `directory` holds the entry `name`, of any kind.
+/// Whether `directory` holds the entry `name`, of any kind. An entry that
+/// can't be looked for counts as held.
 fn holds(directory: BorrowedFd, name: &CStr) -> bool {
-    sys::open_beneath(directory, name, libc::O_PATH | libc::O_NOFOLLOW).is_ok()
+    let found = sys::open_beneath(directory, name, libc::O_PATH | libc::O_NOFOLLOW);
+    !matches!(found, Err(error) if error.raw_os_error() == Some(libc::ENOENT))
 }
 
-/// The names of the entries in `directory`, folded, or `None` if it can't
-/// be listed.
+/// Which of the entries git finds a bare repository by `directory` holds,
+/// folded, or `None` if it can't be listed.
 fn folded_entries(directory: BorrowedFd) -> Option<BTreeSet<String>> {
     let flags = libc::O_RDONLY | libc::O_DIRECTORY;
     let fd = sys::open_beneath(directory, c".", flags).ok()?;
@@ -289,7 +291,10 @@ fn folded_entries(directory: BorrowedFd) -> Option<BTreeSet<String>> {
             let record = usize::from(u16::from_le_bytes([raw[at + 16], raw[at + 17]]));
             let name = raw.get(at + 19..at + record)?;
             let name = CStr::from_bytes_until_nul(name).ok()?;
-            names.insert(fold(name.to_bytes()).unwrap_or_default());
+            let name = fold(name.to_bytes()).unwrap_or_default();
+            if BARE.contains(&name.as_str()) {
+                names.insert(name);
+            }
             at += record;
         }
     }

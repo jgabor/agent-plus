@@ -12,7 +12,7 @@ use rustls::server::Acceptor;
 /// it is known what the connection carries.
 const HEAD_LIMIT: usize = 64 * 1024;
 /// The most headers a request head, or a body's trailers, may have.
-const HEADERS: usize = 128;
+pub(crate) const HEADERS: usize = 128;
 
 /// Reads what the guest sends on one connection, and passes the bytes on
 /// once they agree with the name.
@@ -21,6 +21,8 @@ pub struct NameCheck {
     /// Bytes read and not yet passed.
     held: Vec<u8>,
     state: State,
+    /// A request whose `Host` names another host passes.
+    any_host: bool,
 }
 
 /// The connection showed a name that disagrees, or bytes that can't be
@@ -63,6 +65,7 @@ impl NameCheck {
             name: normal(name.as_bytes()),
             held: Vec::new(),
             state: State::First,
+            any_host: false,
         }
     }
 
@@ -73,6 +76,17 @@ impl NameCheck {
         NameCheck {
             state: State::Http(Http::Head),
             ..NameCheck::new(name)
+        }
+    }
+
+    /// A check for a connection to `name` that the proxy decrypts to put a
+    /// hidden secret's value in, which reads only HTTP, as
+    /// [`NameCheck::requests`] does. A request whose `Host` names another
+    /// host passes too.
+    pub fn injecting(name: &str) -> NameCheck {
+        NameCheck {
+            any_host: true,
+            ..NameCheck::requests(name)
         }
     }
 
@@ -91,8 +105,22 @@ impl NameCheck {
         out: &mut Vec<u8>,
         allows: &mut dyn FnMut(&str) -> bool,
     ) -> Result<(), Refused> {
+        self.feed_rewriting(input, out, allows, &mut |head, out| {
+            out.extend_from_slice(head)
+        })
+    }
+
+    /// Takes `input` as [`NameCheck::feed_deciding`] does, and passes each
+    /// request head through `rewrite`, which adds what passes to `out`.
+    pub fn feed_rewriting(
+        &mut self,
+        input: &[u8],
+        out: &mut Vec<u8>,
+        allows: &mut dyn FnMut(&str) -> bool,
+        rewrite: &mut dyn FnMut(&[u8], &mut Vec<u8>),
+    ) -> Result<(), Refused> {
         self.held.extend_from_slice(input);
-        let fed = self.read(out, allows);
+        let fed = self.read(out, allows, rewrite);
         if fed.is_err() {
             self.state = State::Refused;
             self.held = Vec::new();
@@ -105,7 +133,9 @@ impl NameCheck {
         &mut self,
         out: &mut Vec<u8>,
         allows: &mut dyn FnMut(&str) -> bool,
+        rewrite: &mut dyn FnMut(&[u8], &mut Vec<u8>),
     ) -> Result<(), Refused> {
+        let host = (!self.any_host).then_some(&*self.name);
         loop {
             let moved = match &mut self.state {
                 State::Passing => {
@@ -127,9 +157,13 @@ impl NameCheck {
                     }
                     agreed
                 }
-                State::Http(http) => match request(*http, &self.name, &self.held, allows)? {
+                State::Http(http) => match request(*http, host, &self.held, allows)? {
                     Some((taken, next)) => {
-                        out.extend(self.held.drain(..taken));
+                        match *http {
+                            Http::Head => rewrite(&self.held[..taken], out),
+                            _ => out.extend_from_slice(&self.held[..taken]),
+                        }
+                        self.held.drain(..taken);
                         self.state = next;
                         true
                     }
@@ -231,7 +265,7 @@ fn hello(
 /// what comes after them, or `None` if more must come.
 fn request(
     http: Http,
-    name: &str,
+    name: Option<&str>,
     held: &[u8],
     allows: &mut dyn FnMut(&str) -> bool,
 ) -> Result<Option<(usize, State)>, Refused> {
@@ -293,12 +327,12 @@ fn request(
     }
 }
 
-/// What follows a request whose head is `parsed`, if its `Host` agrees
-/// with `name`, the server would read its body as this reads it, and
-/// `allows` allows its target.
+/// What follows a request whose head is `parsed`, if its `Host` names
+/// `name`, or `name` is `None`, the server would read its body as this
+/// reads it, and `allows` allows its target.
 fn head(
     parsed: &httparse::Request,
-    name: &str,
+    name: Option<&str>,
     allows: &mut dyn FnMut(&str) -> bool,
 ) -> Result<State, Refused> {
     // An absolute target names a host of its own, and CONNECT opens a
@@ -317,7 +351,7 @@ fn head(
     };
     let mut hosts = named("host");
     match (hosts.next(), hosts.next()) {
-        (Some(host), None) if host_name(host) == Some(name.to_owned()) => {}
+        (Some(host), None) if name.is_none_or(|name| host_name(host).as_deref() == Some(name)) => {}
         _ => return Err(Refused),
     }
     let mut encodings = named("transfer-encoding");
@@ -352,7 +386,7 @@ fn head(
 
 /// The name in a `Host` header's value, without its port, or `None` if the
 /// value isn't a name.
-fn host_name(value: &[u8]) -> Option<String> {
+pub(crate) fn host_name(value: &[u8]) -> Option<String> {
     let (name, port) = match value.iter().rposition(|&byte| byte == b':') {
         Some(at) => (&value[..at], Some(&value[at + 1..])),
         None => (value, None),

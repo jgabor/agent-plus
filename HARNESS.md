@@ -814,8 +814,9 @@ started.
    changes. Any other PR stays open. A merge moves `main`, so the PRs after it
    are checked against the new `main`. After the squash, `refresh` removes
    `land-needed` from the PR and its issue, because GitHub starts no workflow
-   for a merge made with the workflow's own token. Then it closes that issue,
-   which GitHub leaves open after such a merge.
+   for a merge made with the workflow's own token. Then it closes the issue as
+   completed, which GitHub leaves open after such a merge. It closes the one the
+   PR named just before the squash.
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
    and says why. If it ended with neither a `success` nor a `failure` on the
    PR's head, as at the merge timeout, `refresh` posts `failure` as `Not

@@ -2823,18 +2823,22 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     for number in [5, 8, 9, 7] {
         assert!(merged_five < at(&unlabeled(number)), "{calls}");
     }
-    // Nor does GitHub close the issue of a PR that the workflow merged.
+    // Nor does GitHub close the issue of a PR that the workflow merged. No
+    // other issue is closed, or changed in any other way.
     for issue in [8, 7] {
         assert!(at(&unlabeled(issue)) < at(&closed(issue)), "{calls}");
     }
+    let to_issues: String = calls
+        .lines()
+        .filter(|call| call.contains("/issues/") && !call.contains("/labels"))
+        .map(|call| format!("{call}\n"))
+        .collect();
+    assert_eq!(to_issues, closed(8) + &closed(7), "{calls}");
     for (number, branch, head) in [(6, "2-z", &before[2]), (4, "6-up", &before[3])] {
         assert_eq!(&repo.head_of(branch), head);
         assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
         assert!(!calls.contains(&format!("gh pr merge {number}")), "{calls}");
         assert!(!calls.contains(&unlabeled(number)), "{calls}");
-    }
-    for issue in [2, 6] {
-        assert!(!calls.contains(&closed(issue)), "{calls}");
     }
     assert!(!calls.contains("pr comment"), "{calls}");
     let out = stdout(&output);

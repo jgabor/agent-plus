@@ -325,6 +325,17 @@ impl Gh {
         Ok(())
     }
 
+    /// Closes an issue as completed. One that is closed already stays so.
+    pub fn close_issue(&self, number: u64) -> Result<(), Problem> {
+        let path = format!("{ISSUES}/{number}");
+        let fields = ["state=closed", "state_reason=completed"];
+        let args = [
+            "api", "-X", "PATCH", &path, "-f", fields[0], "-f", fields[1],
+        ];
+        self.text(&args, None)?;
+        Ok(())
+    }
+
     /// Sets a status on a commit. `said` is its description, of which GitHub
     /// takes 140 characters, and `link` is the page it leads to.
     pub fn post_status(

@@ -187,7 +187,9 @@ fn merge_if_armed(
     let number = pr.number;
     let slot = lock::merge_slot(root)?;
     let now = gh.armed(number)?;
-    // GitHub's own auto-merge can get there first.
+    // GitHub's own auto-merge can get there first, and then GitHub closes
+    // the PR's issues itself.
+    let mut close = false;
     if now.state != "MERGED" {
         if now.state != "OPEN" {
             return Ok(Some(format!("it is {}", now.state)));
@@ -198,9 +200,15 @@ fn merge_if_armed(
         if now.head != head {
             return Ok(Some(format!("its head moved from {head} to {}", now.head)));
         }
+        let read = gh.pull_request(number)?;
         // A green from an earlier proof can predate the review.
-        if gh.pull_request(number)?.changes_requested {
+        if read.changes_requested {
             return Ok(Some("a review of it requested changes".to_string()));
+        }
+        // The label goes from the issues this run listed, and they are the
+        // ones to close.
+        if read.closing_issues != pr.closing_issues {
+            return Ok(Some("the issue it closes changed".to_string()));
         }
         if let Err(problem) = gh.merge_pr(number, head, &slot)
             && gh.armed(number)?.state != "MERGED"
@@ -208,9 +216,20 @@ fn merge_if_armed(
             return Err(problem);
         }
         println!("refresh: PR {number} merged at {head}");
+        // `gh` doesn't say whose merge landed the PR. It succeeds when
+        // GitHub's auto-merge got there during the call, and it can fail
+        // after its own squash. So the issues are closed either way, and one
+        // that GitHub closed stays as it is.
+        close = true;
     }
     // A merge with the workflow's token starts no `mirror-labels` run.
     remove_land_needed(gh, pr)?;
+    // Nor does GitHub close the issues of a PR that such a merge lands.
+    if close {
+        for number in &pr.closing_issues {
+            gh.close_issue(*number)?;
+        }
+    }
     Ok(None)
 }
 

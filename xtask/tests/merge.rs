@@ -391,11 +391,13 @@ maybe_kill before
     cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
-    if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi ;;
+    if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi
+    if [ -f '{bin}/merge-fails-late' ]; then echo 'no branch to delete' >&2; exit 1; fi ;;
   "issue view") cat '{bin}/issue.json' ;;
   "api -X") case "$4" in */labels*) n="${{4%/labels*}}"; n="${{n##*/}}"
       if [ -f "{bin}/refuse-label-$n" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
-      exit 0 ;; esac
+      exit 0 ;;
+      */issues/*) exit 0 ;; esac
     if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
@@ -2645,6 +2647,13 @@ fn merged(number: u64, head: &str) -> String {
     format!("gh pr merge {number} -R o/r --squash --delete-branch --match-head-commit {head}")
 }
 
+/// The call that closes an issue as completed.
+fn closed(number: u64) -> String {
+    format!(
+        "gh api -X PATCH repos/{{owner}}/{{repo}}/issues/{number} -f state=closed -f state_reason=completed\n"
+    )
+}
+
 fn unlabeled(number: u64) -> String {
     format!("gh api -X DELETE repos/{{owner}}/{{repo}}/issues/{number}/labels/land-needed")
 }
@@ -2815,6 +2824,17 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     for number in [5, 8, 9, 7] {
         assert!(merged_five < at(&unlabeled(number)), "{calls}");
     }
+    // Nor does GitHub close the issue of a PR that the workflow merged. No
+    // other issue is closed, or changed in any other way.
+    for issue in [8, 7] {
+        assert!(at(&unlabeled(issue)) < at(&closed(issue)), "{calls}");
+    }
+    let to_issues: String = calls
+        .lines()
+        .filter(|call| call.contains("/issues/") && !call.contains("/labels"))
+        .map(|call| format!("{call}\n"))
+        .collect();
+    assert_eq!(to_issues, closed(8) + &closed(7), "{calls}");
     for (number, branch, head) in [(6, "2-z", &before[2]), (4, "6-up", &before[3])] {
         assert_eq!(&repo.head_of(branch), head);
         assert!(!calls.contains(&format!("statuses/{head}")), "{calls}");
@@ -3542,6 +3562,64 @@ fn a_refresh_merges_no_green_pr_that_a_review_asked_to_change() {
         stdout(&output)
     );
     assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+}
+
+/// The label goes from the issue that this run listed the PR with, and that
+/// is the issue to close. A PR that has come to close another one waits for a
+/// run that lists it so.
+#[test]
+fn a_refresh_merges_no_green_pr_that_came_to_close_another_issue() {
+    let repo = Repo::new("refresh-issue-changed");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_pr(&Pr {
+        closes: &[8],
+        ..Pr::default()
+    });
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(
+        stdout(&output).contains("the issue it closes changed"),
+        "{}",
+        stdout(&output)
+    );
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    assert!(!calls.contains("-X DELETE"), "{calls}");
+    assert!(!calls.contains("-X PATCH"), "{calls}");
+}
+
+/// `gh pr merge` can fail after its squash, as when it can't delete the
+/// branch. The PR merged all the same, so its issue is closed.
+#[test]
+fn a_refresh_closes_the_issue_when_gh_fails_after_its_squash() {
+    let repo = Repo::new("refresh-late-failure");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    fs::write(repo.bin.join("merge-fails-late"), "").unwrap();
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    let (unlabel, close) = (calls.find(&unlabeled(7)), calls.find(&closed(7)));
+    assert!(unlabel.is_some() && unlabel < close, "{calls}");
 }
 
 /// Each merge moves `main`, so a PR that was green on the old one is proven

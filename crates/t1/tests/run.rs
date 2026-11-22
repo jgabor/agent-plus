@@ -1487,8 +1487,8 @@ fn holds_hidden_value(pid: u32) -> bool {
     (environment.windows(HIDDEN_VALUE.len())).any(|window| window == HIDDEN_VALUE.as_bytes())
 }
 
-// #608: the share server and the cleanup process, like the run process,
-// start without a hidden secret's variable.
+// #608: the share server, the cleanup process, and the network process,
+// like the run process, start without a hidden secret's variable.
 #[test]
 fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable() {
     let scratch = Scratch::new("secret-share");
@@ -1502,7 +1502,7 @@ fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable(
     let ap_run = run.0.id();
     // `ap run` itself reads the value from its environment.
     assert!(holds_hidden_value(ap_run), "the test passed no value");
-    for program in ["ap-share-server", "ap-run-cleanup"] {
+    for program in ["ap-share-server", "ap-run-cleanup", "ap-network"] {
         let pid = started_as(ap_run, format!("{program}\0").as_bytes());
         assert!(!holds_hidden_value(pid), "{program} holds the hidden value");
     }

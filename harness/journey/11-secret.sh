@@ -191,16 +191,17 @@ printf '%s\r\n' "GET /bound?key=$placeholder HTTP/1.1" \
 printf '%s\r\n' "GET /other?key=$placeholder HTTP/1.1" \
   'Host: other.example' "Authorization: Bearer $placeholder" \
   "X-Other: $placeholder" '' >other.expected
-for request in bound other; do
-  eval "kept=\$$request"
-  if ! cmp -s "$kept" "$request.expected"; then
-    echo "the $request request should have reached the upstream as:" >&2
-    sed "s/$cr\$//" "$request.expected" >&2
+kept() {
+  if ! cmp -s "$2" "$1.expected"; then
+    echo "the $1 request should have reached the upstream as:" >&2
+    sed "s/$cr\$//" "$1.expected" >&2
     echo "but reached it as:" >&2
-    sed "s/$cr\$//" "$kept" >&2
+    sed "s/$cr\$//" "$2" >&2
     exit 1
   fi
-done
+}
+kept bound "$bound"
+kept other "$other"
 
 # Without the secret's value in the environment, the run fails before the
 # harness starts, and the error names the secret.

@@ -2111,8 +2111,9 @@ fn runtime(line: &str) -> u64 {
     value.parse().unwrap()
 }
 
-/// The night keeps 600 seconds for the report, so a night of 900 leaves the
-/// steps at most 300 between them, however long the steps before took.
+/// The night keeps 600 seconds for the report, so a night of 800 leaves the
+/// steps at most 200 between them, however long the steps before took. That's
+/// shorter than the fuzzer's build gets on its own.
 #[test]
 fn a_step_gets_only_the_time_the_night_has_left() {
     let repo = with_fuzz(
@@ -2124,7 +2125,7 @@ fn a_step_gets_only_the_time_the_night_has_left() {
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .arg("nightly")
-        .env("XTASK_NIGHTLY_SECONDS", "900")
+        .env("XTASK_NIGHTLY_SECONDS", "800")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -2141,13 +2142,40 @@ fn a_step_gets_only_the_time_the_night_has_left() {
     let build = runtime(line("-- cargo build --release"));
     let fuzz = runtime(line("/release/fuzz "));
     let mutation = runtime(line("-- cargo mutants "));
-    assert!(0 < build && build <= 300, "{calls}");
-    assert!(0 < fuzz && fuzz <= 300, "{calls}");
+    assert!(0 < build && build <= 200, "{calls}");
+    assert!(0 < fuzz && fuzz <= build, "{calls}");
     assert!(0 < mutation && mutation <= fuzz, "{calls}");
     // The fuzzer stops on its own before the shorter limit, as it does before
     // its own.
     let ran = fs::read_to_string(repo.root.join("target/fuzz-seconds")).unwrap();
     assert_eq!(ran, (fuzz - fuzz / 2).to_string(), "{calls}");
+}
+
+/// A night of 600 seconds is all the report's, so a step with a limit of its
+/// own has no time left. It fails without starting, and the report still goes.
+#[test]
+fn a_step_with_no_time_left_fails_and_the_report_goes_out() {
+    let repo = with_fuzz("night-over", "fn main() {}\n");
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .env("XTASK_NIGHTLY_SECONDS", "600")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("no time is left before the night's limit"),
+        "{}",
+        stderr(&output)
+    );
+    let comment = repo.comment();
+    assert!(comment.contains("- fail fuzz\n"), "{comment}");
+    assert!(comment.contains("- fail mutation\n"), "{comment}");
+    let calls = repo.read_bin("systemd-calls");
+    assert!(!calls.contains("RuntimeMaxSec="), "{calls}");
+    assert!(!repo.bin.join("mutants-calls").exists());
 }
 
 #[test]

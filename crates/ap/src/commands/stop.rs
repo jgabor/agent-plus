@@ -54,7 +54,7 @@ fn stop(name: &str) -> Result<(), String> {
         // The path names the open directory, so it must stay open.
         let opened = File::open(&dir)?;
         let mut stream = UnixStream::connect(runs::short_path(&opened, &runs::socket_name(name)))?;
-        resume(&stream)?;
+        resume(&stream);
         runs::send_stop(&mut stream)?;
         io::copy(&mut stream, &mut io::sink())
     };
@@ -68,8 +68,9 @@ fn stop(name: &str) -> Result<(), String> {
 
 /// Resumes the `ap run` that serves the socket at the other end of
 /// `stream`, in case it is suspended. The kernel names the process that
-/// listens on the socket, and `SIGCONT` does nothing to one that runs.
-fn resume(stream: &UnixStream) -> io::Result<()> {
+/// listens on the socket, and `SIGCONT` does nothing to one that runs, so a
+/// failure here holds back no stop that would reach the run anyway.
+fn resume(stream: &UnixStream) {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -87,12 +88,9 @@ fn resume(stream: &UnixStream) -> io::Result<()> {
             &mut length,
         )
     };
-    if read != 0 {
-        return Err(io::Error::last_os_error());
+    // A listener in another process namespace has no process id here.
+    if read == 0 && credentials.pid > 0 {
+        // SAFETY: `kill` takes and returns plain integers.
+        unsafe { libc::kill(credentials.pid, libc::SIGCONT) };
     }
-    // SAFETY: `kill` takes and returns plain integers.
-    if credentials.pid > 0 && unsafe { libc::kill(credentials.pid, libc::SIGCONT) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }

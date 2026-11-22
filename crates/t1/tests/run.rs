@@ -974,6 +974,11 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
     // As Ctrl-Z would. The run process goes on, in a process group of its
     // own, but the run's socket is served by `ap run`.
     signal("-STOP", run.0.id());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !stopped(run.0.id()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(stopped(run.0.id()), "ap run didn't stop");
     let mut stop = Started(
         Command::new(&shared().0)
             .args(["stop", &name])
@@ -987,11 +992,22 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
             .unwrap(),
     );
     let status = wait_within(&mut stop, Duration::from_secs(30));
-    assert_eq!(status.code(), Some(0), "{status:?}");
+    let mut printed = String::new();
+    stop.0.stdout.take().unwrap().read_to_string(&mut printed).unwrap();
+    stop.0.stderr.take().unwrap().read_to_string(&mut printed).unwrap();
+    assert_eq!((status.code(), printed.as_str()), (Some(0), ""), "{status:?}");
     assert!(!running(vm), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");
     assert_eq!(scratch.ps(), Vec::<String>::new());
+}
+
+/// Whether the process `pid` is stopped, as by `SIGSTOP`.
+fn stopped(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ")?.1.chars().next())
+        == Some('T')
 }
 
 /// Sends `signal` to the process `pid`, which this test started.

@@ -149,6 +149,21 @@ fn the_state_marks_onboarding_done() {
     }
 }
 
+// spec(Run): The Claude Code adapter marks `/` as trusted (`projects["/"].hasTrustDialogAccepted` in `~/.claude.json`), so an interactive run whose working directory isn't in a git repository doesn't ask whether to trust it.
+#[test]
+fn the_state_trusts_the_root_directory() {
+    for mode in MODES {
+        let state = String::from_utf8(file(&[], mode, claude::STATE).unwrap()).unwrap();
+        assert!(
+            state.contains(
+                "\"projects\": {\n    \"/\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }"
+            ),
+            "{}: {state}",
+            mode_name(mode)
+        );
+    }
+}
+
 // spec(MODEL): `<model>` is passed to the harness unchanged, so it accepts whatever names or aliases the harness accepts.
 // spec(MODEL): Without `MODEL`, the harness uses its default model.
 // spec(EFFORT): Without `EFFORT`, the harness uses its default effort.

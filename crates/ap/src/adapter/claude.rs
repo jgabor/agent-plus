@@ -2,7 +2,7 @@
 //!
 //! Its files are the global instructions from `SYSTEM`, the user settings
 //! that turn self-updates off, and the state that tells Claude Code its
-//! onboarding is done. Its command line sets the model, the effort, and the
+//! onboarding is done and `/` is trusted. Its command line sets the model, the effort, and the
 //! permission mode every time it starts the harness, so neither a project's
 //! settings nor an earlier session can pick others. A version older than
 //! `--effort` gets the effort from `CLAUDE_CODE_EFFORT_LEVEL`, which it reads
@@ -30,7 +30,7 @@ pub const INSTRUCTIONS: &str = "/home/agent/.claude/CLAUDE.md";
 /// The user settings.
 pub const SETTINGS: &str = "/home/agent/.claude/settings.json";
 /// The state Claude Code keeps for itself, which says whether its onboarding
-/// is done.
+/// is done, and which directories it trusts.
 pub const STATE: &str = "/home/agent/.claude.json";
 
 /// The variable that sets the effort of a version without `--effort`.
@@ -99,7 +99,10 @@ const AUTO_FROM: [u64; 3] = [2, 1, 71];
 /// The settings turn self-updates off through Claude Code's own variable, and
 /// with `MODE full` they also skip the warning that full mode shows the first
 /// time. The state marks the onboarding done, so a new VM skips the theme and
-/// welcome screens.
+/// welcome screens. It also marks `/` as trusted, so an interactive run skips
+/// the trust dialog. Claude Code 2.1.323 takes a directory as trusted when it
+/// or a directory above it is, but in a git repository only the record of the
+/// repository's root counts.
 pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     let mut files = Vec::new();
     if !system.is_empty() {
@@ -113,7 +116,8 @@ pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     files.push((SETTINGS, settings.into_bytes()));
     files.push((
         STATE,
-        b"{\n  \"hasCompletedOnboarding\": true\n}\n".to_vec(),
+        b"{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"/\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}\n"
+            .to_vec(),
     ));
     files
 }

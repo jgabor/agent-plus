@@ -543,6 +543,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "t2"
+version = "0.0.0"
+dependencies = [
+ "agentfile",
+ "ap",
+ "guest",
+ "t1",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,81 @@
+# Runs the gate on a GitHub-hosted runner at each push to `main`, so that a
+# fault that shows only there is found within one merge of the commit that
+# brought it. It decides no merge, and it posts no status. When the gate fails
+# or runs out of time, one open issue says so.
+#
+# The gate job runs the repository's code with a token that can only read. The
+# report job holds the token that files the issue, and runs no code from the
+# repository.
+name: runner-gate
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# A newer push replaces a run that is still queued, not one that runs. That
+# loses nothing, because the newer run tests a newer `main`. The group is its
+# own, so this workflow never holds or replaces a refresh.
+concurrency:
+  group: runner-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # The merge timeout. A hang is one of the faults this job is for.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The same setup as the refresh. `refresh.yml` says why each step is
+      # there.
+      - name: Open KVM to the runner's user
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Let the runner's user map ids in a user namespace
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Start a systemd user session
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      - run: cargo xtask gate
+
+  # A job that runs out of time fails, so `failure()` covers it. A run that a
+  # newer push replaced, or that someone cancelled, files nothing.
+  report:
+    needs: gate
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: The gate fails on a GitHub runner at `main`
+        run: |
+          open=$(gh api --paginate "repos/$REPOSITORY/issues?state=open&per_page=100" \
+            --jq '.[] | select(.pull_request == null and .title == env.TITLE) | .number')
+          if [ -n "$open" ]; then
+            echo "Issue #$(echo "$open" | head -n 1) is open, so this adds nothing"
+            exit 0
+          fi
+          body=$(printf '%s\n' \
+            "\`cargo xtask gate\` failed or ran out of time on a GitHub-hosted runner at" \
+            "$COMMIT, in $RUN." \
+            "" \
+            "The gate on the owner's machines still decides every merge. While this" \
+            "issue is open, a later failure adds nothing here.")
+          gh issue create --repo "$REPOSITORY" --title "$TITLE" --body "$body"

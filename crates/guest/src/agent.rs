@@ -48,6 +48,7 @@ use std::process::{ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread;
+use std::time::Duration;
 
 const NOT_EXECUTABLE: u8 = 126;
 const NOT_FOUND: u8 = 127;
@@ -94,6 +95,10 @@ const QUIET: i32 = 50;
 /// job that keeps writing can't hold back the status. It counts bytes, not
 /// time, so a host that reads slowly loses nothing.
 const LAST_OUTPUT: usize = 1 << 20;
+/// How long the agent waits to offer the host a connection again, after the
+/// host refused one because it held as many as it can. A command beside the
+/// harness that ends frees one.
+const REFUSED_RETRY: Duration = Duration::from_millis(100);
 
 /// What is left to read once a program has ended.
 #[derive(Clone, Copy)]
@@ -180,12 +185,20 @@ struct Context {
 }
 
 /// Opens a connection to the host, and runs the first command it asks for
-/// there, after opening the next connection. A connection that can't open
-/// or that ends first takes no command, and offers no more.
+/// there, after opening the next connection. The host refuses a connection
+/// only while it holds as many as it can, so a refused one is tried again
+/// [`REFUSED_RETRY`] later. One that can't open for another reason, or that
+/// ends first, takes no command, and offers no more.
 fn offer_exec(context: Arc<Context>, connect: Connect) {
     thread::spawn(move || {
-        let Ok(mut channel) = connect() else {
-            return;
+        let mut channel = loop {
+            match connect() {
+                Ok(channel) => break channel,
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {
+                    thread::sleep(REFUSED_RETRY);
+                }
+                Err(_) => return,
+            }
         };
         let Ok(Some(ToGuest::Exec(exec))) = ToGuest::read(&mut channel) else {
             return;

@@ -120,9 +120,9 @@ pub struct Input {
     queued: Mutex<Vec<u8>>,
     room: Condvar,
     waker: Arc<Waker>,
-    /// The descriptor the sender reads its input from. A confined process
-    /// may read it, and no other.
-    source: RawFd,
+    /// The descriptors the sender reads its input from. A confined process
+    /// may read these, and no others.
+    sources: [RawFd; 2],
     /// The commands beside the harness, by the id `ap run` gave each.
     execs: Mutex<BTreeMap<u32, Exec>>,
 }
@@ -140,13 +140,13 @@ struct Exec {
 }
 
 impl Input {
-    /// Input that the sender reads from `source`.
-    pub fn new(source: RawFd) -> Input {
+    /// Input that the sender reads from `sources`.
+    pub fn new(sources: [RawFd; 2]) -> Input {
         Input {
             queued: Mutex::new(Vec::new()),
             room: Condvar::new(),
             waker: Arc::default(),
-            source,
+            sources,
             execs: Mutex::new(BTreeMap::new()),
         }
     }
@@ -184,7 +184,7 @@ impl Input {
     }
 
     /// Says that the `ap exec` of the command with this id is gone, so the
-    /// command's connection closes.
+    /// command's connection is reset.
     pub fn exec_hung_up(&self, id: u32) {
         if let Some(exec) = self.execs().get_mut(&id) {
             exec.hung_up = true;
@@ -612,7 +612,7 @@ pub fn boot_linked(
         thread::spawn(move || receiver.run(|| waker.wake()));
     }
     if guest.confine {
-        let input = guest.input.map(|input| input.source);
+        let input = guest.input.into_iter().flat_map(|input| input.sources);
         let share_server = machine.relay.as_ref().map(ShareRelay::descriptor);
         let link = machine.net.as_ref().map(|(device, _)| device.descriptor());
         let layers = machine
@@ -620,7 +620,6 @@ pub fn boot_linked(
             .iter()
             .filter_map(|(disk, _)| disk.descriptor());
         let readable: Vec<RawFd> = input
-            .into_iter()
             .chain(share_server)
             .chain(link)
             .chain(layers)
@@ -770,7 +769,8 @@ impl<F: FnMut(Report)> Machine<'_, F> {
 
     /// Gives each new command beside the harness a connection, passes on
     /// what was sent to each, and reports what each has done, as far as its
-    /// window allows.
+    /// window allows. The connection of a command whose `ap exec` is gone is
+    /// reset, because a close would wait for the command to read its input.
     fn serve_execs(&mut self) {
         let Some(input) = self.input else {
             return;
@@ -786,7 +786,7 @@ impl<F: FnMut(Report)> Machine<'_, F> {
         let mut ended = Vec::new();
         for (id, exec) in execs.iter_mut() {
             if exec.hung_up {
-                ended.push(*id);
+                ended.push((*id, true));
                 continue;
             }
             if !bound.contains_key(id) {
@@ -809,13 +809,15 @@ impl<F: FnMut(Report)> Machine<'_, F> {
             }
             if let Some(end) = receive_exec(vsock, *connection, frame, exec, *id, &mut reports) {
                 reports.push(ExecReport::Message(*id, end));
-                ended.push(*id);
+                ended.push((*id, false));
             }
         }
-        for id in ended {
+        for (id, hung_up) in ended {
             execs.remove(&id);
-            if let Some((connection, _)) = bound.remove(&id) {
-                vsock.close(connection);
+            match bound.remove(&id) {
+                Some((connection, _)) if hung_up => vsock.reset(connection),
+                Some((connection, _)) => vsock.close(connection),
+                None => {}
             }
         }
         drop(execs);

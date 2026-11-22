@@ -310,6 +310,26 @@ impl Vsock {
         self.forget_if_finished(connection);
     }
 
+    /// Ends the connection at once, and drops what waits either way, so a
+    /// guest that doesn't read can't keep it.
+    pub fn reset(&mut self, connection: Connection) {
+        let Some(state) = self.connections.remove(&connection) else {
+            return;
+        };
+        if !state.dead {
+            self.control.push_back(Header {
+                src_cid: HOST_CID,
+                dst_cid: self.guest_cid,
+                src_port: connection.host_port,
+                dst_port: connection.guest_port,
+                kind: TYPE_STREAM,
+                op: OP_RST,
+                buf_alloc: BUFFER,
+                ..Header::default()
+            });
+        }
+    }
+
     fn forget_if_finished(&mut self, connection: Connection) {
         if self
             .connections
@@ -1284,6 +1304,35 @@ mod tests {
         driver.send(packet(OP_RST), &[]);
         assert!(driver.ops().is_empty(), "a reset is never answered");
         assert!(driver.device.connections.is_empty());
+    }
+
+    #[test]
+    fn a_host_reset_drops_what_the_guest_hasnt_taken_and_ends_at_once() {
+        let mut driver = Driver::new();
+        let connection = driver.connected();
+        driver.send(
+            Header {
+                buf_alloc: 0,
+                ..packet(OP_CREDIT_UPDATE)
+            },
+            &[],
+        );
+        assert_eq!(driver.device.send(connection, b"unread"), 6);
+        driver.device.reset(connection);
+        assert!(driver.device.connections.is_empty());
+        assert_eq!(driver.device.send(connection, b"x"), 0);
+        driver.service();
+        let packets = driver.received();
+        assert_eq!(packets.len(), 1, "{packets:?}");
+        assert_eq!(packets[0].0.op, OP_RST);
+        assert_eq!(
+            (packets[0].0.src_port, packets[0].0.dst_port),
+            (PORT, GUEST_PORT)
+        );
+        driver.send(data(1), &[1]);
+        assert_eq!(driver.ops(), [OP_RST]);
+        driver.send(packet(OP_RST), &[]);
+        assert!(driver.ops().is_empty(), "a reset is never answered");
     }
 
     #[test]

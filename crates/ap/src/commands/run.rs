@@ -258,6 +258,10 @@ fn run_agent(
     let link = share::inheritable(network_link.as_fd())
         .map_err(fail("can't start the network process"))?;
     drop(network_link);
+    // Your keys have a pair of their own, so a harness that doesn't read
+    // them holds back nothing else.
+    let (keys, their_keys) = UnixStream::pair().map_err(fail("can't start the run"))?;
+    let their_keys = share::inheritable(their_keys.as_fd()).map_err(fail("can't start the run"))?;
     drop(network_process);
     let mut command = Command::new(exe);
     for secret in &names {
@@ -267,7 +271,8 @@ fn run_agent(
         .arg0(runs::RUN_PROCESS)
         .arg(std::process::id().to_string())
         .arg(&run.name)
-        .arg(link.as_raw_fd().to_string());
+        .arg(link.as_raw_fd().to_string())
+        .arg(their_keys.as_raw_fd().to_string());
     if let Some(socket) = &share_socket {
         command.arg(socket.as_raw_fd().to_string());
     }
@@ -281,6 +286,7 @@ fn run_agent(
     // socket, which must close so that the run's end reads as an end.
     drop(command);
     drop(link);
+    drop(their_keys);
     drop(share_socket);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.
@@ -305,8 +311,9 @@ fn run_agent(
             // Raw mode comes first, so a signal taken from here on finds the
             // modes to put back, and nothing changes them after.
             let raw = RawMode::start().map_err(fail("can't set up your terminal"))?;
-            pass_keys(Arc::clone(&writer), false);
-            take_signals(writer);
+            let keys = Arc::new(Mutex::new(keys));
+            pass_keys(Arc::clone(&keys), false);
+            take_signals(keys);
             Some(raw)
         }
         false => None,

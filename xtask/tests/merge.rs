@@ -2927,7 +2927,9 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     }
     let to_issues: String = calls
         .lines()
-        .filter(|call| call.contains("/issues/") && !call.contains("/labels"))
+        .filter(|call| {
+            call.starts_with("gh api -X ") && call.contains("/issues/") && !call.contains("/labels")
+        })
         .map(|call| format!("{call}\n"))
         .collect();
     assert_eq!(to_issues, closed(8) + &closed(7), "{calls}");

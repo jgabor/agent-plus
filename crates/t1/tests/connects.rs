@@ -35,6 +35,8 @@ const TIMEOUT: &str = "240";
 /// scratch directory that its agent was built in.
 const INSIDE_VARIABLE: &str = "AP_CONNECTS_INSIDE";
 const NAMES_TEST: &str = "a_run_keeps_resolving_after_the_host_s_resolver_configuration_changes";
+/// The file in the scratch that `SSL_CERT_FILE` names, once it exists.
+const ROOTS: &str = "roots.pem";
 
 /// A home of its own, with the kernel and the OS layer in its store and the
 /// fake harness in its download cache, so that `ap` reads none of the owner's
@@ -116,7 +118,8 @@ impl Scratch {
     }
 
     /// The static `ap`, with only `HOME` and `XDG_RUNTIME_DIR` in its
-    /// environment, under a timeout.
+    /// environment, and `SSL_CERT_FILE` once [`Scratch::trust`] wrote its
+    /// file, under a timeout.
     fn command(&self) -> Command {
         let mut command = Command::new("timeout");
         command
@@ -125,7 +128,17 @@ impl Scratch {
             .env_clear()
             .env("HOME", self.home())
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"));
+        let roots = self.root.join(ROOTS);
+        if roots.exists() {
+            command.env("SSL_CERT_FILE", roots);
+        }
         command
+    }
+
+    /// Makes `ap` trust `pem` too, as roots in the file that
+    /// `SSL_CERT_FILE` names.
+    fn trust(&self, pem: &str) {
+        fs::write(self.root.join(ROOTS), pem).unwrap();
     }
 
     fn ap(&self, args: &[&str]) -> Output {
@@ -663,7 +676,11 @@ fn run_to_end(
     let mut stderr = run.0.stderr.take().unwrap();
     let mut report = String::new();
     stdout.read_line(&mut report).unwrap();
-    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    if !report.starts_with("{\"arguments\":") {
+        let mut errors = String::new();
+        stderr.read_to_string(&mut errors).unwrap();
+        panic!("{report}{errors}");
+    }
     let listed = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
     let row = listed.lines().nth(1).expect("ap ps lists the run");
     let name = row.split_whitespace().next().unwrap().to_owned();
@@ -814,6 +831,115 @@ fn ap_logs_shows_the_run_s_network_decisions() {
     assert!(
         !stdout.contains("allow") && !stdout.contains("deny"),
         "{stdout}"
+    );
+}
+
+/// Answers each HTTPS request with a 404, over TLS with a certificate for
+/// `host.ap.internal` that a new authority signed, and notes its target.
+/// Returns the authority's certificate, in PEM, and the targets.
+fn https_listener(listener: TcpListener) -> (String, Seen) {
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    let now = std::time::SystemTime::now();
+    let authority = ap::network::Authority::generate(now).unwrap();
+    let leaf = authority.issue("host.ap.internal", now).unwrap();
+    let provider = Arc::new(rustls_graviola::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![leaf.certificate], leaf.key)
+        .unwrap();
+    let config = Arc::new(config);
+    let seen = Seen::default();
+    let noted = Arc::clone(&seen);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let (config, noted) = (Arc::clone(&config), Arc::clone(&noted));
+            thread::spawn(move || {
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(30)))
+                    .unwrap();
+                let server = ServerConnection::new(config).unwrap();
+                let mut stream = BufReader::new(StreamOwned::new(server, stream));
+                loop {
+                    let mut line = String::new();
+                    if stream.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let target = line.split(' ').nth(1).unwrap_or_default();
+                    noted.lock().unwrap().push(target.to_owned());
+                    let mut header = String::new();
+                    while stream.read_line(&mut header).unwrap_or(0) > 0 && header != "\r\n" {
+                        header.clear();
+                    }
+                    let answer = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                    if stream.get_mut().write_all(answer).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (authority.certificate_pem().to_owned(), seen)
+}
+
+// spec(NETWORK): **Decryption.** The proxy decrypts TLS, with the per-run certificate authority, only where it must.
+// spec(NETWORK): on hosts with URL rules, because the rules need the request path
+// spec(NETWORK): The proxy verifies an upstream server's certificate against the root certificates compiled into `ap`, plus those in the file that `SSL_CERT_FILE` names in your host's environment.
+// spec(ap logs): Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+#[test]
+fn a_url_rule_decides_each_https_request_to_your_host() {
+    let scratch = Scratch::new("url");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (pem, seen) = https_listener(listener);
+    let rule = format!("+https://host.ap.internal:{port}/allowed");
+    scratch.build("url", &format!("NETWORK -\nNETWORK {rule}\n"));
+    let url = format!("https://host.ap.internal:{port}");
+    // git's client trusts the guest's bundle, which holds the run's
+    // authority.
+    let script = format!(
+        "echo \"allowed $(timeout 20 git ls-remote {url}/allowed/repo 2>&1 | head -1)\"\n\
+         echo \"denied $(timeout 20 git ls-remote {url}/denied/repo 2>&1 | head -1)\"\n"
+    );
+    // Without the listener's authority in `SSL_CERT_FILE`, nothing reaches
+    // it.
+    let (lines, _, _, _) = run_to_end(&scratch, "url", &script);
+    assert!(lines[0].contains("unable to access"), "{lines:?}");
+    assert_eq!(settled(&seen, 1), Vec::<String>::new());
+
+    scratch.trust(&pem);
+    let (lines, _, _, name) = run_to_end(&scratch, "url", &script);
+    // The allowed request reached the listener, which doesn't know the
+    // repository. The denied one didn't, and the guest's connection reset.
+    assert!(
+        lines[0].starts_with("allowed ") && lines[0].contains("not found"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("denied ") && lines[1].contains("unable to access"),
+        "{lines:?}"
+    );
+    assert_eq!(
+        settled(&seen, 1),
+        ["/allowed/repo/info/refs?service=git-upload-pack"]
+    );
+    let logs = scratch.ap(&["logs", &name]);
+    let stderr = String::from_utf8(logs.stderr).unwrap();
+    let decisions: Vec<&str> = (stderr.lines())
+        .filter(|line| line.get(..20).is_some_and(|time| time.ends_with('Z')))
+        .filter_map(|line| line.split_once("  ").map(|(_, rest)| rest))
+        .collect();
+    let host = format!("host.ap.internal:{port}");
+    assert_eq!(
+        decisions,
+        [
+            format!("allow  {host}  NETWORK {rule}"),
+            format!("deny   {host}  the default"),
+        ],
+        "{stderr}"
     );
 }
 

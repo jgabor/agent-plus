@@ -29,7 +29,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 9] = [
+const TARGETS: [Target; 10] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -414,6 +414,42 @@ const TARGETS: [Target; 9] = [
             "\u{7f}",
         ],
     },
+    Target {
+        name: "request-check",
+        check: |input| {
+            request_check_input(input);
+        },
+        corpus: &[
+            "",
+            "GET /allowed HTTP/1.1\r\nHost: host.ap.internal\r\n\r\nGET /allowed/b?c HTTP/1.1\r\nHost: host.ap.internal:443\r\n\r\n",
+            concat!(
+                "POST /allowed/a HTTP/1.1\r\nHost: host.ap.internal\r\nContent-Length: 5\r\n\r\nGET /",
+                "PUT /allowed/%7Eb HTTP/1.1\r\nHost: host.ap.internal\r\nTransfer-Encoding: chunked\r\n\r\n",
+                "3\r\nabc\r\n0\r\n\r\n",
+            ),
+        ],
+        words: &[
+            "GET ",
+            "POST ",
+            "/allowed",
+            "/denied",
+            "/allowed/../",
+            "/./",
+            "%2F",
+            "%7E",
+            "%",
+            "?",
+            "*",
+            " HTTP/1.1\r\n",
+            "Host: host.ap.internal\r\n",
+            "Host: example.com\r\n",
+            "Content-Length: 5\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n",
+            "SSH-2.0-x\r\n",
+            "\x16\x03\x01",
+        ],
+    },
 ];
 
 /// The TLS client hello in the name check's corpus.
@@ -572,6 +608,62 @@ fn name_check_input(input: &str) -> bool {
                 whole.0
             );
         }
+    }
+    whole.1 && whole.0 == bytes
+}
+
+/// Feeds `input`, as the guest's requests on a decrypted connection to
+/// `host.ap.internal`, to the request check, whole and in pieces, under a
+/// rule that allows paths under `/allowed`. Panics if the two disagree, if
+/// what passes isn't the start of `input`, or if any of the head of a first
+/// request that the rules deny passed. Returns whether it all passed.
+fn request_check_input(input: &str) -> bool {
+    let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+    let instructions =
+        agentfile::parse("AGENT claude\nNETWORK -\nNETWORK +https://host.ap.internal/allowed\n")
+            .unwrap();
+    let network = agentfile::Network::read(&instructions).unwrap();
+    let allows = |target: &str| {
+        let connection = net::Connection {
+            name: Some("host.ap.internal"),
+            address: std::net::Ipv4Addr::LOCALHOST.into(),
+            port: 443,
+            request: Some(net::Request {
+                scheme: agentfile::Scheme::Https,
+                target,
+            }),
+        };
+        net::proxied(&network, &[], &connection).allows()
+    };
+    let checked = |piece: usize| {
+        let mut check = net::NameCheck::requests("host.ap.internal");
+        let mut passed = Vec::new();
+        for chunk in bytes.chunks(piece) {
+            if (check.feed_deciding(chunk, &mut passed, &mut |target| allows(target))).is_err() {
+                return (passed, false);
+            }
+        }
+        (passed, !check.holding())
+    };
+    let whole = checked(bytes.len().max(1));
+    for piece in [1, 1 + bytes.len() % 13] {
+        let pieces = checked(piece);
+        assert_eq!(whole.1, pieces.1, "in pieces of {piece}");
+        if whole.1 {
+            assert_eq!(whole.0, pieces.0, "in pieces of {piece}");
+        }
+    }
+    assert!(bytes.starts_with(&whole.0), "{:?}", whole.0);
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut request = httparse::Request::new(&mut headers);
+    if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes)
+        && !request.path.is_some_and(allows)
+    {
+        assert!(
+            whole.0.len() < head,
+            "a head the rules deny passed: {:?}",
+            whole.0
+        );
     }
     whole.1 && whole.0 == bytes
 }
@@ -1515,6 +1607,22 @@ mod tests {
         assert!(!name_check_input(
             "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
         ));
+    }
+
+    #[test]
+    fn the_request_check_corpus_passes() {
+        let target = TARGETS.iter().find(|t| t.name == "request-check").unwrap();
+        for input in target.corpus {
+            assert!(request_check_input(input), "{input:?}");
+        }
+        for denied in [
+            "GET /denied HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n",
+            "GET /allowed/../denied HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n",
+            "GET /allowed HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            "SSH-2.0-OpenSSH_9.9\r\n",
+        ] {
+            assert!(!request_check_input(denied), "{denied:?}");
+        }
     }
 
     #[test]

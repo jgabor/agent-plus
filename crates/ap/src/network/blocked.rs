@@ -14,7 +14,7 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::net::IpAddr;
 
-use agentfile::Network;
+use agentfile::{Network, Sign};
 use net::Blocked;
 
 use super::decisions::{self, Rule};
@@ -140,21 +140,65 @@ impl Reporter {
     /// Reports a connection to `address` on `port`, attributed to `name`,
     /// that the proxy allows or not, and the rule that decided.
     pub(super) fn decided(&self, allow: bool, name: Option<&str>, address: IpAddr, port: u16) {
+        self.requested(allow, name, address, port, None);
+    }
+
+    /// Reports a connection as [`Reporter::decided`] does, or the
+    /// `request` on it.
+    pub(super) fn requested(
+        &self,
+        allow: bool,
+        name: Option<&str>,
+        address: IpAddr,
+        port: u16,
+        request: Option<net::Request>,
+    ) {
         let harness: Vec<&str> = self.harness.iter().map(String::as_str).collect();
         let connection = net::Connection {
             name,
             address,
             port,
-            request: None,
+            request,
         };
         let proxied = net::proxied(&self.network, &harness, &connection);
+        let rule = match (proxied, request) {
+            // A request on a connection to your host, which got there, is
+            // denied by a `-` rule, its path, or else the default, not by
+            // its loopback, and never by a `+` IP rule.
+            (net::Proxied::Loopback, Some(_)) => {
+                match net::decide(&self.network.rules, Sign::Deny, &connection) {
+                    net::Decision {
+                        sign: Sign::Deny,
+                        by,
+                    } => Rule::by(&self.network, by),
+                    _ => Rule::Default,
+                }
+            }
+            _ => Rule::proxied(&self.network, proxied),
+        };
+        self.send_decision(allow, &rule, name, address, port);
+    }
+
+    /// Reports a UDP flow to `name` at `address` on `port` that the proxy
+    /// refused, because the name has URL rules, and UDP isn't HTTP.
+    pub(super) fn not_http(&self, name: Option<&str>, address: IpAddr, port: u16) {
+        self.send_decision(false, &Rule::NotHttp, name, address, port);
+    }
+
+    fn send_decision(
+        &self,
+        allow: bool,
+        rule: &Rule,
+        name: Option<&str>,
+        address: IpAddr,
+        port: u16,
+    ) {
         let about = Blocked::Connection {
             name: name.map(str::to_owned),
             address,
             port,
         };
-        let rule = Rule::proxied(&self.network, proxied);
-        if self.send(&decisions::write(allow, &rule, &about)) {
+        if self.send(&decisions::write(allow, rule, &about)) {
             *self.refused.borrow_mut() = None;
         }
     }
@@ -186,6 +230,32 @@ impl Reporter {
                 port,
             } => self.decided(false, name.as_deref(), *address, *port),
         }
+        self.note(&blocked);
+    }
+
+    /// Reports a request on a connection to `name` at `address` on
+    /// `port` that the proxy allows or not, as a decision, and, if it
+    /// doesn't, its host as [`Reporter::report`] does.
+    pub(super) fn request(
+        &self,
+        allow: bool,
+        name: &str,
+        address: IpAddr,
+        port: u16,
+        request: net::Request,
+    ) {
+        self.requested(allow, Some(name), address, port, Some(request));
+        if !allow {
+            self.note(&Blocked::Connection {
+                name: Some(name.to_owned()),
+                address,
+                port,
+            });
+        }
+    }
+
+    /// Notes the host of `blocked`, unless it was noted already.
+    fn note(&self, blocked: &Blocked) {
         let mut hosts = self.hosts.borrow_mut();
         let host = blocked.host();
         if hosts.contains(&host) || hosts.len() > MOST_BLOCKED {
@@ -193,7 +263,7 @@ impl Reporter {
         }
         let message = match hosts.len() {
             MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
-            _ => write(&blocked),
+            _ => write(blocked),
         };
         // The socket doesn't wait. A report that doesn't fit is sent again
         // the next time the host is blocked.
@@ -367,6 +437,79 @@ mod tests {
         assert_eq!(&buffer[..len], b"!deny default lookup example.com");
         let len = mine.recv(&mut buffer).unwrap();
         assert_eq!(&buffer[..len], b"!lookup example.com");
+    }
+
+    // spec(ap logs): On a host with URL rules, the rule can also be the request path, or, for traffic that isn't HTTP, the host's URL rules.
+    #[test]
+    fn a_request_denied_on_your_host_names_what_denied_it() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let args: Vec<OsString> = [
+            "--",
+            "-",
+            "+https://host.ap.internal/allowed",
+            "-https://host.ap.internal/allowed/secret",
+            "+127.0.0.1",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let (network, _) = super::super::rules(&args).unwrap();
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            network,
+            Vec::new(),
+        );
+        let request = |target| net::Request {
+            scheme: agentfile::Scheme::Https,
+            target,
+        };
+        let address = "127.0.0.1".parse().unwrap();
+        for target in ["/other", "/allowed/secret", "/allowed/../x"] {
+            reporter.request(false, "host.ap.internal", address, 443, request(target));
+        }
+        reporter.not_http(Some("host.ap.internal"), address, 443);
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
+        let mut buffer = [0; 512];
+        let mut rules = Vec::new();
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            if let Some((_, rule, _)) = decisions::read(&buffer[..len]) {
+                rules.push(rule);
+            }
+        }
+        // A `+` rule never names a denial, and the IP rule doesn't reach a
+        // request that its path decides.
+        assert_eq!(
+            rules,
+            [Rule::Default, Rule::Numbered(1), Rule::Path, Rule::NotHttp]
+        );
+    }
+
+    // spec(Run): It leaves out UDP that a host's URL rules deny, which no rule can allow.
+    #[test]
+    fn udp_that_url_rules_deny_is_no_blocked_host() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let args: Vec<OsString> = ["--", "+", "-https://example.com/secret"]
+            .map(OsString::from)
+            .to_vec();
+        let (network, _) = super::super::rules(&args).unwrap();
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            network,
+            Vec::new(),
+        );
+        let address = "192.0.2.7".parse().unwrap();
+        reporter.not_http(Some("example.com"), address, 443);
+        drop(theirs);
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        let mut reports = Reports::default();
+        let mut buffer = [0; 512];
+        let mut decisions = 0;
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            decisions += usize::from(decisions::read(&buffer[..len]).is_some());
+            reports.take(&buffer[..len]);
+        }
+        assert_eq!(decisions, 1);
+        assert_eq!(report(&args, &reports), None);
     }
 
     #[test]

@@ -474,6 +474,7 @@ directory) and writes an image into the local store.
   blocked and the rule that would allow each one, on standard error. It
   never asks during the run, and it never adds a rule itself. It lists each
   host once, and at most 100 hosts, and then says that it left others out.
+  It leaves out UDP that a host's URL rules deny, which no rule can allow.
 - **Desktop.** With `OS desktop`, `ap run --gui <agent>` opens the agent's
   desktop in a native window.
 
@@ -586,6 +587,8 @@ and sends no input.
   destination is the name alone.
 - The rule is the `NETWORK` line that decided, or else the default, the
   harness's hosts, or your host's loopback.
+- On a host with URL rules, the rule can also be the request path, or, for
+  traffic that isn't HTTP, the host's URL rules.
 
 ### ap exec
 
@@ -1902,11 +1905,17 @@ allow one.
   On a decrypted connection, the proxy verifies the upstream server's
   certificate and checks every request's host and path, including each
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
-  rules, traffic that isn't HTTP is denied.
+  rules, traffic that isn't HTTP is denied. A request that the rules deny
+  never reaches the server, and the proxy resets the connection it came on.
+  The proxy connects to the server before the first request, but nothing
+  the server sends reaches the guest until the rules allow a request. The
+  proxy reads what the guest sends, and what the server answers passes
+  unread.
 
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that
-  `SSL_CERT_FILE` names in your host's environment. Until the proxy has
+  `SSL_CERT_FILE` names in your host's environment. A file that can't be
+  read, or isn't a regular file, adds none. Until the proxy has
   its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 - **Harness hosts are never decrypted for a rule.** A rule set that would
   need it, such as a URL rule for a harness host or `-console.anthropic.com`

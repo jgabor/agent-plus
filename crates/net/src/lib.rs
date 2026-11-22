@@ -185,6 +185,43 @@ pub fn proxied<'a>(network: &'a Network, harness: &[&str], connection: &Connecti
     }
 }
 
+/// Whether `network` has URL rules for `name`, so that the proxy reads
+/// each HTTP request on a connection to it.
+pub fn url_rules(network: &Network, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    (network.rules.iter()).any(|rule| {
+        matches!(&rule.destination, Destination::Url { host, .. } if host.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Whether the proxy may open `connection`, to a host with URL rules, as
+/// [`proxied`] decides it: because it allows the connection before any
+/// request, or would allow a request for the path of one of its `+` URL
+/// rules. Each request on it is decided again.
+pub fn could_request(network: &Network, harness: &[&str], connection: &Connection) -> bool {
+    if proxied(network, harness, connection).allows() {
+        return true;
+    }
+    let name = connection.name.unwrap_or_default();
+    (network.rules.iter()).any(|rule| match &rule.destination {
+        Destination::Url {
+            scheme, host, path, ..
+        } if rule.sign == Sign::Allow && host.eq_ignore_ascii_case(name.trim_end_matches('.')) => {
+            let request = Request {
+                scheme: *scheme,
+                target: path,
+            };
+            let connection = Connection {
+                request: Some(request),
+                ..*connection
+            };
+            proxied(network, harness, &connection).allows()
+        }
+        _ => false,
+    })
+}
+
 /// Whether `address` is a loopback or unspecified address, in either family
 /// or IPv4-mapped.
 fn refused(address: IpAddr) -> bool {

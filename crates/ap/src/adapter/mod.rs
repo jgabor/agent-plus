@@ -33,6 +33,15 @@ pub fn reserved(harness: Harness) -> Reserved<'static> {
     }
 }
 
+/// The request headers that the proxy may put a hidden secret's value in,
+/// for a run of `harness`.
+pub fn headers(harness: Harness) -> &'static [&'static str] {
+    match harness {
+        Harness::Claude => claude::HEADERS,
+        Harness::Codex => codex::HEADERS,
+    }
+}
+
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
 pub fn system(values: &[Vec<u8>]) -> Vec<u8> {

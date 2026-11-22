@@ -1,5 +1,6 @@
 //! The network process's proxy on a host with URL rules, by **Decryption**
-//! under NETWORK in SPEC.md. The proxy serves a link, as in a run. A second
+//! under NETWORK in SPEC.md, and on a hidden secret's bound host, by
+//! **Hidden** under SECRET. The proxy serves a link, as in a run. A second
 //! `smoltcp` interface plays the guest on the other end, and reaches fake
 //! destinations on this host's loopback as `host.ap.internal`. Each fake
 //! destination notes the request line of every request that reaches it.
@@ -14,7 +15,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use agentfile::{Network, parse};
-use ap::network::{Authority, Decryption, Proxy};
+use ap::network::{Authority, Decryption, Hidden, Injection, Proxy};
 use guest::net;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
@@ -118,6 +119,17 @@ impl Guest {
     /// trusts `roots` as well as the roots compiled into `ap`. `port` is
     /// the fake destination's.
     fn new(lines: &str, roots: Vec<CertificateDer<'static>>, port: u16) -> Guest {
+        Guest::injecting(lines, roots, port, Injection::default())
+    }
+
+    /// A guest as [`Guest::new`]'s, whose proxy puts the secrets of
+    /// `injection` in requests.
+    fn injecting(
+        lines: &str,
+        roots: Vec<CertificateDer<'static>>,
+        port: u16,
+        injection: Injection,
+    ) -> Guest {
         let (mine, theirs) = link();
         let (sent, got) = mpsc::channel();
         let lines = lines.to_owned();
@@ -135,7 +147,9 @@ impl Guest {
             let decryption = Decryption::new(authority, roots).unwrap();
             // Your host's name asks for no lookup.
             let (lookups, _) = UnixDatagram::pair().unwrap();
-            let mut proxy = Proxy::new(network, Vec::new(), lookups).decrypting(decryption);
+            let mut proxy = (Proxy::new(network, Vec::new(), lookups))
+                .decrypting(decryption)
+                .injecting(injection);
             let mut stack = ap::network::stack();
             // It ends once the guest's end closes.
             let _ = proxy.serve(&File::from(theirs), &mut stack, &mut resolver);
@@ -190,6 +204,16 @@ impl Guest {
     /// A TLS client for `host.ap.internal`, which trusts only `root`, and
     /// offers `protocols`.
     fn tls_offering(root: &CertificateDer<'static>, protocols: &[&[u8]]) -> ClientConnection {
+        Guest::tls_for(root, protocols, NAME)
+    }
+
+    /// A TLS client for `server`, which trusts only `root`, and offers
+    /// `protocols`.
+    fn tls_for(
+        root: &CertificateDer<'static>,
+        protocols: &[&[u8]],
+        server: &str,
+    ) -> ClientConnection {
         let mut roots = RootCertStore::empty();
         roots.add(root.clone()).unwrap();
         let provider = Arc::new(rustls_graviola::default_provider());
@@ -199,7 +223,7 @@ impl Guest {
             .with_root_certificates(roots)
             .with_no_client_auth();
         config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
-        let name = ServerName::try_from(NAME).unwrap();
+        let name = ServerName::try_from(server.to_owned()).unwrap();
         ClientConnection::new(Arc::new(config), name).unwrap()
     }
 
@@ -867,4 +891,254 @@ fn traffic_that_isn_t_http_is_denied_on_a_host_with_url_rules() {
     let answer = guest.exchange(handle, None, &get("/denied"));
     assert_eq!(answer, Err("reset".to_owned()));
     assert_eq!(settled(&seen), ["GET /allowed HTTP/1.1 (plain)"]);
+}
+
+const PLACEHOLDER: &str = "0123456789abcdef0123456789abcdef";
+const VALUE: &str = "real-secret-value";
+/// `git:` and the placeholder, then `git:` and the value, in base64.
+const BASIC_PLACEHOLDER: &str = "Z2l0OjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVm";
+const BASIC_VALUE: &str = "Z2l0OnJlYWwtc2VjcmV0LXZhbHVl";
+
+/// The run's hidden secret, bound to `host`, with Claude Code's headers.
+fn bound_to(host: &str) -> Injection {
+    Injection {
+        headers: ap::adapter::headers(agentfile::Harness::Claude)
+            .iter()
+            .map(|header| header.to_string())
+            .collect(),
+        secrets: vec![Hidden {
+            name: "API_TOKEN".to_owned(),
+            value: VALUE.as_bytes().to_vec(),
+            placeholder: PLACEHOLDER.as_bytes().to_vec(),
+            hosts: vec![host.to_owned()],
+        }],
+    }
+}
+
+/// A fake destination as [`destination`]'s, which notes the whole of each
+/// request: its head, and the body that its `Content-Length` gives.
+fn recording(tls: Option<Arc<ServerConfig>>) -> (u16, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Seen::default();
+    let noted = Arc::clone(&seen);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let (tls, noted) = (tls.clone(), Arc::clone(&noted));
+            thread::spawn(move || {
+                stream.set_read_timeout(Some(WAIT)).unwrap();
+                match tls {
+                    Some(config) => {
+                        let server = ServerConnection::new(config).unwrap();
+                        record(rustls::StreamOwned::new(server, stream), &noted);
+                    }
+                    None => record(stream, &noted),
+                }
+            });
+        }
+    });
+    (port, seen)
+}
+
+fn record<S: Read + Write>(stream: S, noted: &Seen) {
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut request = String::new();
+        let mut line = String::new();
+        while line != "\r\n" {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            request.push_str(&line);
+        }
+        let length = (request.lines())
+            .find_map(|line| line.strip_prefix("Content-Length: "))
+            .map_or(0, |length| length.parse().unwrap());
+        let mut body = vec![0; length];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        request.push_str(&String::from_utf8_lossy(&body));
+        noted.lock().unwrap().push(request);
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        let stream = reader.get_mut();
+        if stream.write_all(response).is_err() || stream.flush().is_err() {
+            return;
+        }
+    }
+}
+
+/// A request to `host`, which holds the placeholder in each place it could.
+fn holding_placeholder(host: &str) -> Vec<u8> {
+    let basic = BASIC_PLACEHOLDER;
+    format!(
+        "POST /path?key={PLACEHOLDER} HTTP/1.1\r\nHost: {host}\r\n\
+         Authorization: Basic {basic}\r\nX-Api-Key: {PLACEHOLDER}\r\n\
+         X-Other: {PLACEHOLDER}\r\nContent-Length: {}\r\n\r\n{PLACEHOLDER}",
+        PLACEHOLDER.len()
+    )
+    .into_bytes()
+}
+
+// spec(SECRET): The egress proxy replaces the placeholder with the real value only under both of these conditions.
+// spec(SECRET): on TLS connections to the secret's bound hosts
+// spec(SECRET): in request headers on the adapter's allowlist (for example, `Authorization` and `x-api-key`), never in query strings or bodies
+// spec(SECRET): In an `Authorization: Basic` header, which git sends over HTTPS, the proxy decodes the credentials, replaces the placeholder in them, and encodes them again.
+// spec(SECRET): Injection requires decrypting TLS to the bound hosts (see [Enforcement](#network)).
+#[test]
+fn a_bound_host_gets_the_value_in_the_allowed_headers_alone() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    // The guest trusts the run's authority alone, so the proxy decrypted.
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
+
+    let basic = BASIC_VALUE;
+    let seen = settled(&seen);
+    assert_eq!(
+        seen,
+        [format!(
+            "POST /path?key={PLACEHOLDER} HTTP/1.1\r\nHost: {NAME}\r\n\
+             Authorization: Basic {basic}\r\nX-Api-Key: {VALUE}\r\n\
+             X-Other: {PLACEHOLDER}\r\nContent-Length: {}\r\n\r\n{PLACEHOLDER}",
+            PLACEHOLDER.len()
+        )]
+    );
+}
+
+// spec(SECRET): A connection counts as one to a bound host only when the name behind the address it connects to (see [NETWORK](#network)), its TLS server name, and each request's `Host` or `:authority` all name that host, under either network default.
+// spec(SECRET): On any other connection, the placeholder passes through unchanged.
+#[test]
+fn the_placeholder_passes_unchanged_anywhere_but_to_the_bound_host() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config.clone()));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+
+    // A secret bound to another host: the connection isn't decrypted, and
+    // the guest sees the destination's own certificate.
+    let mut guest = Guest::injecting(&rules, Vec::new(), port, bound_to("api.example.com"));
+    let handle = guest.connect();
+    let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+
+    let mut guest = Guest::injecting(&rules, vec![root.clone()], port, bound_to(NAME));
+    // A request on the bound host's connection whose `Host` names another
+    // host.
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder("example.com"));
+    assert!(answer.is_ok(), "{answer:?}");
+    // Plain HTTP to the bound host.
+    let (plain, plain_seen) = recording(None);
+    let mut plain_guest = Guest::injecting(&rules, Vec::new(), plain, bound_to(NAME));
+    let handle = plain_guest.connect();
+    let answer = plain_guest.exchange(handle, None, &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    // A server name that names another host: the name rule's check refuses
+    // it, so nothing reaches the destination.
+    let handle = guest.connect();
+    let mut tls = Guest::tls_for(&guest.authority.clone(), &[b"http/1.1"], "example.com");
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_err(), "{answer:?}");
+
+    let all = [settled(&seen), settled(&plain_seen)].concat();
+    assert_eq!(all.len(), 3, "{all:?}");
+    for request in all {
+        assert!(!request.contains(VALUE), "{request}");
+        // In the query, `X-Api-Key`, `X-Other`, and the body, and in the
+        // `Basic` credentials, still encoded.
+        assert_eq!(request.matches(PLACEHOLDER).count(), 4, "{request}");
+        assert!(request.contains(BASIC_PLACEHOLDER), "{request}");
+    }
+}
+
+#[test]
+fn a_bound_host_with_url_rules_gets_the_value_in_the_requests_they_allow() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/path\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_bound_host_s_server_may_still_speak_first() {
+    // A server that speaks first, as SSH does, reaches the guest.
+    let (port, _) = greeter();
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, Vec::new(), port, bound_to(NAME));
+    let handle = guest.connect();
+    let deadline = Instant::now() + WAIT;
+    let mut greeted = Vec::new();
+    while Instant::now() < deadline && greeted.is_empty() {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        if socket.can_recv() {
+            let mut buffer = [0; 256];
+            let n = socket.recv_slice(&mut buffer).unwrap();
+            greeted.extend_from_slice(&buffer[..n]);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!greeted.is_empty());
+}
+
+#[test]
+fn a_guest_that_waits_before_its_hello_still_gets_the_value() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    // Past the quarter second after which the server may speak first.
+    let until = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < until {
+        guest.poll();
+        thread::sleep(Duration::from_millis(1));
+    }
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let seen = settled(&seen);
+    assert!(
+        seen[0].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_client_hello_that_never_ends_is_reset() {
+    let (root, config) = server();
+    let (port, _) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
+    let handle = guest.connect();
+    // The start of a handshake record, and nothing more.
+    send_raw(&mut guest, handle, &[0x16, 0x03, 0x01, 0x02, 0x00]);
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        guest.poll();
+        if guest.sockets.get_mut::<tcp::Socket>(handle).state() == tcp::State::Closed {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the connection is still open");
 }

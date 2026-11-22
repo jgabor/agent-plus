@@ -43,6 +43,11 @@ pub const SET: &[&str] = &[];
 /// three before its stored sign-in.
 pub const SIGN_IN: &[&str] = &["CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY"];
 
+/// The request headers that the proxy may put a hidden secret's value in,
+/// from SPEC.md's SECRET section. Codex sends its key in `Authorization`,
+/// and other clients a key in `X-Api-Key`.
+pub const HEADERS: &[&str] = &["Authorization", "X-Api-Key"];
+
 /// The hosts Codex connects to for its model and sign-in. Codex 0.169.0
 /// calls the model on `api.openai.com` with an API key, and on `chatgpt.com`
 /// with a ChatGPT sign-in, which it gets from `auth.openai.com`.

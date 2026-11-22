@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 agentfile = { path = "../agentfile" }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 httparse = { version = "1", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 

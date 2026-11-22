@@ -835,8 +835,9 @@ fn ap_logs_shows_the_run_s_network_decisions() {
 }
 
 /// Answers each HTTPS request with a 404, over TLS with a certificate for
-/// `host.ap.internal` that a new authority signed, and notes its target.
-/// Returns the authority's certificate, in PEM, and the targets.
+/// `host.ap.internal` that a new authority signed, and notes its target,
+/// and its `Authorization` header after it, if it has one. Returns the
+/// authority's certificate, in PEM, and what it noted.
 fn https_listener(listener: TcpListener) -> (String, Seen) {
     use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
@@ -868,12 +869,17 @@ fn https_listener(listener: TcpListener) -> (String, Seen) {
                     if stream.read_line(&mut line).unwrap_or(0) == 0 {
                         return;
                     }
-                    let target = line.split(' ').nth(1).unwrap_or_default();
-                    noted.lock().unwrap().push(target.to_owned());
+                    let mut noting = line.split(' ').nth(1).unwrap_or_default().to_owned();
                     let mut header = String::new();
                     while stream.read_line(&mut header).unwrap_or(0) > 0 && header != "\r\n" {
+                        let authorization = (header.split_once(':'))
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"));
+                        if let Some((_, value)) = authorization {
+                            noting = format!("{noting} {}", value.trim());
+                        }
                         header.clear();
                     }
+                    noted.lock().unwrap().push(noting);
                     let answer = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
                     if stream.get_mut().write_all(answer).is_err() {
                         return;
@@ -940,6 +946,81 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
             format!("deny   {host}  the default"),
         ],
         "{stderr}"
+    );
+}
+
+const SECRET_VALUE: &str = "real-secret-0c4e7f";
+
+// spec(SECRET): on TLS connections to the secret's bound hosts
+// spec(SECRET): Injection requires decrypting TLS to the bound hosts (see [Enforcement](#network)).
+#[test]
+fn a_hidden_secret_s_value_reaches_its_bound_host_from_the_network_process_alone() {
+    let scratch = Scratch::new("secret");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (pem, seen) = https_listener(listener);
+    scratch.trust(&pem);
+    scratch.build(
+        "secret",
+        "NETWORK -\nNETWORK +host.ap.internal\nSECRET API_TOKEN @host.ap.internal\n",
+    );
+    let mut run = Started(
+        scratch
+            .command()
+            .env("API_TOKEN", SECRET_VALUE)
+            .args(["run", "secret", "-p", "Use the secret."])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut report = String::new();
+    BufReader::new(run.0.stdout.take().unwrap())
+        .read_line(&mut report)
+        .unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    assert!(!report.contains(SECRET_VALUE), "{report}");
+    let listed = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
+    let row = listed.lines().nth(1).expect("ap ps lists the run");
+    let name = row.split_whitespace().next().unwrap().to_owned();
+
+    // Neither the network process's arguments nor its environment hold the
+    // value, which reached it another way.
+    let network: Vec<u32> = (descendants(run.0.id()).into_iter())
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline.starts_with(b"ap-network\0"))
+        })
+        .collect();
+    assert_eq!(network.len(), 1, "{network:?}");
+    for file in ["cmdline", "environ"] {
+        let bytes = fs::read(format!("/proc/{}/{file}", network[0])).unwrap();
+        let holds = (bytes.windows(SECRET_VALUE.len())).any(|w| w == SECRET_VALUE.as_bytes());
+        assert!(!holds, "the network process's {file} holds the value");
+    }
+    let environment = fs::read(format!("/proc/{}/environ", network[0])).unwrap();
+    assert!(
+        (environment.split(|&byte| byte == 0))
+            .any(|variable| variable.starts_with(b"SSL_CERT_FILE=")),
+        "the network process has no environment"
+    );
+
+    // git in the guest sends the placeholder, and the listener gets the
+    // value.
+    let url = format!("https://host.ap.internal:{port}/repo");
+    let script = format!(
+        "echo \"held ${{#API_TOKEN}}\"\n\
+         timeout 20 git -c \"http.extraHeader=Authorization: Bearer $API_TOKEN\" \
+         ls-remote {url} 2>&1 | head -1\n"
+    );
+    let lines = scratch.try_network(&name, &script);
+    assert_eq!(lines[0], "held 32", "{lines:?}");
+    scratch.stop(&name, run);
+    assert_eq!(
+        settled(&seen, 1),
+        [format!(
+            "/repo/info/refs?service=git-upload-pack Bearer {SECRET_VALUE}"
+        )]
     );
 }
 

@@ -3,8 +3,10 @@
 //! resolver and the proxy hand it what they know of a connection.
 
 mod check;
+mod inject;
 
 pub use check::{NameCheck, Refused};
+pub use inject::{LONGEST, Swap, inject};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

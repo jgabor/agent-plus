@@ -235,11 +235,11 @@ A failing floor blocks a merge regardless of scores.
 | Floor | Verified by |
 |---|---|
 | No C in the dependency tree, and no build scripts in our crates | `cargo metadata` and `cargo tree` |
-| A hidden secret can't be read from the guest | `floor_hidden_secret`, needed by step 11 |
-| A closed network stays closed | `floor_closed_network`, needed by step 10 |
-| A share can't reach outside its root | `floor_share_root`, needed by step 9 |
-| The guest can't run anything on the host | `floor_guest_host`, needed by step 4 |
-| On Linux, the process that runs a guest can't start a process or a program, or open a host file | `floor_vmm_confined`, needed by step 3 |
+| A hidden secret can't be read from the guest | `floor_hidden_secret` |
+| A closed network stays closed | `floor_closed_network` |
+| A share can't reach outside its root | `floor_share_root` |
+| The guest can't run anything on the host | `floor_guest_host` |
+| On Linux, the process that runs a guest can't start a process or a program, or open a host file | `floor_vmm_confined` |
 | No check is removed while the sentence it quoted is still a promise | Comparison with the base |
 | `main` builds and passes the gate | Nightly job |
 
@@ -261,8 +261,9 @@ moved, but not dropped. In a repository with no `origin/main`, the gate prints
 `skip base` and compares nothing.
 
 **Pending floors.** A floor whose check doesn't exist yet is pending. A pending
-floor passes the gate and fails a release. Escape checks are tests in T1, and
-each journey step above can't pass until its check exists.
+floor passes the gate and fails a release. Escape checks are tests in T1. A
+journey step names the floor it needs with its `floor` field in
+`harness/journey.toml`, and it can't pass until that floor's check exists.
 
 ## Check tiers
 

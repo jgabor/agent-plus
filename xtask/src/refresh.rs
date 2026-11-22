@@ -46,6 +46,7 @@ pub fn run() -> Result<Verdict, Problem> {
             verdict: "not proven",
             said: String::new(),
             took: None,
+            open: None,
         };
         match needs_proof(&root, &gh, &pr) {
             Ok((head, true)) => {
@@ -104,10 +105,28 @@ pub fn run() -> Result<Verdict, Problem> {
                 if !proven {
                     verdict = Verdict::Fail;
                 }
-                match merge_if_armed(&root, &gh, pr, &head) {
+                // A head that was green already had its comment when the
+                // owner armed it, because a proof that found something new
+                // turned auto-merge off.
+                let new = if stale {
+                    newly_accepted(&gh, pr.number, &head)
+                } else {
+                    Ok(Vec::new())
+                };
+                let merged = match new {
+                    Ok(new) if new.is_empty() => merge_if_armed(&root, &gh, pr, &head),
+                    Ok(new) => Ok(Some(format!(
+                        "its proof accepts what the owner didn't approve: {}. Arming its auto-merge again approves it",
+                        new.join("; ")
+                    ))),
+                    Err(problem) => Err(problem),
+                };
+                match merged {
                     Ok(None) => row.verdict = "merged",
                     Ok(Some(why)) => {
-                        println!("refresh: PR {} stays open, because {why}", pr.number)
+                        let why = format!("PR {} stays open, because {why}", pr.number);
+                        println!("refresh: {why}");
+                        row.open = Some(why);
                     }
                     Err(Problem(message)) => {
                         eprintln!("refresh: PR {} wasn't merged: {message}", pr.number);
@@ -233,6 +252,18 @@ fn merge_if_armed(
     Ok(None)
 }
 
+/// What this head's proof accepted that the comment before its own didn't
+/// list. A proof that accepted nothing left no comment for this head.
+fn newly_accepted(gh: &Gh, number: u64, head: &str) -> Result<Vec<String>, Problem> {
+    let lists = merge::acceptances(&gh.acceptances(number)?);
+    Ok(match lists.split_last() {
+        Some(((at, accepted), earlier)) if at == head => {
+            merge::unapproved(earlier.last().map(|(_, reasons)| &reasons[..]), accepted)
+        }
+        _ => Vec::new(),
+    })
+}
+
 /// Lets the dispatcher restart the PR's issue, and tells the PR why, once for
 /// each head. The comment comes last, so it says only what was done. Its
 /// auto-merge stays armed, so the owner's approval stands for the fix.
@@ -320,6 +351,8 @@ struct Row {
     said: String,
     /// How long its proof took, if it ran one.
     took: Option<Duration>,
+    /// Why a proven PR stays open, if it does.
+    open: Option<String>,
 }
 
 /// A Markdown table with a row per PR, for the page of an Actions run.
@@ -343,6 +376,9 @@ fn summary(rows: &[Row]) -> String {
             }
         }
         table.push('\n');
+    }
+    for why in rows.iter().filter_map(|row| row.open.as_ref()) {
+        table.push_str(&format!("\n{why}\n"));
     }
     table
 }
@@ -592,6 +628,7 @@ mod tests {
             verdict: "not proven",
             said: "a | b\nc".to_string(),
             took: None,
+            open: None,
         };
         assert!(summary(&[row]).ends_with("\n| #3 | not proven | a \\| b c | |\n"));
     }

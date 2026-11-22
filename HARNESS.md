@@ -732,7 +732,9 @@ first, and change the file in a later PR.
    is the `main` it was tested on, and push with `--force-with-lease`.
 6. Verify that the new head differs from the gated head only by that record.
    If the PR waits for the owner, a count fell, or the PR is an exact revert,
-   comment on the PR naming what merging accepts. Post `xtask/gate` on the new
+   comment on the PR naming what merging accepts. If the PR's auto-merge is
+   armed, and the comment names what the owner's approval doesn't cover, as
+   [Refresh](#refresh) says, turn auto-merge off. Post `xtask/gate` on the new
    head. `prepare` stops here, and so does `land` if merging would accept
    something, so the owner reads it.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
@@ -795,6 +797,10 @@ record.
 A PR that waits for the owner is approved when the owner arms auto-merge on
 it, or clicks Merge on it while it is behind `main`, which arms auto-merge.
 Nothing proves a waiting PR before that, so until then it shows as behind.
+The approval covers the reasons that the PR's newest "Merging this PR at
+`<head>` accepts:" comment listed when the owner gave it. The head in that line
+doesn't count. A count that fell is covered by a fall at least as big, on any
+`main`, and a reason is the same whichever xtask found it.
 
 A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
 an issue gets `land-needed`, and on every push to `main`, one run at a time,
@@ -820,6 +826,11 @@ started.
    issue, because GitHub starts no workflow for a merge made with the workflow's
    own token. Then it closes the issue as completed, which GitHub leaves open
    after such a merge.
+   A PR whose proof in this run accepts what the approval doesn't cover isn't
+   merged, and it and its issue keep `land-needed`. GitHub merges an armed PR
+   once it is green, so its `prepare` turned auto-merge off before posting
+   `success`, as the [merge sequence](#merge-sequence) does. The PR has the new
+   comment, and the owner approves it by arming the PR again.
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
    and says why. If it ended with neither a `success` nor a `failure` on the
    PR's head, as at the merge timeout, `refresh` posts `failure` as `Not
@@ -851,7 +862,7 @@ Actions, each proof sits in a `::group::PR 5 (1 of 2): <title>` fold, and the
 proof of `main` in its own fold. `refresh` appends a table to
 `$GITHUB_STEP_SUMMARY`, with a row per PR: the PR, the verdict (`merged`,
 `proven`, or `not proven`), the status description, and how long the proof
-took.
+took. Under the table, a line for each proven PR that stays open says why.
 Elsewhere it prints no fold markers and writes no summary.
 
 Each `prepare` proves its PR with the xtask of the `main` it fetched, as in

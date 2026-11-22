@@ -44,7 +44,10 @@ case "$1 $2" in
   "pr comment") cat >> "$d/pr-comment"; echo "https://github.com/o/r/pull/$3#issuecomment-6" ;;
   "pr view")
     if [ ! -e "$d/pr.json" ]; then echo "no such PR" >&2; exit 1; fi
-    cat "$d/pr.json" ;;
+    case "$*" in
+      *autoMergeRequest*) echo '{"state":"OPEN","headRefOid":"0","autoMergeRequest":null}' ;;
+      *) cat "$d/pr.json" ;;
+    esac ;;
   "api -X") ;;
   "api repos/"*)
     sha="$(echo "$2" | cut -d/ -f5)"

@@ -285,7 +285,9 @@ fn sequence(
     }
     // The comment comes first, so that a green PR always has it.
     if !accepted.is_empty() {
+        let earlier = gh.acceptances(number)?;
         gh.comment_on_pr(number, &acceptance(&recorded, &accepted))?;
+        hold_back(&gh, number, command, &earlier, &accepted)?;
     }
     status.passed(&format!(
         "spec {} of {}, journey {} of {}",
@@ -444,12 +446,99 @@ impl Drop for Status<'_> {
     }
 }
 
+/// How the comment that lists what merging accepts begins.
+const ACCEPTS: &str = "Merging this PR at `";
+/// What marks a reason that only `main`'s xtask accepted.
+const BY_MAINS: &str = "by `main`'s xtask, ";
+
 fn acceptance(head: &str, accepted: &[String]) -> String {
     let lines: Vec<String> = accepted.iter().map(|item| format!("- {item}")).collect();
-    format!(
-        "Merging this PR at `{head}` accepts:\n\n{}\n",
-        lines.join("\n")
-    )
+    format!("{ACCEPTS}{head}` accepts:\n\n{}\n", lines.join("\n"))
+}
+
+/// The head and the reasons of each comment that `acceptance` wrote, oldest
+/// first, from comment bodies one after another.
+pub fn acceptances(comments: &str) -> Vec<(String, Vec<String>)> {
+    let mut lists: Vec<(String, Vec<String>)> = Vec::new();
+    let mut open = false;
+    for line in comments.lines() {
+        let head = line
+            .strip_prefix(ACCEPTS)
+            .and_then(|rest| rest.strip_suffix("` accepts:"));
+        if let Some(head) = head {
+            lists.push((head.to_string(), Vec::new()));
+            open = true;
+            continue;
+        }
+        let Some((_, reasons)) = lists.last_mut().filter(|_| open) else {
+            continue;
+        };
+        match line.strip_prefix("- ") {
+            Some(reason) => reasons.push(reason.to_string()),
+            // The blank line under the heading.
+            None if line.is_empty() && reasons.is_empty() => {}
+            None => open = false,
+        }
+    }
+    lists
+}
+
+/// What `accepted` has that the `approved` list doesn't cover, or all of it
+/// when nothing was approved. A count that fell is covered by an approval of
+/// a fall at least as big, measured on any `main`. Which xtask found a reason
+/// doesn't matter.
+pub fn unapproved(approved: Option<&[String]>, accepted: &[String]) -> Vec<String> {
+    let approved = approved.unwrap_or_default();
+    accepted
+        .iter()
+        .filter(|reason| {
+            !approved.iter().any(|given| {
+                plain(given) == plain(reason)
+                    || matches!((fall(given), fall(reason)),
+                        (Some((name, allowed)), Some((named, fell))) if name == named && fell <= allowed)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn plain(reason: &str) -> &str {
+    reason.strip_prefix(BY_MAINS).unwrap_or(reason)
+}
+
+/// The count and how far it fell, from a reason that `compare_counts` wrote.
+fn fall(reason: &str) -> Option<(&str, u64)> {
+    let (name, counts) = plain(reason).split_once(" fell from ")?;
+    let (from, to) = counts.split_once(" to ")?;
+    let (from, to): (u64, u64) = (from.parse().ok()?, to.parse().ok()?);
+    Some((name, from.checked_sub(to)?))
+}
+
+/// An owner who arms auto-merge approves what the PR's newest comment said
+/// merging accepts, and GitHub merges an armed PR once it is green. So a proof
+/// that accepts more turns auto-merge off before its green, and arming it
+/// again approves the new comment. `earlier` is what was there before it.
+fn hold_back(
+    gh: &Gh,
+    number: u64,
+    command: &str,
+    earlier: &str,
+    accepted: &[String],
+) -> Result<(), Problem> {
+    let lists = acceptances(earlier);
+    let new = unapproved(lists.last().map(|(_, reasons)| &reasons[..]), accepted);
+    // Read after the comment, so an owner who arms it now has seen it.
+    if new.is_empty() || !gh.armed(number)?.auto_merge {
+        return Ok(());
+    }
+    gh.disable_auto_merge(number)?;
+    println!(
+        "{command}: PR {number}'s auto-merge is off, because what the owner approved doesn't cover what merging it now accepts:"
+    );
+    for item in &new {
+        println!("- {item}");
+    }
+    Ok(())
 }
 
 /// Whether this process is the worker that a supervisor started. The variable
@@ -1118,7 +1207,7 @@ impl Proof {
     fn after(mut self, mains: Proof) -> Proof {
         for item in mains.accepted {
             if !self.accepted.contains(&item) {
-                self.accepted.push(format!("by `main`'s xtask, {item}"));
+                self.accepted.push(format!("{BY_MAINS}{item}"));
             }
         }
         self
@@ -1240,7 +1329,9 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 
 #[cfg(test)]
 mod tests {
-    use super::{GOING, SLOT, TREE_PATH, WAITING, left_after, long};
+    use super::{
+        GOING, SLOT, TREE_PATH, WAITING, acceptance, acceptances, left_after, long, unapproved,
+    };
     use std::path::Path;
     use std::time::Duration;
 
@@ -1276,6 +1367,63 @@ mod tests {
             left_after(GOING, SLOT, seconds(40), seconds(5), whole),
             whole
         );
+    }
+
+    fn reasons(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn each_acceptance_comment_is_read_with_its_head_and_reasons() {
+        let first = acceptance(
+            "aaa",
+            &reasons(&["it changes `x`", "journey fell from 2 to 1"]),
+        );
+        let second = acceptance("bbb", &reasons(&["spec fell from 3 to 2"]));
+        let other = "The refresh couldn't prove this PR: Failed: lint\n\n- a list\n";
+        let quoted = "> Merging this PR at `ccc` accepts:\n";
+        let comments = format!("{first}\n{other}\n{second}\n{quoted}\n");
+        assert_eq!(
+            acceptances(&comments),
+            [
+                (
+                    "aaa".to_string(),
+                    reasons(&["it changes `x`", "journey fell from 2 to 1"])
+                ),
+                ("bbb".to_string(), reasons(&["spec fell from 3 to 2"])),
+            ]
+        );
+        assert!(acceptances("").is_empty());
+    }
+
+    #[test]
+    fn only_what_the_approval_did_not_cover_is_new() {
+        let accepted = reasons(&["it changes `x`", "journey fell from 9 to 8"]);
+        assert_eq!(unapproved(None, &accepted), accepted);
+        assert!(unapproved(Some(&accepted), &accepted).is_empty());
+        let fewer = reasons(&["journey fell from 9 to 8"]);
+        let more = reasons(&[
+            "journey fell from 9 to 8",
+            "it changes `y`",
+            "it changes `x`",
+        ]);
+        assert!(unapproved(Some(&more), &fewer).is_empty());
+        assert_eq!(
+            unapproved(Some(&fewer), &accepted),
+            reasons(&["it changes `x`"])
+        );
+        // A fall as big on a newer `main` is the same fall, and a bigger one
+        // isn't.
+        let approved = reasons(&["journey fell from 9 to 8"]);
+        assert!(unapproved(Some(&approved), &reasons(&["journey fell from 10 to 9"])).is_empty());
+        let further = reasons(&["journey fell from 9 to 7"]);
+        assert_eq!(unapproved(Some(&approved), &further), further);
+        let other = reasons(&["spec fell from 9 to 8"]);
+        assert_eq!(unapproved(Some(&approved), &other), other);
+        // Which xtask found it doesn't matter.
+        let mains = reasons(&["by `main`'s xtask, journey fell from 9 to 8"]);
+        assert!(unapproved(Some(&approved), &mains).is_empty());
+        assert!(unapproved(Some(&mains), &approved).is_empty());
     }
 
     #[test]

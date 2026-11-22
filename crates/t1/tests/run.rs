@@ -1253,6 +1253,7 @@ fn ap_exec_answers_while_an_interactive_harness_leaves_your_keys_unread() {
     printed(&exec_within(&scratch, &name, &["id", "-un"]), "agent\n");
 }
 
+// spec(ap stop): It sends the harness `SIGTERM`, and powers the VM off if the harness hasn't exited 10 seconds later.
 #[test]
 fn ap_stop_reaches_an_interactive_harness_that_leaves_your_keys_unread() {
     let scratch = Scratch::new("stop-unread");
@@ -1276,8 +1277,9 @@ fn ap_stop_reaches_an_interactive_harness_that_leaves_your_keys_unread() {
     assert_eq!(run.exit_status().code(), Some(128 + 15));
 }
 
-/// The most commands beside the harness that can run at once: the VMM
-/// takes 64 connections from the guest, and the init holds one.
+/// The most commands beside a headless harness that can run at once: the
+/// VMM takes 64 connections from the guest, and the init holds one. Beside
+/// a harness in a terminal, its keys hold one more.
 const MOST_EXECS: usize = 63;
 
 #[test]

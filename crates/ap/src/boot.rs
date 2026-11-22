@@ -111,10 +111,10 @@ pub struct Shares {
     pub count: usize,
 }
 
-/// What a run gets while it runs, sent from a thread other than the vCPU's:
-/// keys and resizes for a harness in a terminal, on a connection of their
-/// own, a stop for the harness, which reaches the guest after the request
-/// that started it, and the commands beside the harness, with their input.
+/// What a run gets while it runs, sent from a thread other than the vCPU's.
+/// Keys and resizes for a harness in a terminal go on a connection of their
+/// own. A stop reaches the guest after the request that started the harness.
+/// The commands beside the harness come with their input.
 pub struct Input {
     /// A stop for the init, not yet handed to the vsock device.
     stops: Mutex<Vec<u8>>,
@@ -593,7 +593,7 @@ pub fn boot_linked(
         .map(|shares| ShareRelay::new(shares.socket, Instant::now() + guest.timeout))
         .transpose()
         .map_err(|error| failed("can't reach the share server", error))?;
-    // Only a run has commands beside its harness.
+    // Only a run has keys for its harness, and commands beside it.
     let ports: &[u32] = match guest.input {
         Some(_) => &[PORT, EXEC_PORT, KEYS_PORT],
         None => &[PORT],

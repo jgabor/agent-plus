@@ -133,8 +133,10 @@ impl Split for File {
 /// Opens a new connection to this port on the host.
 pub type Connect = fn(u32) -> io::Result<File>;
 
-/// Serves requests until the host hangs up, or until a harness has ended. With `connect`, a harness that starts can have
-/// commands run beside it.
+/// Serves requests until the host hangs up, or until a harness has ended.
+/// With `connect`, a harness that starts can have commands run beside it,
+/// and a harness in a terminal can take keys. Without it, a harness in a
+/// terminal fails to start.
 ///
 /// A refused frame ends the service. The caller powers off, and a program
 /// still running goes with the machine.

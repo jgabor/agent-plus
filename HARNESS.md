@@ -277,9 +277,9 @@ each journey step above can't pass until its check exists.
 **Paid checks (T3).** They run on a Claude Console workspace and an OpenAI
 project used only for them, each with a monthly spend limit the owner sets.
 The providers enforce the limits, so no program here can pass them. Each key
-is scoped to its workspace or project, with an expiry. A step marked `spend`
-names its provider, and the nightly job gives it that provider's key and no
-other, the way a user's `AUTH key` run gets it. It reads the Anthropic key
+is scoped to its workspace or project, with an expiry. The nightly job gives
+a step marked `spend` its provider's key and no other, the way a user's
+`AUTH key` run gets it. It reads the Anthropic key
 from `~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it as
 `ANTHROPIC_API_KEY`. It reads the OpenAI key from
 `~/.config/agent-plus/paid-checks/openai-api-key`, and gives it only to step

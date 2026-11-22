@@ -1068,8 +1068,14 @@ fn nightly_gives_each_spend_step_only_its_own_key() {
 /// when another provider has one.
 #[test]
 fn nightly_skips_a_spend_step_without_its_own_key() {
+    for openai in [None, Some(" \n")] {
+        skips_without_its_own_key(openai);
+    }
+}
+
+fn skips_without_its_own_key(openai: Option<&str>) {
     let repo = Repo::with(
-        "one-key",
+        &format!("one-key-{}", openai.is_some()),
         "fn main() {}\n",
         &[
             ("harness/journey.toml", TWO_KEYS),
@@ -1077,7 +1083,9 @@ fn nightly_skips_a_spend_step_without_its_own_key() {
         ],
     );
     repo.set_paid_key("anthropic", "sk-ant-0xf7a1");
-    repo.set_paid_key("openai", " \n");
+    if let Some(key) = openai {
+        repo.set_paid_key("openai", key);
+    }
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(

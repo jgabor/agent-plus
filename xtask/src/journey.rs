@@ -182,7 +182,7 @@ fn read(root: &Path) -> Result<(Vec<Milestone>, Vec<Step>), Problem> {
                 Some(Value::Str(floor)) => Some(floor.clone()),
                 Some(_) => return Err(bad("has a `floor` that isn't a string")),
             },
-            spend: read_spend(&table).map_err(|what| bad(what))?,
+            spend: read_spend(&table).map_err(bad)?,
         };
         if steps.insert(id, step).is_some() {
             return Err(Problem(format!("{JOURNEY_FILE}: step {id} appears twice")));

@@ -649,6 +649,7 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
 // spec(SHARE): A directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, is a git directory too, because that is how git finds a bare repository.
 // spec(SHARE): None of those entries can be removed or moved out of it.
 // spec(SHARE): Its `modules` and `worktrees` are protected as they are in `.git`.
+// spec(SHARE): Your filesystem decides whether it holds those entries, so on one that tells case apart, `head` isn't `HEAD`.
 #[test]
 fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let tree = Tree::new("bare");
@@ -661,6 +662,8 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
         "linked",
         "later/objects",
         "later/refs",
+        "cased/objects",
+        "cased/refs",
     ] {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
@@ -672,6 +675,8 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
         "linked/HEAD",
         "linked/commondir",
         "linked/config.worktree",
+        "cased/head",
+        "cased/config",
     ] {
         fs::write(root.join(file), b"host").unwrap();
     }
@@ -727,6 +732,10 @@ fn a_bare_repository_s_config_and_hooks_are_read_only() {
     let refused = shut.remove(UNLINK, 1, b"HEAD");
     fs::set_permissions(root.join("shut"), fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(refused, EPERM);
+    // The host's filesystem says whether `head` is `HEAD`.
+    let folds = root.join("cased/HEAD").exists();
+    let written = guest.overwrite("cased/config", b"agent");
+    assert_eq!(written, if folds { Err(EPERM) } else { Ok(()) });
     // So is a root that is one, or that is beneath one.
     let mut bare = Guest::with(&root.join("repo.git"), Mode::ReadWrite);
     assert_eq!(bare.overwrite("config", b"agent"), Err(EPERM));

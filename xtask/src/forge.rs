@@ -375,6 +375,24 @@ impl Gh {
         self.text(&["api", &path, "--paginate", "--jq", ".[].body"], None)
     }
 
+    /// The bodies of the comments on a PR that begin as `merge::acceptance`
+    /// does, one after another.
+    pub fn acceptances(&self, number: u64) -> Result<String, Problem> {
+        let path = format!("{ISSUES}/{number}/comments");
+        let filter = format!(
+            ".[] | select(.body | startswith({})) | .body",
+            json::quoted(crate::merge::ACCEPTS)
+        );
+        self.text(&["api", &path, "--paginate", "--jq", &filter], None)
+    }
+
+    /// Turns auto-merge off, which `gh` does before it reads any branch.
+    pub fn disable_auto_merge(&self, number: u64) -> Result<(), Problem> {
+        let number = number.to_string();
+        self.text(&["pr", "merge", &number, "--disable-auto"], None)?;
+        Ok(())
+    }
+
     pub fn open_issues(&self) -> Result<Vec<OpenIssue>, Problem> {
         self.listed("open", "number,title,labels,isPinned")?
             .iter()

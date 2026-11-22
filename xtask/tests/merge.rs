@@ -380,7 +380,7 @@ maybe_kill before
   "repo view") echo '{{"nameWithOwner":"o/r","owner":{{"login":"o"}}}}' ;;
   "pr view") case "$*" in
     *autoMergeRequest*) if [ -f "{bin}/merged-$3" ]; then state=MERGED; else state=OPEN; fi
-      if [ -f "{bin}/disarmed-$3" ]; then auto=null; else auto='{{"mergeMethod":"SQUASH"}}'; fi
+      if [ -f "{bin}/armed-$3" ] && [ ! -f "{bin}/disarmed-$3" ]; then auto='{{"mergeMethod":"SQUASH"}}'; else auto=null; fi
       head=$('{git}' --git-dir '{origin}' rev-parse "refs/heads/$(cat "{bin}/branch-$3")")
       printf '{{"state":"%s","headRefOid":"%s","autoMergeRequest":%s}}\n' "$state" "$head" "$auto" ;;
     *) if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
@@ -389,7 +389,8 @@ maybe_kill before
   "issue list") cat '{bin}/issues.json' ;;
   "pr comment") if [ -f '{bin}/comment-fails' ]; then echo 'gh: no comment (HTTP 403)' >&2; exit 1; fi
     cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
-  "pr merge") if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
+  "pr merge") case "$*" in *--disable-auto*) : > "{bin}/disarmed-$3"; exit 0 ;; esac
+    if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
     if [ "$3" = 9 ]; then echo "$9" > '{bin}/merged'; fi
     if [ -f '{bin}/merge-fails-late' ]; then echo 'no branch to delete' >&2; exit 1; fi ;;
@@ -2759,7 +2760,8 @@ fn status(head: &str, state: &str) -> String {
 }
 
 impl Repo {
-    /// The fake `gh pr view` reads each PR's head from its branch.
+    /// The fake `gh pr view` reads each PR's head from its branch, and whether
+    /// its auto-merge is armed from its row.
     fn set_open_prs(&self, rows: &[String]) {
         for row in rows {
             let field = |name: &str, end: char| {
@@ -2769,6 +2771,9 @@ impl Repo {
             let number = field("\"number\":", ',');
             let branch = field("\"headRefName\":\"", '"');
             fs::write(self.bin.join(format!("branch-{number}")), branch).unwrap();
+            if row.contains(ARMED) {
+                fs::write(self.bin.join(format!("armed-{number}")), "").unwrap();
+            }
         }
         fs::write(self.bin.join("prs.json"), format!("[{}]\n", rows.join(","))).unwrap();
     }
@@ -2922,7 +2927,9 @@ fn a_refresh_proves_and_merges_each_armed_land_needed_pr_oldest_first() {
     }
     let to_issues: String = calls
         .lines()
-        .filter(|call| call.contains("/issues/") && !call.contains("/labels"))
+        .filter(|call| {
+            call.starts_with("gh api -X ") && call.contains("/issues/") && !call.contains("/labels")
+        })
         .map(|call| format!("{call}\n"))
         .collect();
     assert_eq!(to_issues, closed(8) + &closed(7), "{calls}");
@@ -3587,6 +3594,109 @@ fn a_refresh_merges_no_pr_whose_auto_merge_was_turned_off() {
     let calls = repo.calls();
     assert!(!calls.contains("gh pr merge"), "{calls}");
     assert!(!calls.contains("/labels/"), "{calls}");
+}
+
+impl Repo {
+    /// The comment that a proof of an earlier head left, which the owner
+    /// approved by arming auto-merge.
+    fn approved(&self, reasons: &[&str]) {
+        let lines: Vec<String> = reasons.iter().map(|reason| format!("- {reason}")).collect();
+        let body = format!(
+            "Merging this PR at `0123456789abcdef0123456789abcdef01234567` accepts:\n\n{}\n\n",
+            lines.join("\n")
+        );
+        fs::write(self.bin.join("pr-comments"), body).unwrap();
+    }
+
+    /// A refresh in Actions, and the summary it wrote.
+    fn refresh_summed_up(&self) -> (Output, String) {
+        let summary = self.temp.join("summary.md");
+        self.git(&["checkout", "-q", "main"]);
+        let output = self
+            .command(env!("CARGO_BIN_EXE_xtask"))
+            .arg("refresh")
+            .env("GITHUB_ACTIONS", "true")
+            .env("GITHUB_STEP_SUMMARY", &summary)
+            .output()
+            .unwrap();
+        (output, fs::read_to_string(&summary).unwrap_or_default())
+    }
+}
+
+/// A PR whose journey count falls from 2 to 1, armed and behind `main`.
+fn falling(name: &str) -> Repo {
+    let repo = with_base(name, 0, 2);
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    repo.forget_calls();
+    repo
+}
+
+/// The owner's approval covers only what the comment listed when they armed
+/// the PR, so a refresh that finds more turns auto-merge off before the green
+/// that GitHub's auto-merge would act on.
+#[test]
+fn a_refresh_leaves_open_a_pr_whose_proof_accepts_something_new() {
+    let repo = falling("refresh-new-reason");
+    repo.approved(&["it changes `.github/workflows/x.yml`"]);
+
+    let (output, summary) = repo.refresh_summed_up();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let head = repo.head();
+    let calls = repo.calls();
+    let off = calls
+        .find("gh pr merge 9 --disable-auto")
+        .unwrap_or_else(|| panic!("auto-merge stayed on:\n{calls}"));
+    let green = calls.find(&status(&head, "success")).expect(&calls);
+    assert!(off < green, "{calls}");
+    assert!(!calls.contains(&merged(9, &head)), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+    assert!(!calls.contains("/issues/7 "), "{calls}");
+    let comments = repo.pr_comments();
+    let listed = format!("Merging this PR at `{head}` accepts:\n\n- journey fell from 2 to 1\n");
+    assert!(comments.contains(&listed), "{comments}");
+    let why = "PR 9 stays open, because its proof accepts what the owner didn't approve: journey fell from 2 to 1. Arming its auto-merge again approves it";
+    let out = stdout(&output);
+    assert!(out.contains(&format!("refresh: {why}\n")), "{out}");
+    assert!(
+        summary.contains("| #9 | proven | spec 0 of 2, journey 1 of 1 | "),
+        "{summary}"
+    );
+    assert!(summary.contains(&format!("\n{why}\n")), "{summary}");
+}
+
+/// A fall no bigger than the one approved is the same reason, whatever head
+/// or `main` it was measured on.
+#[test]
+fn a_refresh_merges_a_pr_whose_proof_accepts_what_was_approved() {
+    let repo = falling("refresh-same-reason");
+    repo.approved(&[
+        "journey fell from 3 to 2",
+        "it changes `.github/workflows/x.yml`",
+    ]);
+
+    let (output, summary) = repo.refresh_summed_up();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(!calls.contains("--disable-auto"), "{calls}");
+    assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+    assert!(calls.contains(&closed(7)), "{calls}");
+    assert!(summary.contains("| #9 | merged | "), "{summary}");
+    assert!(!summary.contains("stays open"), "{summary}");
 }
 
 /// A head that a person pushed after the proof isn't the one it proved.

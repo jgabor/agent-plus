@@ -348,6 +348,22 @@ fn each_codex_mode_is_set_on_the_command_line() {
     golden_in("codex", "mode.txt", lines.as_bytes());
 }
 
+// spec(MODE): With `edit` and `auto`, the Codex adapter also empties `sandbox_workspace_write.writable_roots`, so a project's settings can't add directories the sandbox lets the agent write.
+#[test]
+fn a_codex_project_cant_add_writable_roots() {
+    let empty = "sandbox_workspace_write.writable_roots=[]";
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                let arguments = codex::arguments(version, None, None, mode, interactive);
+                let emptied = (arguments.windows(2)).any(|pair| pair == ["-c", empty]);
+                let writes = matches!(mode, Mode::Edit | Mode::Auto);
+                assert_eq!(emptied, writes, "{version} {mode:?} {interactive}");
+            }
+        }
+    }
+}
+
 // spec(WORKDIR): A headless Codex run can start in a directory that isn't a git repository, such as `/home/agent`, because the adapter passes `codex exec --skip-git-repo-check`.
 #[test]
 fn a_headless_codex_run_skips_the_git_repository_check() {
@@ -378,7 +394,9 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
             "--skip-git-repo-check",
             "--approve-for-me",
             "-c",
-            "sandbox_workspace_write.network_access=true"
+            "sandbox_workspace_write.network_access=true",
+            "-c",
+            "sandbox_workspace_write.writable_roots=[]"
         ]
     );
 }

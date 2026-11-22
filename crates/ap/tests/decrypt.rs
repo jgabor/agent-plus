@@ -130,13 +130,26 @@ impl Guest {
         port: u16,
         injection: Injection,
     ) -> Guest {
+        Guest::with_harness(lines, roots, port, injection, Vec::new())
+    }
+
+    /// A guest as [`Guest::injecting`]'s, whose harness has `harness` as its
+    /// hosts.
+    fn with_harness(
+        lines: &str,
+        roots: Vec<CertificateDer<'static>>,
+        port: u16,
+        injection: Injection,
+        harness: Vec<String>,
+    ) -> Guest {
         let (mine, theirs) = link();
         let (sent, got) = mpsc::channel();
         let lines = lines.to_owned();
         thread::spawn(move || {
             let instructions = parse(&format!("AGENT claude\n{lines}")).unwrap();
             let network = Network::read(&instructions).unwrap();
-            let mut args = vec!["--".into()];
+            let mut args: Vec<std::ffi::OsString> = (harness.iter()).map(Into::into).collect();
+            args.push("--".into());
             args.extend((lines.lines()).map(|line| line.strip_prefix("NETWORK ").unwrap().into()));
             let mut resolver = ap::network::resolver(&args).unwrap();
             let answer = resolver.answer(&query(NAME)).unwrap();
@@ -147,7 +160,7 @@ impl Guest {
             let decryption = Decryption::new(authority, roots).unwrap();
             // Your host's name asks for no lookup.
             let (lookups, _) = UnixDatagram::pair().unwrap();
-            let mut proxy = (Proxy::new(network, Vec::new(), lookups))
+            let mut proxy = (Proxy::new(network, harness, lookups))
                 .decrypting(decryption)
                 .injecting(injection);
             let mut stack = ap::network::stack();
@@ -1237,4 +1250,38 @@ fn a_key_s_server_never_speaks_first() {
         assert!(!socket.can_recv(), "the server spoke first");
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+// spec(NETWORK): `AUTH key` is the one case where the proxy decrypts a harness host's traffic.
+#[test]
+fn a_harness_host_is_decrypted_only_for_its_key() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let harness = vec![NAME.to_owned()];
+    // Without a key, the guest sees the destination's own certificate.
+    let mut guest = Guest::with_harness(
+        &rules,
+        Vec::new(),
+        port,
+        Injection::default(),
+        harness.clone(),
+    );
+    let handle = guest.connect();
+    let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    // With one, the run's authority signs what the guest sees.
+    let mut guest = Guest::with_harness(&rules, vec![root], port, key_for(NAME), harness);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_ok(), "{answer:?}");
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(!seen[0].contains(VALUE), "{seen:?}");
+    assert!(
+        seen[1].contains(&format!("X-Api-Key: {VALUE}\r\n")),
+        "{seen:?}"
+    );
 }

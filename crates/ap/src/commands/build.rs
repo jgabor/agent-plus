@@ -719,8 +719,9 @@ fn read_text(host: &HostPath) -> io::Result<Vec<u8>> {
 }
 
 /// The harness configuration layer, as an uncompressed EROFS image: the
-/// files the harness's adapter renders for `auth`, and the prompt at [`PROMPT`]. What
-/// it puts in the agent's home is the agent's, so the harness can change it.
+/// files the harness's adapter renders for `auth`, and the prompt at
+/// [`PROMPT`]. What it puts in the agent's home is the agent's, so the
+/// harness can change it.
 fn configuration(
     settings: &Settings,
     auth: Option<Auth>,

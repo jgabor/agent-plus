@@ -35,7 +35,8 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 /// What the worker tells its supervisor: it holds the slot, which starts the
-/// timeout again, or it waits for a place, which stops it.
+/// timeout again, or it waits for other work to free a place or the activity
+/// lock, which stops it.
 const SLOT: u8 = b's';
 const WAITING: u8 = b'w';
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
@@ -464,7 +465,8 @@ fn report_slot() -> Result<(), Problem> {
     tell_supervisor(SLOT)
 }
 
-/// Tells the supervisor that the worker waits for a place, or has one. The
+/// Tells the supervisor that the worker waits for other work, or no longer
+/// does: for a place, and for its bench to hold the activity lock alone. The
 /// timeout stops during the wait, and starts again after it.
 fn report_place(waiting: bool) -> Result<(), Problem> {
     tell_supervisor(if waiting { WAITING } else { SLOT })
@@ -543,7 +545,8 @@ fn supervised() -> Result<i32, Problem> {
 
 /// Stops the worker's group once the worker has held the slot for the timeout,
 /// because a stuck merge would hold it for every other merge. A wait for a
-/// place doesn't count, because other work holds the places. Says whether it
+/// place doesn't count, because other work holds the places, and neither does
+/// a bench's wait for the activity lock, which other work holds. Says whether it
 /// did. Only the caller exits, once the worker is reaped, because this thread
 /// can be slow to go on after the kill lands, and the caller would then see a
 /// killed worker and die as it did.
@@ -866,8 +869,9 @@ struct Proof {
 
 /// Runs the gate, the journey, and any bench on the rebased head, saying which
 /// it is on, and returns the record they earn. If any check failed, the merge
-/// must stop, and the reasons have been printed. `placing` hears when the wait
-/// for a place starts and ends.
+/// must stop, and the reasons have been printed. `placing` hears when a wait
+/// for other work starts and ends: for a place, and for the bench to hold the
+/// activity lock alone.
 fn prove(
     tree: &Path,
     scoring: &Scoring,
@@ -922,7 +926,7 @@ fn prove(
     let benched = !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)?;
     if benched {
         starting("bench");
-        if bench::compare(tree, Some(&pr.body))? == Verdict::Fail {
+        if bench::compare(tree, Some(&pr.body), placing)? == Verdict::Fail {
             return Ok(Err(vec!["bench"]));
         }
     }

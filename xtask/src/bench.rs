@@ -197,13 +197,18 @@ pub fn missed<'a>(budgets: &'a [Budget], values: &BTreeMap<String, f64>) -> Vec<
 }
 
 pub fn run() -> Result<Verdict, Problem> {
-    compare(&workspace::root()?, None)
+    compare(&workspace::root()?, None, &|_| Ok(()))
 }
 
 /// Measures HEAD against its base. A merge passes the PR body it read, which
 /// says why any slowdown is worth it. Otherwise that comes from this branch's
-/// open PR.
-pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
+/// open PR. `waiting` hears when the wait to hold the activity lock alone
+/// starts and ends, because other work holds that lock for as long as it runs.
+pub fn compare(
+    root: &Path,
+    pr_body: Option<&str>,
+    waiting: &dyn Fn(bool) -> Result<(), Problem>,
+) -> Result<Verdict, Problem> {
     let budgets = read_budgets(root)?;
     let Some(commit) = base::find(root)? else {
         return Err(Problem(
@@ -227,7 +232,9 @@ pub fn compare(root: &Path, pr_body: Option<&str>) -> Result<Verdict, Problem> {
     };
     drop(hold);
 
+    waiting(true)?;
     let measuring = lock::exclusive(root)?;
+    waiting(false)?;
     let rows = measure(
         &budgets,
         &baseline,

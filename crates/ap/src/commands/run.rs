@@ -25,9 +25,10 @@
 //! Each `SECRET`'s value comes from the variable of its name in this
 //! process's environment, and a run without one fails with 125, before any
 //! VM starts. A `visible` value goes to the harness's environment. A hidden
-//! one stays in this process, for the network process, and the harness
-//! gets a placeholder made for this run instead. The run process starts
-//! without a hidden secret's variable.
+//! one goes to the network process, which puts it in requests to its bound
+//! hosts, and the harness gets a placeholder made for this run instead.
+//! Neither the run process nor the network process starts with a hidden
+//! secret's variable.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, OsString};
@@ -50,6 +51,7 @@ use agentfile::{
 };
 use ap::boot::Error;
 use ap::filter::Filter;
+use ap::network::{Hidden, Injection};
 use ap::paths::HostPath;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
@@ -155,8 +157,8 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
 
 /// Runs the agent, and returns the harness's status, or `ap`'s own.
 pub fn run(args: &Args) -> u8 {
-    let started = start(args).and_then(|(root, layers, shares, start, network, hidden)| {
-        run_agent(&root, args, &layers, shares, start, &network, &hidden)
+    let started = start(args).and_then(|(root, layers, shares, start, network, injection)| {
+        run_agent(&root, args, &layers, shares, start, &network, injection)
     });
     match started {
         Ok(status) => status,
@@ -176,7 +178,7 @@ fn run_agent(
     shares: Vec<Opened>,
     mut start: Start,
     network: &[OsString],
-    hidden: &[Hidden],
+    injection: Injection,
 ) -> Result<u8, Error> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -219,8 +221,12 @@ fn run_agent(
         link: network_link,
         lookups,
         authority,
-    } = ap::network::start(exe, network).map_err(fail("can't start the network process"))?;
+    } = ap::network::start(exe, network, &injection)
+        .map_err(fail("can't start the network process"))?;
     start.authority = authority;
+    // The values live in the network process alone from here.
+    let names: Vec<String> = (injection.secrets.iter()).map(|secret| secret.name.clone()).collect();
+    drop(injection);
     let share_socket = match shares.is_empty() {
         true => None,
         false => {
@@ -240,8 +246,8 @@ fn run_agent(
     let mut command = Command::new(exe);
     // The run process gets no hidden value, not even through the
     // environment it would inherit.
-    for secret in hidden {
-        command.env_remove(&secret.name);
+    for secret in &names {
+        command.env_remove(secret);
     }
     command
         .arg0(runs::RUN_PROCESS)
@@ -559,26 +565,16 @@ fn keep_pending(
 }
 
 /// The store's root, the agent's layers, its shares' roots, how to start
-/// its harness, the network process's arguments, and its hidden secrets.
+/// its harness, the network process's arguments, and what it puts in
+/// requests.
 type Prepared = (
     PathBuf,
     Vec<LayerName>,
     Vec<Opened>,
     Start,
     Vec<OsString>,
-    Vec<Hidden>,
+    Injection,
 );
-
-/// A hidden secret, whose value stays out of the run process and the guest.
-struct Hidden {
-    name: String,
-    /// The value from your host, for the network process to swap in.
-    #[expect(dead_code, reason = "the network process gets it in a later change")]
-    value: Vec<u8>,
-    /// What the guest holds instead, random for each run.
-    #[expect(dead_code, reason = "the network process gets it in a later change")]
-    placeholder: Vec<u8>,
-}
 
 /// How many random bytes a placeholder has. It holds them in hex.
 const PLACEHOLDER_BYTES: usize = 16;
@@ -699,10 +695,18 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         let placeholder = random_placeholder()
             .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
         given.push((secret.name.as_bytes().to_vec(), placeholder.clone()));
+        // A name on several lines is bound to each of their hosts.
+        let mut hosts: Vec<String> = Vec::new();
+        for host in secrets.secrets.iter().filter(same).flat_map(|other| &other.hosts) {
+            if !hosts.contains(host) {
+                hosts.push(host.clone());
+            }
+        }
         hidden.push(Hidden {
             name: secret.name.clone(),
             value,
             placeholder,
+            hosts,
         });
     }
     let files = Files::read(&instructions).map_err(unreadable)?;
@@ -940,7 +944,13 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     };
     let hosts = ap::adapter::reserved(settings.agent.harness).hosts;
     let network = ap::network::arguments(hosts, &merged);
-    Ok((root, layers, roots, start, network, hidden))
+    let injection = Injection {
+        headers: (ap::adapter::headers(settings.agent.harness).iter())
+            .map(|header| header.to_string())
+            .collect(),
+        secrets: hidden,
+    };
+    Ok((root, layers, roots, start, network, injection))
 }
 
 /// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a

@@ -10,12 +10,17 @@
 //! Either way, [`NameCheck::requests`] reads each request, and the rules
 //! decide its target. A request they deny never reaches the destination,
 //! and the connection ends with a reset. So does traffic that isn't HTTP.
+//!
+//! A hidden secret's bound host is decrypted too, to put the secret's value
+//! in, as [`Reads::Injects`] says. On a TLS connection whose server name
+//! names the attributed name, each request whose `Host` names it too gets
+//! the value in the headers that [`Injection`] allows, by [`net::inject`].
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use agentfile::Scheme;
 use net::{NameCheck, Request};
@@ -25,7 +30,8 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::server::Acceptor;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
 
-use super::Authority;
+use super::proxy::SILENT_WAIT;
+use super::{Authority, Injection};
 
 /// Bytes moved at once in each direction.
 const BUFFER: usize = 16 * 1024;
@@ -104,6 +110,20 @@ pub fn roots(path: &Path) -> Vec<CertificateDer<'static>> {
 /// Decides a request on a connection: true allows it.
 pub(super) type Decide<'a> = dyn FnMut(&net::Connection) -> bool + 'a;
 
+/// Why a connection is decrypted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reads {
+    /// Its host has URL rules, so the rules decide each request, and
+    /// anything that isn't HTTP is refused.
+    Requests,
+    /// Its host is a hidden secret's bound host, and nothing else. Only TLS
+    /// whose server name names the host is decrypted, and each request on
+    /// it passes, whatever its `Host`. Anything else is read as it would be
+    /// without a secret: by the name check, if a name decided the
+    /// connection, which `by_name` says, or else not at all.
+    Injects { by_name: bool },
+}
+
 pub(super) struct Decrypted {
     id: ConnectionId,
     upstream: TcpStream,
@@ -111,6 +131,12 @@ pub(super) struct Decrypted {
     address: IpAddr,
     port: u16,
     check: NameCheck,
+    reads: Reads,
+    /// When the connection opened, for a guest that sends nothing first.
+    since: Instant,
+    /// The guest's TLS named the host, so its requests get the host's
+    /// secrets.
+    injects: bool,
     stage: Stage,
     /// Bytes for the guest that the stack has no room for yet.
     to_guest: Vec<u8>,
@@ -135,27 +161,38 @@ pub(super) struct Decrypted {
 enum Stage {
     /// Nothing has come from the guest.
     First,
-    /// A TLS client hello is coming, and this many bytes of it came.
-    Hello(Box<Acceptor>, usize),
+    /// A TLS client hello is coming, and these bytes of it came.
+    Hello(Box<Acceptor>, Vec<u8>),
     /// TLS, decrypted: the guest's side, and the destination's.
     Tls(Box<ServerConnection>, Box<ClientConnection>),
     Plain,
+    /// Not decrypted: the bytes pass both ways, through the name check if
+    /// there is one.
+    Passing(Option<Box<NameCheck>>),
 }
 
 impl Decrypted {
     /// The connection `id`, which the stack accepted, to `name`, whose
-    /// destination is `upstream`, connected to `to` and non-blocking.
+    /// destination is `upstream`, connected to `to` and non-blocking, which
+    /// is read as `reads` says.
     pub(super) fn new(
         id: ConnectionId,
         upstream: TcpStream,
         name: &str,
         to: SocketAddr,
+        reads: Reads,
     ) -> Decrypted {
         let name = name.to_ascii_lowercase();
         Decrypted {
             id,
             upstream,
-            check: NameCheck::requests(&name),
+            check: match reads {
+                Reads::Requests => NameCheck::requests(&name),
+                Reads::Injects { .. } => NameCheck::injecting(&name),
+            },
+            reads,
+            since: Instant::now(),
+            injects: false,
             name: name.trim_end_matches('.').to_owned(),
             address: to.ip(),
             port: to.port(),
@@ -186,6 +223,7 @@ impl Decrypted {
                 client.is_handshaking() || (open && !guest.is_handshaking())
             }
             Stage::Plain => open,
+            Stage::Passing(_) => true,
             Stage::First | Stage::Hello(..) => false,
         };
         reading && !self.upstream_closed && self.to_guest.is_empty()
@@ -198,16 +236,17 @@ impl Decrypted {
     }
 
     /// Moves what it can both ways, decrypting with `decryption`, without
-    /// which TLS is refused, and asks `decide`
-    /// about each request. Returns whether the connection goes on. Once it
-    /// doesn't, the stack has forgotten the connection.
+    /// which TLS is refused, and asks `decide` about each request. Requests
+    /// get the secrets of `injection`. Returns whether the connection goes
+    /// on. Once it doesn't, the stack has forgotten the connection.
     pub(super) fn pump(
         &mut self,
         stack: &mut Stack,
         decryption: Option<&Decryption>,
+        injection: &Injection,
         decide: &mut Decide,
     ) -> bool {
-        match self.moved(stack, decryption, decide) {
+        match self.moved(stack, decryption, injection, decide) {
             Ok(()) if !stack.ended(self.id) => true,
             Ok(()) => {
                 stack.forget(self.id);
@@ -225,9 +264,16 @@ impl Decrypted {
         &mut self,
         stack: &mut Stack,
         decryption: Option<&Decryption>,
+        injection: &Injection,
         decide: &mut Decide,
     ) -> io::Result<()> {
         let mut buffer = [0; BUFFER];
+        // A guest that sends nothing first may wait for the server, which
+        // gets what the guest sends unread, apart from the name check.
+        let silent = self.since.elapsed() >= SILENT_WAIT;
+        if let (Stage::First, Reads::Injects { by_name }, true) = (&self.stage, self.reads, silent) {
+            self.passing(by_name);
+        }
         loop {
             let mut moved = false;
             // From the guest.
@@ -235,7 +281,7 @@ impl Decrypted {
                 let n = stack.recv(self.id, &mut buffer);
                 if n > 0 {
                     moved = true;
-                    self.guest_sent(&buffer[..n], decryption, decide)?;
+                    self.guest_sent(&buffer[..n], decryption, injection, decide)?;
                 } else if stack.received_all(self.id) {
                     self.guest_ended()?;
                 }
@@ -333,29 +379,49 @@ impl Decrypted {
         !self.guest_closed && self.to_upstream.is_empty() && !waiting
     }
 
+    /// Passes the guest's bytes without decrypting, through the name check
+    /// if `by_name`.
+    fn passing(&mut self, by_name: bool) {
+        let check = by_name.then(|| Box::new(NameCheck::new(&self.name)));
+        self.stage = Stage::Passing(check);
+        self.allowed = true;
+    }
+
     fn guest_sent(
         &mut self,
         mut input: &[u8],
         decryption: Option<&Decryption>,
+        injection: &Injection,
         decide: &mut Decide,
     ) -> io::Result<()> {
         if let Stage::First = self.stage {
-            self.stage = match input[0] {
-                0x16 => Stage::Hello(Box::default(), 0),
-                _ => Stage::Plain,
-            };
+            match (input[0], self.reads) {
+                (0x16, _) => self.stage = Stage::Hello(Box::default(), Vec::new()),
+                (_, Reads::Requests) => self.stage = Stage::Plain,
+                (_, Reads::Injects { by_name }) => self.passing(by_name),
+            }
         }
-        let (name, address, port) = (self.name.clone(), self.address, self.port);
-        let mut allows = |scheme, target: &str| {
-            decide(&net::Connection {
+        let (name, address, port, reads) = (self.name.clone(), self.address, self.port, self.reads);
+        let mut allows = |scheme, target: &str| match reads {
+            Reads::Requests => decide(&net::Connection {
                 name: Some(&name),
                 address,
                 port,
                 request: Some(Request { scheme, target }),
-            })
+            }),
+            // The connection's own decision decides its requests.
+            Reads::Injects { .. } => true,
         };
         match &mut self.stage {
             Stage::First => unreachable!(),
+            Stage::Passing(check) => {
+                match check {
+                    Some(check) => (check.feed(input, &mut self.to_upstream))
+                        .map_err(|_| refused("a name that disagrees"))?,
+                    None => self.to_upstream.extend_from_slice(input),
+                }
+                Ok(())
+            }
             Stage::Plain => {
                 let check = &mut self.check;
                 let before = self.to_upstream.len();
@@ -365,26 +431,39 @@ impl Decrypted {
                 self.allowed |= self.to_upstream.len() > before;
                 fed.map_err(|_| refused("a request the rules deny"))
             }
-            Stage::Hello(acceptor, read) => {
-                *read += input.len();
+            Stage::Hello(acceptor, raw) => {
+                raw.extend_from_slice(input);
                 while !input.is_empty() {
                     if acceptor.read_tls(&mut input)? == 0 {
                         return Err(refused("a client hello that doesn't end"));
                     }
                 }
                 let accepted = match acceptor.accept() {
-                    Ok(None) if *read > HELLO_LIMIT => return Err(refused("a long client hello")),
+                    Ok(None) if raw.len() > HELLO_LIMIT => {
+                        return Err(refused("a long client hello"));
+                    }
                     Ok(None) => return Ok(()),
                     Ok(Some(accepted)) => accepted,
                     Err((error, _)) => return Err(io::Error::other(error)),
                 };
                 let server = accepted.client_hello().server_name().map(str::to_owned);
-                if server.is_some_and(|server| {
-                    !server
+                let agrees = server.as_deref().map(|server| {
+                    server
                         .trim_end_matches('.')
                         .eq_ignore_ascii_case(&self.name)
-                }) {
-                    return Err(refused("a server name that disagrees"));
+                });
+                match (self.reads, agrees) {
+                    (_, Some(true)) => self.injects = injection.binds(&self.name),
+                    (Reads::Requests, None) => {}
+                    (Reads::Requests, Some(false)) => {
+                        return Err(refused("a server name that disagrees"));
+                    }
+                    // Not for the bound host, so it isn't decrypted.
+                    (Reads::Injects { by_name }, _) => {
+                        let raw = std::mem::take(raw);
+                        self.passing(by_name);
+                        return self.guest_sent(&raw, decryption, injection, decide);
+                    }
                 }
                 let decryption = decryption.ok_or_else(|| refused("TLS it can't decrypt"))?;
                 let config = decryption.server(&self.name)?;
@@ -396,7 +475,7 @@ impl Decrypted {
                     .map_err(io::Error::other)?;
                 client.set_buffer_limit(None);
                 self.stage = Stage::Tls(Box::new(guest), Box::new(client));
-                self.decrypted(&mut allows)
+                self.decrypted(injection, &mut allows)
             }
             Stage::Tls(..) => {
                 while !input.is_empty() {
@@ -408,17 +487,32 @@ impl Decrypted {
                         break;
                     }
                     guest.process_new_packets().map_err(io::Error::other)?;
-                    self.decrypted(&mut allows)?;
+                    self.decrypted(injection, &mut allows)?;
                 }
                 Ok(())
             }
         }
     }
 
-    /// Passes what the guest's side decrypted, as far as the rules allow.
-    fn decrypted(&mut self, allows: &mut dyn FnMut(Scheme, &str) -> bool) -> io::Result<()> {
+    /// Passes what the guest's side decrypted, as far as the rules allow,
+    /// with the secrets of `injection` put in each head.
+    fn decrypted(
+        &mut self,
+        injection: &Injection,
+        allows: &mut dyn FnMut(Scheme, &str) -> bool,
+    ) -> io::Result<()> {
         let Stage::Tls(guest, client) = &mut self.stage else {
             return Ok(());
+        };
+        let swaps = match self.injects {
+            true => injection.swaps(&self.name),
+            false => Vec::new(),
+        };
+        let headers = injection.header_names();
+        let name = &self.name;
+        let mut rewrite = |head: &[u8], out: &mut Vec<u8>| match swaps.is_empty() {
+            true => out.extend_from_slice(head),
+            false => net::inject(head, name, &headers, &swaps, out),
         };
         let mut buffer = [0; BUFFER];
         let mut passed = Vec::new();
@@ -433,9 +527,8 @@ impl Decrypted {
                 }
                 Ok(n) => {
                     let mut decide = |target: &str| allows(Scheme::Https, target);
-                    let fed = self
-                        .check
-                        .feed_deciding(&buffer[..n], &mut passed, &mut decide);
+                    let fed =
+                        (self.check).feed_rewriting(&buffer[..n], &mut passed, &mut decide, &mut rewrite);
                     client.writer().write_all(&passed)?;
                     self.allowed |= !passed.is_empty();
                     passed.clear();
@@ -484,10 +577,11 @@ impl Decrypted {
     fn guest_ended(&mut self) -> io::Result<()> {
         let unchecked = match &self.stage {
             Stage::First | Stage::Hello(..) => true,
-            Stage::Tls(guest, _) => guest.is_handshaking(),
-            Stage::Plain => false,
+            Stage::Tls(guest, _) => guest.is_handshaking() || self.check.holding(),
+            Stage::Plain => self.check.holding(),
+            Stage::Passing(check) => check.as_ref().is_some_and(|check| check.holding()),
         };
-        if unchecked || self.check.holding() {
+        if unchecked {
             return Err(refused("the guest closed before its check"));
         }
         self.guest_closed = true;

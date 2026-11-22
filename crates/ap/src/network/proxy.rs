@@ -17,7 +17,8 @@ use vmm::net::MAX_FRAME;
 
 use super::RECEIVE_WAIT;
 use super::blocked::Reporter;
-use super::decrypt::{Decrypted, Decryption};
+use super::Injection;
+use super::decrypt::{Decrypted, Decryption, Reads};
 use super::lookup::Asker;
 
 /// How long a connection waits for its lookup, and then for each address.
@@ -28,7 +29,7 @@ const ACCEPT_WAIT: Duration = Duration::from_secs(30);
 /// How long a connection that a name decided waits for the guest to send
 /// first, before it connects anyway, for a protocol where the server
 /// speaks first.
-const SILENT_WAIT: Duration = Duration::from_millis(250);
+pub(super) const SILENT_WAIT: Duration = Duration::from_millis(250);
 /// How long a UDP flow lasts with no datagram either way.
 const UDP_IDLE: Duration = Duration::from_secs(60);
 /// The datagrams a UDP flow keeps while it waits for its lookup.
@@ -51,9 +52,8 @@ struct Opening {
     since: Instant,
     step: Step,
     guest: Guest,
-    /// Whether the proxy reads each request, because the name has URL
-    /// rules.
-    requests: bool,
+    /// Why the proxy decrypts it, if it does.
+    decrypts: Option<Reads>,
 }
 
 /// The guest's end of an opening connection.
@@ -110,9 +110,9 @@ struct Waiting {
     flow: Flow,
     upstream: TcpStream,
     since: Instant,
-    /// The name whose URL rules decide each request, if any do, and the
-    /// address connected to.
-    requests: Option<(String, IpAddr)>,
+    /// The name it is decrypted for, if it is, the address connected to,
+    /// and why.
+    decrypts: Option<(String, IpAddr, Reads)>,
 }
 
 /// What reads a connection that the rules allow.
@@ -124,8 +124,23 @@ enum Check {
     Name,
     /// The name has URL rules, so each request is read and decided.
     Requests,
-    /// The name has URL rules, and the flow is UDP, which isn't HTTP.
+    /// The name has URL rules, and the flow is UDP, which isn't HTTP, or
+    /// it is a hidden secret's bound host, and the flow is QUIC's.
     NotHttp,
+    /// The name is a hidden secret's bound host and has no URL rules, so
+    /// TLS to it is decrypted, and a name decided it if this says so.
+    Injects(bool),
+}
+
+impl Check {
+    /// Why a TCP connection it reads is decrypted, if it is.
+    fn decrypts(self) -> Option<Reads> {
+        match self {
+            Check::Requests => Some(Reads::Requests),
+            Check::Injects(by_name) => Some(Reads::Injects { by_name }),
+            _ => None,
+        }
+    }
 }
 
 struct UdpFlow {
@@ -158,6 +173,8 @@ pub struct Proxy {
     /// What it decrypts TLS with. Without it, TLS to a host with URL rules
     /// is refused.
     decryption: Option<Decryption>,
+    /// The hidden secrets it puts in requests to their bound hosts.
+    injection: Injection,
 }
 
 impl Proxy {
@@ -182,7 +199,14 @@ impl Proxy {
             flows: Vec::new(),
             reporter: None,
             decryption: None,
+            injection: Injection::default(),
         }
+    }
+
+    /// This proxy, putting the hidden secrets of `injection` in requests to
+    /// their bound hosts, which it decrypts.
+    pub fn injecting(self, injection: Injection) -> Proxy {
+        Proxy { injection, ..self }
     }
 
     /// This proxy, decrypting TLS to a host with URL rules with
@@ -236,9 +260,11 @@ impl Proxy {
             self.datagrams(stack, resolver, now);
             self.pipes.retain_mut(|pipe| pipe.pump(stack));
             let (policy, reporter) = (&self.policy, self.reporter.as_deref());
-            let decryption = self.decryption.as_ref();
+            let (decryption, injection) = (self.decryption.as_ref(), &self.injection);
             let mut decide = |connection: &Connection| decide_request(policy, reporter, connection);
-            (self.decrypted).retain_mut(|decrypted| decrypted.pump(stack, decryption, &mut decide));
+            (self.decrypted).retain_mut(|decrypted| {
+                decrypted.pump(stack, decryption, injection, &mut decide)
+            });
             stack.poll(Instant::now());
             while let Some(frame) = stack.transmit() {
                 match (&*link).write(&frame) {
@@ -376,10 +402,11 @@ impl Proxy {
                 }
             }
             Target::Addresses(name, addresses) => {
+                let bound = name.as_deref().is_some_and(|name| self.injection.binds(name));
                 let (allowed, check) = allowed(
                     network,
                     &hosts,
-                    name.as_deref(),
+                    (name.as_deref(), bound),
                     destination.port(),
                     &addresses,
                     tcp,
@@ -402,15 +429,15 @@ impl Proxy {
                     self.checking.push(Checking::new(*flow, name, allowed, now));
                     return Verdict::Take;
                 }
-                (name, Err((allowed, check == Check::Requests)))
+                (name, Err((allowed, check.decrypts())))
             }
         };
         let port = destination.port();
         if tcp {
-            let (step, requests) = match step {
-                Ok(id) => (Step::Asking(id), false),
-                Err((addresses, requests)) => match connecting(addresses, port, now) {
-                    Some(step) => (step, requests),
+            let (step, decrypts) = match step {
+                Ok(id) => (Step::Asking(id), None),
+                Err((addresses, decrypts)) => match connecting(addresses, port, now) {
+                    Some(step) => (step, decrypts),
                     None => return Verdict::Refuse,
                 },
             };
@@ -420,7 +447,7 @@ impl Proxy {
                 since: now,
                 step,
                 guest: Guest::Held,
-                requests,
+                decrypts,
             });
             return Verdict::Hold;
         }
@@ -454,7 +481,9 @@ impl Proxy {
                 let opening = &mut self.opening[at];
                 let port = flow_destination(&opening.flow).port();
                 let name = opening.name.as_deref();
-                let (allowed, check) = allowed(network, &hosts, name, port, &addresses, true);
+                let bound = name.is_some_and(|name| self.injection.binds(name));
+                let (allowed, check) =
+                    allowed(network, &hosts, (name, bound), port, &addresses, true);
                 // Each request is a decision of its own.
                 if check != Check::Requests || allowed.is_empty() {
                     answered(
@@ -466,7 +495,7 @@ impl Proxy {
                         false,
                     );
                 }
-                opening.requests = check == Check::Requests;
+                opening.decrypts = check.decrypts();
                 if let (Check::Name, false, Some(name)) = (check, allowed.is_empty(), name) {
                     let checking = Checking::new(opening.flow, name, allowed, now);
                     let opening = self.opening.remove(at);
@@ -488,7 +517,9 @@ impl Proxy {
             if let Some(flow) = flow {
                 let port = flow.destination.port();
                 let name = flow.name.as_deref();
-                let (allowed, check) = allowed(network, &hosts, name, port, &addresses, false);
+                let bound = name.is_some_and(|name| self.injection.binds(name));
+                let (allowed, check) =
+                    allowed(network, &hosts, (name, bound), port, &addresses, false);
                 answered(
                     self.reporter.as_deref(),
                     flow.name.as_deref(),
@@ -560,9 +591,9 @@ impl Proxy {
                             flow: opening.flow,
                             upstream,
                             since: now,
-                            requests: (opening.name)
-                                .filter(|_| opening.requests)
-                                .map(|name| (name, address)),
+                            decrypts: (opening.name)
+                                .zip(opening.decrypts)
+                                .map(|(name, reads)| (name, address, reads)),
                         });
                     }
                     Guest::Taken(id, check, passed) => {
@@ -598,10 +629,11 @@ impl Proxy {
             });
             if let Some(at) = paired {
                 let waiting = self.waiting.remove(at);
-                match waiting.requests {
-                    Some((name, address)) => {
+                match waiting.decrypts {
+                    Some((name, address, reads)) => {
                         let to = SocketAddr::new(address, connection.destination.port());
-                        let decrypted = Decrypted::new(connection.id, waiting.upstream, &name, to);
+                        let decrypted =
+                            Decrypted::new(connection.id, waiting.upstream, &name, to, reads);
                         self.decrypted.push(decrypted);
                     }
                     None => self.pipes.push(Pipe::new(connection.id, waiting.upstream)),
@@ -690,7 +722,7 @@ impl Proxy {
                     since: now,
                     step,
                     guest,
-                    requests: false,
+                    decrypts: None,
                 }),
                 None => {
                     stack.abort(id);
@@ -811,20 +843,22 @@ fn flow_destination(flow: &Flow) -> SocketAddr {
 }
 
 /// The addresses of `addresses` that the proxy may connect to on `port`,
-/// for a connection attributed to `name`, over TCP if `tcp`, and what
-/// reads it: the name check, if a name decided any of them, or the request
-/// check, if the name has URL rules.
+/// for a connection attributed to `name`, which is a hidden secret's bound
+/// host if `bound` says so, over TCP if `tcp`, and what reads it: the
+/// request check, if the name has URL rules, decryption for the secret, if
+/// it is bound, or else the name check, if a name decided any of them.
 fn allowed(
     network: &Network,
     harness: &[&str],
-    name: Option<&str>,
+    (name, bound): (Option<&str>, bool),
     port: u16,
     addresses: &[IpAddr],
     tcp: bool,
 ) -> (Vec<IpAddr>, Check) {
     let url = name.is_some_and(|name| url_rules(network, name));
-    // UDP to such a host, QUIC among it, isn't HTTP.
-    if url && !tcp {
+    // UDP to such a host, QUIC among it, isn't HTTP. QUIC to a bound host
+    // would carry the placeholder where the proxy can't reach it.
+    if (url || bound && port == 443) && !tcp {
         return (Vec::new(), Check::NotHttp);
     }
     let requests = url;
@@ -850,6 +884,7 @@ fn allowed(
         .collect();
     let check = match (requests, by_name) {
         (true, _) => Check::Requests,
+        (false, by_name) if bound && tcp => Check::Injects(by_name),
         // The name check reads TCP alone.
         (false, true) if tcp => Check::Name,
         (false, _) => Check::Unread,

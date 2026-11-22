@@ -56,6 +56,11 @@ pub const SIGN_IN: &[&str] = &[
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
 ];
 
+/// The request headers that the proxy may put a hidden secret's value in,
+/// from SPEC.md's SECRET section. Claude Code sends its key in `X-Api-Key`,
+/// and a token in `Authorization`, as most other clients do.
+pub const HEADERS: &[&str] = &["Authorization", "X-Api-Key"];
+
 /// The hosts Claude Code connects to for its model and sign-in. Claude Code
 /// 2.1.325 calls the model and makes its API key on `api.anthropic.com`,
 /// trades a sign-in code for a token on `platform.claude.com`, and has

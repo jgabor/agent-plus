@@ -30,6 +30,8 @@
 //! [`Authority`] says, and sends `ap run` the authority's certificate, in
 //! PEM, as the first message on its standard output. The key stays here.
 //! It reads the roots in the file that `SSL_CERT_FILE` names then too.
+//! `ap run` then sends it the run's hidden secrets on that socket, as
+//! [`Injection`] says, and it decrypts TLS to their bound hosts too.
 //!
 //! It confines itself before it reads a frame. It can then make IPv4 and
 //! IPv6 sockets, unless its rules can reach nothing, but it can't start a
@@ -46,6 +48,7 @@ mod decisions;
 mod decrypt;
 mod lookup;
 mod proxy;
+mod secrets;
 
 pub use authority::{Authority, Leaf};
 pub use blocked::{Reports, report};
@@ -53,6 +56,7 @@ pub use decisions::Keeper;
 pub use decrypt::{Decryption, roots};
 pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;
+pub use secrets::{Hidden, Injection};
 
 use std::collections::hash_map::RandomState;
 use std::ffi::{OsString, c_int};
@@ -119,18 +123,24 @@ pub fn arguments(harness: &[&str], instructions: &[Instruction]) -> Vec<OsString
 /// Starts `program`, a build of `ap`, as a run's network process, with the
 /// `args` that [`arguments`] made. The link it returns is a socket that
 /// keeps message boundaries, for [`crate::boot::boot_linked`]. It returns
-/// once the process has sent its authority. The process ends once every
+/// once the process has sent its authority, and been sent `injection`. The
+/// process starts without a hidden secret's variable. It ends once every
 /// copy of the link is closed.
-pub fn start(program: &Path, args: &[OsString]) -> io::Result<Started> {
+pub fn start(program: &Path, args: &[OsString], injection: &Injection) -> io::Result<Started> {
     let (mine, theirs) = link()?;
     let (answers, asks) = link()?;
-    let process = Command::new(program)
+    let mut command = Command::new(program);
+    for secret in &injection.secrets {
+        command.env_remove(&secret.name);
+    }
+    let process = command
         .arg0(PROGRAM)
         .args(args)
         .stdin(theirs)
         .stdout(asks)
         .spawn()?;
     let authority = receive_authority(answers.as_fd())?;
+    injection.send(answers.as_fd())?;
     Ok(Started {
         process,
         link: mine,
@@ -230,9 +240,20 @@ pub fn main(args: &[OsString]) -> u8 {
         eprintln!("ap: can't send the run's certificate authority: {error}");
         return 1;
     }
-    // Only a host with URL rules is decrypted.
-    let decrypts =
-        (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
+    let injection = (lookups.set_read_timeout(Some(AUTHORITY_WAIT)))
+        .and_then(|()| Injection::receive(lookups.as_fd()))
+        .and_then(|injection| lookups.set_read_timeout(None).map(|()| injection));
+    let injection = match injection {
+        Ok(injection) => injection,
+        Err(error) => {
+            eprintln!("ap: can't take the run's hidden secrets: {error}");
+            return 1;
+        }
+    };
+    // Only a host with URL rules, or a hidden secret's bound host, is
+    // decrypted.
+    let decrypts = !injection.secrets.is_empty()
+        || (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
     let extra = match std::env::var_os("SSL_CERT_FILE") {
         Some(path) if decrypts => roots(path.as_ref()),
         _ => Vec::new(),
@@ -259,6 +280,7 @@ pub fn main(args: &[OsString]) -> u8 {
         false => (
             (Proxy::new(network, harness, lookups))
                 .decrypting(decryption)
+                .injecting(injection)
                 .reporting(reporter),
             confine_connecting(link.as_fd()),
         ),

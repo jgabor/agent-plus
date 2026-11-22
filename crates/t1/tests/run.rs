@@ -1078,6 +1078,7 @@ fn a_run_has_512_mib_of_memory() {
     log.read_line(&mut report).unwrap();
     assert!(report.starts_with("{\"arguments\":"), "{report}");
     let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
     let name = rows[0].split_whitespace().next().unwrap().to_owned();
 
     let output = scratch.exec(&name, &["cat", "/proc/meminfo"], b"");

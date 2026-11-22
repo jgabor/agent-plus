@@ -30,8 +30,9 @@ use crate::store::Store;
 
 const KVM: &str = "/dev/kvm";
 const INIT_PATH: &str = "/init";
-/// SPEC.md's Run section: every run's VM has 512 MiB of memory. Claude Code
-/// 2.1.323 at its prompt left 76 MiB of 256 MiB available.
+/// The memory of every VM, including `ap boot`'s. SPEC.md's Run section
+/// gives each run's VM 512 MiB. Claude Code 2.1.323 at its prompt left 76
+/// MiB of 256 MiB available.
 const MEMORY: usize = 512 << 20;
 const DEVICE_ADDRESS: u64 = 0xd000_0000;
 const DEVICE_SIZE: u64 = 0x1000;

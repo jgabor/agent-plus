@@ -1805,8 +1805,8 @@ fn the_wait_for_a_place_does_not_count_against_the_timeout() {
 
 /// Other work holds the activity lock for as long as it runs, so the wait of a
 /// merge's bench to hold it alone doesn't count against the timeout either.
-/// The proof up to the bench takes up to 40 seconds on a loaded machine, and
-/// the timeout started before it, so 62 seconds into the wait it has passed.
+/// The proof's other work takes up to 40 seconds on a loaded machine, of the
+/// 60 that the timeout gives it.
 #[test]
 fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
     let base = record(0, 1, "");
@@ -1817,12 +1817,15 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
     );
     let directory = repo.root.join(".git/xtask");
     fs::create_dir_all(&directory).unwrap();
-    let activity = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(directory.join("activity.lock"))
-        .unwrap();
+    let lock = |name: &str| {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(name))
+            .unwrap()
+    };
+    let activity = lock("activity.lock");
     activity.lock_shared().unwrap();
     // To files, because nothing reads a pipe while this waits.
     let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
@@ -1843,19 +1846,45 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
             fs::read_to_string(repo.temp.join("merge.err")).unwrap()
         );
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !repo.calls().contains("Proving: bench") {
+    // A bench keeps the turnstile for as long as it waits for the lock. A
+    // build only passes through it, so the bench waits once the turnstile is
+    // held twice in a row.
+    let turnstile = lock("turnstile.lock");
+    let held = || match turnstile.try_lock() {
+        Ok(()) => turnstile.unlock().is_err(),
+        Err(_) => true,
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
         if merge.try_wait().unwrap().is_some() || Instant::now() > deadline {
-            ended(&mut merge, "the merge never reached its bench");
+            ended(&mut merge, "the merge's bench never waited for the lock");
         }
         thread::sleep(Duration::from_millis(100));
+        if held() {
+            thread::sleep(Duration::from_millis(200));
+            if held() {
+                break;
+            }
+        }
     }
+    // The wait alone now outlasts the timeout.
     thread::sleep(Duration::from_secs(62));
     if merge.try_wait().unwrap().is_some() {
         ended(&mut merge, "the merge didn't wait for the activity lock");
     }
     activity.unlock().unwrap();
-    let status = merge.wait().unwrap();
+    // The timeout goes on with what the proof left of it, so the bench ends
+    // within it, one way or the other.
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = merge.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            ended(&mut merge, "the merge didn't end once it had the lock");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
     let output = Output {
         status,
         stdout: fs::read(repo.temp.join("merge.out")).unwrap(),

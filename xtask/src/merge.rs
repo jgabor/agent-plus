@@ -22,7 +22,7 @@ use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const AUTO_MERGE: &str = "auto:merge";
 /// Why a proof failed when the change may be fine.
@@ -35,10 +35,12 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 /// What the worker tells its supervisor: it holds the slot, which starts the
-/// timeout again, or it waits for other work to free a place or the activity
-/// lock, which stops it.
+/// timeout again, it waits for other work to free a place or the activity
+/// lock, which stops it, or its bench's wait is over, which lets the timeout
+/// go on from where it stopped.
 const SLOT: u8 = b's';
 const WAITING: u8 = b'w';
+const GOING: u8 = b'g';
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
 /// or of the worker itself once it runs the xtask of `main`.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
@@ -233,7 +235,7 @@ fn sequence(
     };
     let mut status = Status::begin(&gh, &fetched.branch);
     let starting = |check: &str| status.proving(check);
-    let mut proof = match prove(&tree.path, &scoring, &starting, &report_place)? {
+    let mut proof = match prove(&tree.path, &scoring, &starting, &tell_supervisor)? {
         Ok(proof) => proof,
         Err(failed) => {
             status.failed(&format!("Failed: {}", failed.join(", ")));
@@ -465,8 +467,7 @@ fn report_slot() -> Result<(), Problem> {
     tell_supervisor(SLOT)
 }
 
-/// Tells the supervisor that the worker waits for other work, or no longer
-/// does: for a place, and for its bench to hold the activity lock alone. The
+/// Tells the supervisor that the worker waits for a place, or has one. The
 /// timeout stops during the wait, and starts again after it.
 fn report_place(waiting: bool) -> Result<(), Problem> {
     tell_supervisor(if waiting { WAITING } else { SLOT })
@@ -567,15 +568,21 @@ fn time_out(reports: io::PipeReader, group: u32, seconds: u64) -> Arc<AtomicBool
         let Ok(mut last) = taken.recv() else {
             return;
         };
+        let whole = Duration::from_secs(seconds);
+        let mut left = whole;
         loop {
+            let since = Instant::now();
             let next = match last {
                 WAITING => taken
                     .recv()
                     .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-                _ => taken.recv_timeout(Duration::from_secs(seconds)),
+                _ => taken.recv_timeout(left),
             };
             match next {
-                Ok(report) => last = report,
+                Ok(report) => {
+                    left = left_after(last, report, left, since.elapsed(), whole);
+                    last = report;
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
@@ -584,6 +591,20 @@ fn time_out(reports: io::PipeReader, group: u32, seconds: u64) -> Arc<AtomicBool
         stop_group(group);
     });
     timed_out
+}
+
+/// What is left of the timeout once `report` follows `last`. The worker ran or
+/// waited for `spent` since `last`, and had `left` then. Holding the slot gives
+/// it the `whole` timeout again. Otherwise what it ran counts, and what it
+/// waited doesn't, so a wait that ends goes on with what was left.
+fn left_after(last: u8, report: u8, left: Duration, spent: Duration, whole: Duration) -> Duration {
+    if report == SLOT {
+        whole
+    } else if last == WAITING {
+        left
+    } else {
+        left.saturating_sub(spent)
+    }
 }
 
 /// Stops the group first, so that none of it runs while the kill goes through
@@ -869,14 +890,14 @@ struct Proof {
 
 /// Runs the gate, the journey, and any bench on the rebased head, saying which
 /// it is on, and returns the record they earn. If any check failed, the merge
-/// must stop, and the reasons have been printed. `placing` hears when a wait
-/// for other work starts and ends: for a place, and for the bench to hold the
-/// activity lock alone.
+/// must stop, and the reasons have been printed. `telling` hears what the
+/// supervisor does: when the wait for a place starts and ends, and when the
+/// bench's wait to hold the activity lock alone does.
 fn prove(
     tree: &Path,
     scoring: &Scoring,
     starting: &dyn Fn(&str),
-    placing: &dyn Fn(bool) -> Result<(), Problem>,
+    telling: &dyn Fn(u8) -> Result<(), Problem>,
 ) -> Result<Result<Proof, Failed>, Problem> {
     let Scoring {
         number, mode, pr, ..
@@ -907,9 +928,9 @@ fn prove(
         gate::record("hill-line", false, &mut failed);
         return Ok(Err(failed));
     }
-    placing(true)?;
+    telling(WAITING)?;
     let place = lock::place(tree)?;
-    placing(false)?;
+    telling(SLOT)?;
     let hold = place.share()?;
     let merging = Merging { prepare, starting };
     let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
@@ -926,7 +947,10 @@ fn prove(
     let benched = !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)?;
     if benched {
         starting("bench");
-        if bench::compare(tree, Some(&pr.body), placing)? == Verdict::Fail {
+        // Having a place started the timeout again, for this proof. The
+        // bench's wait only stops it, so that the proof gets it once.
+        let waiting = |waiting| telling(if waiting { WAITING } else { GOING });
+        if bench::compare(tree, Some(&pr.body), &waiting)? == Verdict::Fail {
             return Ok(Err(vec!["bench"]));
         }
     }
@@ -1216,8 +1240,43 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 
 #[cfg(test)]
 mod tests {
-    use super::{TREE_PATH, long};
+    use super::{GOING, SLOT, TREE_PATH, WAITING, left_after, long};
     use std::path::Path;
+    use std::time::Duration;
+
+    #[test]
+    fn a_wait_costs_none_of_the_timeout_and_only_the_slot_starts_it_again() {
+        let seconds = Duration::from_secs;
+        let whole = seconds(60);
+        // The proof ran for 20 seconds, and then its bench waits.
+        assert_eq!(
+            left_after(SLOT, WAITING, whole, seconds(20), whole),
+            seconds(40)
+        );
+        // However long it waits, it goes on with what was left.
+        assert_eq!(
+            left_after(WAITING, GOING, seconds(40), seconds(3600), whole),
+            seconds(40)
+        );
+        // What the bench then runs counts, and can use up the rest.
+        assert_eq!(
+            left_after(GOING, WAITING, seconds(40), seconds(15), whole),
+            seconds(25)
+        );
+        assert_eq!(
+            left_after(GOING, WAITING, seconds(40), seconds(50), whole),
+            seconds(0)
+        );
+        // A place, or the slot once more, starts the whole timeout again.
+        assert_eq!(
+            left_after(WAITING, SLOT, seconds(40), seconds(5), whole),
+            whole
+        );
+        assert_eq!(
+            left_after(GOING, SLOT, seconds(40), seconds(5), whole),
+            whole
+        );
+    }
 
     #[test]
     fn a_tree_path_is_padded_to_its_length() {

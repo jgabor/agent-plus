@@ -766,10 +766,10 @@ next proof.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's own
 xtask starts its proof, so each proof gets all of it. The PR's own xtask can't
 start it again. It stops while a proof waits for a place, and starts again once
-the proof has one. It stops the same way while the proof's bench waits to hold
-the activity lock alone, because other work holds that lock for as long as it
-runs. A PR's own xtask can't stop the timeout either, so the wait of its bench
-counts.
+the proof has one. It also stops while the proof's bench waits to hold the
+activity lock alone, because other work holds that lock for as long as it runs,
+and then goes on from where it stopped. A PR's own xtask can't stop the timeout
+either, so the wait of its bench counts.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 

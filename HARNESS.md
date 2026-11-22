@@ -1039,7 +1039,7 @@ passes. No scheduled work runs on GitHub.
 | Spec and code diverge | Quote mismatch | The gate fails |
 | Worker collision | `Touches` overlap, and rebase conflict | Not dispatched together. On conflict, the worker reassesses |
 | Broken `main` | Nightly job | Bisect and revert PR |
-| A fault only a GitHub runner shows | [Runner gate](#runner-gate) | An issue opens |
+| A gate failure only a GitHub runner shows | [Runner gate](#runner-gate) | An issue opens |
 | Noisy timing | Band and activity lock | Interleaved runs are repeated |
 | Disk exhaustion | Free-space check | Dispatch stops |
 | Stale VM | VM timeout | The VM exits, and the check fails |

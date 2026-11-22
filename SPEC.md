@@ -451,6 +451,7 @@ directory) and writes an image into the local store.
 - **User.** The agent runs as the non-root user `agent`, with
   `HOME=/home/agent`. Everything the image puts in `/home/agent` belongs to
   `agent`.
+- **Memory.** Every run's VM has 512 MiB of memory.
 - **Updates.** Harness self-updates are disabled. The harness version
   changes only through the Agentfile and the lockfile.
 - **Sign-in.** When the guest asks to open a URL, `ap` opens only `https`

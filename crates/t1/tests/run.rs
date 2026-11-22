@@ -1055,6 +1055,49 @@ fn exec_in_terminal(scratch: &Scratch, name: &str, args: &[&str], size: Size) ->
 // spec(ap exec): Its standard input, output, and error are those of `ap exec`.
 // spec(ap exec): When both standard input and standard output of `ap exec` are terminals, the command gets a terminal too.
 // spec(ap exec): Its output isn't part of the run's log.
+// spec(Run): **Memory.** Every run's VM has 512 MiB of memory.
+#[test]
+fn a_run_has_512_mib_of_memory() {
+    let scratch = Scratch::new("memory");
+    scratch.build("roomy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let mut run = Started(
+        Command::new("timeout")
+            .args(["-k", "10", TIMEOUT])
+            .arg(&shared().0)
+            .args(["run", "roomy", "-p", PROMPT])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut log = BufReader::new(run.0.stdout.take().unwrap());
+    let mut report = String::new();
+    log.read_line(&mut report).unwrap();
+    assert!(report.starts_with("{\"arguments\":"), "{report}");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+
+    let output = scratch.exec(&name, &["cat", "/proc/meminfo"], b"");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let meminfo = String::from_utf8(output.stdout).unwrap();
+    let total: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))
+        .and_then(|rest| rest.trim().strip_suffix(" kB"))
+        .and_then(|kib| kib.trim().parse().ok())
+        .unwrap_or_else(|| panic!("no MemTotal: {meminfo}"));
+    // The kernel keeps some of the VM's memory for itself, which takes 18
+    // MiB of it today.
+    assert!(
+        (480 * 1024..=512 * 1024).contains(&total),
+        "MemTotal is {total} kB"
+    );
+}
+
 // spec(ap exec): If the command isn't found, `ap exec` exits with status 127, and if it can't be run, with status 126.
 // spec(ap exec): If the run has finished or doesn't exist, `ap exec` says so on standard error and exits with status 125.
 // spec(ap exec): If the run ends while the command runs, `ap exec` exits with status 125.

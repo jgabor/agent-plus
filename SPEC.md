@@ -1377,9 +1377,6 @@ like any secret and passes it through untouched, so the agent can read it.
 With any harness but Claude Code, it is a build error.
 
 - `AUTH key` and `AUTH token` are [grants](#grants).
-- With Claude Code, the adapter approves `AUTH key`'s placeholder by its
-  last 20 characters, which are the same on every run, so an interactive
-  run doesn't ask whether to use the key.
 - A headless run can't complete a login flow, so one that isn't signed in,
   including a called run, ends with the harness's error and status. Sign an
   agent with a `PROMPT` in with `ap run <agent> -p ""`. In CI, use

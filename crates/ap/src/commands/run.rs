@@ -753,9 +753,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             if sign_in.hosts.is_empty() {
                 given.push((variable.as_bytes().to_vec(), value));
             } else {
-                let mut placeholder = random_placeholder()
+                let placeholder = random_placeholder()
                     .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
-                placeholder.extend_from_slice(sign_in.suffix.as_bytes());
                 given.push((variable.as_bytes().to_vec(), placeholder.clone()));
                 hidden.push(Hidden {
                     name: variable.to_owned(),

@@ -51,9 +51,6 @@ pub struct SignIn {
     /// The hosts the proxy swaps a key's value in on. A token has none, and
     /// the guest gets its value.
     pub hosts: &'static [&'static str],
-    /// What a key's placeholder ends in, for a harness that approves a key
-    /// by its end.
-    pub suffix: &'static str,
 }
 
 /// How `auth` signs `harness` in, or `None` for `AUTH login`, which isn't
@@ -64,17 +61,14 @@ pub fn sign_in(harness: Harness, auth: Auth) -> Option<SignIn> {
         (Harness::Claude, Auth::Key) => Some(SignIn {
             variable: claude::KEY,
             hosts: claude::KEY_HOSTS,
-            suffix: claude::KEY_SUFFIX,
         }),
         (Harness::Claude, Auth::Token) => Some(SignIn {
             variable: claude::TOKEN,
             hosts: &[],
-            suffix: "",
         }),
         (Harness::Codex, Auth::Key) => Some(SignIn {
             variable: codex::KEY,
             hosts: codex::KEY_HOSTS,
-            suffix: "",
         }),
     }
 }

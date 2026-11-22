@@ -21,7 +21,7 @@
 //!
 //! `--permission-mode` takes `auto` from 2.1.71.
 
-use agentfile::{Auth, Effort, Mode};
+use agentfile::{Effort, Mode};
 
 use super::{effort_name as name, version};
 
@@ -61,11 +61,6 @@ pub const SIGN_IN: &[&str] = &[
 pub const KEY: &str = "ANTHROPIC_API_KEY";
 /// The hosts the proxy swaps the key's value in on.
 pub const KEY_HOSTS: &[&str] = &["api.anthropic.com"];
-/// What the key's placeholder ends in. An interactive Claude Code 2.1.330
-/// asks whether to use a key from its environment, with "No" first, unless
-/// [`STATE`] approves the key's last 20 characters. So the placeholder ends
-/// in the same 20 on every run, and [`files`] approves them.
-pub const KEY_SUFFIX: &str = "agentplusplaceholder";
 /// The variable that `AUTH token` reads on your host and sets in the guest.
 pub const TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
@@ -104,9 +99,8 @@ const AUTO_FROM: [u64; 3] = [2, 1, 71];
 /// The settings turn self-updates off through Claude Code's own variable, and
 /// with `MODE full` they also skip the warning that full mode shows the first
 /// time. The state marks the onboarding done, so a new VM skips the theme and
-/// welcome screens. With `AUTH key`, it also approves the key by
-/// [`KEY_SUFFIX`].
-pub fn files(system: &[Vec<u8>], mode: Mode, auth: Option<Auth>) -> Vec<(&'static str, Vec<u8>)> {
+/// welcome screens.
+pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     let mut files = Vec::new();
     if !system.is_empty() {
         files.push((INSTRUCTIONS, super::system(system)));
@@ -117,14 +111,10 @@ pub fn files(system: &[Vec<u8>], mode: Mode, auth: Option<Auth>) -> Vec<(&'stati
     }
     settings.push_str("\n}\n");
     files.push((SETTINGS, settings.into_bytes()));
-    let mut state = String::from("{\n");
-    if auth == Some(Auth::Key) {
-        state.push_str(&format!(
-            "  \"customApiKeyResponses\": {{\n    \"approved\": [\"{KEY_SUFFIX}\"],\n    \"rejected\": []\n  }},\n"
-        ));
-    }
-    state.push_str("  \"hasCompletedOnboarding\": true\n}\n");
-    files.push((STATE, state.into_bytes()));
+    files.push((
+        STATE,
+        b"{\n  \"hasCompletedOnboarding\": true\n}\n".to_vec(),
+    ));
     files
 }
 

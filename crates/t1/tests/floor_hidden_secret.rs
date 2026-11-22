@@ -405,7 +405,6 @@ fn reported<'a>(report: &'a str, name: &str) -> &'a str {
 }
 
 // spec(AUTH): The agent sees only a placeholder, and the adapter signs the harness in with it.
-// spec(AUTH): With Claude Code, the adapter approves `AUTH key`'s placeholder by its last 20 characters, which are the same on every run, so an interactive run doesn't ask whether to use the key.
 #[test]
 fn floor_auth_key() {
     let _turn = ONE_AT_A_TIME
@@ -435,14 +434,10 @@ fn floor_auth_key() {
         .unwrap();
     assert!(report.starts_with("{\"arguments\":"), "{report}");
     assert!(!report.contains(VALUE), "{report}");
-    // The harness starts with the placeholder, which ends in what Claude
-    // Code's state approves.
+    // The harness starts with the placeholder.
     let placeholder = reported(&report, "ANTHROPIC_API_KEY").to_owned();
-    assert_eq!(placeholder.len(), 32 + 20, "{report}");
-    assert!(
-        placeholder.ends_with(ap::adapter::claude::KEY_SUFFIX),
-        "{report}"
-    );
+    assert_eq!(placeholder.len(), 32, "{report}");
+    assert_ne!(placeholder, VALUE);
     let listed = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();
     let row = listed.lines().nth(1).expect("ap ps lists the run");
     let name = row.split_whitespace().next().unwrap().to_owned();
@@ -460,7 +455,7 @@ fn floor_auth_key() {
     assert_eq!(tried.status.code(), Some(0), "{tried:?}");
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 5, "{stdout}");
-    assert_eq!(lines[0], "held 52", "{stdout}");
+    assert_eq!(lines[0], "held 32", "{stdout}");
     let found: Vec<usize> = (lines[1].split_whitespace())
         .filter_map(|word| word.parse().ok())
         .collect();

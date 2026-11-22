@@ -1,7 +1,0 @@
-{
-  "customApiKeyResponses": {
-    "approved": ["agentplusplaceholder"],
-    "rejected": []
-  },
-  "hasCompletedOnboarding": true
-}

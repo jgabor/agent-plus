@@ -65,7 +65,7 @@ fn file(system: &[&str], mode: Mode, path: &str) -> Option<Vec<u8>> {
         .iter()
         .map(|value| value.as_bytes().to_vec())
         .collect();
-    claude::files(&system, mode, None)
+    claude::files(&system, mode)
         .into_iter()
         .find(|(at, _)| *at == path)
         .map(|(_, content)| content)
@@ -499,9 +499,6 @@ fn sign_ins(harness: agentfile::Harness) -> String {
                 for host in sign_in.hosts {
                     shown.push_str(&format!(" @{host}"));
                 }
-                if !sign_in.suffix.is_empty() {
-                    shown.push_str(&format!(", its placeholder ends in {}", sign_in.suffix));
-                }
                 shown
             }
         };
@@ -529,29 +526,4 @@ fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
         assert!(own.sign_in.contains(&sign_in.variable));
     }
     assert!(claude::SIGN_IN.contains(&claude::TOKEN));
-}
-
-// spec(AUTH): With Claude Code, the adapter approves `AUTH key`'s placeholder by its last 20 characters, which are the same on every run, so an interactive run doesn't ask whether to use the key.
-#[test]
-fn claude_code_s_state_approves_the_key_s_placeholder() {
-    let state = |auth| {
-        (claude::files(&[], Mode::Auto, auth).into_iter())
-            .find(|(path, _)| *path == claude::STATE)
-            .map(|(_, content)| content)
-            .unwrap()
-    };
-    let keyed = state(Some(Auth::Key));
-    golden("claude-key.json", &keyed);
-    assert_eq!(claude::KEY_SUFFIX.len(), 20);
-    let text = String::from_utf8(keyed).unwrap();
-    assert!(text.contains(&format!("\"approved\": [\"{}\"]", claude::KEY_SUFFIX)));
-    // Only a key is approved.
-    for auth in [None, Some(Auth::Login), Some(Auth::Token)] {
-        assert_eq!(state(auth), state(None));
-        assert!(
-            !String::from_utf8(state(auth))
-                .unwrap()
-                .contains("customApiKey")
-        );
-    }
 }

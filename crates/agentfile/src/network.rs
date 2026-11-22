@@ -177,10 +177,8 @@ impl Network {
             .iter()
             .filter_map(|rule| match rule.destination {
                 Destination::Address {
-                    network,
-                    prefix,
-                    port: only,
-                } if only.is_none_or(|only| only == port) => Some((network, prefix)),
+                    network, prefix, ..
+                } => Some((network, prefix)),
                 _ => None,
             })
             .chain(
@@ -230,18 +228,16 @@ impl Network {
                     port: only_port,
                     path: prefix,
                 } => {
-                    let default = match only {
-                        Scheme::Https => 443,
-                        Scheme::Http => 80,
+                    let default = match (only, scheme) {
+                        (Scheme::Https, Scheme::Https) => 443,
+                        (Scheme::Http, Scheme::Http) => 80,
+                        _ => return None,
                     };
                     let under = path == prefix
                         || path
                             .strip_prefix(prefix.as_str())
                             .is_some_and(|rest| prefix.ends_with('/') || rest.starts_with('/'));
-                    (host == name
-                        && *only == scheme
-                        && only_port.unwrap_or(default) == port
-                        && under)
+                    (host == name && only_port.unwrap_or(default) == port && under)
                         .then(|| (true, prefix.len(), only_port.is_some()))
                 }
                 Destination::Address { .. } => None,
@@ -295,35 +291,24 @@ fn refused(address: IpAddr) -> bool {
 /// The sign of the matches with the highest key. Equally specific matches
 /// with opposite signs deny.
 fn most_specific<K: Ord>(matches: impl Iterator<Item = (K, Sign)>) -> Option<Sign> {
-    let mut best: Option<(K, Sign)> = None;
-    for (key, sign) in matches {
-        match &mut best {
-            Some((top, top_sign)) if key == *top => {
-                if sign == Sign::Deny {
-                    *top_sign = Sign::Deny;
-                }
-            }
-            Some((top, _)) if key < *top => {}
-            _ => best = Some((key, sign)),
-        }
-    }
-    best.map(|(_, sign)| sign)
+    let (_, deny) = matches.map(|(key, sign)| (key, sign == Sign::Deny)).max()?;
+    Some(if deny { Sign::Deny } else { Sign::Allow })
 }
 
 /// `address` with the bits past `prefix` cleared, or `None` when the prefix
 /// is longer than the address.
 fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
-    match address {
-        IpAddr::V4(address) if prefix <= 32 => {
-            let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
-            Some(IpAddr::V4((u32::from(address) & mask).into()))
+    let prefix = u32::from(prefix);
+    Some(match address {
+        IpAddr::V4(address) => {
+            let mask = u32::MAX.checked_shl(32_u32.checked_sub(prefix)?);
+            IpAddr::V4((u32::from(address) & mask.unwrap_or(0)).into())
         }
-        IpAddr::V6(address) if prefix <= 128 => {
-            let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
-            Some(IpAddr::V6((u128::from(address) & mask).into()))
+        IpAddr::V6(address) => {
+            let mask = u128::MAX.checked_shl(128_u32.checked_sub(prefix)?);
+            IpAddr::V6((u128::from(address) & mask.unwrap_or(0)).into())
         }
-        _ => None,
-    }
+    })
 }
 
 /// The instructions with `typed`, the rules from `ap run --network`, merged

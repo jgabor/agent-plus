@@ -146,6 +146,22 @@ fn a_read_write_share_is_a_write_grant() {
 fn a_path_named_twice_is_one_grant_with_the_widest_access() {
     let grants = grants_of("ADD ~/data ~/copy\nSHARE ~/data ~/data rw\nSHARE ~/data ~/again");
     assert_eq!(grants.paths, vec![path("/home/u/data", true)]);
+    let grants = grants_of("ADD ~/data ~/copy\nSHARE ~/data ~/again\nSHARE ~/more ~/more rw");
+    assert_eq!(
+        grants.paths,
+        vec![path("/home/u/data", false), path("/home/u/more", true)]
+    );
+}
+
+// spec(Grants): | Secrets, their bound hosts, and their visibility | `SECRET`, `SEAL`, `AUTH key`, `AUTH token` |
+#[test]
+fn a_secret_named_twice_is_one_grant_with_the_widest_access() {
+    let grants: Grants = "NETWORK -\nPOLICY -\nSECRET T @a.com\nSECRET T @b.com visible\n\
+                          SEAL S @s.com visible\nSEAL S @s.com\n"
+        .parse()
+        .unwrap();
+    assert_eq!(grants.secrets, vec![secret("T", &["a.com", "b.com"], true)]);
+    assert_eq!(grants.seals, vec![secret("S", &["s.com"], true)]);
 }
 
 // spec(Grants): | Host environment variables | `$NAME` in `ENV` values |
@@ -414,11 +430,12 @@ fn reading_rejects_what_it_does_not_know() {
          SHARE /a\n\
          PATH /bad\\escape\n\
          PATH /bad\\u{110000}\n\
+         PATH /seven\\u{0000041}\n\
          NETWORK -\n\
          POLICY -",
     );
     let lines: Vec<usize> = errors.iter().map(|error| error.line).collect();
-    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "{errors:?}");
+    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], "{errors:?}");
 }
 
 #[test]

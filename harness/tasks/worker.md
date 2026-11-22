@@ -44,6 +44,12 @@ can't continue alone, park the issue as AGENTS.md says.
     "options": {"effort": "high"}}
    ```
 
+   If T3 Code rejects a target's options, load
+   `mcp__t3-code__orchestrator_capabilities`, and call it with `search` set to
+   that target's model. Try the same target once more with only the options
+   it lists for that model, then go on to the next. Say in the PR what each
+   target that didn't run returned.
+
    When the PR adds a crate, or writes code a crate could do, ask the
    reviewer to confirm that the measurement was taken and that the oracle is
    in the tests, as Crates and our own code in AGENTS.md says.

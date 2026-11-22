@@ -12,6 +12,8 @@ use std::process::{Command, Stdio};
 pub const JOURNEY_FILE: &str = "harness/journey.toml";
 const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
 const FAKE_HARNESS: &str = "fake-harness";
+/// The server on your host that step 10 reaches from the guest.
+const FAKE_UPSTREAM: &str = "fake-upstream";
 
 struct Step {
     id: i64,
@@ -269,21 +271,33 @@ fn build_static(root: &Path, target: &Path, package: &str) -> Result<PathBuf, Pr
 /// Builds the fake harness for release, statically linked, or `None` if the
 /// workspace has no such package.
 pub fn build_fake_harness(root: &Path, target: &Path) -> Result<Option<PathBuf>, Problem> {
+    build_if_present(root, target, FAKE_HARNESS)
+}
+
+/// Builds `package` as [`build_static`] does, or `None` if the workspace has
+/// no such package.
+fn build_if_present(root: &Path, target: &Path, package: &str) -> Result<Option<PathBuf>, Problem> {
     if !workspace::packages(root)?
         .iter()
-        .any(|package| package.name == FAKE_HARNESS)
+        .any(|known| known.name == package)
     {
         return Ok(None);
     }
-    build_static(root, target, FAKE_HARNESS).map(Some)
+    build_static(root, target, package).map(Some)
 }
 
-/// Builds `ap` for release, and the fake harness if the workspace has it, and
-/// copies them where the steps will find them. A step puts the fake harness
-/// in an agent itself.
+/// Builds `ap` for release, and the fake harness and the fake upstream if the
+/// workspace has them, and copies them where the steps will find them. A step
+/// puts the fake harness in an agent itself, and starts the fake upstream on
+/// your host.
 fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     let built = build_ap(root, &root.join("target"))?;
-    let fake = build_fake_harness(root, &root.join("target"))?;
+    let mut fakes = Vec::new();
+    for package in [FAKE_HARNESS, FAKE_UPSTREAM] {
+        if let Some(fake) = build_if_present(root, &root.join("target"), package)? {
+            fakes.push((fake, package));
+        }
+    }
     let problem = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", journey.display()));
     if journey.exists() {
         fs::remove_dir_all(journey).map_err(problem)?;
@@ -291,8 +305,8 @@ fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     let bin = journey.join("bin");
     fs::create_dir_all(&bin).map_err(problem)?;
     fs::copy(built, bin.join("ap")).map_err(problem)?;
-    if let Some(fake) = fake {
-        fs::copy(fake, bin.join(FAKE_HARNESS)).map_err(problem)?;
+    for (fake, package) in fakes {
+        fs::copy(fake, bin.join(package)).map_err(problem)?;
     }
     Ok(bin)
 }

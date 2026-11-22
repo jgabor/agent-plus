@@ -24,8 +24,9 @@ concurrency:
 jobs:
   gate:
     runs-on: ubuntu-latest
-    # The merge timeout. A hang is one of the faults this job is for.
-    timeout-minutes: 30
+    # A backstop for a step before the gate. A job that runs out of time ends
+    # as cancelled, which files no issue.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -48,9 +49,11 @@ jobs:
           sudo loginctl enable-linger "$USER"
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-      - run: cargo xtask gate
+      # The merge timeout. A hang is one of the faults this job is for.
+      # `timeout` stops the gate and fails the step, so the report below runs.
+      - run: timeout --kill-after=1m 30m cargo xtask gate
 
-  # A job that runs out of time fails, so `failure()` covers it. A run that a
+  # A gate that ran out of time failed, so `failure()` covers it. A run that a
   # newer push replaced, or that someone cancelled, files nothing.
   report:
     needs: gate

@@ -1,7 +1,7 @@
 issue = 633
 pr = 637
-commit = "27c54a78797ec2769935ef1171f58d042a2e2bb9"
-base = "65c7ca3bc8b9637afd598e66b2833e689f7169aa"
+commit = "ded0546f71c6db1d46fbf101a33edec94e1091a8"
+base = "5c15c9b72eb2ea914252b2d079f9a56386a1025b"
 date = "2026-11-22"
 host = "linux-x86_64"
 spec = { proven = 492, promises = 907 }
@@ -10,8 +10,8 @@ reason = ""
 
 [budgets]
 binary_bytes = 7979952
-boot_ms = 80.43
-idle_mib = 41.92
-noop_build_ms = 1.25
-run_ms = 114.9
-version_ms = 0.26
+boot_ms = 104.51
+idle_mib = 41.89
+noop_build_ms = 1.32
+run_ms = 127.1
+version_ms = 0.25

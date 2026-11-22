@@ -1483,6 +1483,11 @@ In `rw` shares, the files your host acts on are read-only to the agent.
   `commondir`, `gitdir`, and `hooks/`.
 - Beneath `.git/modules` and `.git/worktrees`, every directory counts as a
   git directory, because a submodule's name can hold `/`.
+- A directory that holds `HEAD`, and either `commondir` or both `objects`
+  and `refs`, is a git directory too, because that is how git finds a bare
+  repository. None of those entries can be removed or moved out of it.
+- Anywhere else, the agent can't make the entry that would complete that
+  set, so nothing the agent wrote becomes a bare repository.
 - A directory or a symlink can't be moved or linked beneath
   `.git/modules` or `.git/worktrees`, or to `modules` or `worktrees` in a
   git directory, and no symlink can be made in those places, so nothing

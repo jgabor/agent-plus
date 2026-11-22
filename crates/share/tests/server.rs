@@ -646,6 +646,115 @@ fn a_git_directory_s_config_and_hooks_are_read_only() {
     assert!(!tree.root.join(".git/modules/evil").exists());
 }
 
+// spec(SHARE): A directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, is a git directory too, because that is how git finds a bare repository.
+// spec(SHARE): None of those entries can be removed or moved out of it.
+#[test]
+fn a_bare_repository_s_config_and_hooks_are_read_only() {
+    let tree = Tree::new("bare");
+    let root = &tree.root;
+    for dir in ["repo.git/objects", "repo.git/refs", "repo.git/hooks", "linked"] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for file in [
+        "repo.git/HEAD",
+        "repo.git/config",
+        "repo.git/hooks/pre-receive",
+        "linked/HEAD",
+        "linked/commondir",
+        "linked/config.worktree",
+    ] {
+        fs::write(root.join(file), b"host").unwrap();
+    }
+    let mut guest = Guest::with(root, Mode::ReadWrite);
+    for path in [
+        "repo.git/config",
+        "repo.git/hooks/pre-receive",
+        "linked/commondir",
+        "linked/config.worktree",
+    ] {
+        assert_eq!(guest.overwrite(path, b"agent"), Err(EPERM), "{path}");
+    }
+    let repo = guest.walk("repo.git").unwrap();
+    let hooks = guest.walk("repo.git/hooks").unwrap();
+    assert_eq!(guest.create(hooks, b"post-receive", 0), Err(EPERM));
+    assert_eq!(guest.create(repo, b"config.worktree", 0), Err(EPERM));
+    // `HEAD` changes, as git changes it, by a rename over it.
+    guest.overwrite("repo.git/HEAD", b"ref: refs/heads/agent").unwrap();
+    let (_, handle) = guest.create(repo, b"HEAD.lock", 0).unwrap();
+    guest.release(handle);
+    assert_eq!(guest.rename(repo, b"HEAD.lock", repo, b"HEAD", 0), 0);
+    // What git finds the repository by stays.
+    for (name, opcode) in [(&b"HEAD"[..], UNLINK), (b"objects", RMDIR), (b"refs", RMDIR)] {
+        assert_eq!(guest.remove(opcode, repo, name), EPERM, "{name:?}");
+        assert_eq!(guest.rename(repo, name, 1, b"out", 0), EPERM, "{name:?}");
+    }
+    let linked = guest.walk("linked").unwrap();
+    assert_eq!(guest.remove(UNLINK, linked, b"HEAD"), EPERM);
+    // So does a root that is one, or that is beneath one.
+    let mut bare = Guest::with(&root.join("repo.git"), Mode::ReadWrite);
+    assert_eq!(bare.overwrite("config", b"agent"), Err(EPERM));
+    let mut beneath = Guest::with(&root.join("repo.git/hooks"), Mode::ReadWrite);
+    assert_eq!(beneath.overwrite("pre-receive", b"agent"), Err(EPERM));
+    for file in [
+        "repo.git/config",
+        "repo.git/hooks/pre-receive",
+        "linked/commondir",
+    ] {
+        assert_eq!(fs::read(root.join(file)).unwrap(), b"host", "{file}");
+    }
+    assert!(root.join("repo.git/objects").is_dir());
+    assert!(!root.join("repo.git/hooks/post-receive").exists());
+}
+
+// spec(SHARE): Anywhere else, the agent can't make the entry that would complete that set, so nothing the agent wrote becomes a bare repository.
+#[test]
+fn no_directory_the_agent_writes_becomes_a_bare_repository() {
+    let tree = Tree::new("make-bare");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let made = |guest: &mut Guest, parent, name: &[u8]| {
+        let (_, handle) = guest.create(parent, name, 0)?;
+        guest.release(handle);
+        Ok::<(), i32>(())
+    };
+    // Part of the set is no git directory, so it can be made.
+    let refs_last = guest.mkdir(1, b"refs-last").unwrap();
+    made(&mut guest, refs_last, b"HEAD").unwrap();
+    made(&mut guest, refs_last, b"config").unwrap();
+    guest.mkdir(refs_last, b"objects").unwrap();
+    assert_eq!(guest.mkdir(refs_last, b"refs"), Err(EPERM));
+    assert_eq!(guest.symlink(refs_last, b"refs", b"/x"), Err(EPERM));
+    guest.mkdir(1, b"staged").unwrap();
+    assert_eq!(guest.rename(1, b"staged", refs_last, b"refs", 0), EPERM);
+    // `HEAD` can't be made in any way, in any case.
+    let head_last = guest.mkdir(1, b"head-last").unwrap();
+    guest.mkdir(head_last, b"objects").unwrap();
+    guest.mkdir(head_last, b"refs").unwrap();
+    for name in [&b"HEAD"[..], b"head"] {
+        assert_eq!(made(&mut guest, head_last, name), Err(EPERM), "{name:?}");
+    }
+    assert_eq!(guest.symlink(head_last, b"HEAD", b"refs"), Err(EPERM));
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.link(hello, head_last, b"HEAD"), Err(EPERM));
+    assert_eq!(guest.rename(1, b"hello.txt", head_last, b"HEAD", 0), EPERM);
+    // `commondir` with `HEAD` is enough, in either order.
+    let common = guest.mkdir(1, b"common").unwrap();
+    made(&mut guest, common, b"HEAD").unwrap();
+    assert_eq!(made(&mut guest, common, b"commondir"), Err(EPERM));
+    let head = guest.mkdir(1, b"head").unwrap();
+    made(&mut guest, head, b"commondir").unwrap();
+    assert_eq!(made(&mut guest, head, b"HEAD"), Err(EPERM));
+    for path in [
+        "refs-last/refs",
+        "head-last/HEAD",
+        "head-last/head",
+        "common/commondir",
+        "head/HEAD",
+    ] {
+        assert!(fs::symlink_metadata(tree.root.join(path)).is_err(), "{path}");
+    }
+    assert!(tree.root.join("staged").is_dir());
+}
+
 // spec(SHARE): Names match case-insensitively, as they do on macOS filesystems.
 #[test]
 fn protected_names_match_without_regard_to_case() {

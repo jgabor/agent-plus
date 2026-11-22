@@ -16,17 +16,18 @@
 //!
 //! Between the two, `ap run` binds the run's socket, `<name>.sock`, in the
 //! runtime directory, and keeps it until it exits. It talks to the run
-//! process over a socket pair of its own.
+//! process over a socket pair of its own, and sends your keys over another,
+//! so that a harness that doesn't read them holds back only them.
 //!
 //! A run with shares has a third process, the share server, which `ap run`
 //! starts with the roots it opened. The run process inherits the VMM's end
 //! of the server's socket, and the only one, so the server ends with it.
 //!
 //! `ap run` sends the layers and how to start the harness. For a harness in
-//! a terminal, it then sends what you type and the terminal's new sizes. The
-//! run process sends the harness's output, unfiltered, then how the run
-//! ended. Each message is a tag byte, a body length as a little-endian
-//! `u32`, and the body.
+//! a terminal, it then sends what you type and the terminal's new sizes, on
+//! the other pair. The run process sends the harness's output, unfiltered,
+//! then how the run ended. Each message is a tag byte, a body length as a
+//! little-endian `u32`, and the body.
 //!
 //! Each `ap exec` connects to the run's socket, sends the command, then its
 //! input, and reads the command's output and status, as `ap run` reads the
@@ -519,6 +520,15 @@ impl Execs {
         }
         let execs = Arc::clone(&self);
         thread::spawn(move || execs.write_to(id, writer, &written));
+        // While the window is full, nothing reads the stream, so another
+        // thread watches it for `ap exec` hanging up.
+        if let Ok(watched) = stream.try_clone() {
+            let window = Arc::clone(&window);
+            thread::spawn(move || {
+                wait_for_hang_up(&watched);
+                window.close();
+            });
+        }
         loop {
             let (tag, body) = match read_from_exec(&mut reader) {
                 Ok(Some(FromExec::Input(bytes))) => (INPUT, bytes),
@@ -531,11 +541,11 @@ impl Execs {
                 _ => break,
             };
             if !window.take() || self.send(id, tag, &body).is_err() {
-                return;
+                break;
             }
         }
         // Dropping the client ends its writer, and the command's connection
-        // closes in the run process.
+        // ends in the run process, unless the command has ended already.
         self.clients().remove(&id);
         let _ = self.send(id, HUNG_UP, &[]);
     }
@@ -560,11 +570,26 @@ impl Execs {
     }
 }
 
+/// Waits until the other end of `stream` hangs up, or this end shuts down.
+/// It reads nothing, so what waits in the stream stays for its reader.
+fn wait_for_hang_up(stream: &UnixStream) {
+    let mut watched = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: `watched` is one valid `pollfd`, which outlives each call.
+    while unsafe { libc::poll(&mut watched, 1, -1) } < 0
+        && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
+    {}
+}
+
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
 /// process id is the first argument, for the run named by the second, with
 /// its end of a socket pair with `ap run` as its standard input. The third
 /// argument is the number of an inherited descriptor, the VMM's end of the
-/// network process's link. A run with shares has a fourth: the number of
+/// network process's link, and the fourth another's, its end of the pair
+/// that brings your keys. A run with shares has a fifth: the number of
 /// another, the VMM's end of the share server's socket. It returns
 /// the status to exit with, which nobody reads, because it reports how the
 /// run ended over the socket.
@@ -577,7 +602,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if !(3..=4).contains(&args.len()) || orphaned {
+    if !(4..=5).contains(&args.len()) || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
@@ -587,10 +612,10 @@ pub fn run_process(args: &[OsString]) -> u8 {
         fd if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
         _ => None,
     };
-    let Some(link) = inherited(&args[2]) else {
+    let (Some(link), Some(keys)) = (inherited(&args[2]), inherited(&args[3])) else {
         return 125;
     };
-    let shares = match args.get(3).map(inherited) {
+    let shares = match args.get(4).map(inherited) {
         None => None,
         Some(Some(fd)) => Some(fd),
         Some(None) => return 125,
@@ -607,7 +632,15 @@ pub fn run_process(args: &[OsString]) -> u8 {
         return 125;
     };
     let output = Arc::new(ToRun::new(output));
-    let end = match serve(&args[1].to_string_lossy(), &stream, link, shares, &output) {
+    let keys = File::from(keys);
+    let end = match serve(
+        &args[1].to_string_lossy(),
+        &stream,
+        keys,
+        link,
+        shares,
+        &output,
+    ) {
         Ok(status) => End::Exited(status),
         Err(error) => End::Failed(error.exit_code(), error.to_string()),
     };
@@ -649,11 +682,12 @@ fn record_exit(status: u8) {
 
 /// Locks the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, and boots the agent with its output sent to
-/// `output`, its network on `link`, and the shares the server at the end of
-/// `shares` serves.
+/// `output`, its keys read from `keys`, its network on `link`, and the
+/// shares the server at the end of `shares` serves.
 fn serve(
     name: &str,
     stream: &UnixStream,
+    keys: File,
     link: OwnedFd,
     shares: Option<OwnedFd>,
     output: &Arc<ToRun>,
@@ -714,13 +748,11 @@ fn serve(
         .try_clone()
         .map(|clone| File::from(OwnedFd::from(clone)))
         .map_err(lost)?;
-    let input = Arc::new(Input::new(source.as_raw_fd()));
-    pass_input(
-        source,
-        Arc::clone(&input),
-        Arc::clone(output),
-        start.terminal.is_some(),
-    );
+    let input = Arc::new(Input::new([source.as_raw_fd(), keys.as_raw_fd()]));
+    pass_input(source, Arc::clone(&input), Arc::clone(output));
+    if start.terminal.is_some() {
+        pass_keys(keys, Arc::clone(&input));
+    }
     let shares = match (shares, start.shares.len()) {
         (None, 0) => None,
         (Some(socket), count @ 1..) => Some(Shares { socket, count }),
@@ -845,12 +877,12 @@ fn stop(input: &Input, output: &ToRun) {
 }
 
 /// Passes what `ap run` sends from `source` on to the guest, until it sends
-/// something else or is gone: keys and resizes for a harness in a
-/// `terminal`, and what each `ap exec` sends. A stop goes to a thread of its
-/// own, started now, while this process may still start one, so the rest
-/// goes on passing while the harness ends. `ap run` exits when the run ends,
-/// so these threads end with this process.
-fn pass_input(mut source: File, input: Arc<Input>, output: Arc<ToRun>, terminal: bool) {
+/// something else or is gone: what each `ap exec` sends, and a stop. Nothing
+/// here waits for the guest. A stop goes to a thread of its own, started
+/// now, while this process may still start one, so the rest goes on passing
+/// while the harness ends. `ap run` exits when the run ends, so these
+/// threads end with this process.
+fn pass_input(mut source: File, input: Arc<Input>, output: Arc<ToRun>) {
     let (stops, stopped) = mpsc::channel();
     let stopping = Arc::clone(&input);
     thread::spawn(move || {
@@ -866,14 +898,31 @@ fn pass_input(mut source: File, input: Arc<Input>, output: Arc<ToRun>, terminal:
                     let _ = stops.send(());
                     Ok(())
                 }
-                (INPUT, _) if terminal => input.send(&ToGuest::Input(body)),
-                (RESIZE, [a, b, c, d]) if terminal => input.send(&ToGuest::Resize(Size {
-                    rows: u16::from_le_bytes([*a, *b]),
-                    columns: u16::from_le_bytes([*c, *d]),
-                })),
                 (FOR_EXEC, [a, b, c, d, tag, rest @ ..]) => {
                     pass_to_exec(&input, u32::from_le_bytes([*a, *b, *c, *d]), *tag, rest)
                 }
+                _ => return,
+            };
+            if passed.is_err() {
+                return;
+            }
+        }
+    });
+}
+
+/// Passes what you type, and your terminal's new sizes, from `keys` on to
+/// the harness, on a thread of its own, until `ap run` sends something else
+/// or is gone. It waits while the harness doesn't read, which holds back
+/// only your keys.
+fn pass_keys(mut keys: File, input: Arc<Input>) {
+    thread::spawn(move || {
+        while let Ok(Some((tag, body))) = read_frame(&mut keys) {
+            let passed = match (tag, body.as_slice()) {
+                (INPUT, _) => input.send(&ToGuest::Input(body)),
+                (RESIZE, [a, b, c, d]) => input.send(&ToGuest::Resize(Size {
+                    rows: u16::from_le_bytes([*a, *b]),
+                    columns: u16::from_le_bytes([*c, *d]),
+                })),
                 _ => return,
             };
             if passed.is_err() {

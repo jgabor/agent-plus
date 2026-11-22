@@ -9,6 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -624,13 +625,14 @@ impl Interactive {
 }
 
 /// The status of `run`, once it exits within `limit`.
+#[track_caller]
 fn wait_within(run: &mut Started, limit: Duration) -> ExitStatus {
     let deadline = Instant::now() + limit;
     loop {
         if let Some(status) = run.0.try_wait().unwrap() {
             return status;
         }
-        assert!(Instant::now() < deadline, "ap run didn't exit");
+        assert!(Instant::now() < deadline, "it didn't exit within {limit:?}");
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -1169,6 +1171,168 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
         stderr.contains(&format!("run {name} has finished")),
         "{stderr}"
     );
+}
+
+/// How long an `ap exec` that nothing holds back may take to answer.
+const ANSWERED_WITHIN: Duration = Duration::from_secs(30);
+
+/// Runs `ap exec` in the run `name` with no input, as [`Scratch::exec`]
+/// does, and fails unless it exits within [`ANSWERED_WITHIN`].
+#[track_caller]
+fn exec_within(scratch: &Scratch, name: &str, args: &[&str]) -> Output {
+    let mut exec = Started(
+        scratch
+            .exec_command(name, args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let read_all = |mut pipe: Box<dyn Read + Send>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).unwrap();
+            bytes
+        })
+    };
+    let stdout = read_all(Box::new(exec.0.stdout.take().unwrap()));
+    let stderr = read_all(Box::new(exec.0.stderr.take().unwrap()));
+    let status = wait_within(&mut exec, ANSWERED_WITHIN);
+    Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    }
+}
+
+/// Writes lines of keys to `to` on a thread of its own until a write fails,
+/// and returns once nothing has taken any for a second. Returns how many
+/// bytes were taken by then.
+fn type_until_held_back(mut to: impl Write + Send + 'static) -> usize {
+    let typed = Arc::new(AtomicUsize::new(0));
+    let typing = Arc::clone(&typed);
+    thread::spawn(move || {
+        let mut line = [b'x'; 100];
+        line[99] = b'\r';
+        while to.write_all(&line).is_ok() {
+            typing.fetch_add(line.len(), Ordering::Relaxed);
+        }
+    });
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    let mut before = 0;
+    loop {
+        thread::sleep(Duration::from_secs(1));
+        let now = typed.load(Ordering::Relaxed);
+        if now == before {
+            return now;
+        }
+        assert!(Instant::now() < deadline, "the keys were never held back");
+        before = now;
+    }
+}
+
+/// More than the run process lets wait for the guest. That typing stopped
+/// with this much taken shows the rest waits for the program to read.
+const UNREAD: usize = 64 << 10;
+
+#[test]
+fn ap_exec_answers_while_an_interactive_harness_leaves_your_keys_unread() {
+    let scratch = Scratch::new("unread-keys");
+    scratch.build("deaf", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let mut run = Interactive::start(&scratch, &["deaf"], size(30, 100));
+    run.wait_for("\"user\":");
+    // The harness reads nothing after `exit`, until it ends.
+    run.type_line("exit");
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+
+    let typed = type_until_held_back(run.controller.try_clone().unwrap());
+    assert!(typed > UNREAD, "{typed}");
+    printed(&exec_within(&scratch, &name, &["id", "-un"]), "agent\n");
+}
+
+/// The most commands beside the harness that can run at once: the VMM
+/// takes 64 connections from the guest, and the init holds one.
+const MOST_EXECS: usize = 63;
+
+#[test]
+fn ap_exec_works_again_once_as_many_commands_as_can_run_at_once_have_ended() {
+    let scratch = Scratch::new("most-execs");
+    scratch.build("busy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let (_run, name) = start_headless(&scratch, "busy");
+
+    let mut commands: Vec<Started> = (0..MOST_EXECS)
+        .map(|_| {
+            Started(
+                scratch
+                    .exec_command(&name, &["sh", "-c", "echo up; exec cat"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+            )
+        })
+        .collect();
+    // Each is running once it says so, so all of them run at once.
+    for command in &mut commands {
+        let mut up = String::new();
+        BufReader::new(command.0.stdout.take().unwrap())
+            .read_line(&mut up)
+            .unwrap();
+        assert_eq!(up, "up\n");
+    }
+    for command in &mut commands {
+        drop(command.0.stdin.take());
+    }
+    for command in &mut commands {
+        let status = wait_within(command, ANSWERED_WITHIN);
+        assert_eq!(status.code(), Some(0), "{status:?}");
+    }
+    printed(&exec_within(&scratch, &name, &["id", "-un"]), "agent\n");
+}
+
+#[test]
+fn a_killed_ap_exec_whose_command_never_reads_input_lets_go_of_its_guest_connection() {
+    let scratch = Scratch::new("unread-input");
+    scratch.build("busy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let (_run, name) = start_headless(&scratch, "busy");
+
+    // It never reads its input. It leaves a mark once its output has
+    // nowhere to go, which it has only once its connection is gone.
+    let script = "trap '' PIPE; echo up; while echo tick; do sleep 0.1; done; touch /tmp/released";
+    let mut deaf = Started(
+        scratch
+            .exec_command(&name, &["sh", "-c", script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut output = BufReader::new(deaf.0.stdout.take().unwrap());
+    let mut up = String::new();
+    output.read_line(&mut up).unwrap();
+    assert_eq!(up, "up\n");
+    let typed = type_until_held_back(deaf.0.stdin.take().unwrap());
+    assert!(typed > UNREAD, "{typed}");
+    // `timeout` passes the signal on to `ap exec`.
+    signal("-TERM", deaf.0.id());
+    wait_within(&mut deaf, Duration::from_secs(10));
+
+    let deadline = Instant::now() + ANSWERED_WITHIN;
+    loop {
+        let released = exec_within(&scratch, &name, &["test", "-e", "/tmp/released"]);
+        if released.status.code() == Some(0) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the command still has its connection: {released:?}"
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
+    drop(output);
 }
 
 impl Scratch {

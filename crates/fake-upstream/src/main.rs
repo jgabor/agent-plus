@@ -20,14 +20,18 @@
 //! HTTPS answers every request with a 404. Each line it gets, and each
 //! request's target, is noted in `<directory>/seen` as one line, `plain
 //! <line>`, `address <line>`, or `tls <target>`, so a check can tell what
-//! reached it.
+//! reached it. Each HTTPS request, its head and body as they arrived, is
+//! also kept whole in `<directory>/requests/<n>`, numbered from 1 in the
+//! order they came.
 
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -42,6 +46,19 @@ const QUIET: Duration = Duration::from_secs(60);
 
 /// Where each line that reached the upstream is noted.
 type Seen = Arc<Mutex<File>>;
+
+/// Where each HTTPS request is kept whole, and how many came so far.
+struct Requests {
+    directory: PathBuf,
+    count: AtomicUsize,
+}
+
+impl Requests {
+    fn keep(&self, request: &[u8]) -> io::Result<()> {
+        let number = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+        fs::write(self.directory.join(number.to_string()), request)
+    }
+}
 
 fn main() -> ExitCode {
     let mut arguments = env::args_os().skip(1);
@@ -76,6 +93,11 @@ fn serve(directory: &Path) -> io::Result<()> {
         .with_single_cert(vec![leaf.certificate], leaf.key)
         .map_err(io::Error::other)?;
     fs::write(directory.join("ca.pem"), authority.certificate_pem())?;
+    let requests = Arc::new(Requests {
+        directory: directory.join("requests"),
+        count: AtomicUsize::new(0),
+    });
+    fs::create_dir_all(&requests.directory)?;
 
     let plain = TcpListener::bind("127.0.0.1:0")?;
     let tls = TcpListener::bind("127.0.0.1:0")?;
@@ -94,7 +116,9 @@ fn serve(directory: &Path) -> io::Result<()> {
     stdout.flush()?;
 
     let config = Arc::new(config);
-    accept(tls, &seen, move |stream, seen| https(stream, &config, seen));
+    accept(tls, &seen, move |stream, seen| {
+        https(stream, &config, seen, &requests)
+    });
     accept(address, &seen, |stream, seen| echo(stream, "address", seen));
     let seen = Arc::clone(&seen);
     for stream in plain.incoming() {
@@ -139,8 +163,13 @@ fn echo(stream: TcpStream, label: &str, seen: &Seen) -> io::Result<()> {
     Ok(())
 }
 
-/// Answers each HTTPS request on the connection with a 404.
-fn https(stream: TcpStream, config: &Arc<ServerConfig>, seen: &Seen) -> io::Result<()> {
+/// Answers each HTTPS request on the connection with a 404, and keeps it.
+fn https(
+    stream: TcpStream,
+    config: &Arc<ServerConfig>,
+    seen: &Seen,
+    requests: &Requests,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(QUIET))?;
     let server = ServerConnection::new(Arc::clone(config)).map_err(io::Error::other)?;
     let mut stream = BufReader::new(StreamOwned::new(server, stream));
@@ -151,9 +180,14 @@ fn https(stream: TcpStream, config: &Arc<ServerConfig>, seen: &Seen) -> io::Resu
         }
         let target = line.split(' ').nth(1).unwrap_or_default();
         note(seen, &format!("tls {target}"));
+        let mut request = line.clone().into_bytes();
         let mut length = 0;
         let mut header = String::new();
-        while stream.read_line(&mut header)? > 0 && header != "\r\n" {
+        while stream.read_line(&mut header)? > 0 {
+            request.extend_from_slice(header.as_bytes());
+            if header == "\r\n" {
+                break;
+            }
             if let Some((name, value)) = header.split_once(':')
                 && name.eq_ignore_ascii_case("content-length")
             {
@@ -161,7 +195,8 @@ fn https(stream: TcpStream, config: &Arc<ServerConfig>, seen: &Seen) -> io::Resu
             }
             header.clear();
         }
-        io::copy(&mut (&mut stream).take(length), &mut io::sink())?;
+        (&mut stream).take(length).read_to_end(&mut request)?;
+        requests.keep(&request)?;
         let answer = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
         stream.get_mut().write_all(answer)?;
     }

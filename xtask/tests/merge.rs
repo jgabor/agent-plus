@@ -1847,8 +1847,8 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
         );
     };
     // A bench keeps the turnstile for as long as it waits for the lock. A
-    // build only passes through it, so the bench waits once the turnstile is
-    // held twice in a row.
+    // build only passes through it, so the bench waits once the proof has
+    // reached it and the turnstile is held twice in a row.
     let turnstile = lock("turnstile.lock");
     let held = || match turnstile.try_lock() {
         Ok(()) => turnstile.unlock().is_err(),
@@ -1860,7 +1860,7 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
             ended(&mut merge, "the merge's bench never waited for the lock");
         }
         thread::sleep(Duration::from_millis(100));
-        if held() {
+        if repo.calls().contains("Proving: bench") && held() {
             thread::sleep(Duration::from_millis(200));
             if held() {
                 break;

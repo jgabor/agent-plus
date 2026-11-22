@@ -651,13 +651,12 @@ secrets in `ap`'s secret store. [SECRET](#secret) says when a run reads them.
   never their values.
 - If the store doesn't have the name, `ap secret rm <name>` says so on
   standard error and exits 1.
-- On Linux, the store is the Secret Service, which GNOME Keyring and KWallet
-  provide. `ap` finds the session bus through `DBUS_SESSION_BUS_ADDRESS`,
-  or else `$XDG_RUNTIME_DIR/bus`. With no bus or no Secret Service, as over
-  SSH or in CI, `ap secret` says so on standard error, says to give the
-  secret in the environment variable that [SECRET](#secret) reads first,
-  and exits 1. Nothing falls back to a file, so `ap` never keeps a secret
-  on disk in the clear.
+- On Linux, v0.1.0 has no secret store, and `ap secret set`,
+  `ap secret rm`, and `ap secret ls` each say so on standard error, say to
+  give the secret in the environment variable that [SECRET](#secret) reads
+  first, and exit 1. Nothing falls back to a file, so `ap` never keeps a
+  secret on disk in the clear.
+- **Planned.** After v0.1.0, `ap` will have a secret store on Linux too.
 
 ### ap acp
 
@@ -1232,8 +1231,9 @@ Every `SECRET` is a [grant](#grants).
 
 **Where the value comes from.** At run time, `ap` reads the value from the
 host environment variable `<name>`. If that is unset, it reads `ap`'s secret
-store (`ap secret set <name>`, backed by the OS keychain). A missing value
-makes the run fail, and the error names the secret.
+store (`ap secret set <name>`, backed by the OS keychain). On Linux, v0.1.0
+has no secret store, so `ap` reads the value only from the host environment
+variable. A missing value makes the run fail, and the error names the secret.
 
 **Hidden (the default).** Inside the guest, the environment variable
 `<name>` holds a placeholder. The egress proxy replaces the placeholder with

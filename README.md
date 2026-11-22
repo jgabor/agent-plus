@@ -159,7 +159,7 @@ desktop in a native window.
 
 - `ap reset <agent | digest>`: delete an agent's persisted state, including the
   sign-in from `AUTH login`
-- `ap secret set|rm|ls`: manage secrets in the OS keychain
+- `ap secret set|rm|ls`: manage secrets in the macOS Keychain
 
 #### Integration
 

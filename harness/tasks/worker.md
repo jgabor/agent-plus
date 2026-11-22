@@ -35,10 +35,6 @@ can't continue alone, park the issue as AGENTS.md says.
    ```
 
    ```json
-   {"providerInstanceId": "opencode", "model": "opencode/big-pickle"}
-   ```
-
-   ```json
    {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5"}
    ```
 

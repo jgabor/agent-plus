@@ -31,7 +31,10 @@ pub fn parse(args: &[OsString]) -> Option<Secret> {
 pub fn run(secret: &Secret) -> u8 {
     let variable = match secret {
         Secret::Set(name) | Secret::Rm(name) => {
-            format!("give it in the environment variable {}", name.escape_debug())
+            format!(
+                "give it in the environment variable {}",
+                name.escape_debug()
+            )
         }
         Secret::Ls => "give each secret in the environment variable named after it".to_owned(),
     };

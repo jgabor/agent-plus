@@ -40,22 +40,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Open KVM to the runner's user
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      # Ubuntu's AppArmor lets a plain process make a user namespace, but not
-      # write its id maps. The share owner test runs its server as another
-      # uid in one, so the runner's user must be able to map ids there.
-      - name: Let the runner's user map ids in a user namespace
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Start a systemd user session
-        run: |
-          sudo loginctl enable-linger "$USER"
-          sudo systemctl start "user@$(id -u).service"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+      # It runs from the checkout, which is `main`, like this file.
+      - uses: ./.github/actions/runner-setup
       - env:
           GH_TOKEN: ${{ github.token }}
           GIT_AUTHOR_NAME: github-actions[bot]

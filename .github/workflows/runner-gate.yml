@@ -1,0 +1,74 @@
+# Runs the gate on a GitHub-hosted runner at each push to `main`, so that a
+# fault that shows only there is found within one merge of the commit that
+# brought it. It decides no merge, and it posts no status. When the gate fails
+# or runs out of time, one open issue says so.
+#
+# The gate job runs the repository's code with a token that can only read. The
+# report job holds the token that files the issue, and runs no code from the
+# repository.
+name: runner-gate
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# A newer push replaces a run that is still queued, not one that runs. That
+# loses nothing, because the newer run tests a newer `main`. The group is its
+# own, so this workflow never holds or replaces a refresh.
+concurrency:
+  group: runner-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # A backstop for the steps before the gate. A job that runs out of time
+    # ends as cancelled, which files no issue.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The same setup as the refresh.
+      - uses: ./.github/actions/runner-setup
+      # The merge timeout, because a hang is one of the faults this job is
+      # for. A step that runs out of time fails, so the report below runs.
+      - run: cargo xtask gate
+        timeout-minutes: 30
+
+  # A gate that ran out of time failed, so `failure()` covers it. A run that a
+  # newer push replaced, or that someone cancelled, files nothing.
+  report:
+    needs: gate
+    if: failure()
+    runs-on: ubuntu-latest
+    # The run holds the group until this job ends.
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TITLE: The gate fails on a GitHub runner at `main`
+        run: |
+          open=$(gh api --paginate "repos/$REPOSITORY/issues?state=open&per_page=100" \
+            --jq '.[] | select(.pull_request == null and .title == env.TITLE) | .number')
+          if [ -n "$open" ]; then
+            echo "Issue #$(echo "$open" | head -n 1) is open, so this adds nothing"
+            exit 0
+          fi
+          body=$(printf '%s\n' \
+            "The runner gate failed or ran out of time on a GitHub-hosted runner at" \
+            "$COMMIT, in $RUN." \
+            "" \
+            "The gate on the owner's machines still decides every merge. While this" \
+            "issue is open, a later failure adds nothing here.")
+          gh issue create --repo "$REPOSITORY" --title "$TITLE" --body "$body"

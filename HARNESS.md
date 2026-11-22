@@ -807,7 +807,9 @@ A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
 an issue gets `land-needed`, and on every push to `main`, one run at a time,
 with the workflow and `xtask` of `main`. GitHub-hosted x86_64 runners can
 run the VMM, once a udev rule opens KVM and a systemd user session is
-started.
+started. The `runner-setup` action in `.github/actions/` does both, and lets
+the runner's user map ids in a user namespace. The
+[runner gate](#runner-gate) uses it too, so a fix for the runner lands in both.
 
 1. Find each open PR whose issue has `land-needed` and whose auto-merge is
    armed, oldest first. Every other PR, and its status, is left alone.
@@ -870,6 +872,31 @@ Each `prepare` proves its PR with the xtask of the `main` it fetched, as in
 the [merge sequence](#merge-sequence), so a PR that changes `xtask/` is proven
 both ways here too. If `main` moves during a run, the rest are proven on the
 newer `main`.
+
+### Runner gate
+
+Some faults show only on a GitHub-hosted runner, such as a uid that isn't
+1000, an AppArmor rule, a small socket buffer, or a slower machine. Without
+this workflow, only the refresh runs our tests there, so such a fault waits
+until some unrelated PR is armed, and that PR pays for it.
+
+So `runner-gate.yml` runs `cargo xtask gate` on a GitHub-hosted runner at each
+push to `main`, after the `runner-setup` action that the refresh uses. It finds
+such a fault within one merge of the commit that brought it, and it blocks no
+PR. The gate on the owner's machines still decides every merge.
+
+- The job that runs the gate has a token that can only read. It posts no
+  `xtask/gate` status, and it merges and labels nothing.
+- Its concurrency group is its own, so it never holds or replaces a refresh.
+  A newer push replaces a run that is queued, not one that runs.
+- The gate gets the merge timeout, because a hang is one of the faults it is
+  for. A gate that runs out of time fails. The job has a longer limit, for the
+  steps before the gate, and a job that reaches it files no issue.
+- When the gate fails there, a second job files one open issue titled
+  `` The gate fails on a GitHub runner at `main` ``, with the commit and a link
+  to the run. While that issue is open, a later failure adds nothing. That job
+  runs no code from the repository, and it is the only one whose token can
+  write.
 
 ### Nightly job
 
@@ -1014,6 +1041,7 @@ passes. No scheduled work runs on GitHub.
 | Spec and code diverge | Quote mismatch | The gate fails |
 | Worker collision | `Touches` overlap, and rebase conflict | Not dispatched together. On conflict, the worker reassesses |
 | Broken `main` | Nightly job | Bisect and revert PR |
+| A gate failure only a GitHub runner shows | [Runner gate](#runner-gate) | An issue opens |
 | Noisy timing | Band and activity lock | Interleaved runs are repeated |
 | Disk exhaustion | Free-space check | Dispatch stops |
 | Stale VM | VM timeout | The VM exits, and the check fails |

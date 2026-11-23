@@ -3,7 +3,7 @@
 
 use std::net::IpAddr;
 
-use agentfile::{Network, NetworkRule, Scheme, Sign, parse};
+use agentfile::{Destination, Network, NetworkRule, Scheme, Sign, parse};
 use net::{By, Connection, Request, decide};
 
 /// An address that no rule in these tests names, as the resolver's pool
@@ -326,9 +326,20 @@ fn request_paths_are_normalized_before_matching() {
         ALLOW,
         "default",
     );
-    // A rule's own escaped dots never move it to another path.
-    let rules = "NETWORK -\nNETWORK +https://a.com/public/%2e%2e/secret\n";
-    decides(rules, request("https://a.com/secret"), DENY, "default");
+    // A rule's own escaped dots never move it to another path. `ap build`
+    // rejects such a rule, so it is built here by hand.
+    let rule = NetworkRule {
+        sign: ALLOW,
+        destination: Destination::Url {
+            scheme: Scheme::Https,
+            host: "a.com".to_string(),
+            port: None,
+            path: "/public/%2e%2e/secret".to_string(),
+        },
+    };
+    let rules = [rule];
+    let decision = decide(&rules, DENY, &request("https://a.com/secret"));
+    assert_eq!((decision.sign, decision.by), (DENY, By::Default));
 }
 
 // spec(NETWORK): Requests whose paths contain encoded slashes (`%2F`) or dot segments under a host with URL rules are denied.

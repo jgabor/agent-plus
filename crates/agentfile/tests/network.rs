@@ -380,7 +380,8 @@ fn a_url_rule_is_a_host_and_a_plain_path() {
 #[test]
 fn a_url_rule_path_has_no_escaped_dot_segment() {
     for path in [
-        "%2e", "%2E", "%2e%2e", "%2E%2E", ".%2e", "%2e.", ".%2E", "%2E.",
+        ".", "..", "%2e", "%2E", "%2e%2e", "%2E%2E", "%2e%2E", "%2E%2e", ".%2e", "%2e.", ".%2E",
+        "%2E.",
     ] {
         error_of(&format!("NETWORK +https://a.com/public/{path}/secret\n"));
         error_of(&format!("NETWORK +https://a.com/public/{path}\n"));

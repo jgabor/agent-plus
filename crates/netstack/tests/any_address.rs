@@ -792,7 +792,11 @@ fn half_open_connections_and_held_syns_stay_within_their_limit() {
             }
             // A taken SYN with a bad checksum opens nothing, so each new
             // one is asked about.
-            let expected = if bad && verdict == Verdict::Take { 200 } else { 64 };
+            let expected = if bad && verdict == Verdict::Take {
+                200
+            } else {
+                64
+            };
             assert_eq!(asked.len(), expected, "{verdict:?}, bad {bad}");
             while stack.transmit().is_some() {}
             // A SYN past the limit isn't asked about, and gets no answer.

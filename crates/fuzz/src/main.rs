@@ -1129,22 +1129,28 @@ const PROTECTED: [&str; 4] = [
 ];
 
 /// Plays a guest of an `rw` share, as [`fuse_input`] does, in a tree of its
-/// own. Panics as it does, and also if anything outside the root, or
-/// anything [`PROTECTED`] in it, changed, or if anything appeared beside
-/// the root.
+/// own that it removes afterwards. Panics as it does, and also if anything
+/// outside the root, or anything [`PROTECTED`] in it, changed, or if
+/// anything appeared beside the root.
 fn fuse_rw_input(input: &str) -> usize {
-    fuse_rw_input_at(input, "root")
+    fuse_rw_input_at(input, "root", &fuse_rw_base())
 }
 
-/// [`fuse_rw_input`] with the share's root at `served` in the tree, which
-/// a test moves to stand in for a server that escaped it.
-fn fuse_rw_input_at(input: &str, served: &str) -> usize {
+/// A path for a new tree of [`fuse_rw_input`]'s, unique to this run.
+fn fuse_rw_base() -> PathBuf {
     static RUNS: AtomicU64 = AtomicU64::new(0);
     let run = RUNS.fetch_add(1, Ordering::Relaxed);
-    let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/fuzz-share-rw")
-        .join(format!("{}-{run}", std::process::id()));
-    let _ = fs::remove_dir_all(&base);
+        .join(format!("{}-{run}", std::process::id()))
+}
+
+/// [`fuse_rw_input`] in a tree at `base`, with the share's root at
+/// `served` in it, which a test moves to stand in for a server that
+/// escaped it.
+fn fuse_rw_input_at(input: &str, served: &str, base: &Path) -> usize {
+    let _ = fs::remove_dir_all(base);
+    let _tree = Tree(base);
     let root = base.join("root");
     fs::create_dir_all(root.join("dir")).expect("the fuzz tree");
     fs::create_dir_all(root.join(".git/hooks")).expect("the fuzz tree");
@@ -1169,7 +1175,7 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
     let answered = fuse_answers(&mut server, input);
     // The guest may change the mode of any other directory, so the check
     // reaches past it.
-    reach(&base, &kept);
+    reach(base, &kept);
     for name in PROTECTED {
         let expected = if name == PROTECTED[0] { CANARY } else { INSIDE };
         let found = fs::read(base.join(name)).ok();
@@ -1180,7 +1186,7 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
         );
     }
     for (path, before) in kept.iter().zip(modes) {
-        let name = path.strip_prefix(&base).expect("the fuzz tree").display();
+        let name = path.strip_prefix(base).expect("the fuzz tree").display();
         assert_eq!(mode(path), before, "{name}'s mode changed: {input:?}");
     }
     let names = |dir: &Path| -> Vec<_> {
@@ -1192,7 +1198,7 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
         names
     };
     assert_eq!(
-        names(&base),
+        names(base),
         ["outside", "root"],
         "a file beside the root: {input:?}"
     );
@@ -1201,26 +1207,36 @@ fn fuse_rw_input_at(input: &str, served: &str) -> usize {
         ["secret"],
         "a file outside: {input:?}"
     );
-    let _ = fs::remove_dir_all(&base);
     answered
+}
+
+/// A tree of [`fuse_rw_input`]'s, which it removes when it drops, even
+/// after a panic, whatever modes the guest set in it.
+struct Tree<'a>(&'a Path);
+
+impl Drop for Tree<'_> {
+    fn drop(&mut self) {
+        reach(self.0, &[]);
+        let _ = fs::remove_dir_all(self.0);
+    }
 }
 
 /// Lets the owner into `directory` and every directory beneath it, except
 /// those `kept`, so a mode the guest may set hides no file from the check.
-/// It follows no symlink.
+/// It follows no symlink. It doesn't panic, so a [`Tree`] can use it while
+/// a panic unwinds, and a directory it can't open shows in the check.
 fn reach(directory: &Path, kept: &[PathBuf]) {
     if !kept.iter().any(|path| path == directory) {
         let reachable = fs::Permissions::from_mode(0o700);
-        fs::set_permissions(directory, reachable).expect("the fuzz tree");
+        let _ = fs::set_permissions(directory, reachable);
     }
     // A kept directory the guest closed hides its files, and the check
     // finds them changed.
     let Ok(entries) = fs::read_dir(directory) else {
         return;
     };
-    for entry in entries {
-        let entry = entry.expect("the fuzz tree");
-        if entry.file_type().expect("the fuzz tree").is_dir() {
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             reach(&entry.path(), kept);
         }
     }
@@ -1541,12 +1557,37 @@ mod tests {
         assert_eq!(fuse_rw_input(mode), 1);
     }
 
+    /// The body of a SETATTR of a node's mode to 0.
+    const LOCK: &str = "w:1 w:0 0 0 0 0 0 0 w:0 w:0 w:0 w:0 w:0 w:0 w:0 w:0";
+
+    #[test]
+    fn a_tree_whose_modes_the_guest_took_away_is_removed() {
+        let input = format!("1 1 hello.txt\n4 2 {LOCK}\n4 1 {LOCK}\n");
+        let base = fuse_rw_base();
+        assert_eq!(fuse_rw_input_at(&input, "root", &base), 3);
+        assert!(!base.exists(), "the tree stayed");
+    }
+
+    #[test]
+    fn a_tree_a_failing_input_locked_is_removed() {
+        // A root at the tree stands in for a server that escaped it, so the
+        // guest locks a file, the share's root, and the tree, and fails.
+        let input = format!("1 1 root\n1 2 hello.txt\n4 3 {LOCK}\n4 2 {LOCK}\n4 1 {LOCK}\n");
+        let base = fuse_rw_base();
+        let run = panic::catch_unwind(|| fuse_rw_input_at(&input, ".", &base));
+        let failure = run.expect_err("the input passed");
+        let message = failure.downcast_ref::<String>().expect("a message");
+        assert!(message.contains("outside/secret changed"), "{message}");
+        assert!(!base.exists(), "the tree stayed");
+    }
+
     #[test]
     #[should_panic(expected = "outside/secret changed")]
     fn a_change_outside_an_rw_share_is_found() {
         fuse_rw_input_at(
             "1 1 outside\n1 2 secret\n14 3 w:1 w:0\n16 0 1 0 w:3 w:0 0 w:0 w:0 bad\n",
             ".",
+            &fuse_rw_base(),
         );
     }
 
@@ -1556,6 +1597,7 @@ mod tests {
         fuse_rw_input_at(
             "1 1 outside\n4 2 w:1 w:0 0 0 0 0 0 0 w:0 w:0 w:0 w:511 w:0 w:0 w:0 w:0\n",
             ".",
+            &fuse_rw_base(),
         );
     }
 

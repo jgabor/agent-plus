@@ -47,7 +47,7 @@ impl Scratch {
     }
 
     /// Records a run of `agent`, and gives it a socket. The run is active
-    /// for as long as the returned file is open.
+    /// until the returned hold drops.
     fn run(&self, agent: &str, started: u128) -> (String, Held, UnixListener) {
         let runs = Runs::new(&self.store);
         let run = runs.create(agent, started).unwrap();

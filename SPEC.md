@@ -1873,13 +1873,19 @@ command-line rules win ties against Agentfile rules. The checks that
 `ap build` runs on `NETWORK` and `SECRET` rules run again on the merged
 rules, and a failure fails the run.
 
-**Harness hosts.** The hosts the harness needs for its model API and
-sign-in stay allowed under `NETWORK -`, so an agent never loses its own
-model. An explicit `-` rule for such a host still wins. The hosts follow
-from `AGENT`, so the grants you approve name the harness, not its hosts. A
-build that changes the harness under `NETWORK -` asks again, and names the
-hosts the new harness adds. These hosts are an exfiltration path: code in
-the agent can send data to them with a key it brought itself.
+**Harness hosts.** The hosts the harness needs for its model API and sign-in
+stay allowed under `NETWORK -`, so an agent never loses its own model. An
+explicit `-` rule for such a host still wins. The hosts follow from `AGENT`,
+so the grants you approve name the harness, not its hosts. A build that
+changes the harness under `NETWORK -` asks again, and names the hosts the
+new harness adds. It leaves out a host that the approved rules already allow
+on every connection, so with `+api.openai.com` approved, a change to
+`AGENT codex` names only `auth.openai.com` and `chatgpt.com`. A host that a `+`
+rule allows only on some ports or paths stays in the list, and so does one
+that a `-` rule denies on some connection. When the approved rules allow
+every host that the new harness adds, the build doesn't ask. These hosts are
+an exfiltration path: code in the agent can send data to them with a key it
+brought itself.
 With `AUTH key`, the proxy allows only requests that carry the key's
 placeholder on the key's hosts. The other harness hosts stay an exfiltration
 path.

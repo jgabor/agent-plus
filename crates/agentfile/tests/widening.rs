@@ -317,6 +317,58 @@ fn another_harness_widens_nothing_where_every_host_was_allowed() {
     assert_eq!(widened_with(open, ("codex", "NETWORK -\n")), []);
 }
 
+/// The harness widening when `approved`, under `AGENT claude`, changes to
+/// `AGENT codex` with the same lines. Codex adds `sign-in.codex.test`.
+fn codex_with(approved: &str) -> Vec<Widening> {
+    widened_with(("claude", approved), ("codex", approved))
+}
+
+fn sign_in() -> Vec<Widening> {
+    vec![Widening::Harness {
+        harness: Harness::Codex,
+        hosts: vec!["sign-in.codex.test".to_string()],
+    }]
+}
+
+// spec(NETWORK): It leaves out a host that the approved rules already allow on every connection, so with `+api.openai.com` approved, a change to `AGENT codex` names only `auth.openai.com` and `chatgpt.com`.
+// spec(NETWORK): When the approved rules allow every host that the new harness adds, the build doesn't ask.
+#[test]
+fn another_harness_leaves_out_a_host_that_approved_rules_allow() {
+    assert_eq!(codex_with("NETWORK -\nNETWORK +sign-in.codex.test\n"), []);
+    assert_eq!(codex_with("NETWORK -\nNETWORK +codex.test\n"), []);
+    // In any case, and on a port alongside the rule for every port.
+    assert_eq!(codex_with("NETWORK -\nNETWORK +Sign-In.Codex.Test\n"), []);
+    let both = "NETWORK -\nNETWORK +codex.test\nNETWORK +sign-in.codex.test:443\n";
+    assert_eq!(codex_with(both), []);
+    // A broader `-` rule that a more specific `+` rule beats decides nothing.
+    let beaten = "NETWORK -\nNETWORK -codex.test\nNETWORK +sign-in.codex.test\n";
+    assert_eq!(codex_with(beaten), []);
+    // An IP rule that allows decides nothing against the host rule.
+    let address = "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK +10.0.0.0/8\n";
+    assert_eq!(codex_with(address), []);
+}
+
+// spec(NETWORK): A host that a `+` rule allows only on some ports or paths stays in the list, and so does one that a `-` rule denies on some connection.
+#[test]
+fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
+    for approved in [
+        "NETWORK -\nNETWORK +sign-in.codex.test:443\n",
+        "NETWORK -\nNETWORK +https://sign-in.codex.test/\n",
+        "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test\n",
+        "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test:80\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -https://sign-in.codex.test/x\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -10.0.0.0/8\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -[::]/0:22\n",
+        // Equally specific rules with opposite signs deny.
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -sign-in.codex.test\n",
+        // A rule for a subdomain, or for another host, doesn't reach it.
+        "NETWORK -\nNETWORK +x.sign-in.codex.test\n",
+        "NETWORK -\nNETWORK +in.codex.test\n",
+    ] {
+        assert_eq!(codex_with(approved), sign_in(), "{approved}");
+    }
+}
+
 #[test]
 fn an_approval_that_names_no_harness_under_network_deny_widens_by_every_host() {
     let approved: Grants = "NETWORK -\nPOLICY +\n".parse().unwrap();

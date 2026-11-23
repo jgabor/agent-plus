@@ -79,26 +79,7 @@ impl Network {
     /// could have passes.
     pub fn denies(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        // Each port and path a rule names, and one that none names, so that
-        // every way a request can match the rules gets tried.
-        let mut ports = vec![80, 443];
-        let mut paths = Vec::new();
-        for rule in &self.rules {
-            match &rule.destination {
-                Destination::Host { port, .. } | Destination::Address { port, .. } => {
-                    ports.extend(*port)
-                }
-                Destination::Url { port, path, .. } => {
-                    ports.extend(*port);
-                    paths.push(path.clone());
-                }
-            }
-        }
-        let longest = paths.iter().map(String::len).max().unwrap_or(0);
-        paths.push(format!("/{}", "x".repeat(longest)));
-        ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
-        ports.sort_unstable();
-        ports.dedup();
+        let (ports, paths) = self.cases();
         if let Ok(address) = host.parse::<IpAddr>() {
             return refused(address)
                 || ports.iter().all(|&port| {
@@ -113,12 +94,7 @@ impl Network {
                 }
             }
         }
-        // Step 3 of the evaluation.
-        let decide = |name: Option<Sign>, by_address: Option<Sign>| match (name, by_address) {
-            (Some(one), Some(other)) if one != other => Sign::Deny,
-            (Some(sign), _) | (None, Some(sign)) => sign,
-            (None, None) => self.default,
-        };
+        let decide = |name, by_address| self.decide(name, by_address);
         // Your host is reachable only when a `+` rule names it, and IP rules
         // still check its real address, your host's loopback.
         if host == "host.ap.internal" {
@@ -165,6 +141,58 @@ impl Network {
             }
         }
         true
+    }
+
+    /// Whether these rules allow every connection to the name `host`, by the
+    /// evaluation under NETWORK in SPEC.md: on every port, scheme, and path,
+    /// and to every address it could have that the proxy doesn't refuse.
+    pub fn allows(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        let (ports, paths) = self.cases();
+        ports.iter().all(|&port| {
+            let by_address = self.address_decisions(port);
+            [Scheme::Https, Scheme::Http].into_iter().all(|scheme| {
+                paths.iter().all(|path| {
+                    let name = self.name_decision(&host, scheme, port, path);
+                    (by_address.iter())
+                        .all(|&by_address| self.decide(name, by_address) == Sign::Allow)
+                })
+            })
+        })
+    }
+
+    /// Step 3 of the evaluation: the sign from a connection's name decision
+    /// and its address decision.
+    fn decide(&self, name: Option<Sign>, by_address: Option<Sign>) -> Sign {
+        match (name, by_address) {
+            (Some(one), Some(other)) if one != other => Sign::Deny,
+            (Some(sign), _) | (None, Some(sign)) => sign,
+            (None, None) => self.default,
+        }
+    }
+
+    /// Each port and path a rule names, and one that none names, so that
+    /// every way a request can match the rules gets tried.
+    fn cases(&self) -> (Vec<u16>, Vec<String>) {
+        let mut ports = vec![80, 443];
+        let mut paths = Vec::new();
+        for rule in &self.rules {
+            match &rule.destination {
+                Destination::Host { port, .. } | Destination::Address { port, .. } => {
+                    ports.extend(*port)
+                }
+                Destination::Url { port, path, .. } => {
+                    ports.extend(*port);
+                    paths.push(path.clone());
+                }
+            }
+        }
+        let longest = paths.iter().map(String::len).max().unwrap_or(0);
+        paths.push(format!("/{}", "x".repeat(longest)));
+        ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
+        ports.sort_unstable();
+        ports.dedup();
+        (ports, paths)
     }
 
     /// Every decision the IP rules give on `port` to some address that the

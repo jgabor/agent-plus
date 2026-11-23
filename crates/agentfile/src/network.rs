@@ -205,7 +205,7 @@ impl Network {
                 }
                 Destination::Url { port, path, .. } => {
                     ports.extend(*port);
-                    paths.push(path.clone());
+                    paths.push(unescape_unreserved(path).unwrap_or_else(|| path.clone()));
                 }
             }
         }
@@ -283,6 +283,8 @@ impl Network {
                         (Scheme::Http, Scheme::Http) => 80,
                         _ => return None,
                     };
+                    // As the proxy matches it.
+                    let prefix = unescape_unreserved(prefix).unwrap_or_else(|| prefix.clone());
                     let under = path == prefix
                         || path
                             .strip_prefix(prefix.as_str())
@@ -759,6 +761,32 @@ fn path_is_written_right(path: &str) -> bool {
         at += 1;
     }
     true
+}
+
+/// `path` with each escape of an unreserved character decoded, and every
+/// other escape in uppercase, by RFC 3986 section 6.2.2. The proxy matches
+/// request paths and URL rule paths in this form. `None` when a `%` doesn't
+/// start an escape of two hex digits.
+pub fn unescape_unreserved(path: &str) -> Option<String> {
+    let mut out = String::with_capacity(path.len());
+    let mut rest = path;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..at]);
+        let hex = rest.get(at + 1..at + 3)?;
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = u8::from_str_radix(hex, 16).ok()?;
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push('%');
+            out.push_str(&hex.to_ascii_uppercase());
+        }
+        rest = &rest[at + 3..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// Reads an agent name, by the rule under `ap build` in SPEC.md: 1 to 63

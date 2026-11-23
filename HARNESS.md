@@ -1016,7 +1016,9 @@ issue, so closing that issue turns the roadmap off.
 The owner starts this check before a release, through a GitHub workflow with a
 `workflow_dispatch` trigger. A fresh GitHub-hosted runner installs the release
 binary and runs the journey, which is what the clean-machine requirement in
-[Release criteria](#release-criteria) needs. It is built once journey step 18
+[Release criteria](#release-criteria) needs. Such a runner boots our guest once
+the `runner-setup` action opens KVM, as the [runner gate](#runner-gate) shows,
+so the release check uses that action first. It is built once journey step 18
 passes. No scheduled work runs on GitHub.
 
 ## Isolation and limits
@@ -1132,7 +1134,6 @@ The harness is built before product features.
 | Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
 | Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
 | Limit on model spend for workers | Workers run no step marked `spend` |
-| Whether GitHub-hosted Linux runners can run the VMM for the release check. Their documented KVM support is for Android, and it is untested here | The owner runs the release check by hand on a clean machine |
 | The binary size target, and bands for every budget except boot, idle overhead, a build with nothing changed, `ap --version`, and the binary | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |
 | Running workers inside `ap` agents once step 12 passes, which needs nested KVM | Workers run on the host |

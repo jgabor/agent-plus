@@ -114,7 +114,16 @@ impl Repo {
         repo.git(&["init", "-q", "-b", "main"]);
         repo.set_issues(issues);
         repo.write_gh();
+        repo.set_host("Linux");
         repo
+    }
+
+    /// What the fake `uname -s` prints, which is how `xtask` knows the host.
+    fn set_host(&self, name: &str) {
+        common::write_tool(
+            &self.bin.join("uname"),
+            &format!("#!/bin/sh\necho {name}\n"),
+        );
     }
 
     fn set_issues(&self, issues: &[String]) {
@@ -839,4 +848,112 @@ fn a_listing_at_the_issue_limit_is_a_problem() {
     let output = Repo::new("issue-limit", &issues).xtask(&["next"]);
     assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
     assert!(stderr(&output).contains("2000"), "{}", stderr(&output));
+}
+
+const MAC: &[&str] = &["auto:pr", "host:macos"];
+
+fn claimed_on_a_mac(number: u64, touches: &str) -> String {
+    issue(
+        number,
+        "OPEN",
+        &["auto:pr", "host:macos", "in-progress"],
+        &body(touches, ""),
+        &[status(number * 10, OWNER, "working", "b", LIVE)],
+    )
+}
+
+/// The numbers `next` names on Linux, then on a Mac.
+fn on_each_host(name: &str, issues: &[String]) -> (Vec<u64>, Vec<u64>) {
+    let repo = Repo::new(name, issues);
+    let linux = repo.numbers();
+    repo.set_host("Darwin");
+    (linux, repo.numbers())
+}
+
+#[test]
+fn an_issue_for_a_mac_is_named_only_on_a_mac() {
+    let issues = [open(7, MAC, T), open(8, &["auto:pr"], "`crates/b`")];
+    assert_eq!(on_each_host("host-split", &issues), (vec![8], vec![7]));
+}
+
+#[test]
+fn a_mac_has_one_worker_slot() {
+    let issues = [open(7, MAC, "`a`"), open(8, MAC, "`b`")];
+    assert_eq!(on_each_host("host-mac-slot", &issues), (vec![], vec![7]));
+    let full = [claimed_on_a_mac(2, "`z`"), open(7, MAC, "`a`")];
+    assert_eq!(on_each_host("host-mac-full", &full), (vec![], vec![]));
+}
+
+#[test]
+fn a_claim_takes_a_slot_only_on_its_own_host() {
+    let paths = ["`a`", "`b`", "`c`", "`d`", "`e`"];
+    let mut issues: Vec<String> = (5..10)
+        .zip(paths)
+        .map(|(number, path)| open(number, &["auto:merge"], path))
+        .collect();
+    issues.push(claimed_on_a_mac(2, "`z`"));
+    assert_eq!(
+        on_each_host("host-mac-held", &issues),
+        (vec![5, 6, 7, 8, 9], vec![])
+    );
+    let linux_held = [claimed(2, "`z`"), open(7, MAC, "`a`")];
+    assert_eq!(
+        on_each_host("host-linux-held", &linux_held),
+        (vec![], vec![7])
+    );
+}
+
+#[test]
+fn a_claim_on_either_host_holds_its_paths_on_both() {
+    let issues = [claimed_on_a_mac(2, T), open(9, &["auto:pr"], T)];
+    assert_eq!(on_each_host("host-paths-mac", &issues), (vec![], vec![]));
+    let issues = [claimed(2, T), open(9, MAC, T)];
+    assert_eq!(on_each_host("host-paths-linux", &issues), (vec![], vec![]));
+}
+
+#[test]
+fn a_claim_on_the_wrong_host_fails_without_writing() {
+    for (name, host, labels) in [
+        ("host-claim-linux", "Linux", MAC),
+        ("host-claim-mac", "Darwin", &["auto:pr"][..]),
+    ] {
+        let repo = Repo::new(name, &[open(7, labels, T)]);
+        repo.set_host(host);
+        repo.git(&["checkout", "-q", "-b", "7-x"]);
+        let output = repo.xtask(&["claim", "7"]);
+        assert_eq!(output.status.code(), Some(1), "{name}: {}", stderr(&output));
+        assert!(
+            stderr(&output).contains("host:macos"),
+            "{name}: {}",
+            stderr(&output)
+        );
+        let calls = repo.calls();
+        assert!(!calls.contains("issue edit"), "{name}: {calls}");
+        assert!(!calls.contains("issue comment"), "{name}: {calls}");
+    }
+}
+
+/// The worker on the Mac parks its status and removes `host:macos` and
+/// `in-progress`, so that Linux takes the issue over on its branch.
+#[test]
+fn a_mac_hands_its_issue_over_to_linux_on_its_branch() {
+    let repo = Repo::new("host-handover", &[open(7, MAC, T)]);
+    repo.set_branch("7-mac", BEFORE_EXPIRY);
+    assert_eq!(repo.numbers(), Vec::<u64>::new());
+    repo.set_host("Darwin");
+    assert_eq!(repo.numbers(), vec![7]);
+
+    repo.set_issues(&[issue(
+        7,
+        "OPEN",
+        &["auto:pr"],
+        &body(T, ""),
+        &[status(70, OWNER, "parked", "7-mac", LIVE)],
+    )]);
+    assert_eq!(repo.numbers(), Vec::<u64>::new());
+    repo.set_host("Linux");
+    assert_eq!(
+        repo.next(),
+        "[{\"issue\":7,\"touches\":[\"crates/a\"],\"autonomy\":\"auto:pr\",\"branch\":\"7-mac\",\"worktree\":null}]\n"
+    );
 }

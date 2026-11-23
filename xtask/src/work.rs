@@ -8,13 +8,14 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WORKER_SLOTS: usize = 5;
 const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
 /// What parks an issue: a PR ready to merge, or a question waiting for an answer.
 pub const LAND_NEEDED: &str = "land-needed";
 pub const ANSWER_NEEDED: &str = "answer-needed";
 pub const PARKED: [&str; 2] = [LAND_NEEDED, ANSWER_NEEDED];
+/// What marks an issue that has to start on a Mac.
+const HOST_MACOS: &str = "host:macos";
 const STATUS_MARK: &str = "<!-- status -->";
 const DEFAULT_BRANCH: &str = "main";
 
@@ -286,11 +287,64 @@ impl State {
     }
 }
 
+/// The machine `xtask` runs on. Each has its own worker slots, and takes only
+/// the issues that start on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Host {
+    Linux,
+    Macos,
+}
+
+impl Host {
+    /// From `uname -s`, so that a test can pose as a Mac.
+    fn here() -> Result<Host, Problem> {
+        let output = std::process::Command::new("uname")
+            .arg("-s")
+            .output()
+            .map_err(|e| Problem(format!("couldn't run `uname -s`: {e}")))?;
+        if !output.status.success() {
+            return Err(Problem(format!("`uname -s` failed: {}", output.status)));
+        }
+        let name = String::from_utf8_lossy(&output.stdout);
+        Ok(if name.trim() == "Darwin" {
+            Host::Macos
+        } else {
+            Host::Linux
+        })
+    }
+
+    fn worker_slots(self) -> usize {
+        match self {
+            Host::Linux => 5,
+            Host::Macos => 1,
+        }
+    }
+
+    fn starts(self, issue: &Issue) -> bool {
+        has(issue, HOST_MACOS) == (self == Host::Macos)
+    }
+
+    /// Why this host can't take the issue, if it can't.
+    fn refusal(self, issue: &Issue) -> Option<String> {
+        let number = issue.number;
+        match (self.starts(issue), self) {
+            (true, _) => None,
+            (false, Host::Linux) => Some(format!(
+                "#{number} has `{HOST_MACOS}`, so it starts on a Mac"
+            )),
+            (false, Host::Macos) => Some(format!(
+                "#{number} has no `{HOST_MACOS}`, so it starts on Linux"
+            )),
+        }
+    }
+}
+
 /// Everything the states are worked out from.
 struct View<'a> {
     forge: &'a dyn Forge,
     owner: String,
     now: i64,
+    host: Host,
     issues: Vec<Issue>,
     open: HashSet<u64>,
     parents: HashSet<u64>,
@@ -315,7 +369,7 @@ fn autonomy(issue: &Issue) -> Option<&'static str> {
 }
 
 impl<'a> View<'a> {
-    fn read(forge: &'a dyn Forge, now: i64) -> Result<View<'a>, Problem> {
+    fn read(forge: &'a dyn Forge, now: i64, host: Host) -> Result<View<'a>, Problem> {
         let owner = forge.owner()?;
         let mut issues = forge.issues()?;
         for issue in &mut issues {
@@ -333,6 +387,7 @@ impl<'a> View<'a> {
             forge,
             owner,
             now,
+            host,
             issues,
             open,
             parents,
@@ -425,7 +480,8 @@ impl<'a> View<'a> {
         }
     }
 
-    /// The paths of every live claim, and how many there are.
+    /// The paths of every live claim, and how many are on this host. A claim
+    /// on another host still holds its paths, because both push to one `main`.
     fn held(&self, states: &[(&Issue, State)]) -> (Vec<String>, usize) {
         let held: Vec<_> = states
             .iter()
@@ -435,7 +491,11 @@ impl<'a> View<'a> {
             .iter()
             .flat_map(|(issue, _)| touches(&issue.body))
             .collect();
-        (paths, held.len())
+        let here = held
+            .iter()
+            .filter(|(issue, _)| self.host.starts(issue))
+            .count();
+        (paths, here)
     }
 
     fn states(&self) -> Result<Vec<(&Issue, State)>, Problem> {
@@ -473,18 +533,19 @@ struct Entry {
 fn next(
     forge: &dyn Forge,
     now: i64,
+    host: Host,
     worktrees: &HashMap<String, String>,
 ) -> Result<Vec<Entry>, Problem> {
-    let view = View::read(forge, now)?;
+    let view = View::read(forge, now, host)?;
     let states = view.states()?;
     let (mut taken, held) = view.held(&states);
-    let free = WORKER_SLOTS.saturating_sub(held);
+    let free = host.worker_slots().saturating_sub(held);
     let mut entries = Vec::new();
     for (issue, state) in &states {
         if entries.len() == free {
             break;
         }
-        if !state.claimable() {
+        if !state.claimable() || !host.starts(issue) {
             continue;
         }
         let paths = touches(&issue.body);
@@ -550,7 +611,12 @@ pub fn now_seconds() -> Result<i64, Problem> {
 
 pub fn run_next() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let entries = next(&Gh::new(&root), now_seconds()?, &worktrees(&root)?)?;
+    let entries = next(
+        &Gh::new(&root),
+        now_seconds()?,
+        Host::here()?,
+        &worktrees(&root)?,
+    )?;
     println!("{}", render_next(&entries));
     Ok(Verdict::Pass)
 }
@@ -582,15 +648,19 @@ fn claim(
     branch: &str,
     thread: &str,
     now: i64,
+    host: Host,
     nonce: &str,
 ) -> Result<Claim, Problem> {
-    let view = View::read(forge, now)?;
+    let view = View::read(forge, now, host)?;
     let states = view.states()?;
     let Some((issue, state)) = states.iter().find(|(issue, _)| issue.number == number) else {
         return Ok(Claim::Lost(format!("#{number} isn't an open issue")));
     };
     if !state.claimable() {
         return Ok(Claim::Lost(format!("#{number} is {}", state.word())));
+    }
+    if let Some(reason) = host.refusal(issue) {
+        return Ok(Claim::Lost(reason));
     }
     if let Some(kept) = state.branch()
         && kept != branch
@@ -691,7 +761,8 @@ pub fn run_claim(number: &str, thread: Option<&str>) -> Result<Verdict, Problem>
         .map_or(0, |elapsed| elapsed.subsec_nanos());
     let nonce = format!("{}-{nanos}", std::process::id());
     let thread = thread.unwrap_or("unknown");
-    match claim(&Gh::new(&root), parsed, branch, thread, now, &nonce)? {
+    let host = Host::here()?;
+    match claim(&Gh::new(&root), parsed, branch, thread, now, host, &nonce)? {
         Claim::Won { comment, replaced } => {
             println!(
                 "{{\"issue\":{parsed},\"comment\":{comment},\"branch\":{},\"replaced\":{}}}",
@@ -799,7 +870,9 @@ pub fn run_status(number: &str, thread: &str) -> Result<Verdict, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Claim, claim, next, overlap, refusal, seconds, set_up, stamp, update_status};
+    use super::{
+        Claim, Host, claim, next, overlap, refusal, seconds, set_up, stamp, update_status,
+    };
     use crate::Problem;
     use crate::forge::{Comment, Forge, Issue, LISTED_COMMENTS};
     use std::cell::{Cell, RefCell};
@@ -942,7 +1015,7 @@ mod tests {
     }
 
     fn try_claim_on(forge: &Fake, branch: &str) -> Claim {
-        claim(forge, 7, branch, "thread", NOW, "n")
+        claim(forge, 7, branch, "thread", NOW, Host::Linux, "n")
             .map_err(|e| e.0)
             .unwrap()
     }
@@ -1222,13 +1295,13 @@ mod tests {
         parked.labels.push("answer-needed".to_string());
         let mut forge = Fake::new(vec![parked]);
         forge.branch_date = Some(stamp(NOW - 7200));
-        assert_eq!(next(&forge, NOW, &HashMap::new()).unwrap(), []);
+        assert_eq!(next(&forge, NOW, Host::Linux, &HashMap::new()).unwrap(), []);
 
         forge.issues.borrow_mut()[0]
             .labels
             .retain(|l| l != "answer-needed");
         let worktrees = HashMap::from([("b".to_string(), "/w/b".to_string())]);
-        let entries = next(&forge, NOW, &worktrees).unwrap();
+        let entries = next(&forge, NOW, Host::Linux, &worktrees).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].branch.as_deref(), Some("b"));
         assert_eq!(entries[0].worktree.as_deref(), Some("/w/b"));
@@ -1252,7 +1325,7 @@ mod tests {
         comments.push(comment(500, OWNER, &status_of("parked", NOW - 60, "old")));
         let mut forge = Fake::new(vec![issue(comments)]);
         forge.branch_date = Some(stamp(NOW - 7200));
-        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        let entries = next(&forge, NOW, Host::Linux, &HashMap::new()).unwrap();
         assert_eq!(entries[0].branch.as_deref(), Some("b"));
     }
 
@@ -1267,7 +1340,7 @@ mod tests {
             comment(41, OWNER, &loser),
         ])]);
         forge.branch_date = Some(stamp(NOW - 7200));
-        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        let entries = next(&forge, NOW, Host::Linux, &HashMap::new()).unwrap();
         assert_eq!(entries[0].branch.as_deref(), Some("b"));
         assert_eq!(update(&forge, "won", &winner), Ok(40));
     }
@@ -1279,7 +1352,7 @@ mod tests {
             OWNER,
             &status_of("parked", NOW - 3600, "old"),
         )])]);
-        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        let entries = next(&forge, NOW, Host::Linux, &HashMap::new()).unwrap();
         assert_eq!(entries[0].branch, None);
         assert!(matches!(try_claim_on(&forge, "7-x"), Claim::Won { .. }));
     }

@@ -2,8 +2,6 @@
 //! writes a run's log the way `ap run` does, and reads it back with `ap
 //! logs`.
 
-mod common;
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -24,7 +22,6 @@ impl Scratch {
         let _ = fs::remove_dir_all(&root);
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
-        common::seed_os(&home.join(".local/share/ap"));
         Scratch {
             home: home.canonicalize().unwrap(),
         }
@@ -56,13 +53,14 @@ fn a_name_the_agent_chose_prints_with_controls_and_overrides_escaped() {
     let mut log = runs.create_log(&run.name).unwrap();
     runs::write_log(&mut log, false, b"out\n").unwrap();
     // A name that clears your screen, one that a right-to-left override
-    // shows as `example.com`, one that rings the bell, and one with a tab
-    // and an isolate. A backslash shows doubled, so no escape is forged.
+    // shows as `example.com`, one that rings the bell, and one with a tab,
+    // an isolate, and a newline. A backslash shows doubled, and a newline
+    // as an escape, so neither forges an escape or a line.
     for line in [
         "deny   clear\x1b[2J.example  the default",
         "allow  \u{202e}moc.elpmaxe:443  NETWORK +example.com",
         "deny   bell\x07.example  the default",
-        "deny   a\tb\u{2066}c\\u{7}.example  the default",
+        "deny   a\tb\u{2066}c\\u{7}\n.example  the default",
     ] {
         runs::write_decision(&mut log, 0, line).unwrap();
     }
@@ -81,7 +79,7 @@ fn a_name_the_agent_chose_prints_with_controls_and_overrides_escaped() {
             "\n",
             r"1970-01-01T00:00:00Z  deny   bell\u{7}.example  the default",
             "\n",
-            r"1970-01-01T00:00:00Z  deny   a\u{9}b\u{2066}c\\u{7}.example  the default",
+            r"1970-01-01T00:00:00Z  deny   a\u{9}b\u{2066}c\\u{7}\u{a}.example  the default",
             "\n",
         )
     );

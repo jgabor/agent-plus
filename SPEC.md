@@ -1479,6 +1479,8 @@ How it works:
   each answer from your host.
 - An agent's first POSIX lock on a file fails if the name the agent last
   reached the file by is gone.
+- In an `rw` share, the agent can give back a mode it took away from a
+  file or a directory.
 
 In `rw` shares, the files your host acts on are read-only to the agent.
 

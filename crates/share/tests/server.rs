@@ -9,7 +9,7 @@ use share::{Mode, Root, Server};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -389,6 +389,39 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
     assert_eq!(guest.remove(RMDIR, 1, b"made"), 0);
     assert!(!root.join("made").exists());
     assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
+}
+
+// spec(SHARE): In an `rw` share, the agent can give back a mode it took away from a file or a directory.
+#[test]
+fn an_rw_share_gives_back_a_mode_it_took_away() {
+    let tree = Tree::new("rw-mode-back");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let mode = |path: &str| fs::metadata(tree.root.join(path)).unwrap().mode() & 0o7777;
+    let taken = [
+        ("hello.txt", 0, 0o600),
+        ("dir", 0, 0o700),
+        ("dir", 0o600, 0o700),
+        ("", 0, 0o755),
+    ];
+    for (path, taken, back) in taken {
+        let node = guest.walk(path).unwrap();
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, taken), 0, "{path}");
+        assert_eq!(mode(path), taken, "{path}");
+        assert_eq!(guest.setattr(node, FATTR_MTIME, 0, 0), 0, "{path}");
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, back), 0, "{path}");
+        assert_eq!(mode(path), back, "{path}");
+    }
+    // The file it gives a mode back to is still the one at its name, beneath
+    // the root.
+    let file = guest.walk("dir/nested.txt").unwrap();
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0), 0);
+    let away = tree.base.join("outside/nested.txt");
+    fs::rename(tree.root.join("dir/nested.txt"), &away).unwrap();
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), ENOENT);
+    fs::write(tree.root.join("dir/nested.txt"), b"another").unwrap();
+    fs::set_permissions(tree.root.join("dir/nested.txt"), fs::Permissions::from_mode(0)).unwrap();
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), ESTALE);
+    assert_eq!(fs::metadata(&away).unwrap().mode() & 0o7777, 0);
 }
 
 #[test]

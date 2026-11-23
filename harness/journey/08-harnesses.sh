@@ -133,8 +133,8 @@ timeout -k 10 600 ap exec "$run" claude -p "Say what you can see." \
   status=$?
 took=$(($(date +%s) - begun))
 case $status in
-  124 | 137) ended="the probe timed out after $took seconds" ;;
-  *) ended="ap exec exited $status after $took seconds" ;;
+  124) ended="the probe timed out after $took seconds" ;;
+  *) ended="the probe exited $status after $took seconds" ;;
 esac
 says claude.init '"subtype":"init"' "$ended"
 says claude.init '"cwd":"/home/agent"' "$ended"

@@ -16,7 +16,7 @@ const REPORT_ISSUE: &str =
     "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
 const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
 const WAITING_FOR_EITHER: &str = "[{\"number\":30,\"title\":\"Ready\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":32,\"title\":\"Stuck\",\"labels\":[{\"name\":\"answer-needed\"}],\"isPinned\":false}]";
-const CHECKS_PASSED: &str = "<details>\n<summary>Checks: 3 passed, 4 skipped</summary>\n\n- pass bench\n- pass gate\n- skip t2\n- skip t3\n- pass journey\n- skip fuzz\n- skip mutation\n\n</details>\n";
+const CHECKS_PASSED: &str = "<details>\n<summary>Checks: 3 passed, 5 skipped</summary>\n\n- pass bench\n- pass gate\n- skip t2\n- skip release\n- skip t3\n- pass journey\n- skip fuzz\n- skip mutation\n\n</details>\n";
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
@@ -1171,6 +1171,52 @@ fn a_passing_t2_package_is_reported() {
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(repo.comment().contains("- pass t2\n"), "{}", repo.comment());
+}
+
+#[test]
+fn a_t1_package_s_ignored_tests_run_and_can_fail() {
+    let manifest = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    let repo = Repo::with(
+        "t1-release",
+        "fn main() {}\n",
+        &[
+            ("crates/t1/Cargo.toml", manifest),
+            (
+                "crates/t1/src/lib.rs",
+                "#[test]\n#[ignore = \"downloads\"]\nfn download() {\n    panic!();\n}\n",
+            ),
+        ],
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- fail release\n"),
+        "{}",
+        repo.comment()
+    );
+}
+
+#[test]
+fn a_passing_t1_release_test_is_reported() {
+    let manifest = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    let repo = Repo::with(
+        "t1-release-passes",
+        "fn main() {}\n",
+        &[
+            ("crates/t1/Cargo.toml", manifest),
+            (
+                "crates/t1/src/lib.rs",
+                "#[test]\n#[ignore = \"downloads\"]\nfn download() {}\n",
+            ),
+        ],
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        repo.comment().contains("- pass release\n"),
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]

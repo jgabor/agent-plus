@@ -1,4 +1,6 @@
-//! Fetches the real pinned kernel over the internet.
+//! Fetches the real pinned kernel over the internet. The local server in
+//! `crates/ap/tests/store.rs` proves the downloader on every gate, so only the
+//! nightly job runs this, to prove the release still serves what `ap` reads.
 
 use std::fs;
 use std::path::Path;
@@ -8,6 +10,7 @@ use ap::fetch::{self, Client};
 use ap::store::Store;
 
 #[test]
+#[ignore = "downloads from the real release, which only the nightly job does"]
 fn the_pinned_kernel_downloads_and_matches_its_digest() {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("fetch-store");
     let _ = fs::remove_dir_all(&root);

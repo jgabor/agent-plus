@@ -31,7 +31,7 @@ edit those issues.
 4. Find the steps that failed:
 
    ```sh
-   grep -E '^fail (bench|gate|t2|t3|journey|fuzz|mutation)$' target/nightly.log
+   grep -E '^fail (bench|gate|t2|release|t3|journey|fuzz|mutation)$' target/nightly.log
    ```
 
    Leave out `gate` if the log has a line starting `nightly: filed #`,

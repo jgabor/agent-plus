@@ -210,13 +210,16 @@ pub fn require_tools(root: &Path) -> Result<(), Problem> {
 
 /// Runs a cargo command, with its output on our stderr, so that stdout carries
 /// only the result. `CC` and `CXX` point at a program that fails, so a build
-/// that tries to compile C fails even if the floors missed it.
+/// that tries to compile C fails even if the floors missed it. In a merge,
+/// our input is the pipe to the supervisor, which the tree's code mustn't
+/// reach.
 pub fn cargo_passes(root: &Path, args: &[&str]) -> Result<bool, Problem> {
     let status = Command::new("cargo")
         .args(args)
         .current_dir(root)
         .env("CC", "false")
         .env("CXX", "false")
+        .stdin(Stdio::null())
         .stdout(Stdio::from(io::stderr()))
         .status()
         .map_err(no_cargo)?;

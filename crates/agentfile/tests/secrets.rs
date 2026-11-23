@@ -319,7 +319,10 @@ fn a_run_cannot_read_a_hidden_secret_into_env() {
     let instruction = |line, name: &str, arguments: &[&str]| agentfile::Instruction {
         line,
         name: name.to_string(),
-        arguments: arguments.iter().map(|argument| argument.to_string()).collect(),
+        arguments: arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect(),
         text: None,
     };
     let instructions = [

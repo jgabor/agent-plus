@@ -558,3 +558,43 @@ fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
     }
     assert!(claude::SIGN_IN.contains(&claude::TOKEN));
 }
+
+// spec(ENV): A name the harness reads to reach a model through another provider, such as Claude Code's `ANTHROPIC_FOUNDRY_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`, isn't a name it reads for sign-in, because `AUTH` can't sign the harness in to another provider.
+// spec(ENV): Claude Code's `ANTHROPIC_CUSTOM_HEADERS` is one, because an `Authorization` or `X-Api-Key` header in it signs Claude Code in.
+// spec(SECRET): A name the harness reads to reach a model through another provider can be a `SECRET`, as it can be an [`ENV`](#env) key, and `ANTHROPIC_CUSTOM_HEADERS` can't.
+#[test]
+fn another_providers_names_are_not_claude_codes_sign_in() {
+    // Claude Code 2.1.330 reads each of these to reach Foundry, Bedrock, or
+    // Vertex.
+    for name in [
+        "ANTHROPIC_FOUNDRY_API_KEY",
+        "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+        "ANTHROPIC_FOUNDRY_RESOURCE",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "CLAUDE_CODE_USE_VERTEX",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+    ] {
+        for line in [
+            format!("ENV {name} x"),
+            format!("SECRET {name} @example.com"),
+            format!("SECRET {name} visible"),
+        ] {
+            let source = format!("AGENT claude\nOS minimal\n{line}\n");
+            let parsed = agentfile::parse_for(&source, ap::adapter::reserved);
+            assert!(parsed.is_ok(), "{line}: {parsed:?}");
+        }
+    }
+    for line in [
+        "ENV ANTHROPIC_CUSTOM_HEADERS x",
+        "SECRET ANTHROPIC_CUSTOM_HEADERS @example.com",
+        "SECRET ANTHROPIC_CUSTOM_HEADERS visible",
+    ] {
+        let source = format!("AGENT claude\nOS minimal\n{line}\n");
+        let errors = agentfile::parse_for(&source, ap::adapter::reserved).unwrap_err();
+        assert_eq!(errors.len(), 1, "{line}: {errors:?}");
+        assert_eq!(errors[0].line, 3, "{line}");
+        assert!(errors[0].message.contains("`AUTH`"), "{line}: {errors:?}");
+    }
+}

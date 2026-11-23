@@ -113,9 +113,14 @@ impl Guest {
     }
 
     pub fn serving(root: Root) -> Self {
+        Self::made(move || Server::new(vec![root]).unwrap())
+    }
+
+    /// A guest of the server `make` makes, on the thread that serves it.
+    pub fn made(make: impl FnOnce() -> Server + Send + 'static) -> Self {
         let (mine, theirs) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || {
-            let mut server = Server::new(vec![root]).unwrap();
+            let mut server = make();
             let mut theirs = theirs;
             share::serve(&mut theirs, &mut server).unwrap();
         });
@@ -491,13 +496,20 @@ pub const S_IFIFO: u32 = 0o010_000;
 pub const S_IFCHR: u32 = 0o020_000;
 pub const S_IFSOCK: u32 = 0o140_000;
 
+/// A copy-on-write share of `root`, which keeps the agent's changes in
+/// `pending`, a new directory.
+pub fn cow_root(root: &Path, pending: &Path) -> Root {
+    fs::create_dir(pending).unwrap();
+    let root = OwnedFd::from(File::open(root).unwrap());
+    let pending = OwnedFd::from(File::open(pending).unwrap());
+    Root::new(root, Mode::CopyOnWrite(pending))
+}
+
 impl Guest {
     /// A guest of a copy-on-write share of `root`, which keeps the agent's
     /// changes in `pending`, a new directory.
     pub fn cow(root: &Path, pending: &Path) -> Self {
-        fs::create_dir(pending).unwrap();
-        let pending = OwnedFd::from(File::open(pending).unwrap());
-        Self::with(root, Mode::CopyOnWrite(pending))
+        Self::serving(cow_root(root, pending))
     }
 
     pub fn mknod(&mut self, parent: u64, name: &[u8], mode: u32, rdev: u32) -> Result<u64, i32> {

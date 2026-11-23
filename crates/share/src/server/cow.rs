@@ -457,9 +457,52 @@ fn copy_contents(from: BorrowedFd, to: BorrowedFd) -> io::Result<()> {
     }
 }
 
+thread_local! {
+    /// What runs each time a capture on this thread has listed `.git`.
+    static LISTED: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `hook` each time a capture of `.git` on this thread has listed it,
+/// until it is set again. A test changes `.git` with it.
+#[doc(hidden)]
+pub fn when_git_is_listed(hook: Option<Box<dyn FnMut()>>) {
+    LISTED.with(|listed| *listed.borrow_mut() = hook);
+}
+
+/// How many times a capture copies a `.git` that changes while it copies.
+const CAPTURES: usize = 5;
+
+/// What a capture saw of each entry beneath a git directory, but for what
+/// `objects` holds, by path. Git can't change an entry without changing
+/// what [`seen`] gives for it, or which entries there are.
+type Seen = BTreeMap<Vec<u8>, (u32, u64, i64, [i64; 4])>;
+
+/// The mode and inode of an entry, and if it isn't a directory, its size
+/// and modification and change times. A directory's times move as git
+/// changes its entries, which are seen on their own.
+fn seen(stat: &libc::stat) -> (u32, u64, i64, [i64; 4]) {
+    match is(stat.st_mode, libc::S_IFDIR) {
+        true => (stat.st_mode, stat.st_ino, 0, [0; 4]),
+        false => (
+            stat.st_mode,
+            stat.st_ino,
+            stat.st_size,
+            [
+                stat.st_mtime,
+                stat.st_mtime_nsec,
+                stat.st_ctime,
+                stat.st_ctime_nsec,
+            ],
+        ),
+    }
+}
+
 /// Copies the `.git` directory at `root`, if it has one, to `git` in
 /// `pending`, but for what is in its `objects`, and writes `head`. Returns
-/// the copy.
+/// the copy. Git can change `.git` while it is copied, as when it packs
+/// refs, so the copy is checked against what `.git` holds afterwards, and
+/// made again if they differ.
 fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>> {
     let git = match sys::open_beneath(root, c".git", PATH_FLAGS) {
         Ok(git) => git,
@@ -471,11 +514,28 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
     if !is(stat.st_mode, libc::S_IFDIR) {
         return Ok(None);
     }
-    sys::mkdirat(pending, GIT, DIR_MODE)?;
-    let copy = sys::open_beneath(pending, GIT, libc::O_PATH | libc::O_DIRECTORY)?;
-    let mut linked = false;
-    copy_tree(git.as_fd(), copy.as_fd(), b"", &mut linked)?;
-    finish(copy.as_fd(), &stat)?;
+    for _ in 0..CAPTURES {
+        sys::mkdirat(pending, GIT, DIR_MODE)?;
+        let copy = sys::open_beneath(pending, GIT, libc::O_PATH | libc::O_DIRECTORY)?;
+        let mut linked = false;
+        let mut copied = Seen::new();
+        copy_tree(git.as_fd(), copy.as_fd(), b"", &mut linked, &mut copied)?;
+        let mut now = Seen::new();
+        walk(git.as_fd(), b"", &mut now)?;
+        if copied == now {
+            finish(copy.as_fd(), &stat)?;
+            write_head(pending, copy.as_fd(), linked)?;
+            return Ok(Some(copy));
+        }
+        remove_tree(pending, GIT)?;
+    }
+    Err(io::Error::other(
+        "git kept changing `.git` while it was captured",
+    ))
+}
+
+/// Writes `head` in `pending`, for the copy of `.git`.
+fn write_head(pending: BorrowedFd, copy: BorrowedFd, linked: bool) -> io::Result<()> {
     // `HEAD` and the refs are read from the copy, so they are what the
     // guest sees. A ref that is a symlink is read as a symbolic ref, but a
     // symlink at `packed-refs`, or on the way to a ref, would be followed,
@@ -498,15 +558,61 @@ fn capture(root: BorrowedFd, pending: BorrowedFd) -> io::Result<Option<OwnedFd>>
     if sys::pwrite(file.as_fd(), head.as_bytes(), 0)? != head.len() {
         return Err(io::Error::from_raw_os_error(libc::EIO));
     }
-    Ok(Some(copy))
+    Ok(())
+}
+
+/// Records what each entry beneath the directory `from`, at `path` in a
+/// git directory, is now, but for what `objects` holds.
+fn walk(from: BorrowedFd, path: &[u8], out: &mut Seen) -> io::Result<()> {
+    for (name, _, _) in names(from).map_err(io::Error::from_raw_os_error)? {
+        let inner = join(path, &name);
+        let entry = match sys::open_beneath(from, &c(&name), PATH_FLAGS) {
+            Ok(entry) => entry,
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+            Err(error) => return Err(error),
+        };
+        let stat = sys::fstat(entry.as_fd())?;
+        if is(stat.st_mode, libc::S_IFDIR) && inner != b"objects" {
+            walk(entry.as_fd(), &inner, out)?;
+        }
+        out.insert(inner, seen(&stat));
+    }
+    Ok(())
+}
+
+/// Removes the directory `name` in `directory`, which a capture made, and
+/// everything in it.
+fn remove_tree(directory: BorrowedFd, name: &CStr) -> io::Result<()> {
+    let made = sys::open_beneath(directory, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
+    // The copy can have your mode, which may not let it be changed.
+    sys::fchmod(made.as_fd(), DIR_MODE)?;
+    for (entry, _, _) in names(made.as_fd()).map_err(io::Error::from_raw_os_error)? {
+        let entry = c(&entry);
+        match sys::unlinkat(made.as_fd(), &entry, 0) {
+            Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
+                remove_tree(made.as_fd(), &entry)?;
+            }
+            removed => removed?,
+        }
+    }
+    sys::unlinkat(directory, name, libc::AT_REMOVEDIR)
 }
 
 /// Copies the directory `from`, at `path` in a git directory, into the
 /// directory `to`, but for what `objects` holds. `linked` is set if
 /// `packed-refs`, `refs`, or anything beneath it is a symlink, or if one of
-/// them or `HEAD` is a special file.
-fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -> io::Result<()> {
+/// them or `HEAD` is a special file. What it copied goes in `copied`.
+fn copy_tree(
+    from: BorrowedFd,
+    to: BorrowedFd,
+    path: &[u8],
+    linked: &mut bool,
+    copied: &mut Seen,
+) -> io::Result<()> {
     let listed = names(from).map_err(io::Error::from_raw_os_error)?;
+    if path.is_empty() {
+        LISTED.with(|hook| hook.borrow_mut().as_mut().map(|hook| hook()));
+    }
     for (name, _, _) in listed {
         let inner = join(path, &name);
         let name = c(&name);
@@ -523,9 +629,10 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -
                 let made = sys::open_beneath(to, &name, libc::O_PATH | libc::O_DIRECTORY)?;
                 // The guest reads `objects` live, so it is left empty here.
                 if inner != b"objects" {
-                    copy_tree(entry.as_fd(), made.as_fd(), &inner, linked)?;
+                    copy_tree(entry.as_fd(), made.as_fd(), &inner, linked, copied)?;
                 }
                 finish(made.as_fd(), &stat)?;
+                copied.insert(inner, seen(&stat));
             }
             libc::S_IFREG => {
                 let source = match sys::open_beneath(from, &name, READ_FLAGS) {
@@ -533,10 +640,13 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -
                     Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
                     Err(error) => return Err(error),
                 };
+                // What was opened may be newer than what was looked at.
+                let stat = sys::fstat(source.as_fd())?;
                 let flags = libc::O_WRONLY | libc::O_EXCL;
                 let made = sys::create_beneath(to, &name, flags, FILE_MODE)?;
                 copy_contents(source.as_fd(), made.as_fd())?;
                 finish(made.as_fd(), &stat)?;
+                copied.insert(inner, seen(&stat));
             }
             libc::S_IFLNK => {
                 let target = sys::readlink(entry.as_fd())?;
@@ -545,6 +655,7 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -
                 sys::symlinkat(&target, to, &name)?;
                 *linked |=
                     matches!(&inner[..], b"packed-refs" | b"refs") || inner.starts_with(b"refs/");
+                copied.insert(inner, seen(&stat));
             }
             _ => {
                 *linked |= matches!(&inner[..], b"HEAD" | b"packed-refs" | b"refs")
@@ -564,6 +675,7 @@ fn copy_tree(from: BorrowedFd, to: BorrowedFd, path: &[u8], linked: &mut bool) -
                 if unsafe { libc::chmod(path.as_ptr(), stat.st_mode & PERMISSIONS) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                copied.insert(inner, seen(&stat));
             }
         }
     }

@@ -60,6 +60,8 @@ const PERMISSIONS: u32 = 0o7777;
 const GETATTR_FH: u32 = 1;
 const PATH_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW;
 const READ_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+/// How a file that holds POSIX locks on the agent's copy opens.
+const LOCK_FLAGS: i32 = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 
 /// What the agent made of a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,6 +162,9 @@ enum Handle {
         /// Your file, which this handle had open before the agent's copy
         /// was made, kept so a `flock` on it holds.
         kept: Option<OwnedFd>,
+        /// The `flock` this handle holds, `LOCK_SH`, `LOCK_EX`, or none, so
+        /// it can be taken again on the agent's copy.
+        flock: Option<i32>,
     },
     /// An open directory, listed when it opened.
     Dir { entries: Vec<Dirent> },
@@ -183,14 +188,84 @@ pub(super) struct Cow {
     /// The node of each path the guest holds.
     paths: BTreeMap<Vec<u8>, u64>,
     handles: BTreeMap<u64, Handle>,
-    /// The file that holds each guest lock owner's POSIX locks, by node and
-    /// owner.
-    locks: BTreeMap<(u64, u64), OwnedFd>,
+    /// Each guest lock owner's POSIX locks, by node and owner.
+    locks: BTreeMap<(u64, u64), Locks>,
     /// Lock files on your file, for nodes that have the agent's copy now,
     /// kept so their locks hold until the guest lets them go.
     held: Vec<((u64, u64), OwnedFd)>,
     next_node: u64,
     next_handle: u64,
+}
+
+/// One guest lock owner's POSIX locks on one file.
+struct Locks {
+    /// The file that holds them.
+    fd: OwnedFd,
+    /// Each range the owner holds, by its first byte, its last, and its
+    /// type, so the locks can be taken again on the agent's copy.
+    ranges: Vec<(i64, i64, i16)>,
+}
+
+impl Locks {
+    fn new(fd: OwnedFd) -> Self {
+        Self {
+            fd,
+            ranges: Vec::new(),
+        }
+    }
+
+    /// Records `lock`, which the owner has just taken or let go of, as the
+    /// kernel applies it: it replaces what the owner held in its range, and
+    /// joins a range of the same type that it touches.
+    fn record(&mut self, lock: &libc::flock) {
+        let (mut start, mut end) = match lock.l_len {
+            0 => (lock.l_start, i64::MAX),
+            len => (lock.l_start, lock.l_start + len - 1),
+        };
+        let mut ranges = Vec::new();
+        for &(first, last, kind) in &self.ranges {
+            if last < start || first > end {
+                ranges.push((first, last, kind));
+                continue;
+            }
+            if first < start {
+                ranges.push((first, start - 1, kind));
+            }
+            if last > end {
+                ranges.push((end + 1, last, kind));
+            }
+        }
+        if i32::from(lock.l_type) != libc::F_UNLCK {
+            ranges.retain(|&(first, last, kind)| {
+                let joins = kind == lock.l_type
+                    && (last.checked_add(1) == Some(start) || end.checked_add(1) == Some(first));
+                if joins {
+                    start = start.min(first);
+                    end = end.max(last);
+                }
+                !joins
+            });
+            ranges.push((start, end, lock.l_type));
+        }
+        self.ranges = ranges;
+    }
+
+    /// Takes the owner's locks again on `fd`.
+    fn take(&self, fd: BorrowedFd) -> Result<(), i32> {
+        for &(first, last, kind) in &self.ranges {
+            // SAFETY: `struct flock` is plain data, valid when zeroed.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = kind;
+            lock.l_whence = libc::SEEK_SET as i16;
+            lock.l_start = first;
+            lock.l_len = match last {
+                i64::MAX => 0,
+                last => last - first + 1,
+            };
+            sys::ofd_lock(fd, libc::F_OFD_SETLK, &mut lock).map_err(errno)?;
+        }
+        Ok(())
+    }
 }
 
 fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
@@ -803,8 +878,8 @@ impl Cow {
             self.set(path, entry)?;
         }
         // What the guest has open of your file reads the copy from now on,
-        // and its POSIX locks are taken there. The locks it holds on your
-        // file hold until it lets them go.
+        // and its locks are taken there, as well as the ones it holds. The
+        // locks it holds on your file hold until it lets them go.
         let node = self.paths.get(path).copied();
         let moved: Vec<_> = self
             .locks
@@ -813,8 +888,14 @@ impl Cow {
             .copied()
             .collect();
         for key in moved {
-            if let Some(fd) = self.locks.remove(&key) {
+            if let Some(Locks { fd, ranges }) = self.locks.remove(&key) {
                 self.held.push((key, fd));
+                let locks = Locks {
+                    fd: self.open_upper(path, LOCK_FLAGS)?,
+                    ranges,
+                };
+                locks.take(locks.fd.as_fd())?;
+                self.locks.insert(key, locks);
             }
         }
         let readers: Vec<_> = self
@@ -829,11 +910,15 @@ impl Cow {
                 fd: old,
                 lower,
                 kept,
+                flock,
                 ..
             }) = self.handles.get_mut(&id)
             {
                 *kept = Some(std::mem::replace(old, fd));
                 *lower = false;
+                if let Some(operation) = *flock {
+                    sys::flock(old.as_fd(), operation | libc::LOCK_NB).map_err(errno)?;
+                }
             }
         }
         Ok(())
@@ -979,6 +1064,7 @@ impl Cow {
             mode,
             lower,
             kept: None,
+            flock: None,
         }))
     }
 
@@ -1119,6 +1205,7 @@ impl Cow {
                 mode,
                 lower: false,
                 kept: None,
+                flock: None,
             };
             out.extend(open_out(self.add_handle(handle)));
             return Ok(out);
@@ -1514,7 +1601,7 @@ impl Cow {
     /// The file that holds `owner`'s POSIX locks on `node`, opened the first
     /// time the owner locks it: the agent's copy, open for writing, or your
     /// file, open for reading.
-    fn lock_file(&mut self, node: u64, owner: u64) -> Result<BorrowedFd<'_>, i32> {
+    fn lock_file(&mut self, node: u64, owner: u64) -> Result<&mut Locks, i32> {
         if !self.locks.contains_key(&(node, owner)) {
             let path = self.path(node)?;
             let view = self.view(&path)?;
@@ -1522,18 +1609,12 @@ impl Cow {
                 return Err(libc::EINVAL);
             }
             let fd = match view.entry {
-                Some(_) => {
-                    let flags = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK;
-                    self.open_upper(&path, flags)?
-                }
+                Some(_) => self.open_upper(&path, LOCK_FLAGS)?,
                 None => self.open_lower(&path, READ_FLAGS)?,
             };
-            self.locks.insert((node, owner), fd);
+            self.locks.insert((node, owner), Locks::new(fd));
         }
-        self.locks
-            .get(&(node, owner))
-            .map(AsFd::as_fd)
-            .ok_or(libc::EIO)
+        self.locks.get_mut(&(node, owner)).ok_or(libc::EIO)
     }
 
     /// `struct fuse_lk_in`: the handle, the owner, the lock, and its flags.
@@ -1549,10 +1630,16 @@ impl Cow {
                 _ => libc::LOCK_UN,
             };
             sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(|error| busy(error, wait))?;
+            let handle = u64_at(body, 0).ok_or(libc::EINVAL)?;
+            if let Some(Handle::File { flock, .. }) = self.handles.get_mut(&handle) {
+                *flock = (operation != libc::LOCK_UN).then_some(operation);
+            }
             return Ok(Vec::new());
         }
-        let fd = self.lock_file(node, owner)?;
-        sys::ofd_lock(fd, libc::F_OFD_SETLK, &mut lock).map_err(|error| busy(error, wait))?;
+        let locks = self.lock_file(node, owner)?;
+        sys::ofd_lock(locks.fd.as_fd(), libc::F_OFD_SETLK, &mut lock)
+            .map_err(|error| busy(error, wait))?;
+        locks.record(&lock);
         Ok(Vec::new())
     }
 
@@ -1562,8 +1649,8 @@ impl Cow {
         let (_, node) = self.file(body)?;
         let owner = u64_at(body, 8).ok_or(libc::EINVAL)?;
         let mut lock = lock_of(body)?;
-        let fd = self.lock_file(node, owner)?;
-        sys::ofd_lock(fd, libc::F_OFD_GETLK, &mut lock).map_err(errno)?;
+        let locks = self.lock_file(node, owner)?;
+        sys::ofd_lock(locks.fd.as_fd(), libc::F_OFD_GETLK, &mut lock).map_err(errno)?;
         let end = match lock.l_len {
             0 => i64::MAX,
             len => lock.l_start + len - 1,
@@ -1650,6 +1737,7 @@ pub(super) fn dispatch(share: &mut Cow, request: &Request) -> Option<Answer> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd};
 
     #[test]
     fn a_path_s_parents_run_from_the_root_down() {
@@ -1676,5 +1764,78 @@ mod tests {
         };
         assert_eq!(line(b"null", &entry(null)), b"CHAR \"null\" 600 1 3");
         assert_eq!(line(b"big", &entry(big)), b"CHAR \"big\" 600 300 70000");
+    }
+
+    fn memfd() -> OwnedFd {
+        // SAFETY: the name is a C string, and the call returns a new fd.
+        let fd = unsafe { libc::memfd_create(c"locks".as_ptr(), 0) };
+        assert!(fd >= 0);
+        // SAFETY: `fd` is a new fd that nothing else owns.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    /// Opens the file behind `fd` again, as a new open file description.
+    fn again(fd: &OwnedFd) -> OwnedFd {
+        let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        std::fs::File::options()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+            .into()
+    }
+
+    /// The type of the lock that another owner sees on `at`, and on until
+    /// the end of the file.
+    fn seen(probe: &OwnedFd, at: i64) -> (i16, i16) {
+        let test = |len| {
+            // SAFETY: `struct flock` is plain data, valid when zeroed.
+            let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+            lock.l_type = libc::F_WRLCK as i16;
+            lock.l_start = at;
+            lock.l_len = len;
+            sys::ofd_lock(probe.as_fd(), libc::F_OFD_GETLK, &mut lock).unwrap();
+            lock.l_type
+        };
+        (test(1), test(0))
+    }
+
+    #[test]
+    fn locks_taken_again_match_what_the_kernel_holds() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |below: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below) as i64
+        };
+        for _ in 0..200 {
+            let kernel = memfd();
+            let mut locks = Locks::new(again(&kernel));
+            for _ in 0..12 {
+                // SAFETY: `struct flock` is plain data, valid when zeroed.
+                let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+                lock.l_type = [libc::F_RDLCK, libc::F_WRLCK, libc::F_UNLCK][next(3) as usize] as i16;
+                lock.l_start = next(16);
+                lock.l_len = next(6);
+                sys::ofd_lock(locks.fd.as_fd(), libc::F_OFD_SETLK, &mut lock).unwrap();
+                locks.record(&lock);
+            }
+            let copy = memfd();
+            locks.take(copy.as_fd()).unwrap();
+            let (held, taken) = (again(&kernel), again(&copy));
+            for at in (0..24).chain([i64::MAX - 1]) {
+                assert_eq!(seen(&held, at), seen(&taken, at), "at {at}: {:?}", locks.ranges);
+            }
+            let mut sorted = locks.ranges.clone();
+            sorted.sort();
+            assert!(
+                sorted
+                    .windows(2)
+                    .all(|pair| pair[0].1 < pair[1].0
+                        && (pair[0].2 != pair[1].2 || pair[0].1 + 1 < pair[1].0)),
+                "{sorted:?}"
+            );
+        }
     }
 }

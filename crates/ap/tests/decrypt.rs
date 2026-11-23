@@ -1,9 +1,10 @@
 //! The network process's proxy on a host with URL rules, by **Decryption**
 //! under NETWORK in SPEC.md, on a hidden secret's bound host, by **Hidden**
-//! under SECRET, and on a UDP flow, by **UDP** under NETWORK. The proxy serves a link, as in a run. A second
-//! `smoltcp` interface plays the guest on the other end, and reaches fake
-//! destinations on this host's loopback as `host.ap.internal`. Each fake
-//! destination notes the request line of every request that reaches it.
+//! under SECRET, and on a UDP flow, by **UDP** under NETWORK. The proxy
+//! serves a link, as in a run. A second `smoltcp` interface plays the guest
+//! on the other end, and reaches fake destinations on this host's loopback
+//! as `host.ap.internal`. Each fake destination notes the request line of
+//! every request that reaches it.
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -843,29 +844,39 @@ fn udp_is_denied_on_a_host_with_url_rules() {
     assert!(!echoed(&mut Guest::new(&url, Vec::new(), port), port));
 }
 
-/// A clock for the proxy that the test moves forward, and that counts how
-/// often the proxy reads it.
-#[derive(Clone, Default)]
+/// A clock for the proxy that stands still until the test moves it, and
+/// that counts how often the proxy reads it.
+#[derive(Clone)]
 struct Clock {
+    start: Instant,
     ahead: Arc<AtomicU64>,
     reads: Arc<AtomicUsize>,
 }
 
 impl Clock {
+    fn new() -> Clock {
+        Clock {
+            start: Instant::now(),
+            ahead: Arc::default(),
+            reads: Arc::default(),
+        }
+    }
+
     /// The time by this clock.
     fn now(&self) -> Instant {
         let ahead = Duration::from_millis(self.ahead.load(Ordering::SeqCst));
         self.reads.fetch_add(1, Ordering::SeqCst);
-        Instant::now() + ahead
+        self.start + ahead
     }
 
     /// Moves this clock `by` forward, and returns once the proxy has taken
     /// a whole turn by the new time.
     fn advance(&self, by: Duration) {
-        let read = self.reads.load(Ordering::SeqCst);
         (self.ahead).fetch_add(by.as_millis() as u64, Ordering::SeqCst);
-        // A turn reads the clock three times, and a read that began before
-        // the move may finish after it, so six reads hold a whole turn.
+        let read = self.reads.load(Ordering::SeqCst);
+        // A turn reads the clock three times, and one read that began
+        // before the move may count after it, so six reads hold a whole
+        // turn.
         let deadline = Instant::now() + WAIT;
         while self.reads.load(Ordering::SeqCst) < read + 6 {
             assert!(Instant::now() < deadline, "the proxy took no turn");
@@ -874,19 +885,77 @@ impl Clock {
     }
 }
 
-/// What the guest's UDP socket `handle` receives within `wait`, if
-/// anything.
-fn received(guest: &mut Guest, handle: SocketHandle, wait: Duration) -> Option<Vec<u8>> {
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        guest.poll();
-        let socket = guest.sockets.get_mut::<udp::Socket>(handle);
-        if let Ok((payload, _)) = socket.recv() {
-            return Some(payload.to_vec());
+/// A guest's UDP socket on `port`, and a destination's on this host's
+/// loopback, which is where the guest sends.
+struct Flow {
+    handle: SocketHandle,
+    server: std::net::UdpSocket,
+    to: SocketAddr,
+    /// Where the guest's datagrams reach the destination from.
+    from: Option<SocketAddr>,
+}
+
+impl Flow {
+    fn new(guest: &mut Guest, server: std::net::UdpSocket) -> Flow {
+        let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let mut socket = udp::Socket::new(buffer(), buffer());
+        socket.bind(40000).unwrap();
+        let handle = guest.sockets.add(socket);
+        let port = server.local_addr().unwrap().port();
+        let to = SocketAddr::new(IpAddr::V4(guest.host), port);
+        Flow {
+            handle,
+            server,
+            to,
+            from: None,
         }
-        thread::sleep(Duration::from_millis(1));
     }
-    None
+
+    /// Sends `payload` from the guest, and waits for it at the
+    /// destination.
+    fn send(&mut self, guest: &mut Guest, payload: &[u8]) {
+        let deadline = Instant::now() + WAIT;
+        let mut sent = false;
+        let mut buffer = [0; 64];
+        loop {
+            assert!(Instant::now() < deadline, "the datagram never came");
+            guest.poll();
+            let socket = guest.sockets.get_mut::<udp::Socket>(self.handle);
+            if !sent && socket.can_send() {
+                socket.send_slice(payload, self.to).unwrap();
+                sent = true;
+            }
+            match self.server.recv_from(&mut buffer) {
+                Ok((len, from)) => {
+                    assert_eq!(&buffer[..len], payload);
+                    // A flow that stayed open reaches the destination from
+                    // where it did before.
+                    assert_eq!(*self.from.get_or_insert(from), from);
+                    return;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("{error}"),
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Whether `payload`, sent by the destination, reaches the guest within
+    /// `wait`.
+    fn replies(&mut self, guest: &mut Guest, payload: &[u8], wait: Duration) -> bool {
+        let _ = self.server.send_to(payload, self.from.unwrap());
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            guest.poll();
+            let socket = guest.sockets.get_mut::<udp::Socket>(self.handle);
+            if let Ok((got, _)) = socket.recv() {
+                assert_eq!(got, payload);
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
 }
 
 // spec(NETWORK): A UDP flow closes after 60 seconds with no datagram either way, as it would behind a NAT, and a reply that comes later is dropped.
@@ -895,45 +964,32 @@ fn a_udp_flow_closes_after_60_seconds_with_no_datagram() {
     let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     server.set_nonblocking(true).unwrap();
     let port = server.local_addr().unwrap().port();
-    let clock = Clock::default();
+    let clock = Clock::new();
     let read = clock.clone();
     let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
     let mut guest = Guest::configured(&rules, Vec::new(), port, Vec::new(), move |proxy| {
         proxy.clocked(move || read.now())
     });
-    let buffer = || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
-    let mut socket = udp::Socket::new(buffer(), buffer());
-    socket.bind(40000).unwrap();
-    let handle = guest.sockets.add(socket);
-    let to = SocketAddr::new(IpAddr::V4(guest.host), port);
-    while !guest.sockets.get_mut::<udp::Socket>(handle).can_send() {
-        guest.poll();
-    }
-    (guest.sockets.get_mut::<udp::Socket>(handle))
-        .send_slice(b"ping", to)
-        .unwrap();
-    let deadline = Instant::now() + WAIT;
-    let from = loop {
-        assert!(Instant::now() < deadline, "the ping never came");
-        guest.poll();
-        match server.recv_from(&mut [0; 64]) {
-            Ok((_, from)) => break from,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => panic!("{error}"),
-        }
-        thread::sleep(Duration::from_millis(1));
-    };
+    let mut flow = Flow::new(&mut guest, server);
+    let second = Duration::from_secs(1);
+    flow.send(&mut guest, b"ping");
 
-    // A reply 59 seconds on still reaches the guest.
+    // The guest's datagram keeps the flow open for the replies of the next
+    // 60 seconds, and each reply keeps it open as long again.
     clock.advance(Duration::from_secs(59));
-    server.send_to(b"soon", from).unwrap();
-    let soon = received(&mut guest, handle, WAIT);
-    assert_eq!(soon.as_deref(), Some(&b"soon"[..]));
+    assert!(flow.replies(&mut guest, b"one", WAIT));
+    clock.advance(Duration::from_secs(59));
+    assert!(flow.replies(&mut guest, b"two", WAIT));
 
-    // A reply 60 seconds after that one is dropped.
+    // Another datagram from the guest keeps it open too, on the same port.
+    clock.advance(Duration::from_secs(30));
+    flow.send(&mut guest, b"again");
+    clock.advance(Duration::from_secs(59));
+    assert!(flow.replies(&mut guest, b"three", WAIT));
+
+    // After 60 seconds with no datagram either way, a reply is dropped.
     clock.advance(Duration::from_secs(60));
-    let _ = server.send_to(b"late", from);
-    assert_eq!(received(&mut guest, handle, Duration::from_secs(1)), None);
+    assert!(!flow.replies(&mut guest, b"late", second));
 }
 
 /// A plain destination that greets each connection first, as an SMTP

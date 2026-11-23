@@ -611,14 +611,14 @@ sub-issues under a parent. Each sub-issue inherits its parent's `auto:*` label,
 whatever paths it will touch, because `merge` decides from the diff whether its
 PR waits for the owner. Before it files one, the planner looks for an open
 issue with no parent and no `auto:*`, `answer-needed`, `land-needed`, or
-`in-progress` label that already covers the gap. It adopts that issue as a sub-issue, with the
-parent's label, if it has no sub-issues of its own, and its definition of done
-names checks and not a decision of the owner's. An adopted issue counts as a
-filed one. The planner files none if the issues in progress and the issues
-`cargo xtask next` lists already fill the worker slots. It also keeps a parent
-to at most 3 open sub-issues without `land-needed`, whether they are blocked or
-not, because a sub-issue filed far ahead is written before the work it builds
-on exists. A prepared PR waiting for the owner doesn't count.
+`in-progress` label that already covers the gap. It adopts that issue as a
+sub-issue, with the parent's label, if it has no sub-issues of its own, and its
+definition of done names checks and not a decision of the owner's. An adopted
+issue counts as a filed one. The planner files none if the issues in progress
+and the issues `cargo xtask next` lists already fill the worker slots. It also
+keeps a parent to at most 3 open sub-issues without `land-needed`, whether they
+are blocked or not, because a sub-issue filed far ahead is written before the
+work it builds on exists. A prepared PR waiting for the owner doesn't count.
 
 The planner works on one milestone at a time: the first on the roadmap with a
 step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open

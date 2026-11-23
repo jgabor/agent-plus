@@ -214,6 +214,10 @@ fn a_request_the_server_could_read_another_way_is_refused() {
         "0\r\n\n",
         "0\r\nT: 1\n\r\n",
         "0\r\nT: 1\r\n\n",
+        "0;\n\r\n\r\n",
+        "\r\n\r\n",
+        ";x\r\n\r\n",
+        " 0\r\n\r\n",
     ];
     for chunks in bad_chunks {
         let input = format!("{head}Transfer-Encoding: chunked\r\n\r\n{chunks}");

@@ -303,6 +303,14 @@ fn request(
         }
         Http::ChunkSize => match httparse::parse_chunk_size(held).map_err(|_| Refused)? {
             httparse::Status::Partial => short(),
+            // httparse reads a line with no size digit as size 0, and lets
+            // an extension hold a bare LF, which ends the line for another
+            // server.
+            httparse::Status::Complete((taken, _))
+                if !held[0].is_ascii_hexdigit() || held[..taken - 1].contains(&b'\n') =>
+            {
+                Err(Refused)
+            }
             httparse::Status::Complete((taken, 0)) => {
                 Ok(Some((taken, State::Http(Http::Trailers))))
             }

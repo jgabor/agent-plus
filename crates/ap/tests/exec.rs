@@ -14,7 +14,7 @@ use std::thread::{self, JoinHandle};
 use ap::runs::{End, FromExec, FromRun, read_from_exec, send_to_exec};
 use guest::linux::{open_terminal, take_terminal};
 use guest::protocol::{Exec, Size};
-use store::Runs;
+use store::{Held, Runs};
 
 /// The status `ap exec` exits with when `ap` fails.
 const FAILED: i32 = 125;
@@ -65,8 +65,8 @@ impl Scratch {
     }
 
     /// Records a run, and makes it active, with its socket. The run is
-    /// active for as long as the returned file is open.
-    fn run(&self) -> (String, File, UnixListener) {
+    /// active until the returned hold drops.
+    fn run(&self) -> (String, Held, UnixListener) {
         let runs = Runs::new(&self.store);
         let run = runs.create("notes", 1_794_567_729_000_000_000).unwrap();
         let record = runs.hold(&run.name).unwrap();

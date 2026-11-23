@@ -676,7 +676,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
 }
 
 /// The run's record, which this process holds the lock on until it exits.
-static RECORD: OnceLock<File> = OnceLock::new();
+static RECORD: OnceLock<::store::Held> = OnceLock::new();
 
 /// Adds the status `ap run` exits with to the run's record. Only the one
 /// that claimed the run's end calls this, so it is written at most once.

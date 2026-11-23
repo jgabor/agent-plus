@@ -19,7 +19,8 @@ pub use agents::{Agent, Agents, Declared, Kind, Layer, valid_name};
 pub use approvals::Approvals;
 pub use layers::Layers;
 pub use runs::{
-    NAME_ALPHABET, NAME_LEN, PendingShare, Run, Runs, random_name, record_exit, valid_run_name,
+    Held, NAME_ALPHABET, NAME_LEN, PendingShare, Run, Runs, random_name, record_exit,
+    valid_run_name,
 };
 
 /// Compresses `data` into one zstd frame at a zstd level: `1` to `22`, or a

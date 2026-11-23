@@ -8,7 +8,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use store::Runs;
+use store::{Held, Runs};
 
 /// A second, in the nanoseconds a run's record keeps.
 const SECOND: u128 = 1_000_000_000;
@@ -47,8 +47,8 @@ impl Scratch {
     }
 
     /// Records a run of `agent`, and gives it a socket. The run is active
-    /// for as long as the returned file is open.
-    fn run(&self, agent: &str, started: u128) -> (String, File, UnixListener) {
+    /// until the returned hold drops.
+    fn run(&self, agent: &str, started: u128) -> (String, Held, UnixListener) {
         let runs = Runs::new(&self.store);
         let run = runs.create(agent, started).unwrap();
         let record = runs.hold(&run.name).unwrap();

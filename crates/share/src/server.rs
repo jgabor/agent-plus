@@ -973,9 +973,8 @@ impl Share {
         } else {
             let opened = if directory {
                 let flags = libc::O_RDONLY | libc::O_DIRECTORY;
-                self.served(&found.fd).and_then(|()| {
-                    sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno)
-                })
+                self.served(&found.fd)
+                    .and_then(|()| sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno))
             } else {
                 let access = match valid & FATTR_SIZE {
                     0 => libc::O_RDONLY,

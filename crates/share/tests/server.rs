@@ -419,7 +419,11 @@ fn an_rw_share_gives_back_a_mode_it_took_away() {
     fs::rename(tree.root.join("dir/nested.txt"), &away).unwrap();
     assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), ENOENT);
     fs::write(tree.root.join("dir/nested.txt"), b"another").unwrap();
-    fs::set_permissions(tree.root.join("dir/nested.txt"), fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(
+        tree.root.join("dir/nested.txt"),
+        fs::Permissions::from_mode(0o0),
+    )
+    .unwrap();
     assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), ESTALE);
     assert_eq!(fs::metadata(&away).unwrap().mode() & 0o7777, 0);
 }

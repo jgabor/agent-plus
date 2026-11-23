@@ -1,7 +1,7 @@
 //! `harness/ledger/`: the scores and budgets recorded for each merge.
 
 use crate::toml::{self, Table, Value};
-use crate::{Problem, Verdict, base, journey, lock, score, testrun, workspace};
+use crate::{Problem, Verdict, base, bench, journey, lock, score, testrun, workspace};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
@@ -245,7 +245,8 @@ pub struct Scores {
 }
 
 /// The record for `commit`. Budgets that weren't measured keep their last
-/// values, and the bench's result is used only if it was for this commit.
+/// values, and the bench's result is used only if it was for this commit. The
+/// sizes of the pinned guest files are read every time.
 pub fn compose(
     root: &Path,
     issue: usize,
@@ -261,6 +262,7 @@ pub fn compose(
         budgets.extend(measured.budgets);
         reason = measured.reason;
     }
+    budgets.extend(bench::pinned_sizes(root, commit)?);
     Ok(Record {
         issue,
         pr,

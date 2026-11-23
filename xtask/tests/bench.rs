@@ -1035,6 +1035,9 @@ fn a_bad_budget_file_is_a_problem() {
         "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nbandpct = 20.0\n",
         "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\n\n[[budget]]\nkey = \"version_ms\"\nname = \"v\"\n",
         "[[other]]\n",
+        "[[budget]]\nkey = \"os_bytes\"\nname = \"o\"\ntarget = 1.0\n",
+        "[[budget]]\nkey = \"kernel_bytes\"\nname = \"k\"\nband_pct = 5.0\n",
+        "[[budget]]\nkey = \"os_bytes\"\nname = \"o\"\nband_abs = 5.0\n",
     ] {
         repo.write("harness/budgets.toml", text);
         assert_problem(&repo.bench(), "harness/budgets.toml");

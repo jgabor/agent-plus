@@ -1745,7 +1745,8 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
 /// A PR's code runs in its builds and tests, whose input mustn't reach the
 /// supervisor. Every cargo call tries to pause the timeout, so one that could
 /// would stop it until the hang ends. The hang is at the proof's last cargo
-/// call, and the timeout leaves time to reach it on a loaded machine.
+/// call. The proof's work before it takes up to 40 seconds on a loaded
+/// machine, so the timeout leaves time to reach it.
 #[test]
 fn a_command_the_proof_runs_cannot_pause_the_timeout() {
     let repo = Repo::new("timeout-paused");
@@ -1755,7 +1756,7 @@ fn a_command_the_proof_runs_cannot_pause_the_timeout() {
         .env("PAUSE_ON", "cargo ")
         .env("HANG_ON", "cargo build --release")
         .env("HANG_FOR", "120")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "45")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
         .output()
         .unwrap();
     assert!(

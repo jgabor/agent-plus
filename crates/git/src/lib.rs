@@ -339,11 +339,12 @@ impl Repository {
     }
 
     /// The same repository, refusing as corrupt an object whose contents are
-    /// larger than `limit` bytes, or a pack entry larger than that, before
-    /// either is inflated past its header. A chain of deltas is applied one
-    /// delta at a time, so reading an object holds no more than its file or
-    /// pack entry, its base, one delta, and itself. Without a limit, an
-    /// object can be as large as its header says.
+    /// larger than `limit` bytes. A loose object or a pack entry larger than
+    /// that is refused before it is inflated past its header, and a delta
+    /// whose result is larger is refused before it is applied. A chain of
+    /// deltas is applied one delta at a time, so reading an object holds no
+    /// more than its file or pack entry, its base, one delta, and itself.
+    /// Without a limit, an object can be as large as its header says.
     pub fn with_limit(self, limit: usize) -> Repository {
         Repository { limit, ..self }
     }

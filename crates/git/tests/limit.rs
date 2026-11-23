@@ -12,7 +12,7 @@ use git::{Error, Id, Kind, Object, Repository};
 
 mod plant;
 
-use plant::{delta_header, plant_pack, ref_delta, whole};
+use plant::{delta_header, entry_header, plant_pack, ref_delta, whole};
 
 /// Counts the bytes each thread holds, and the most it has held.
 struct Counting;
@@ -142,6 +142,21 @@ fn a_packed_object_larger_than_the_limit_is_refused_before_it_inflates() {
     assert_eq!(read.unwrap().unwrap().data, vec![7; LIMIT]);
     let over = Repository::at(&git).with_limit(LIMIT - 1).object(&id(2));
     assert_corrupt(over);
+}
+
+#[test]
+fn a_packed_entry_longer_than_its_header_says_is_refused_before_it_grows() {
+    let root = scratch("longer");
+    let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0; LARGE], 6);
+    plant_pack(
+        &root,
+        &[(id(1), [entry_header(3, LIMIT), compressed].concat())],
+    );
+    let git = root.join(".git");
+    let (result, held) = peak(|| Repository::at(&git).with_limit(LIMIT).object(&id(1)));
+    assert_corrupt(result);
+    // The entry's own size, and buffers to inflate it, but never more.
+    assert!(held < LIMIT * 3 / 2, "held {held} bytes");
 }
 
 #[test]

@@ -287,10 +287,11 @@ impl Pack {
             loop {
                 let result = inflate(&mut state, rest, &mut output, MZFlush::None);
                 rest = &rest[result.bytes_consumed..];
-                out.extend_from_slice(&output[..result.bytes_written]);
-                if out.len() > size {
+                // Checked before the output grows, so it never holds more.
+                if result.bytes_written > size - out.len() {
                     return Err(self.bad("has an entry longer than its header says"));
                 }
+                out.extend_from_slice(&output[..result.bytes_written]);
                 match result.status {
                     Ok(MZStatus::StreamEnd) if out.len() == size => return Ok(out),
                     Ok(MZStatus::StreamEnd) => {

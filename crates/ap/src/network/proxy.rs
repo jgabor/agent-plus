@@ -175,6 +175,8 @@ pub struct Proxy {
     decryption: Option<Decryption>,
     /// The hidden secrets it puts in requests to their bound hosts.
     injection: Injection,
+    /// What it tells the time by.
+    clock: Box<dyn Fn() -> Instant>,
 }
 
 impl Proxy {
@@ -200,6 +202,7 @@ impl Proxy {
             reporter: None,
             decryption: None,
             injection: Injection::default(),
+            clock: Box::new(Instant::now),
         }
     }
 
@@ -214,6 +217,15 @@ impl Proxy {
     pub fn decrypting(self, decryption: Decryption) -> Proxy {
         Proxy {
             decryption: Some(decryption),
+            ..self
+        }
+    }
+
+    /// This proxy, telling the time by `clock`, so that a test can move it
+    /// past a limit without waiting.
+    pub fn clocked(self, clock: impl Fn() -> Instant + 'static) -> Proxy {
+        Proxy {
+            clock: Box::new(clock),
             ..self
         }
     }
@@ -237,10 +249,10 @@ impl Proxy {
         // One byte more than a frame, so that a longer message is seen.
         let mut buffer = vec![0; MAX_FRAME + 1];
         loop {
-            let now = Instant::now();
+            let now = (self.clock)();
             let wait = stack.delay(now).unwrap_or(RECEIVE_WAIT).min(RECEIVE_WAIT);
             let ready = self.wait(link.as_raw_fd(), wait)?;
-            let now = Instant::now();
+            let now = (self.clock)();
             for _ in 0..FRAMES_AT_ONCE {
                 match recv(link.as_raw_fd(), &mut buffer)? {
                     None => break,
@@ -264,7 +276,7 @@ impl Proxy {
             let mut decide = |connection: &Connection| decide_request(policy, reporter, connection);
             (self.decrypted)
                 .retain_mut(|decrypted| decrypted.pump(stack, decryption, injection, &mut decide));
-            stack.poll(Instant::now());
+            stack.poll((self.clock)());
             while let Some(frame) = stack.transmit() {
                 match (&*link).write(&frame) {
                     Ok(_) => {}

@@ -77,7 +77,8 @@ Draft model: `claude-fable-5-2`, at effort `high`
    ```sh
    gh issue list --state open --limit 1000 --json number,title,labels,parent \
      --jq '.[] | select(.parent == null) | select([.labels[].name] | any(
-     startswith("auto:") or . == "answer-needed" or . == "land-needed") |
+     startswith("auto:") or . == "answer-needed" or . == "land-needed" or
+     . == "in-progress") |
      not) | "\(.number) \(.title)"'
    ```
 

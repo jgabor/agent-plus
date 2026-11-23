@@ -25,6 +25,8 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+#[doc(hidden)]
+pub use server::when_git_is_listed;
 pub use server::{Mode, Root, Server};
 
 /// The `argv[0]` that `ap` starts the share server with.

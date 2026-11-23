@@ -1460,7 +1460,9 @@ How it works:
 - Files the agent has not written show your changes live. The exception is
   the `.git` directory at the root of a copy-on-write share: everything in
   it except objects is captured when the run starts, so commits you make
-  during the run don't move `HEAD` under the agent. Objects are read live,
+  during the run don't move `HEAD` under the agent. If git changes `.git`
+  on your side while it is captured, it is captured again. If it keeps
+  changing, the run fails to start and says so. Objects are read live,
   which keeps the capture small in a large repository, so pruning objects
   on your side during a run can remove ones the agent needs. A nested
   repository's `.git` stays live.

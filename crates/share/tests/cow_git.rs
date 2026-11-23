@@ -7,6 +7,7 @@
 mod guest;
 
 use guest::*;
+use share::{Root, Server};
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -216,4 +217,76 @@ fn the_capture_keeps_each_entry_as_itself_with_your_mode() {
     drop(guest);
     fs::set_permissions(&info, fs::Permissions::from_mode(0o755)).unwrap();
     fs::set_permissions(pending.join("git/info"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Runs `hook` each time the capture of `.git` on this thread has listed
+/// it, then makes the server of the copy-on-write share `root`.
+fn captured(root: Root, hook: impl FnMut() + 'static) -> std::io::Result<Server> {
+    share::when_git_is_listed(Some(Box::new(hook)));
+    let server = Server::new(vec![root]);
+    share::when_git_is_listed(None);
+    server
+}
+
+// spec(SHARE): If git changes `.git` on your side while it is captured, it is captured again.
+#[test]
+fn refs_packed_while_git_is_captured_are_captured_again() {
+    let tree = Tree::new("cow-git-packed");
+    let first = repository(&tree.root);
+    assert!(!tree.root.join(".git/packed-refs").exists());
+    let pending = pending(&tree);
+    let root = cow_root(&tree.root, &pending);
+    let repository = tree.root.clone();
+    let mut listed = 0;
+    let mut guest = Guest::made(move || {
+        let hook = move || {
+            // Git packs the refs after the capture listed `.git`, and
+            // removes the loose ref it packed.
+            if listed == 0 {
+                git(&repository, &["pack-refs", "--all", "--prune"]);
+            }
+            listed += 1;
+        };
+        captured(root, hook).unwrap()
+    });
+    let packed = fs::read(tree.root.join(".git/packed-refs")).unwrap();
+    assert!(!tree.root.join(".git/refs/heads/main").exists());
+    assert_eq!(guest.read_file(".git/packed-refs"), Ok(packed));
+    assert_eq!(guest.read_file(".git/refs/heads/main"), Err(ENOENT));
+    drop(guest);
+    assert_eq!(
+        fs::read_to_string(pending.join("head")).unwrap(),
+        format!("{first}\n")
+    );
+}
+
+// spec(SHARE): If it keeps changing, the run fails to start and says so.
+#[test]
+fn git_that_keeps_changing_fails_the_capture() {
+    let tree = Tree::new("cow-git-changing");
+    repository(&tree.root);
+    // Each copy that is made again goes, whatever mode yours gave it.
+    let modes = [(".git/info", 0o555), (".git/objects", 0o111)];
+    for (path, mode) in modes {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let pending = pending(&tree);
+    let root = cow_root(&tree.root, &pending);
+    let repository = tree.root.clone();
+    let failed = std::thread::spawn(move || {
+        let mut listed = 0;
+        let hook = move || {
+            listed += 1;
+            fs::write(repository.join(format!(".git/changed-{listed}")), b"").unwrap();
+        };
+        captured(root, hook).err().map(|error| error.to_string())
+    });
+    let failed = failed.join().unwrap().expect("the capture failed");
+    assert_eq!(failed, "git kept changing `.git` while it was captured");
+    // Nothing of a capture is left behind.
+    assert!(!pending.join("git").exists());
+    assert!(!pending.join("head").exists());
+    for (path, _) in modes {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

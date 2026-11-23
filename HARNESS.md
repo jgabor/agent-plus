@@ -1053,9 +1053,9 @@ passes. No scheduled work runs on GitHub.
 | Review rounds | 3, or 5 for security, data loss, or concurrency |
 | Minimum free disk | 50 GiB |
 
-The places stay at 2 while the worker slots rose to 5. Three test runs at
-once failed on timing in 13 of 18 runs on the owner's host, and builds have
-no such limit. If gates start to fail on timing, go back to 4 worker slots.
+The places stay at 2, below the 5 worker slots, because three test runs at
+once failed on timing in 13 of 18 runs on the owner's host. If gates start
+to fail on timing, lower the worker slots to 4.
 
 ## Failure handling
 

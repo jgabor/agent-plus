@@ -9,7 +9,8 @@ exclude_re = [
     'delete - in Mapping::anonymous$',
     # Only a real VM runs these, so only `t1` can notice them, and mutation
     # testing doesn't run `t1`. Its `ap_boot_command` tests fail without the
-    # init or the interrupt, and its `share` tests without the deadline.
+    # init or the interrupt, and its `share` tests without the deadline. The
+    # share relay's deadline is the only `+` in `boot_linked`.
     'crates/ap/src/boot\.rs:\d+:\d+: replace init -> io::Result<\(\)> with Ok\(\(\)\)$',
     'crates/ap/src/boot\.rs:\d+:\d+: replace <impl Line for Interrupt<.?_>>::pulse with \(\)$',
     'crates/ap/src/boot\.rs:\d+:\d+: replace \+ with - in boot_linked$',

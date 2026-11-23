@@ -340,7 +340,7 @@ fn a_long_head_is_read() {
 }
 
 #[test]
-fn a_body_of_exactly_the_most_a_download_may_hold_is_read() {
+fn a_body_of_exactly_the_most_a_download_may_hold_is_accepted() {
     // The server sends less than it says, so the download ends early, after
     // the length was accepted.
     let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\nbody".to_vec();

@@ -1403,10 +1403,12 @@ mod tests {
         relay.finish();
         assert!(start.elapsed() < timeout * 10, "{:?}", start.elapsed());
         release.send(()).unwrap();
-        let mut got = Vec::new();
-        while let Ok(piece) = written.recv_timeout(Duration::from_millis(500)) {
-            got.push(piece);
-        }
+        let mut got: Vec<Vec<u8>> = (0..OUTPUT_WINDOW)
+            .map(|_| written.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        // The writer ends once the relay is gone, with nothing more to write.
+        drop(relay);
+        got.extend(written.iter());
         let window: Vec<Vec<u8>> = (0..OUTPUT_WINDOW as u8).map(|piece| vec![piece]).collect();
         assert_eq!(got, window);
     }

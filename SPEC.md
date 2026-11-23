@@ -1837,7 +1837,7 @@ Matching follows boundaries:
   paths contain encoded slashes (`%2F`) or dot segments under a host with
   URL rules are denied. So are paths there that don't start with `/`, and
   paths with a `%` that two hex digits don't follow. So are paths there with
-  an empty segment, as in `/a//b`, though a path may end with `/`.
+  an empty segment, as in `/a//b`, though a path may end with one `/`.
 - A URL rule's path can't have a `.` or `..` segment, even one written with
   `%2e`, because a normalized request path never has one.
 - A port suffix limits a host or IP rule to that port. IPv6 addresses go in

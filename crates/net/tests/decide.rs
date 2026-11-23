@@ -386,7 +386,7 @@ fn bad_paths_under_a_host_with_url_rules_are_denied() {
     );
 }
 
-// spec(NETWORK): So are paths there with an empty segment, as in `/a//b`, though a path may end with `/`.
+// spec(NETWORK): So are paths there with an empty segment, as in `/a//b`, though a path may end with one `/`.
 #[test]
 fn empty_segments_under_a_host_with_url_rules_are_denied() {
     let rules = "NETWORK +github.com\nNETWORK -https://github.com/jgabor/secret\n";
@@ -405,7 +405,12 @@ fn empty_segments_under_a_host_with_url_rules_are_denied() {
         DENY,
         "-https://github.com/jgabor/secret",
     );
-    for url in ["https://github.com/", "https://github.com/jgabor/"] {
+    for url in [
+        "https://github.com/",
+        "https://github.com/jgabor/",
+        // A query isn't part of the path.
+        "https://github.com/jgabor/?next=//jgabor/secret",
+    ] {
         decides(rules, request(url), ALLOW, "+github.com");
     }
 }

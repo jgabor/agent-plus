@@ -159,30 +159,26 @@ fn state(result: Result<Verdict, Problem>) -> &'static str {
 }
 
 fn t2(root: &Path) -> &'static str {
+    tests(root, "t2", &[])
+}
+
+/// The tests in `t1` that the gate leaves out, because they download from a
+/// real release.
+fn release(root: &Path) -> &'static str {
+    tests(root, "t1", &["--", "--ignored"])
+}
+
+/// Runs a package's tests, or skips them when the workspace has no such
+/// package.
+fn tests(root: &Path, package: &str, extra: &[&str]) -> &'static str {
     let packages = match workspace::packages(root) {
         Ok(packages) => packages,
         Err(problem) => return state(Err(problem)),
     };
-    if !packages.iter().any(|package| package.name == "t2") {
+    if !packages.iter().any(|found| found.name == package) {
         return SKIP;
     }
-    let passed = gate::cargo_passes(root, &["test", "--locked", "--package", "t2"]);
-    state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))
-}
-
-/// The tests that the gate leaves out because they download from a real
-/// release.
-fn release(root: &Path) -> &'static str {
-    let args = [
-        "test",
-        "--locked",
-        "--package",
-        "t1",
-        "--test",
-        "fetch",
-        "--",
-        "--ignored",
-    ];
+    let args = [&["test", "--locked", "--package", package], extra].concat();
     let passed = gate::cargo_passes(root, &args);
     state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))
 }

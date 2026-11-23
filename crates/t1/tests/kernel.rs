@@ -1,4 +1,5 @@
 //! Fetches the pinned kernel the way t1's tests do, into an empty directory.
+//! It downloads from the real release, so only the nightly job runs it.
 
 use std::fs;
 use std::path::Path;
@@ -6,6 +7,7 @@ use std::process::Command;
 use std::thread;
 
 #[test]
+#[ignore = "downloads from the real release, which only the nightly job does"]
 fn two_fetches_in_one_process_both_return_the_pinned_kernel() {
     let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("kernel-fetch");
     let _ = fs::remove_dir_all(&directory);

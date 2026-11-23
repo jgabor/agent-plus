@@ -297,10 +297,10 @@ change can affect a budget when its diff touches `crates/`, `.cargo/`,
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps
 a copy at `xtask/kernel/vmlinux` in the shared git directory, and gives it to a
 tree that lacks it, so a fresh tree doesn't fetch it again. Only a file whose
-digest matches the pin moves either way.
-`ap`'s own downloader is proven against a local server on every gate, and
-against the kernel's real release only in the nightly job, so a gate in a
-tree that holds the kernel makes no request for it.
+digest matches the pin moves either way. A gate in a tree that holds the kernel
+makes no request for it. A local server proves `ap`'s downloader on every gate.
+The t1 tests that download from a real release are ignored, and only the
+nightly job runs them.
 
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
@@ -914,8 +914,8 @@ Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
 does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
-2. Run the gate, T2, the tests that download from a real release, T3, the
-   journey, fuzzing, and mutation testing.
+2. Run the gate, T2, the ignored t1 tests that download from a real
+   release, T3, the journey, fuzzing, and mutation testing.
 3. Post the report to one pinned issue. It leads with what needs the owner:
    a verdict that names each failed check, the three scores, what regressed
    and why, commits not in the ledger, and what waits on the owner. Then come

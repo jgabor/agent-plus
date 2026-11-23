@@ -978,6 +978,8 @@ fn a_udp_flow_closes_after_60_seconds_with_no_datagram() {
     // 60 seconds, and each reply keeps it open as long again.
     clock.advance(Duration::from_secs(59));
     assert!(flow.replies(&mut guest, b"one", WAIT));
+    // By now the proxy's stack has forgotten the guest's link address, so
+    // this reply waits for the one lookup the stopped clock allows.
     clock.advance(Duration::from_secs(59));
     assert!(flow.replies(&mut guest, b"two", WAIT));
 

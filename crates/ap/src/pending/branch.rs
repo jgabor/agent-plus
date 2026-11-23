@@ -55,6 +55,9 @@ struct Agent<'a> {
     /// The trees and blobs of the last commit, and the commit, which are
     /// nowhere else until they go in quarantine.
     made: RefCell<HashMap<Id, Object>>,
+    /// Each file and symlink of the agent's that would replace a directory
+    /// its `HEAD` holds with a git-ignored file in it.
+    replacing: BTreeSet<Vec<u8>>,
 }
 
 impl<'a> Agent<'a> {
@@ -65,6 +68,7 @@ impl<'a> Agent<'a> {
             written: Repository::at(share.dir.join("tree").join(".git")),
             yours: Repository::at(share.root.join(".git")),
             made: RefCell::default(),
+            replacing: BTreeSet::new(),
         }
     }
 
@@ -205,6 +209,66 @@ impl<'a> Agent<'a> {
         Ok(commits)
     }
 
+    /// Each file and symlink of the agent's that would replace a directory
+    /// the tree `tree` holds at `path`, or beneath it, with a git-ignored
+    /// file in it. Git can't hold both, and that file stays.
+    fn replacing(
+        &self,
+        ignore: &Gitignore,
+        path: &[u8],
+        tree: Id,
+        found: &mut BTreeSet<Vec<u8>>,
+    ) -> Result<(), git::Error> {
+        for entry in self.object(&tree)?.entries()? {
+            let inner = beneath(path, &entry.name);
+            if entry.mode != TREE {
+                continue;
+            }
+            match self.records.view(&inner) {
+                View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => {
+                    if self.holds_ignored(ignore, &inner, entry.id)? {
+                        found.insert(inner);
+                    }
+                }
+                _ if self.recorded_beneath(&inner).next().is_some() => {
+                    self.replacing(ignore, &inner, entry.id, found)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the tree `tree` at `path` holds a git-ignored file.
+    fn holds_ignored(&self, ignore: &Gitignore, path: &[u8], tree: Id) -> Result<bool, git::Error> {
+        for entry in self.object(&tree)?.entries()? {
+            let inner = beneath(path, &entry.name);
+            let dir = matches!(entry.mode, TREE | GITLINK);
+            if ignore.is_ignored(bytes_path(&inner), dir) {
+                return Ok(true);
+            }
+            if entry.mode == TREE && self.holds_ignored(ignore, &inner, entry.id)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Each file and symlink of the agent's that would replace a directory
+    /// that `tree`, the tree of its `HEAD`, holds with a git-ignored file in
+    /// it.
+    fn replacing_in(
+        &self,
+        ignore: &Gitignore,
+        tree: Option<Id>,
+    ) -> Result<BTreeSet<Vec<u8>>, git::Error> {
+        let mut found = BTreeSet::new();
+        if let Some(tree) = tree {
+            self.replacing(ignore, b"", tree, &mut found)?;
+        }
+        Ok(found)
+    }
+
     /// The tree of the files as the agent left them: the tree of its `HEAD`,
     /// `tree`, with every file put in, changed, or removed that lands.
     fn left(&self, host: &Host, ignore: &Gitignore, tree: Option<Id>) -> Result<Id, git::Error> {
@@ -265,7 +329,14 @@ impl<'a> Agent<'a> {
                 },
                 _ => {
                     let landed = BTreeMap::new();
-                    match verdict(self.records, &landed, host, ignore, true, path)? {
+                    match verdict(
+                        self.records,
+                        &landed,
+                        host,
+                        ignore,
+                        Some(&self.replacing),
+                        path,
+                    )? {
                         Verdict::Change => true,
                         _ => return Ok(head),
                     }
@@ -312,10 +383,7 @@ impl<'a> Agent<'a> {
         }
         let mut tree = Vec::new();
         for (name, head) in entries {
-            let inner = match root {
-                true => name.clone(),
-                false => [path, b"/", &name].concat(),
-            };
+            let inner = beneath(path, &name);
             // Git keeps no `.git`, and the agent's history comes as commits.
             let left = match name.eq_ignore_ascii_case(b".git") {
                 true => head,
@@ -333,6 +401,15 @@ impl<'a> Agent<'a> {
             return Ok(head);
         }
         Ok(Some((TREE, self.make(tree))))
+    }
+}
+
+/// The path of `name` in the directory `path`, or at the root when `path`
+/// is empty.
+fn beneath(path: &[u8], name: &[u8]) -> Vec<u8> {
+    match path.is_empty() {
+        true => name.to_vec(),
+        false => [path, b"/", name].concat(),
     }
 }
 
@@ -543,6 +620,21 @@ impl Share<'_> {
         }
     }
 
+    /// Each file and symlink of the agent's that would replace a directory
+    /// its `HEAD` holds with a git-ignored file in it.
+    pub(super) fn replacing(
+        &self,
+        records: &Records,
+        ignore: &Gitignore,
+    ) -> Result<BTreeSet<Vec<u8>>, git::Error> {
+        let agent = Agent::new(self, records);
+        let tree = match agent.head()? {
+            Some(head) => Some(agent.object(&head)?.commit()?.tree),
+            None => None,
+        };
+        agent.replacing_in(ignore, tree)
+    }
+
     /// The commit your `HEAD` named when the run started.
     fn start(&self) -> io::Result<Option<Id>> {
         let text = match read_beneath(self.dir, HEAD)? {
@@ -577,30 +669,8 @@ impl Share<'_> {
         let records = self.read(RECORDS)?;
         let host = Host::new(root)?;
         let ignore = Gitignore::load(root)?;
-        let agent = Agent::new(self, &records);
+        let mut agent = Agent::new(self, &records);
         let head = agent.head().map_err(read_failed)?;
-        let mut applied = Applied {
-            text: Vec::new(),
-            ignored: 0,
-            pending: 0,
-        };
-        let landed = BTreeMap::new();
-        // What the agent left differs from its `HEAD` only where it wrote,
-        // and where that hides your files.
-        let mut paths = changed(&records, &host)?;
-        paths.extend(
-            (records.entries.keys())
-                .filter(|path| !path.is_empty())
-                .cloned(),
-        );
-        for path in paths {
-            match verdict(&records, &landed, &host, &ignore, true, &path)? {
-                Verdict::History | Verdict::Landed => {}
-                Verdict::Ignored => applied.ignored += 1,
-                Verdict::Skipped { why, .. } => line(&mut applied.text, "skipped", &path, &why),
-                Verdict::Change => {}
-            }
-        }
         // The agent's history, checked as it is walked, then the files it
         // didn't commit, as one last commit on it.
         let quarantine = Quarantine::new(self.dir)?;
@@ -620,6 +690,36 @@ impl Share<'_> {
                     .map_err(read_failed)?
                     .tree,
             );
+        }
+        agent.replacing = agent.replacing_in(&ignore, tree).map_err(read_failed)?;
+        let mut applied = Applied {
+            text: Vec::new(),
+            ignored: 0,
+            pending: 0,
+        };
+        let landed = BTreeMap::new();
+        // What the agent left differs from its `HEAD` only where it wrote,
+        // and where that hides your files.
+        let mut paths = changed(&records, &host)?;
+        paths.extend(
+            (records.entries.keys())
+                .filter(|path| !path.is_empty())
+                .cloned(),
+        );
+        for path in paths {
+            match verdict(
+                &records,
+                &landed,
+                &host,
+                &ignore,
+                Some(&agent.replacing),
+                &path,
+            )? {
+                Verdict::History | Verdict::Landed => {}
+                Verdict::Ignored => applied.ignored += 1,
+                Verdict::Skipped { why, .. } => line(&mut applied.text, "skipped", &path, &why),
+                Verdict::Change => {}
+            }
         }
         let left = agent.left(&host, &ignore, tree).map_err(read_failed)?;
         let empty = Object::tree(Vec::new()).id();

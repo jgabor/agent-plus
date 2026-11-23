@@ -869,13 +869,22 @@ impl Share<'_> {
             },
             false => None,
         };
+        // History that can't be read is said once, on the first line.
+        let replacing = match repository {
+            true => match self.replacing(&records, &ignore) {
+                Ok(replacing) => Some(replacing),
+                Err(git::Error::Io(error)) => return Err(error),
+                Err(git::Error::Corrupt(_)) => Some(BTreeSet::new()),
+            },
+            false => None,
+        };
         let mut shown = Shown {
             text: Vec::new(),
             ignored: 0,
             commits,
         };
         for path in changed(&records, &host)? {
-            match verdict(&records, &landed, &host, &ignore, repository, &path)? {
+            match verdict(&records, &landed, &host, &ignore, replacing.as_ref(), &path)? {
                 Verdict::History | Verdict::Landed => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
@@ -944,7 +953,7 @@ impl Share<'_> {
         let mut kept = BTreeMap::new();
         let mut changes = Vec::new();
         for path in changed(&records, &host)? {
-            match verdict(&records, &landed, &host, &ignore, false, &path)? {
+            match verdict(&records, &landed, &host, &ignore, None, &path)? {
                 Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
@@ -1130,16 +1139,19 @@ enum Verdict {
     Change,
 }
 
+/// What becomes of the agent's change at `path`. For a branch import,
+/// `branch` holds each file and symlink of the agent's that would replace a
+/// directory its `HEAD` holds with a git-ignored file in it.
 fn verdict(
     records: &Records,
     landed: &BTreeMap<Vec<u8>, Option<Base>>,
     host: &Host,
     ignore: &Gitignore,
-    repository: bool,
+    branch: Option<&BTreeSet<Vec<u8>>>,
     path: &[u8],
 ) -> io::Result<Verdict> {
     let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
-    if repository && names[0] == b".git" {
+    if branch.is_some() && names[0] == b".git" {
         return Ok(Verdict::History);
     }
     if ignore.is_ignored(bytes_path(path), false) {
@@ -1168,9 +1180,14 @@ fn verdict(
         }
         _ => {}
     }
+    // Git can't hold a file and a directory at one path, and a git-ignored
+    // file stays as the agent's `HEAD` holds it.
+    if branch.is_some_and(|replacing| replacing.contains(path)) {
+        return skipped("it would replace a directory that holds a git-ignored file");
+    }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.
-    if !repository && changed_on_your_side(records, host, path)? {
+    if branch.is_none() && changed_on_your_side(records, host, path)? {
         if landed_by_apply(landed, host, path)? {
             return Ok(Verdict::Landed);
         }

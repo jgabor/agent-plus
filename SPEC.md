@@ -1583,6 +1583,10 @@ attributes, because those can run commands.
   - The last commit's time is in UTC. A file the agent never changed or
     removed is in the last commit as the agent's `HEAD` holds it, so a
     change you made to it during the run is left out.
+  - Where the agent's `HEAD` holds a directory with a git-ignored file in
+    it, and the agent wrote a file or symlink in its place, `ap apply`
+    skips that file and says why. The directory is in the last commit as
+    that `HEAD` holds it.
   - With no `git` on your host, `ap apply` fails the branch import, says
     so, and everything stays pending.
   - `ap apply` refuses a branch import into a repository whose object

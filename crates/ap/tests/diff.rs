@@ -529,6 +529,41 @@ fn the_first_line_says_how_many_commits_the_branch_would_carry() {
     assert!(shown.ends_with("+++ b/c\n@@ -0,0 +1 @@\n+c\n"), "{shown}");
 }
 
+/// A file the agent wrote in place of a directory its `HEAD` holds with a
+/// git-ignored file in it, which `ap apply` skips, gets a line instead of
+/// a diff.
+// spec(SHARE): So does a file that `ap apply` would skip, other than a git-ignored one, and the line says why.
+#[test]
+fn a_file_in_place_of_a_directory_with_an_ignored_file_gets_a_line() {
+    let scratch = Scratch::new("file-for-ignored");
+    let share = &scratch.share;
+    repo::run(share, &["init", "-q"]);
+    fs::write(share.join(".gitignore"), "*.log\n").unwrap();
+    fs::create_dir(share.join("logs")).unwrap();
+    fs::write(share.join("logs/debug.log"), "noise\n").unwrap();
+    repo::run(share, &["add", "-f", "logs/debug.log"]);
+    repo::run(share, &["commit", "-q", "-m", "logs"]);
+    let (run, pending) = scratch.run("notes", 1);
+    repo::capture(share, &pending);
+    for path in ["logs/debug.log", "logs"] {
+        record(&pending, &base(share, path));
+        record(&pending, &format!("DELETE \"{path}\""));
+    }
+    write(&pending, "logs", 0o644, b"one file\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "branch ap/notes/{run} would carry 0 commits\n\
+             skipped logs: it would replace a directory that holds a git-ignored file\n\
+             skipped 1 git-ignored file\n"
+        )
+    );
+}
+
 /// A history `ap` can't read, such as one whose object format isn't
 /// SHA-1, still shows the agent's files.
 // spec(SHARE): If `ap` can't read the agent's history, the line says why instead.

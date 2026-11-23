@@ -1991,3 +1991,50 @@ fn a_deleted_directory_of_ignored_files_lands_as_committed() {
         repo::history(guest, "HEAD")
     );
 }
+
+/// A file and a symlink the agent wrote, each in place of a directory its
+/// `HEAD` holds with a git-ignored file in it, are skipped, because git
+/// can't hold a file and a directory at one path. Each directory is in the
+/// last commit as that `HEAD` holds it, and so is the file the agent
+/// deleted beside the ignored one.
+// spec(SHARE): Where the agent's `HEAD` holds a directory with a git-ignored file in it, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why.
+// spec(SHARE): The directory is in the last commit as that `HEAD` holds it.
+#[test]
+fn a_file_in_place_of_a_directory_with_an_ignored_file_is_skipped() {
+    let ignored = |share: &Path| {
+        fs::write(share.join(".gitignore"), "*.log\n").unwrap();
+        for file in ["logs/debug.log", "logs/README", "cache/deep/run.log"] {
+            fs::create_dir_all(share.join(file).parent().unwrap()).unwrap();
+            fs::write(share.join(file), "noise\n").unwrap();
+            repo::run(share, &["add", "-f", file]);
+        }
+        repo::run(share, &["commit", "-q", "-m", "logs"]);
+    };
+    let repository = Repository::with(
+        "file-for-ignored",
+        true,
+        Setup {
+            before: Some(&ignored),
+            ..Setup::default()
+        },
+    );
+    let (share, pending) = (repository.share(), &repository.pending);
+    for file in ["logs/debug.log", "logs/README", "logs", "cache"] {
+        delete(share, pending, file);
+    }
+    write(pending, "logs", 0o644, b"one file\n");
+    link(pending, "cache", "README");
+    write(pending, "notes", 0o644, b"notes\n");
+    fs::write(repository.guest.join("notes"), "notes\n").unwrap();
+    let tree = repository.tree_after(&[&["add", "notes"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it would replace a directory that holds a git-ignored file";
+    assert_eq!(
+        stdout(&output),
+        format!("skipped cache: {why}\nskipped logs: {why}\nskipped 2 git-ignored files\n")
+    );
+    repository.assert_last_commit(&tree, during);
+}

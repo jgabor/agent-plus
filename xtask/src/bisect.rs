@@ -214,9 +214,9 @@ mod tests {
 
     #[test]
     fn the_issue_names_a_path_it_touches() {
-        assert_ne!(
+        assert_eq!(
             crate::work::touches(&issue_body("abc123")),
-            Vec::<String>::new()
+            ["xtask/src/gate.rs"]
         );
     }
 }

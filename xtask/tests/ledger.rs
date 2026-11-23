@@ -153,6 +153,80 @@ fn record_carries_budgets_over_from_the_previous_record() {
     );
 }
 
+/// Budgets for the sizes of the guest files that `guest/` pins, the pins, and
+/// the copies that the T1 tests fetch, which `target/` keeps out of git.
+const PINNED_BUDGETS: &str = "[[budget]]\nkey = \"os_bytes\"\nname = \"OS layer\"\n\n[[budget]]\nkey = \"kernel_bytes\"\nname = \"Kernel\"\n";
+const OS: &str = "an OS layer\n";
+const OS_SHA256: &str = "572930e188290325e9b80a82a61d0e0b57c5ef392bed9d14f5fc5665eeec0e5c";
+const KERNEL: &str = "a kernel\n";
+const KERNEL_SHA256: &str = "0ea0e4d98d963a16e4ae69a302423f7648056205ea740c9559c92725d9544e4d";
+
+fn pin(sha256: &str) -> String {
+    format!("version = \"1\"\nurl = \"https://example.com/file\"\nsha256 = \"{sha256}\"\n")
+}
+
+fn pinned_repo(name: &str) -> Repo {
+    let (os_pin, kernel_pin) = (pin(OS_SHA256), pin(KERNEL_SHA256));
+    let previous = record_text(5, "kernel_bytes = 1\nos_bytes = 1\n");
+    let repo = Repo::new(
+        name,
+        &[
+            ("harness/budgets.toml", PINNED_BUDGETS),
+            ("guest/os/pin.toml", os_pin.as_str()),
+            ("guest/kernel/pin.toml", kernel_pin.as_str()),
+            ("harness/ledger/5.toml", previous.as_str()),
+        ],
+    );
+    let layer = format!("target/guest/os-{OS_SHA256}/plain-layers/{OS_SHA256}");
+    repo.write(&layer, OS);
+    repo.write("target/guest/vmlinux", KERNEL);
+    repo
+}
+
+#[test]
+fn record_writes_the_sizes_of_the_pinned_guest_files() {
+    let repo = pinned_repo("pinned");
+    let output = repo.record("6");
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = fs::read_to_string(repo.root.join("harness/ledger/6.toml")).unwrap();
+    assert!(
+        text.ends_with(&format!(
+            "[budgets]\nkernel_bytes = {}\nos_bytes = {}\n",
+            KERNEL.len(),
+            OS.len()
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn record_refuses_a_guest_file_that_isnt_what_its_pin_names() {
+    let repo = pinned_repo("pinned-stale");
+    repo.write("target/guest/vmlinux", "an older kernel\n");
+    let output = repo.record("6");
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("guest/kernel/pin.toml"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!repo.root.join("harness/ledger/6.toml").exists());
+}
+
+#[test]
+fn record_refuses_a_pinned_guest_file_that_the_tests_didnt_fetch() {
+    let repo = pinned_repo("pinned-missing");
+    fs::remove_dir_all(repo.root.join(format!("target/guest/os-{OS_SHA256}"))).unwrap();
+    let output = repo.record("6");
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("guest/os/pin.toml"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!repo.root.join("harness/ledger/6.toml").exists());
+}
+
 #[test]
 fn record_can_write_over_an_earlier_attempt() {
     let repo = Repo::new("again", &[]);

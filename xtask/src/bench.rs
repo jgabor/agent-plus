@@ -78,6 +78,32 @@ enum Measure {
     Build,
     Run,
     Idle,
+    /// The size of a guest file that `guest/` pins. The file is the same on
+    /// every machine, so every record reads it, and the bench doesn't.
+    Pinned(Guest),
+}
+
+#[derive(Clone, Copy)]
+enum Guest {
+    Os,
+    Kernel,
+}
+
+impl Guest {
+    fn pin(self) -> &'static str {
+        match self {
+            Guest::Os => "guest/os/pin.toml",
+            Guest::Kernel => "guest/kernel/pin.toml",
+        }
+    }
+
+    /// Where the T1 tests keep the file with this digest.
+    fn copy(self, digest: &str) -> String {
+        match self {
+            Guest::Os => format!("target/guest/os-{digest}/plain-layers/{digest}"),
+            Guest::Kernel => "target/guest/vmlinux".to_string(),
+        }
+    }
 }
 
 /// How a budget is measured. A key that isn't listed is a mistake in the
@@ -90,6 +116,8 @@ fn measure_of(key: &str) -> Option<Measure> {
         "noop_build_ms" => Some(Measure::Build),
         "run_ms" => Some(Measure::Run),
         "idle_mib" => Some(Measure::Idle),
+        "os_bytes" => Some(Measure::Pinned(Guest::Os)),
+        "kernel_bytes" => Some(Measure::Pinned(Guest::Kernel)),
         _ => None,
     }
 }
@@ -132,8 +160,18 @@ fn read_budget(table: &Table) -> Result<Budget, String> {
         return Err(format!("a budget has an unknown field `{field}`"));
     }
     let key = table.str("key").ok_or("a budget has no `key`")?;
-    if measure_of(key).is_none() {
+    let Some(measure) = measure_of(key) else {
         return Err(format!("`{key}` isn't a budget this program can measure"));
+    };
+    // No bench compares a pinned size, so a band or a target would do nothing.
+    if matches!(measure, Measure::Pinned(_))
+        && let Some(field) = ["target", "band_pct", "band_abs"]
+            .into_iter()
+            .find(|field| table.get(field).is_some())
+    {
+        return Err(format!(
+            "`{key}` is only recorded, so it can't have `{field}`"
+        ));
     }
     let name = table
         .str("name")
@@ -162,6 +200,42 @@ fn number(table: &Table, field: &str, key: &str) -> Result<Option<f64>, String> 
         return Err(format!("`{field}` of `{key}` is negative"));
     }
     Ok(Some(value))
+}
+
+/// The sizes of the guest files that `commit` pins, for its budgets that
+/// record them. They come from the copies that the T1 tests fetch, which a
+/// record follows, and each must have the digest its pin names.
+pub fn pinned_sizes(root: &Path, commit: &str) -> Result<BTreeMap<String, f64>, Problem> {
+    let mut sizes = BTreeMap::new();
+    for budget in budgets_at(root, commit)? {
+        let Some(Measure::Pinned(guest)) = measure_of(&budget.key) else {
+            continue;
+        };
+        let pin = guest.pin();
+        let text = base::git_text(root, &["show", &format!("{commit}:{pin}")]).map_err(|_| {
+            Problem(format!(
+                "`{}` needs {pin}, which {commit} lacks",
+                budget.key
+            ))
+        })?;
+        let digest = match toml::document(&text)
+            .map_err(|e| Problem(format!("{pin}: {e}")))?
+            .get("sha256")
+        {
+            Some(Value::Str(digest)) => digest.clone(),
+            _ => return Err(Problem(format!("{pin} has no `sha256`"))),
+        };
+        let copy = root.join(guest.copy(&digest));
+        if !copy.is_file() || sha256(&copy)? != digest {
+            return Err(Problem(format!(
+                "`{}` is the size of the file that {pin} pins, and {} isn't that file. The T1 tests fetch it",
+                budget.key,
+                copy.display()
+            )));
+        }
+        sizes.insert(budget.key, size(&copy)?);
+    }
+    Ok(sizes)
 }
 
 /// How many budgets with a target meet it, and how many have one. A budget
@@ -493,7 +567,7 @@ fn measure(
                     idle_once,
                 )?
             }
-            None => continue,
+            Some(Measure::Pinned(_)) | None => continue,
         };
         rows.push(Row {
             key: budget.key.clone(),

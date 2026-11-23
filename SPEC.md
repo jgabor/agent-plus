@@ -1220,6 +1220,13 @@ ENV EDITOR ${EDITOR:-vi}
   is an error. So is a key the adapter sets, such as `CLAUDE_CONFIG_DIR` or the
   certificate variables under [SECRET](#secret), and a name the harness
   reads for sign-in, because only [`AUTH`](#auth) signs the harness in.
+- A name the harness reads only to reach a model through another provider,
+  such as Claude Code's `ANTHROPIC_FOUNDRY_API_KEY`,
+  `AWS_BEARER_TOKEN_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`, isn't one it
+  reads for sign-in, because `AUTH key` and `AUTH token` hold a credential
+  only for the harness's own provider. Claude Code's
+  `ANTHROPIC_CUSTOM_HEADERS` is one, because an `Authorization` or
+  `x-api-key` header in it signs Claude Code in.
 
 ### SECRET
 
@@ -1289,6 +1296,9 @@ Bound hosts:
 - A bound host that is one of the harness's own hosts is an error, and so is
   a `SECRET` that uses a name the harness reads for sign-in. Use
   [`AUTH`](#auth) for those.
+- A name the harness reads only to reach a model through another provider
+  can be a `SECRET`, as it can be an [`ENV`](#env) key, and Claude Code's
+  `ANTHROPIC_CUSTOM_HEADERS` can't.
 
 Injection requires decrypting TLS to the bound hosts (see
 [Enforcement](#network)). The guest trusts a certificate authority

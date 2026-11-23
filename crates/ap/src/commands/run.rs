@@ -529,26 +529,20 @@ pub(super) fn terminal_size() -> Size {
     }
 }
 
-/// Writes the run's output to this process's and to the run's log,
-/// filtered, and hands each `ap exec` what is for it, until the run ends.
-/// Write errors are ignored: a reader that went away, or a full disk,
-/// shouldn't change what the harness does or how it ends.
+/// Writes the run's output, filtered, to the run's log and then to this
+/// process's, as [`show`] does, and hands each `ap exec` what is for it,
+/// until the run ends. Write errors are ignored: a reader that went away,
+/// or a full disk, shouldn't change what the harness does or how it ends.
 fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Result<End> {
     let mut stdout_filter = Filter::default();
     let mut stderr_filter = Filter::default();
     loop {
         match runs::read_from_run(stream)? {
             Some(FromRun::Stdout(bytes)) => {
-                let shown = stdout_filter.push(&bytes);
-                let mut stdout = io::stdout();
-                let _ = stdout.write_all(&shown);
-                let _ = stdout.flush();
-                let _ = runs::write_log(log, false, &shown);
+                show(log, false, &stdout_filter.push(&bytes), &mut io::stdout());
             }
             Some(FromRun::Stderr(bytes)) => {
-                let shown = stderr_filter.push(&bytes);
-                let _ = io::stderr().write_all(&shown);
-                let _ = runs::write_log(log, true, &shown);
+                show(log, true, &stderr_filter.push(&bytes), &mut io::stderr());
             }
             Some(FromRun::ForExec(id, tag, body)) => execs.deliver(id, tag, body),
             Some(FromRun::End(end)) => return Ok(end),
@@ -560,6 +554,14 @@ fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Re
             }
         }
     }
+}
+
+/// Writes output to the run's log, then shows it on `terminal`, so that
+/// `ap logs` has all you saw. Errors are ignored, as [`relay`] says.
+fn show(log: &mut impl Write, stderr: bool, shown: &[u8], terminal: &mut impl Write) {
+    let _ = runs::write_log(log, stderr, shown);
+    let _ = terminal.write_all(shown);
+    let _ = terminal.flush();
 }
 
 /// A share of a run, opened: its root, as [`share::Root`] has it, and the
@@ -1167,5 +1169,70 @@ fn guest_path(path: &str) -> String {
         HOME.to_owned()
     } else {
         format!("{HOME}/{path}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+
+    /// A log that a terminal can look at.
+    struct Log(Rc<RefCell<Vec<u8>>>);
+
+    impl Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.borrow_mut().write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A terminal that, at each write, keeps what the log held then.
+    struct Terminal {
+        log: Rc<RefCell<Vec<u8>>>,
+        logged: Vec<Vec<u8>>,
+    }
+
+    impl Write for Terminal {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.logged.push(self.log.borrow().clone());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // spec(ap logs): It prints the run's output from its start, for an active run up to that moment, and exits 0.
+    #[test]
+    fn output_reaches_the_log_before_your_terminal() {
+        let written = Rc::new(RefCell::new(Vec::new()));
+        let mut log = Log(Rc::clone(&written));
+        for stderr in [false, true] {
+            let mut terminal = Terminal {
+                log: Rc::clone(&written),
+                logged: Vec::new(),
+            };
+            show(&mut log, stderr, b"shown\n", &mut terminal);
+            assert_eq!(terminal.logged, [written.borrow().clone()]);
+            let mut logged = &written.borrow()[..];
+            let mut last = None;
+            while let Some(part) = runs::read_log(&mut logged).unwrap() {
+                last = Some(part);
+            }
+            let shown = b"shown\n".to_vec();
+            let expected = if stderr {
+                runs::Logged::Stderr(shown)
+            } else {
+                runs::Logged::Stdout(shown)
+            };
+            assert_eq!(last, Some(expected));
+        }
     }
 }

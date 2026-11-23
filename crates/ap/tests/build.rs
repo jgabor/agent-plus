@@ -2040,7 +2040,7 @@ fn a_secret_cannot_bind_a_harness_host_or_use_a_sign_in_name() {
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
-// spec(ENV): `ap` sets `HOME`, `USER`, and `LOGNAME` for every run, as [Run](#run) says, so a key that names one of them is an error too.
+// spec(ENV): `ap` sets `HOME`, `USER`, and `LOGNAME` for every run, so a key that names one of them is an error too.
 #[test]
 fn env_cannot_set_what_every_run_sets() {
     let scratch = Scratch::new("env-run-set");

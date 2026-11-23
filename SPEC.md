@@ -1229,8 +1229,8 @@ ENV EDITOR ${EDITOR:-vi}
   is an error. So is a key the adapter sets, such as `CLAUDE_CONFIG_DIR` or the
   certificate variables under [SECRET](#secret), and a name the harness
   reads for sign-in, because only [`AUTH`](#auth) signs the harness in.
-- `ap` sets `HOME`, `USER`, and `LOGNAME` for every run, as [Run](#run)
-  says, so a key that names one of them is an error too.
+- `ap` sets `HOME`, `USER`, and `LOGNAME` for every run, so a key that
+  names one of them is an error too.
 - A name the harness reads only to reach a model through another provider,
   such as Claude Code's `ANTHROPIC_FOUNDRY_API_KEY`,
   `AWS_BEARER_TOKEN_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`, isn't one it

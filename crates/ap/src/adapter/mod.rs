@@ -18,7 +18,8 @@ pub const CERTIFICATES: [&str; 5] = [
     "GIT_SSL_CAINFO",
 ];
 
-/// The variables `ap` sets for every run, from SPEC.md's Run section.
+/// The variables `ap` sets for every run, after `ENV`, from SPEC.md's ENV
+/// section.
 pub const RUN: [&str; 3] = ["HOME", "USER", "LOGNAME"];
 
 /// What the adapter for `harness` keeps for itself: the variables `ap` and

@@ -118,6 +118,7 @@ the parent's plan. Don't fix it in this PR.
 | `in-progress` | An agent holds the issue |
 | `land-needed` | The issue's PR is ready for a person to merge |
 | `answer-needed` | The issue is waiting for an answer |
+| `host:macos` | The issue has to start on a Mac. The owner adds it, and the worker on the Mac removes it when it hands the issue to Linux |
 
 ### Claiming work
 
@@ -128,6 +129,7 @@ You can claim an issue when all of these are true:
   unless its lease has expired and its branch has had no commits since
 - nothing in its `Blocked by` line is still open
 - its `Touches` doesn't overlap an issue that is in progress
+- it has `host:macos` if you run on a Mac, and doesn't if you run on Linux
 
 To claim one, add `in-progress` and post a status comment. If earlier work
 left a status comment that is parked or has an expired lease, edit that one
@@ -222,6 +224,12 @@ reproduction, or a transcript of a run. "Tests pass" isn't proof of a behavior.
 - For a feature, cite the SPEC sentence, and show its check failing before the
   change.
 - Say what you couldn't check.
+- A Mac can't run the gate, so a worker there opens the PR with its proof and
+  its review, and hands the issue to Linux. The worker on Linux can't observe
+  the Mac, so it keeps the Mac's proof for the commit it names, and proves
+  the rest itself. If it changed nothing but the base, and the rebase needed
+  no change to the PR's own lines, the Mac's review stands. Anything else it
+  changes gets its own review, and if only a Mac can prove it, park.
 - Never weaken, skip, or delete a check to get to green. A flaky test gets
   fixed, not retried.
 
@@ -291,7 +299,7 @@ read-only. In T3 Code, use `delegate_task` with a review role.
 
 All of these must be true on the latest commit:
 
-- Your proof covers every change in the diff.
+- Your proof, or a Mac's, covers every change in the diff.
 - `cargo xtask merge` or `cargo xtask prepare` passes, which is what turns the
   `xtask/gate` status green.
 - No hill went down unless the owner accepts it by merging, no floor broke, and

@@ -6,9 +6,11 @@ you run, so never ask a question.
 
 Worker model: `claude-opus-5-5`, at effort `high`
 
-1. Run `df --output=avail -BG .`. If it shows less than 50G, say so and stop.
-2. Run `cargo xtask next`, which prints a JSON array. If it exits with an
-   error, report the error and stop. If the array is empty, say so and stop.
+1. Run `df -Pk .`, which works on Linux and on a Mac. If its `Available`
+   column shows less than 52428800, which is 50 GiB in KiB, say so and stop.
+2. Run `cargo xtask next`, which prints a JSON array. It names only the
+   issues that start on this machine. If it exits with an error, report the
+   error and stop. If the array is empty, say so and stop.
 3. Load `mcp__t3-code__t3_thread_launch` with ToolSearch.
 4. For each entry, launch one thread with only the fields below. Leaving out
    the others makes the thread inherit this project and this runtime mode.

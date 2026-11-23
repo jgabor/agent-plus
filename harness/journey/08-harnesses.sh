@@ -122,8 +122,9 @@ build codex codex:latest
 # loaded machine. A traced start kept making progress the whole time, with
 # no wait on the network. The deadline is far past that, because Claude Code
 # exits as soon as it has reported, so a slow start costs only its own time.
-# Claude Code prints nothing until then, so a probe that times out leaves an
-# empty report. A failed check says how the probe ended, and after how long.
+# Claude Code prints nothing before its `init` event, so a probe that times
+# out leaves an empty report. A failed check says how the probe ended, and
+# after how long.
 start claude
 in_home "$run"
 begun=$(date +%s)

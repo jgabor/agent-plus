@@ -155,9 +155,11 @@ impl Network {
     /// doesn't answer it. A host whose traffic the proxy reads never counts,
     /// because it denies some of that traffic: a host with a URL rule, and a
     /// host under a `+` rule with a narrower `-` rule. Neither do your host,
-    /// an address, and an empty name.
+    /// an address, and an empty name. A name is in any case, with or without
+    /// a final dot.
     pub fn allows(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
+        let host = host.strip_suffix('.').unwrap_or(&host).to_string();
         let under = |host: &str, name: &str| {
             host.strip_suffix(name)
                 .is_some_and(|start| start.ends_with('.'))

@@ -142,4 +142,16 @@ fn allows_never_counts_your_host_or_an_address() {
     assert!(!network.allows("host.ap.internal"));
     assert!(!network.allows("1.2.3.4"));
     assert!(!network.allows(""));
+    assert!(!network.allows("."));
+    assert!(!network.allows("host.ap.internal."));
+}
+
+// spec(NETWORK): Names match in any case, with or without a final dot.
+#[test]
+fn allows_reads_a_name_with_or_without_a_final_dot() {
+    let lines = "AGENT claude\nNETWORK +\nNETWORK -kagi.com\nNETWORK -https://kagi.org/x\n";
+    let network = Network::read(&parse(lines).unwrap()).unwrap();
+    assert!(network.allows("Example.com."));
+    assert!(!network.allows("Kagi.com."));
+    assert!(!network.allows("kagi.org."));
 }

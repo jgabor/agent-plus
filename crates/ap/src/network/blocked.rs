@@ -407,6 +407,11 @@ mod tests {
             ["192.0.2.0", "NETWORK", "+192.0.2.0"]
         );
         assert_eq!(lines[101], "  and others, left out past the first 100");
+        let hosts: HashSet<&str> = lines[1..101]
+            .iter()
+            .filter_map(|line| line.split_whitespace().next())
+            .collect();
+        assert_eq!(hosts.len(), 100, "{text}");
     }
 
     #[test]

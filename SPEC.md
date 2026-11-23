@@ -1982,6 +1982,8 @@ allow one.
 - **UDP** follows the same rules, with names attributed through the
   resolver. QUIC to a host that needs decrypting is blocked, so clients
   fall back to TCP. UDP port 443 is denied to a host the proxy decrypts.
+  A UDP flow closes after 60 seconds with no datagram either way, as it
+  would behind a NAT, and a reply that comes later is dropped.
 - **ICMP** isn't carried, so `ping` gets no reply.
 - **Connections at once.** The guest can have at most 64 TCP connections
   that it has started but not finished opening, and a SYN past that is

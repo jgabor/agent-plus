@@ -70,9 +70,9 @@ edit those issues.
    ```
    ````
 
-   The paths go in backticks, separated by commas. They are the files that
-   the quoted lines name, without line numbers. If those lines name none,
-   use the failing step's own code:
+   The paths go in backticks, separated by commas. They are the files in
+   this repository that the quoted lines name, without line numbers. If those
+   lines name none, use the failing step's own code:
 
    | Step | Path |
    |---|---|

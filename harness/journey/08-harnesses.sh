@@ -117,7 +117,9 @@ build claude claude:stable
 build codex codex:latest
 
 # Claude Code reports its `init` event before it needs a sign-in. With no
-# credentials, it exits after that, so the probe needs no input. It prints
+# credentials, it exits 1 after that, so the probe needs no input. Any other
+# status fails the step, such as the 125 of an `ap exec` whose run ended
+# before the command did. It prints
 # the event only once its start is done, which took 38 to 132 seconds on a
 # loaded machine. A traced start kept making progress the whole time, with
 # no wait on the network. The deadline is far past that, because Claude Code
@@ -141,6 +143,11 @@ says claude.init '"subtype":"init"' "$ended"
 says claude.init '"cwd":"/home/agent"' "$ended"
 says claude.init '"mcp_servers":' "$ended"
 says claude.init '"slash_commands":' "$ended"
+if [ "$status" -ne 1 ]; then
+  echo "Claude Code exits 1 with no credentials, but $ended:" >&2
+  cat claude.init >&2
+  exit 1
+fi
 timeout -k 5 30 ap stop "$run"
 
 # Codex reports through its app-server. The probe starts it in the run with

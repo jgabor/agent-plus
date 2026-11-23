@@ -614,13 +614,22 @@ checkout to `origin/main`, then follows its brief in `harness/tasks/`.
 Runs every dispatch period.
 
 1. Stop if free disk is below the minimum.
-2. Run `cargo xtask next`.
-3. For each entry, start one worker with a brief naming the issue: in a new
+2. Stop if the worker's harness is blocked by a usage limit.
+3. Run `cargo xtask next`.
+4. For each entry, start one worker with a brief naming the issue: in a new
    worktree on its `branch`, or from `origin/main` if it has none. A clean
    `worktree` is removed first. One with changes is reused as it is.
 
 Dispatch is idempotent, because all state is on GitHub. A worker that loses a
 claim race exits.
+
+The dispatcher learns whether a harness is blocked from `to11y
+rate_limit_status`, which reads its limits from the sign-in it already has. A
+harness is blocked when the scope its model draws on is. A command needs no
+MCP setup in the session that runs it, and it shows in the transcript. `to11y`
+runs only on Linux. When it is missing or fails, and on a Mac, the dispatcher
+goes on, and a worker started against a limit stops at its first turn, as
+before.
 
 A Mac runs a dispatcher of its own, with the same brief. `next` there names
 only issues with `host:macos`, against the Mac's own worker slots, and `next`
@@ -694,7 +703,8 @@ a parent is the owner's.
 6. If a floor failed, or no count rose and the PR has no `Hill: none` line,
    revert and try again, within the attempt limit. Past the limit, park the
    issue.
-7. Get a review, within the round limit.
+7. Get a review, within the round limit, from the first reviewer that isn't
+   blocked.
 8. Open the PR, and wait for checks and reviews.
 9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
 
@@ -708,7 +718,11 @@ the gate on Linux decides a merge, so no merge slot spans machines.
 
 Model selection escalates in a fixed order: improve the brief, raise the
 effort, then change the model. Reviewers use a different provider from the
-worker when one is available.
+worker when one is available. Before it asks a reviewer, a worker on Linux
+checks that reviewer's scope with `to11y rate_limit_status`, as the
+dispatcher does, and skips it while it is blocked. The PR names a skipped
+reviewer, and nothing else from `to11y`, so no usage figure, plan, or reset
+time reaches GitHub.
 
 ### Merge sequence
 
@@ -1086,7 +1100,7 @@ start to fail on timing, lower the worker slots on Linux to 4.
 |---|---|---|
 | Session lost or context compacted | Status comment and branch | The next agent resumes from them |
 | Host reboot | Expired lease | Dispatch starts a new worker |
-| Usage limit | Harness error | The worker updates its status and stops. Dispatch retries after the reset |
+| Usage limit | `to11y`, or a harness error | Dispatch starts no worker while the worker's harness is blocked, and a worker skips a blocked reviewer. A worker that hits a limit updates its status and stops. Dispatch retries after the reset |
 | GitHub rate limit | API error | Fall back to REST, and wait for the reset |
 | No progress | Attempt or time limit | The worker parks the issue |
 | PR growth | Review round limit | Extra work becomes new issues |

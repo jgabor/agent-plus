@@ -28,22 +28,39 @@ can't continue alone, park the issue as AGENTS.md says.
    with `role` set to `review`, `mode` set to `wait`, and `timeoutMs` set to
    600000. Ask it to confirm that no decision a user could observe is left
    only in the PR body. Give it a `target`, using the first of these that
-   works, and say in the PR which one ran:
+   isn't blocked and works, and say in the PR which one ran. Each names the
+   `to11y` harness and the scope its model draws on:
+
+   Droid, harness `droid`, scope `standard`:
 
    ```json
    {"providerInstanceId": "acpRegistry_factory_droid", "model": "gemini-4-neon",
     "options": {"reasoning_effort": "high"}}
    ```
 
+   Antigravity, harness `antigravity`, scope `gemini`:
+
    ```json
    {"providerInstanceId": "antigravity", "model": "gemini-4-neon",
     "options": {"thought_level": "high"}}
    ```
 
+   Claude Code, harness `claude-code`, scope `all`:
+
    ```json
    {"providerInstanceId": "claudeAgent", "model": "claude-opus-5-5",
     "options": {"effort": "high"}}
    ```
+
+   On Linux, before you ask a target, run `to11y rate_limit_status --harness
+   <harness>`. If it exits 0, and the entry in `scopes` whose `scope` is the
+   target's has `"blocked": true`, skip that target and go on to the next.
+   If `to11y` isn't on `PATH`, or exits with any other status, ask the target
+   as you would without it. On a Mac, don't run it. If every target is
+   blocked, update your status comment and stop, as for a usage limit. Say in
+   the PR which targets you skipped as blocked, and nothing else from
+   `to11y`'s output. No usage figure, plan, or reset time goes into an issue,
+   a PR, or a status comment.
 
    If T3 Code rejects a target's options, load
    `mcp__t3-code__orchestrator_capabilities`, and call it with `search` set to

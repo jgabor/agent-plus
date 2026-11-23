@@ -10,6 +10,7 @@ agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 git = { path = "../git" }
 httparse = { version = "1", default-features = false }
+iri-string = { version = "0.7", default-features = false, features = ["alloc"] }
 net = { path = "../net" }
 netstack = { path = "../netstack" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

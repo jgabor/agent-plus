@@ -702,10 +702,12 @@ fn net_input(input: &str) -> usize {
             port,
             request: request.map(|(scheme, target)| net::Request { scheme, target }),
         };
-        if let Some((_, target)) = request
-            && let Some(normal) = net::normalize_path(target)
-        {
-            assert_eq!(net::normalize_path(&normal).as_ref(), Some(&normal));
+        if let Some((_, target)) = request {
+            let path = target.split(['?', '#']).next().unwrap_or_default();
+            same_path(path, net::normalize_path(path).as_deref());
+            if let Some(normal) = net::normalize_path(target) {
+                assert_eq!(net::normalize_path(&normal).as_ref(), Some(&normal));
+            }
         }
         let decision = net::decide(&network.rules, network.default, &connection);
         match decision.by {
@@ -724,6 +726,28 @@ fn net_input(input: &str) -> usize {
         decided += 1;
     }
     decided
+}
+
+/// A path normalizes as iri-string normalizes the path of
+/// `http://h<path>`, and one that only a broken escape keeps from being a
+/// URI's path has no normal form. Only an empty path or one that starts with
+/// `/` is the whole path of such a URI.
+fn same_path(path: &str, ours: Option<&str>) {
+    if !path.is_empty() && !path.starts_with('/') {
+        return;
+    }
+    let uri = format!("http://h{path}");
+    let theirs = iri_string::types::UriStr::new(&uri)
+        .ok()
+        .map(|uri| uri.normalize().to_string()["http://h".len()..].to_string());
+    // RFC 3986 section 3.3 allows these, `/`, and escapes in a path.
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/%".contains(&b);
+    if theirs.is_some() || path.bytes().all(allowed) {
+        assert!(
+            ours == theirs.as_deref(),
+            "{path:?}: crates/net {ours:?}, iri-string {theirs:?}"
+        );
+    }
 }
 
 /// The blob `a\n`, which every ref in the git target's corpus names.
@@ -1637,6 +1661,46 @@ mod tests {
     #[should_panic(expected = "differ from git's")]
     fn a_hunk_git_prints_differently_is_found() {
         same_hunks("planted", b"@@ -1 +1 @@\n-a\n+b\n", b"");
+    }
+
+    #[test]
+    fn the_net_corpus_is_decided() {
+        let corpus = TARGETS.iter().find(|t| t.name == "net").unwrap().corpus;
+        assert_eq!(net_input(corpus[0]), 0);
+        assert_eq!(net_input(corpus[1]), 3);
+        assert_eq!(net_input(corpus[2]), 3);
+    }
+
+    #[test]
+    fn paths_normalize_as_iri_string_normalizes_them() {
+        for path in [
+            "",
+            "/",
+            "/a/./b/../c",
+            "/./b/../b/%63/%7bfoo%7d",
+            "/a/.%2E/%2e%2e/b",
+            "//x/../y",
+            "/a//b/..",
+            "/%41%2f%e2%82%ac",
+            "/a b",
+            "/é",
+            "/%",
+            "/%zz",
+        ] {
+            same_path(path, net::normalize_path(path).as_deref());
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "iri-string")]
+    fn a_path_normalized_differently_is_found() {
+        same_path("/a/../b", Some("/a/b"));
+    }
+
+    #[test]
+    #[should_panic(expected = "iri-string")]
+    fn a_broken_escape_with_a_normal_form_is_found() {
+        same_path("/a%zz", Some("/a%zz"));
     }
 
     #[test]

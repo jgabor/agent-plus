@@ -174,7 +174,14 @@ fn t2(root: &Path) -> &'static str {
 /// release.
 fn release(root: &Path) -> &'static str {
     let args = [
-        "test", "--locked", "--package", "t1", "--test", "fetch", "--", "--ignored",
+        "test",
+        "--locked",
+        "--package",
+        "t1",
+        "--test",
+        "fetch",
+        "--",
+        "--ignored",
     ];
     let passed = gate::cargo_passes(root, &args);
     state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))

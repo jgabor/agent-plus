@@ -31,6 +31,7 @@
 
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
+use std::ops::Deref;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -106,6 +107,28 @@ pub fn random_name() -> io::Result<String> {
 /// opened. It is one write, so a reader sees the whole line or none of it.
 pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
     held.write_all(format!("EXITED {status}\n").as_bytes())
+}
+
+/// The lock on a run's record, which [`Runs::hold`] takes. The run is active
+/// until this drops.
+#[derive(Debug)]
+pub struct Held(File);
+
+impl Deref for Held {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        // Closing the file isn't enough: a child that another thread forked
+        // has a copy of it until its exec, and that copy holds the lock as
+        // well. Unlocking releases it for every copy.
+        let _ = self.0.unlock();
+    }
 }
 
 /// The runs in a store. Creating one touches nothing.
@@ -367,9 +390,9 @@ impl Runs {
     }
 
     /// Takes the exclusive lock on the record of the run with this name,
-    /// which marks the run active until the returned file closes. The file
+    /// which marks the run active until the returned hold drops. Its file
     /// can add to the record, as [`record_exit`] does.
-    pub fn hold(&self, name: &str) -> io::Result<File> {
+    pub fn hold(&self, name: &str) -> io::Result<Held> {
         check_run_name(name)?;
         let file = OpenOptions::new()
             .read(true)
@@ -383,7 +406,7 @@ impl Runs {
             })?;
         file.lock()
             .map_err(|error| io::Error::new(error.kind(), format!("run {name}: {error}")))?;
-        Ok(file)
+        Ok(Held(file))
     }
 
     /// Whether the run with this name is active: whether a process holds the

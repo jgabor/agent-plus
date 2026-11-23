@@ -851,10 +851,7 @@ fn discard_throws_the_changes_away_but_not_while_the_run_is_active() {
     );
     assert!(scratch.runs().has_pending(&run).unwrap());
 
-    // The run ends. Dropping the file isn't enough: a child that another
-    // test forked has a copy of it until its exec, and that copy holds the
-    // lock as well. Unlocking releases it for every copy.
-    held.unlock().unwrap();
+    drop(held);
     let output = scratch.ap(&["discard", &run]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));

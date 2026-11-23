@@ -52,6 +52,19 @@ fn a_run_is_active_while_its_record_is_locked() {
 }
 
 #[test]
+fn a_run_ends_when_its_hold_drops_though_a_copy_of_the_file_is_open() {
+    let runs = Runs::new(store_root("copied"));
+    let run = runs.create("notes", 1).unwrap();
+    let held = runs.hold(&run.name).unwrap();
+    // A child that another thread forked has a copy of the file until its
+    // exec, and the copy shares the lock, as this one does.
+    let copy = held.try_clone().unwrap();
+    drop(held);
+    assert!(!runs.active(&run.name).unwrap());
+    drop(copy);
+}
+
+#[test]
 fn a_run_keeps_its_status_and_log_until_it_is_removed() {
     let root = store_root("kept");
     let runs = Runs::new(&root);

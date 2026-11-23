@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WORKER_SLOTS: usize = 3;
+const WORKER_SLOTS: usize = 5;
 const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
 /// What parks an issue: a PR ready to merge, or a question waiting for an answer.

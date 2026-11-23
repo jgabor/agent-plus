@@ -41,7 +41,7 @@ Draft model: `claude-fable-5-2`, at effort `high`
    Go on when it returns, or when it times out.
 4. Run `cargo xtask next` and count its entries. Then count the issues in
    progress with `gh issue list --state open --label in-progress --json number
-   --jq length`. If the two counts add up to 3 or more, say so and stop.
+   --jq length`. If the two counts add up to 5 or more, say so and stop.
 5. Find the parent: the open issue that has an `auto:*` label, no
    `answer-needed` label, and a line in its body that reads `Milestone:
    <name>.`, with your milestone's name. Search with `gh issue list --state
@@ -99,9 +99,10 @@ Draft model: `claude-fable-5-2`, at effort `high`
      -F sub_issue_id="$(gh api 'repos/{owner}/{repo}/issues/<n>' --jq .id)" &&
      gh issue edit <n> --add-label <the parent's auto:* label>
    ```
-9. File or adopt at most 3 minus the larger of the sum from step 4 and the
-   count from step 6. File each new one as a sub-issue of the parent, with
-   `gh issue create --parent <parent>`. Follow Issues in AGENTS.md:
+9. File or adopt at most the smaller of 5 minus the sum from step 4, and 3
+   minus the count from step 6. File each new one as a sub-issue of the
+   parent, with `gh issue create --parent <parent>`. Follow Issues in
+   AGENTS.md:
    - One issue is one problem and one PR.
    - `Definition of done` names the journey step, the budget, or the exact SPEC
      sentences that prove it.

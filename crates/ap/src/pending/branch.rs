@@ -243,8 +243,8 @@ impl<'a> Agent<'a> {
     fn holds_ignored(&self, ignore: &Gitignore, path: &[u8], tree: Id) -> Result<bool, git::Error> {
         for entry in self.object(&tree)?.entries()? {
             let inner = beneath(path, &entry.name);
-            let dir = matches!(entry.mode, TREE | GITLINK);
-            if ignore.is_ignored(bytes_path(&inner), dir) {
+            // As `verdict` and `left_at` read it, a submodule is a file.
+            if ignore.is_ignored(bytes_path(&inner), entry.mode == TREE) {
                 return Ok(true);
             }
             if entry.mode == TREE && self.holds_ignored(ignore, &inner, entry.id)? {
@@ -316,7 +316,10 @@ impl<'a> Agent<'a> {
                 View::Agent(Entry::Dir { .. }) => true,
                 View::Yours => recorded || head_tree,
                 View::Absent => head_tree,
-                View::Agent(_) => false,
+                // The agent's file doesn't land where it would replace a
+                // directory with a git-ignored file in it, so the directory
+                // is as if the agent deleted it.
+                View::Agent(_) => self.replacing.contains(path),
             };
         if !dir {
             let there = match view {

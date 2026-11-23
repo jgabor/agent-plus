@@ -531,7 +531,8 @@ fn the_first_line_says_how_many_commits_the_branch_would_carry() {
 
 /// A file the agent wrote in place of a directory its `HEAD` holds with a
 /// git-ignored file in it, which `ap apply` skips, gets a line instead of
-/// a diff.
+/// a diff. The file it deleted beside the ignored one is shown deleted, as
+/// it is from the last commit.
 // spec(SHARE): So does a file that `ap apply` would skip, other than a git-ignored one, and the line says why.
 #[test]
 fn a_file_in_place_of_a_directory_with_an_ignored_file_gets_a_line() {
@@ -540,12 +541,14 @@ fn a_file_in_place_of_a_directory_with_an_ignored_file_gets_a_line() {
     repo::run(share, &["init", "-q"]);
     fs::write(share.join(".gitignore"), "*.log\n").unwrap();
     fs::create_dir(share.join("logs")).unwrap();
-    fs::write(share.join("logs/debug.log"), "noise\n").unwrap();
-    repo::run(share, &["add", "-f", "logs/debug.log"]);
+    for file in ["logs/debug.log", "logs/README"] {
+        fs::write(share.join(file), "noise\n").unwrap();
+        repo::run(share, &["add", "-f", file]);
+    }
     repo::run(share, &["commit", "-q", "-m", "logs"]);
     let (run, pending) = scratch.run("notes", 1);
     repo::capture(share, &pending);
-    for path in ["logs/debug.log", "logs"] {
+    for path in ["logs/debug.log", "logs/README", "logs"] {
         record(&pending, &base(share, path));
         record(&pending, &format!("DELETE \"{path}\""));
     }
@@ -559,7 +562,52 @@ fn a_file_in_place_of_a_directory_with_an_ignored_file_gets_a_line() {
         format!(
             "branch ap/notes/{run} would carry 0 commits\n\
              skipped logs: it would replace a directory that holds a git-ignored file\n\
+             diff --git a/logs/README b/logs/README\n\
+             deleted file mode 100644\n\
+             --- a/logs/README\n\
+             +++ /dev/null\n\
+             @@ -1 +0,0 @@\n\
+             -noise\n\
              skipped 1 git-ignored file\n"
+        )
+    );
+}
+
+/// A commit of yours that the agent's history names, whose tree `ap diff`
+/// can't read, because the agent wrote other contents under its name, is
+/// history that can't be read, said on the first line.
+// spec(SHARE): If `ap` can't read the agent's history, the line says why instead.
+#[test]
+fn a_tree_that_can_t_be_read_is_said_on_the_first_line() {
+    let scratch = Scratch::new("tree-unread");
+    let share = &scratch.share;
+    repo::run(share, &["init", "-q"]);
+    let start = repo::commit(share, "README", "hello\n", "start");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::capture(share, &pending);
+    let other = scratch.root.join("other");
+    repo::run(&scratch.root, &["init", "-q", "other"]);
+    let mut hash = repo::git(&other);
+    hash.args(["hash-object", "-w", "--stdin"]);
+    let mut child = (hash.stdin(Stdio::piped()).stdout(Stdio::piped()))
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"other\n").unwrap();
+    let blob = String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap();
+    let loose = |id: &str| format!("objects/{}/{}", &id[..2], &id[2..]);
+    let data = fs::read(other.join(".git").join(loose(blob.trim()))).unwrap();
+    write(&pending, &format!(".git/{}", loose(&start)), 0o444, &data);
+    write(&pending, "notes", 0o644, b"notes\n");
+
+    let output = scratch.ap(&["diff", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let shown = stdout(&output);
+    let first = shown.lines().next().unwrap();
+    assert_eq!(
+        first,
+        format!(
+            "branch ap/notes/{run}: its commits can't be counted: the agent's object {start} doesn't hold what its name says"
         )
     );
 }

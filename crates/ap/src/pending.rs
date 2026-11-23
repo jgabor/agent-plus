@@ -861,7 +861,7 @@ impl Share<'_> {
             _ => Gitignore::default(),
         };
         let repository = host.stat(b".git")?.is_some_and(|m| m.is_dir());
-        let commits = match repository {
+        let mut commits = match repository {
             true => match self.commits(&records) {
                 Ok(commits) => Some(Ok(commits)),
                 Err(git::Error::Io(error)) => return Err(error),
@@ -874,7 +874,12 @@ impl Share<'_> {
             true => match self.replacing(&records, &ignore) {
                 Ok(replacing) => Some(replacing),
                 Err(git::Error::Io(error)) => return Err(error),
-                Err(git::Error::Corrupt(_)) => Some(BTreeSet::new()),
+                Err(git::Error::Corrupt(why)) => {
+                    if let Some(Ok(_)) = commits {
+                        commits = Some(Err(branch::printable(&why)));
+                    }
+                    Some(BTreeSet::new())
+                }
             },
             false => None,
         };

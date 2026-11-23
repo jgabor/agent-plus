@@ -1585,8 +1585,9 @@ attributes, because those can run commands.
     change you made to it during the run is left out.
   - Where the agent's `HEAD` holds a directory with a git-ignored file in
     it, and the agent wrote a file or symlink in its place, `ap apply`
-    skips that file and says why. The directory is in the last commit as
-    that `HEAD` holds it.
+    skips that file and says why. The last commit holds the directory as
+    if the agent had deleted it, so its git-ignored files are as that
+    `HEAD` holds them.
   - With no `git` on your host, `ap apply` fails the branch import, says
     so, and everything stays pending.
   - `ap apply` refuses a branch import into a repository whose object

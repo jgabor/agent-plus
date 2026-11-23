@@ -319,8 +319,14 @@ fn request(
             let mut headers = [httparse::EMPTY_HEADER; HEADERS];
             match httparse::parse_headers(held, &mut headers).map_err(|_| Refused)? {
                 httparse::Status::Partial => short(),
+                // httparse ends a line at a bare LF too, and a server that
+                // doesn't reads the trailers another way.
                 httparse::Status::Complete((taken, _)) => {
-                    Ok(Some((taken, State::Http(Http::Head))))
+                    let mut lines = held[..taken].split_inclusive(|&byte| byte == b'\n');
+                    match lines.all(|line| line.ends_with(b"\r\n")) {
+                        true => Ok(Some((taken, State::Http(Http::Head)))),
+                        false => Err(Refused),
+                    }
                 }
             }
         }

@@ -592,16 +592,10 @@ fn name_check_input(input: &str) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut request = httparse::Request::new(&mut headers);
     if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes) {
-        let agrees = |header: &httparse::Header| {
-            let value = header.value.trim_ascii().to_ascii_lowercase();
-            let colon = value.iter().rposition(|&byte| byte == b':');
-            let name = &value[..colon.unwrap_or(value.len())];
-            name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
-        };
         let hosts: Vec<_> = (request.headers.iter())
             .filter(|header| header.name.eq_ignore_ascii_case("host"))
             .collect();
-        if !matches!(hosts[..], [host] if agrees(host)) {
+        if !matches!(hosts[..], [host] if names_host(host.value)) {
             assert!(
                 whole.0.len() < head,
                 "a head for another host passed: {:?}",
@@ -612,6 +606,14 @@ fn name_check_input(input: &str) -> bool {
     // hyper, as a server would, reads every request that passed.
     same_requests(&whole.0, &checked_requests(&whole.0));
     whole.1 && whole.0 == bytes
+}
+
+/// Whether a `Host` header's value names `host.ap.internal`.
+fn names_host(value: &[u8]) -> bool {
+    let value = value.trim_ascii().to_ascii_lowercase();
+    let colon = value.iter().rposition(|&byte| byte == b':');
+    let name = &value[..colon.unwrap_or(value.len())];
+    name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
 }
 
 /// A request that a reader took from a stream: the offset just after its
@@ -631,8 +633,7 @@ fn checked_requests(passed: &[u8]) -> Vec<Framed> {
     let mut requests = Vec::new();
     let mut start = 0;
     for end in 1..=passed.len() {
-        let any_host = &mut |_: &str| true;
-        if (check.feed_deciding(&passed[end - 1..end], &mut Vec::new(), any_host)).is_err() {
+        if check.feed(&passed[end - 1..end], &mut Vec::new()).is_err() {
             break;
         }
         if check.holding() {
@@ -655,14 +656,17 @@ fn checked_requests(passed: &[u8]) -> Vec<Framed> {
 }
 
 /// Panics unless hyper's HTTP/1.1 server, reading `passed` one byte at a
-/// time, reads the same requests as `ours`, up to where it stops reading.
+/// time, reads the same requests as `ours`, up to where it stops reading,
+/// and each names `host.ap.internal`.
 fn same_requests(passed: &[u8], ours: &[Framed]) {
     let (theirs, stop) = served_requests(passed);
     let read = (ours.iter())
         .take_while(|request| stop.is_none_or(|stop| request.end < stop))
         .count();
+    let named = (theirs.iter())
+        .all(|request| matches!(&request.hosts[..], [host] if names_host(host.as_bytes())));
     assert!(
-        ours.starts_with(&theirs) && theirs.len() >= read,
+        ours.starts_with(&theirs) && theirs.len() >= read && named,
         "{}: crates/net {ours:?}, hyper {theirs:?}, which stopped at {stop:?}",
         passed.escape_ascii(),
     );
@@ -1935,6 +1939,38 @@ mod tests {
         assert_eq!(ours.len(), 1);
         ours[0].hosts = vec!["g".to_owned()];
         same_requests(passed, &ours);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_hyper_has_not_finished_is_found() {
+        let passed = b"POST / HTTP/1.1\r\nHost: host.ap.internal\r\nContent-Length: 3\r\n\r\nab";
+        let mut ours = checked_requests(passed);
+        assert_eq!(ours, []);
+        let hosts = vec!["host.ap.internal".to_owned()];
+        let method = "POST".to_owned();
+        ours.push(Framed {
+            end: passed.len(),
+            method,
+            hosts,
+        });
+        same_requests(passed, &ours);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_for_another_host_that_both_read_is_found() {
+        let passed = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let hosts = vec!["example.com".to_owned()];
+        let method = "GET".to_owned();
+        same_requests(
+            passed,
+            &[Framed {
+                end: passed.len(),
+                method,
+                hosts,
+            }],
+        );
     }
 
     #[test]

@@ -47,10 +47,11 @@ const HOST: &str = "host.ap.internal";
 /// How long a connection may stay quiet before the upstream drops it.
 const QUIET: Duration = Duration::from_secs(60);
 
-/// The JavaScript the fake model asks Codex's code-mode `exec` tool to run.
-/// It runs a command, which writes `tool-ran` in Codex's working directory.
+/// The JavaScript the fake model asks Codex's code-mode `exec` tool to run,
+/// as a JSON string. It runs a command, which writes `tool-ran` in Codex's
+/// working directory.
 const MODEL_TOOL: &str =
-    r#"text(JSON.stringify(await tools.exec_command({cmd: "echo the tool ran > tool-ran"})));"#;
+    r#""text(JSON.stringify(await tools.exec_command({cmd: \"echo the tool ran > tool-ran\"})));""#;
 
 /// Where each line that reached the upstream is noted.
 type Seen = Arc<Mutex<File>>;
@@ -226,7 +227,7 @@ fn model_answer(body: &[u8]) -> Vec<u8> {
     let item = match answered {
         false => format!(
             r#"{{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","namespace":"functions","name":"exec","status":"completed","input":{}}}"#,
-            json_string(MODEL_TOOL)
+            MODEL_TOOL
         ),
         true => r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}"#.to_string(),
     };
@@ -258,23 +259,6 @@ fn model_answer(body: &[u8]) -> Vec<u8> {
     .into_bytes();
     answer.extend_from_slice(body.as_bytes());
     answer
-}
-
-/// `text` as a JSON string.
-fn json_string(text: &str) -> String {
-    let mut quoted = String::from('"');
-    for character in text.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            character if u32::from(character) < 0x20 => {
-                quoted.push_str(&format!("\\u{:04x}", u32::from(character)));
-            }
-            character => quoted.push(character),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 /// This host's IPv4 address on its route out, which isn't a loopback

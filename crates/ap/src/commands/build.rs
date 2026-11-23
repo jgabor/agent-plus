@@ -27,7 +27,7 @@ use agentfile::{
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
-use ap::lock::{self, Lock, Locked};
+use ap::lock::{self, CodeModeHost, Lock, Locked};
 use ap::paths::HostPath;
 use graviola::hashing::sha2::Sha256Context;
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
@@ -804,7 +804,7 @@ fn harness(locked: &Locked, cache: &Path) -> io::Result<Vec<u8>> {
     let hash = Rc::new(RefCell::new(Sha256Context::new()));
     match locked.harness {
         Harness::Claude => {
-            let file = open_cached(locked, &path)?;
+            let file = open_cached(&format!("`{}`", locked.label()), &path)?;
             let size = file.metadata()?.len();
             let content = Hashing {
                 file,
@@ -817,14 +817,16 @@ fn harness(locked: &Locked, cache: &Path) -> io::Result<Vec<u8>> {
             );
         }
         Harness::Codex => {
-            let (size, content) = unpacked(locked, &path, &locked.sha256)?;
+            let label = format!("`{}`", locked.label());
+            let (size, content) = unpacked(&label, &path, &locked.sha256)?;
             insert(
                 &mut root,
                 &harness_path(locked.harness),
                 executable(size, content),
             );
-            if let Some(host) = &locked.code_mode_host {
-                let (size, content) = unpacked(locked, &cache.join(host), host)?;
+            if let CodeModeHost::Digest(host) = &locked.code_mode_host {
+                let what = format!("the code-mode host of {label}");
+                let (size, content) = unpacked(&what, &cache.join(host), host)?;
                 insert(
                     &mut root,
                     ap::adapter::codex::CODE_MODE_HOST,
@@ -853,9 +855,9 @@ fn executable(size: u64, content: Box<dyn Read>) -> erofs::Node {
     })
 }
 
-/// The file at `path` in the download cache, which `locked` is installed
+/// The file at `path` in the download cache, which `what` is installed
 /// from.
-fn open_cached(locked: &Locked, path: &Path) -> io::Result<fs::File> {
+fn open_cached(what: &str, path: &Path) -> io::Result<fs::File> {
     let shown = path.display();
     // Nonblocking, so that a FIFO fails the check below instead of waiting
     // for a writer. A regular file reads the same either way.
@@ -866,10 +868,7 @@ fn open_cached(locked: &Locked, path: &Path) -> io::Result<fs::File> {
         .map_err(|error| match error.kind() {
             io::ErrorKind::NotFound => io::Error::new(
                 error.kind(),
-                format!(
-                    "`{}` isn't in the download cache at {shown}",
-                    locked.label()
-                ),
+                format!("{what} isn't in the download cache at {shown}"),
             ),
             _ => io::Error::new(error.kind(), format!("{shown}: {error}")),
         })?;
@@ -882,15 +881,15 @@ fn open_cached(locked: &Locked, path: &Path) -> io::Result<fs::File> {
     Ok(file)
 }
 
-/// The size of the binary in the zstd frame at `path`, whose digest must be
-/// `sha256`, and a reader of it. The frame is read whole and checked before
+/// The size of the binary in the zstd frame at `path`, which `what` is
+/// installed from and whose digest must be `sha256`, and a reader of it. The frame is read whole and checked before
 /// it is unpacked, so only the locked file is. Unpacking it once first gives
 /// the binary's size without holding the binary.
-fn unpacked(locked: &Locked, path: &Path, sha256: &str) -> io::Result<(u64, Box<dyn Read>)> {
+fn unpacked(what: &str, path: &Path, sha256: &str) -> io::Result<(u64, Box<dyn Read>)> {
     let hash = Rc::new(RefCell::new(Sha256Context::new()));
     let mut frame = Vec::new();
     Hashing {
-        file: open_cached(locked, path)?,
+        file: open_cached(what, path)?,
         hash: Rc::clone(&hash),
     }
     .read_to_end(&mut frame)?;
@@ -898,11 +897,7 @@ fn unpacked(locked: &Locked, path: &Path, sha256: &str) -> io::Result<(u64, Box<
     let unpacking = |error: io::Error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "{}: unpacking `{}`: {error}",
-                path.display(),
-                locked.label()
-            ),
+            format!("{}: unpacking {what}: {error}", path.display()),
         )
     };
     let mut counting = unzstd(&frame[..]).map_err(unpacking)?;
@@ -962,7 +957,7 @@ fn harness_key(locked: &Locked) -> String {
     hash.update(lock::name(locked.harness).as_bytes());
     hash.update(b"\0");
     hash.update(locked.sha256.as_bytes());
-    if let Some(host) = &locked.code_mode_host {
+    if let CodeModeHost::Digest(host) = &locked.code_mode_host {
         hash.update(b"\0");
         hash.update(host.as_bytes());
     }

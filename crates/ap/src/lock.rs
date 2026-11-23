@@ -6,9 +6,10 @@
 //! ```
 //!
 //! `HARNESS` holds the harness, its exact version, and the SHA-256 digest of
-//! the file it is installed from. For a Codex release that publishes a
-//! code-mode host, it then holds the digest of the host's file. It holds
-//! nothing else yet, so any other line is an error.
+//! the file it is installed from. For Codex, it then holds the digest of the
+//! file its code-mode host is installed from, or `-` for a release that
+//! publishes none. A Codex line without it was written before `ap` installed
+//! the host. It holds nothing else yet, so any other line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
 //! download cache, and writes the lockfile, from the [`ORIGINS`] each
@@ -98,9 +99,19 @@ pub struct Locked {
     pub version: String,
     /// The SHA-256 digest of the file the harness is installed from.
     pub sha256: String,
-    /// The SHA-256 digest of the file Codex's code-mode host is installed
-    /// from, for a Codex release that publishes one.
-    pub code_mode_host: Option<String>,
+    pub code_mode_host: CodeModeHost,
+}
+
+/// What a lock records of Codex's code-mode host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeModeHost {
+    /// The SHA-256 digest of the file the host is installed from.
+    Digest(String),
+    /// The release publishes no host, or the harness isn't Codex.
+    Unpublished,
+    /// The lock is a Codex lock from before `ap` installed the host, so it
+    /// doesn't say.
+    Unrecorded,
 }
 
 /// A lockfile's error, on the line it is on, from 1.
@@ -131,36 +142,43 @@ impl Lock {
                 "HARNESS" if lock.harness.is_some() => {
                     return Err(fail("a second `HARNESS`".to_string()));
                 }
-                "HARNESS" => match arguments.as_slice() {
-                    [harness, version, sha256, host @ ..]
-                        if is_digest(sha256)
-                            && !version.is_empty()
-                            && match host {
-                                [] => true,
-                                [host] => harness == "codex" && is_digest(host),
-                                _ => false,
-                            } =>
-                    {
-                        let harness = match harness.as_str() {
-                            "claude" => Harness::Claude,
-                            "codex" => Harness::Codex,
-                            _ => return Err(fail(format!("`{harness}` isn't a harness"))),
-                        };
-                        lock.harness = Some(Locked {
-                            harness,
-                            version: version.clone(),
-                            sha256: sha256.clone(),
-                            code_mode_host: host.first().cloned(),
-                        });
+                "HARNESS" => {
+                    let code_mode_host = match arguments.as_slice() {
+                        [harness, _, _] if harness == "codex" => Some(CodeModeHost::Unrecorded),
+                        [_, _, _] => Some(CodeModeHost::Unpublished),
+                        [harness, _, _, host] if harness == "codex" && host == "-" => {
+                            Some(CodeModeHost::Unpublished)
+                        }
+                        [harness, _, _, host] if harness == "codex" && is_digest(host) => {
+                            Some(CodeModeHost::Digest(host.clone()))
+                        }
+                        _ => None,
+                    };
+                    match (arguments.as_slice(), code_mode_host) {
+                        ([harness, version, sha256, ..], Some(code_mode_host))
+                            if is_digest(sha256) && !version.is_empty() =>
+                        {
+                            let harness = match harness.as_str() {
+                                "claude" => Harness::Claude,
+                                "codex" => Harness::Codex,
+                                _ => return Err(fail(format!("`{harness}` isn't a harness"))),
+                            };
+                            lock.harness = Some(Locked {
+                                harness,
+                                version: version.clone(),
+                                sha256: sha256.clone(),
+                                code_mode_host,
+                            });
+                        }
+                        _ => {
+                            return Err(fail(
+                                "`HARNESS` takes a harness, a version, and a SHA-256 digest, \
+                                 and for Codex then its code-mode host's digest, or `-`"
+                                    .to_string(),
+                            ));
+                        }
                     }
-                    _ => {
-                        return Err(fail(
-                            "`HARNESS` takes a harness, a version, and a SHA-256 digest, \
-                             and for Codex the digest of its code-mode host"
-                                .to_string(),
-                        ));
-                    }
-                },
+                }
                 _ => return Err(fail(format!("unknown line `{word}`"))),
             }
         }
@@ -171,9 +189,11 @@ impl Lock {
     pub fn text(&self) -> String {
         match &self.harness {
             Some(locked) => {
-                let host = (locked.code_mode_host.as_ref())
-                    .map(|host| format!(" {host}"))
-                    .unwrap_or_default();
+                let host = match (&locked.harness, &locked.code_mode_host) {
+                    (_, CodeModeHost::Digest(host)) => format!(" {host}"),
+                    (Harness::Codex, CodeModeHost::Unpublished) => " -".to_string(),
+                    _ => String::new(),
+                };
                 format!(
                     "HARNESS {} {} {}{host}\n",
                     name(locked.harness),
@@ -187,7 +207,9 @@ impl Lock {
 }
 
 /// Settles the harness that `agent` names, and returns whether `lock`
-/// changed. A lock that resolves `agent` is kept. Any other resolves again:
+/// changed. A lock that resolves `agent` is kept. A Codex lock that would,
+/// but doesn't record the code-mode host, resolves the version it locks
+/// again. Any other resolves again:
 /// a channel resolves to the exact version the harness's publisher
 /// publishes for it, and the lock gets that version and the digest the
 /// publisher publishes for its file, and for Codex's code-mode host. Each
@@ -206,7 +228,12 @@ pub fn settle(
 ) -> io::Result<bool> {
     let locked = match &lock.harness {
         Some(locked) if locked.resolves(agent) => locked.clone(),
-        _ if agent.harness == Harness::Codex => resolve_codex(agent, client, origins.codex_api)?,
+        Some(locked) if locked.pins(agent) => {
+            resolve_codex(&locked.version, client, origins.codex_api)?
+        }
+        _ if agent.harness == Harness::Codex => {
+            resolve_codex(&agent.version, client, origins.codex_api)?
+        }
         _ => resolve(agent, client, origins.claude)?,
     };
     let store = Store::flat(cache);
@@ -254,7 +281,7 @@ fn files<'a>(locked: &'a Locked, origins: &Origins) -> Vec<(String, &'a str, Str
                 )
             };
             let mut files = vec![(format!("`{label}`"), &*locked.sha256, url(CODEX_ASSET))];
-            if let Some(host) = &locked.code_mode_host {
+            if let CodeModeHost::Digest(host) = &locked.code_mode_host {
                 files.push((
                     format!("the code-mode host of `{label}`"),
                     host,
@@ -338,23 +365,23 @@ fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
         harness: Harness::Claude,
         version,
         sha256,
-        code_mode_host: None,
+        code_mode_host: CodeModeHost::Unpublished,
     })
 }
 
-/// The exact version and digest that GitHub's API at `api` publishes for
-/// the Codex that `agent` names. Codex publishes one channel, `latest`, its
-/// newest release.
-fn resolve_codex(agent: &Agent, client: &Client, api: &str) -> io::Result<Locked> {
+/// The exact version and digests that GitHub's API at `api` publishes for
+/// the Codex that `asked` names, an exact version or a channel. Codex publishes
+/// one channel, `latest`, its newest release.
+fn resolve_codex(asked: &str, client: &Client, api: &str) -> io::Result<Locked> {
     let failed = |error: io::Error| {
         io::Error::new(
             error.kind(),
-            format!("resolving `AGENT codex:{}`: {error}", agent.version),
+            format!("resolving `AGENT codex:{asked}`: {error}"),
         )
     };
     let invalid = |what: String| failed(io::Error::new(io::ErrorKind::InvalidData, what));
-    check_version(&agent.version)?;
-    let url = match agent.version.as_str() {
+    check_version(asked)?;
+    let url = match asked {
         version if is_exact(version) => format!("{api}/releases/tags/{CODEX_TAG}{version}"),
         "latest" => format!("{api}/releases/latest"),
         _ => {
@@ -370,7 +397,7 @@ fn resolve_codex(agent: &Agent, client: &Client, api: &str) -> io::Result<Locked
     let version = (release.get("tag_name").and_then(Value::as_str))
         .and_then(|tag| tag.strip_prefix(CODEX_TAG))
         .filter(|version| is_exact(version) && check_version(version).is_ok())
-        .filter(|version| !is_exact(&agent.version) || *version == agent.version)
+        .filter(|version| !is_exact(asked) || *version == asked)
         .ok_or_else(|| invalid("GitHub sent a release that isn't the one asked for".to_string()))?
         .to_string();
     let assets = (release.get("assets").and_then(Value::as_array)).unwrap_or_default();
@@ -388,8 +415,8 @@ fn resolve_codex(agent: &Agent, client: &Client, api: &str) -> io::Result<Locked
     };
     let sha256 = digest(CODEX_ASSET)?;
     let code_mode_host = match asset(CODEX_HOST_ASSET) {
-        Some(_) => Some(digest(CODEX_HOST_ASSET)?),
-        None => None,
+        Some(_) => CodeModeHost::Digest(digest(CODEX_HOST_ASSET)?),
+        None => CodeModeHost::Unpublished,
     };
     Ok(Locked {
         harness: Harness::Codex,
@@ -467,7 +494,15 @@ impl Locked {
     /// Whether this is a resolution of what `AGENT` names: the same harness,
     /// and the same version unless `AGENT` names a channel. A version that
     /// starts with a digit is exact, and any other is a channel.
+    /// A Codex lock that doesn't record the code-mode host resolves
+    /// nothing.
     pub fn resolves(&self, agent: &Agent) -> bool {
+        self.pins(agent) && self.code_mode_host != CodeModeHost::Unrecorded
+    }
+
+    /// Whether this locks the harness and version that `AGENT` names, as
+    /// [`Locked::resolves`] says, whatever it records of the code-mode host.
+    fn pins(&self, agent: &Agent) -> bool {
         self.harness == agent.harness
             && (!is_exact(&agent.version) || agent.version == self.version)
     }

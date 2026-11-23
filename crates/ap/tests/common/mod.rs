@@ -77,9 +77,11 @@ pub fn pin_harness(home: &Path, dir: &Path) {
         true => version,
         false => "0.0.0",
     };
+    // A Codex lock says its release publishes no code-mode host.
+    let host = if harness == "codex" { " -" } else { "" };
     fs::write(
         dir.join("Agentfile.lock"),
-        format!("HARNESS {harness} {version} {sha256}\n"),
+        format!("HARNESS {harness} {version} {sha256}{host}\n"),
     )
     .unwrap();
 }

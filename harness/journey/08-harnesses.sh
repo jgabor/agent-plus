@@ -7,8 +7,9 @@ set -eu
 # so each harness is downloaded once.
 
 # Builds the agent `$1` from the harness and channel `$2`, and fails unless
-# the lockfile pins that harness by an exact version and a digest. Each agent
-# is named for its harness, which its grants name under `NETWORK -`.
+# the lockfile pins that harness by an exact version and a digest, which for
+# Codex the code-mode host's digest, or `-`, follows. Each agent is named for
+# its harness, which its grants name under `NETWORK -`.
 build() {
   mkdir -p "$1"
   printf 'AGENT %s\nNETWORK -\nPOLICY +\n' "$1" >"$1.grants"
@@ -22,7 +23,8 @@ build() {
     echo "ap build didn't download $2 or write $1/Agentfile.lock" >&2
     exit 1
   fi
-  if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}\$" "$1/Agentfile.lock" ||
+  if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}( [0-9a-f]{64}| -)?\$" \
+    "$1/Agentfile.lock" ||
     grep -Eq "^HARNESS $1 (stable|latest) " "$1/Agentfile.lock"; then
     echo "ap build didn't lock $2 to an exact version and digest:" >&2
     cat "$1/Agentfile.lock" >&2

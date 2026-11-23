@@ -21,7 +21,6 @@ use common::{Interactive, Scratch};
 /// cached download needs no network.
 const VERSION: &str = "0.171.0";
 const DIGEST: &str = "0fd9ae1125788932131a29e296c4fef9995fc4f0c2a2ef6161221786e45ffa8c";
-#[allow(dead_code)]
 const HOST: &str = "8db4b4899dd36d24defa4a0c4f431e9db527fb689e017c88be9f54ea2949e674";
 /// How long the VM may take to start.
 const STARTS_WITHIN: Duration = Duration::from_secs(600);
@@ -78,12 +77,18 @@ fn codex_runs_a_tool_in_the_guest() {
     scratch.build(
         "codex",
         &format!(
-            "AGENT codex:{VERSION}\nOS minimal\nMODE full\nNETWORK -\nNETWORK +host.ap.internal\n"
+            "AGENT codex:{VERSION}\nOS minimal\nMODE full\nNETWORK -\nNETWORK +host.ap.internal\n\
+             SECRET UPSTREAM @host.ap.internal\n"
         ),
-        &format!("HARNESS codex {VERSION} {DIGEST}\n"), // BEFORE
+        &format!("HARNESS codex {VERSION} {DIGEST} {HOST}\n"),
     );
+    // The hidden secret makes the proxy decrypt TLS to the fake upstream,
+    // with the run's authority, which the guest trusts. The proxy trusts
+    // the upstream's.
     let mut command = scratch.run("codex");
-    command.env("SSL_CERT_FILE", upstream.join("ca.pem"));
+    command
+        .env("SSL_CERT_FILE", upstream.join("ca.pem"))
+        .env("UPSTREAM", "unused");
     let mut run = Interactive::start(command);
     let deadline = Instant::now() + STARTS_WITHIN;
     let name = loop {

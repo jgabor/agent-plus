@@ -164,6 +164,7 @@ dependencies = [
  "ap",
  "git",
  "httparse",
+ "iri-string",
  "miniz_oxide",
  "net",
  "netstack",
@@ -239,6 +240,15 @@ name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
+
+[[package]]
+name = "iri-string"
+version = "0.7.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "libc"

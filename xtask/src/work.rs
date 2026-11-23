@@ -8,7 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const WORKER_SLOTS: usize = 3;
+const WORKER_SLOTS: usize = 5;
 const LEASE_SECONDS: i64 = 12 * 3600;
 const IN_PROGRESS: &str = "in-progress";
 /// What parks an issue: a PR ready to merge, or a question waiting for an answer.
@@ -1282,6 +1282,29 @@ mod tests {
         let entries = next(&forge, NOW, &HashMap::new()).unwrap();
         assert_eq!(entries[0].branch, None);
         assert!(matches!(try_claim_on(&forge, "7-x"), Claim::Won { .. }));
+    }
+
+    /// #737: five worker slots, less the ones that are held.
+    #[test]
+    fn next_names_up_to_five_issues_less_the_held_ones() {
+        let apart = |number: u64| Issue {
+            number,
+            body: format!("## Touches\n`crates/{number}`\n"),
+            ..issue(vec![])
+        };
+        let free: Vec<Issue> = (1..=7).map(apart).collect();
+        let forge = Fake::new(free.clone());
+        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        let numbers: Vec<u64> = entries.iter().map(|e| e.issue).collect();
+        assert_eq!(numbers, [1, 2, 3, 4, 5]);
+
+        let mut held = held_by("other");
+        held.number = 20;
+        held.body = "## Touches\n`crates/20`\n".to_string();
+        let forge = Fake::new([free, vec![held]].concat());
+        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
+        let numbers: Vec<u64> = entries.iter().map(|e| e.issue).collect();
+        assert_eq!(numbers, [1, 2, 3, 4]);
     }
 
     #[test]

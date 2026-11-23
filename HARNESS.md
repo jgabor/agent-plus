@@ -1035,11 +1035,11 @@ passes. No scheduled work runs on GitHub.
 
 | Setting | Initial value |
 |---|---|
-| Worker slots | 3 |
+| Worker slots | 5 |
 | Measuring slots | 1 |
 | Merge slots | 1 |
 | Places for test runs | 2 per repository |
-| Dispatch period | 30 minutes |
+| Dispatch period | 10 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
 | Triage time | 06:00 local |
@@ -1052,6 +1052,10 @@ passes. No scheduled work runs on GitHub.
 | Time limit on an issue | Twice its estimate |
 | Review rounds | 3, or 5 for security, data loss, or concurrency |
 | Minimum free disk | 50 GiB |
+
+The places stay at 2 while the worker slots rose to 5. Three test runs at
+once failed on timing in 13 of 18 runs on the owner's host, and builds have
+no such limit. If gates start to fail on timing, go back to 4 worker slots.
 
 ## Failure handling
 

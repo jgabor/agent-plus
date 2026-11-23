@@ -43,7 +43,8 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
 /// Test output goes to our stderr as it arrives, so that stdout carries only
 /// the result. `CC` and `CXX` point at a program that fails, as in the gate.
 /// The package's build and tests share one memory limit, and a test that goes
-/// over it is killed, which fails the run.
+/// over it is killed, which fails the run. In a merge, our input is the pipe
+/// to the supervisor, which the tests mustn't reach.
 fn run_package(
     root: &Path,
     package: &str,
@@ -56,6 +57,7 @@ fn run_package(
         .current_dir(root)
         .env("CC", "false")
         .env("CXX", "false")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped());
     hold.pass_to(&mut command);
     let mut child = command

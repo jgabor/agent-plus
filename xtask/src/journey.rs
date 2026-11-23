@@ -292,6 +292,8 @@ fn build_static(root: &Path, target: &Path, package: &str) -> Result<PathBuf, Pr
         .current_dir(root)
         .env("CC", "false")
         .env("CXX", "false")
+        // In a merge, our input is the pipe to the supervisor.
+        .stdin(Stdio::null())
         .stdout(Stdio::from(io::stderr()))
         .status()
         .map_err(no_cargo)?;

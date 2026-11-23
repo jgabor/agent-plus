@@ -333,7 +333,9 @@ impl Repo {
     /// call sleep for `HANG_FOR` seconds, or 3, and with `HANG_UNTIL` a later
     /// matching call sleeps until that many seconds after the first one
     /// started. `RUN_ON` runs `RUN_COMMAND` just before the first matching call,
-    /// even one that then hangs. The fake `gh` keeps the newest state posted on each
+    /// even one that then hangs. `PAUSE_ON` makes each matching call that
+    /// shares the merge's pipe to its supervisor write `w` to it, which would
+    /// pause the timeout. The fake `gh` keeps the newest state posted on each
     /// commit, and gives it back when asked for that commit's status.
     fn write_tools(&self) {
         let bin = self.bin.display();
@@ -348,6 +350,9 @@ maybe_kill() {{
 }}
 if [ -n "$RUN_ON" ] && [ ! -f '{bin}/ran' ]; then
   case "$call" in *"$RUN_ON"*) : > '{bin}/ran'; eval "$RUN_COMMAND" ;; esac
+fi
+if [ -n "$PAUSE_ON" ] && [ -p /dev/fd/0 ]; then
+  case "$call" in *"$PAUSE_ON"*) echo "$call" >> '{bin}/paused'; printf w >&0 ;; esac
 fi
 if [ -n "$HANG_ON" ]; then
   case "$call" in *"$HANG_ON"*)
@@ -1735,6 +1740,34 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert!(!repo.bin.join("merged").exists());
     assert_merged(&repo, &repo.merge());
+}
+
+/// A PR's code runs in its builds and tests, whose input mustn't reach the
+/// supervisor. Every cargo call tries to pause the timeout, so one that could
+/// would stop it until the hang ends. The hang is at the proof's last cargo
+/// call. The proof's work before it takes up to 40 seconds on a loaded
+/// machine, so the timeout leaves time to reach it.
+#[test]
+fn a_command_the_proof_runs_cannot_pause_the_timeout() {
+    let repo = Repo::new("timeout-paused");
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("PAUSE_ON", "cargo ")
+        .env("HANG_ON", "cargo build --release")
+        .env("HANG_FOR", "120")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .output()
+        .unwrap();
+    assert!(
+        repo.calls().contains("cargo build --release"),
+        "{}",
+        repo.calls()
+    );
+    let paused = fs::read_to_string(repo.bin.join("paused")).unwrap_or_default();
+    assert!(paused.is_empty(), "{paused}");
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
 }
 
 /// A PR that changes xtask is proven twice, and each proof gets the whole

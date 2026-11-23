@@ -8,7 +8,7 @@ use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
+use std::process::{self, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -18,6 +18,7 @@ use ap::fetch;
 use ap::store::Store;
 use guest::linux::{open_terminal, program_has_ended, resize, take_terminal};
 use guest::protocol::Size;
+use t1::started::Started;
 use t1::{guest_binary, kernel, os};
 
 /// The status `ap run` exits with when it fails before the harness starts.
@@ -182,17 +183,6 @@ impl Scratch {
         assert_eq!(stdout.lines().count(), 1, "{output:?}");
         assert!(stdout.starts_with("{\"arguments\":"), "{output:?}");
         stdout
-    }
-}
-
-/// A process this test started, killed and reaped when it's dropped, so a
-/// failed test leaves no VM behind.
-struct Started(Child);
-
-impl Drop for Started {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 
@@ -812,6 +802,52 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
     );
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert!(!socket.exists(), "{socket:?} outlived the run");
+}
+
+/// A test that fails while `ap run` lasts, under `timeout` as most of these
+/// tests start it, has stopped that `ap run` by the time its guard drops,
+/// whether or not `timeout` gives `ap run` a signal when `timeout` dies. The
+/// processes `ap run` started, and the VM, end soon after.
+#[test]
+fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
+    let scratch = Scratch::new("failed");
+    scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
+    let started = Mutex::new(Vec::new());
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut run = Started(
+            Command::new("timeout")
+                .args(["-k", "10", TIMEOUT])
+                .arg(&shared().0)
+                .args(["run", "sleepy", "-p", PROMPT])
+                .env_clear()
+                .env("HOME", &scratch.home)
+                .env("XDG_RUNTIME_DIR", &scratch.runtime)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let mut log = BufReader::new(run.0.stdout.take().unwrap());
+        let mut report = String::new();
+        log.read_line(&mut report).unwrap();
+        assert!(report.starts_with("{\"arguments\":"), "{report}");
+        // `ap run` first, then the run, network, and cleanup processes it
+        // started.
+        started.lock().unwrap().extend(descendants(run.0.id()));
+        panic!("this test fails on purpose, before `ap stop`");
+    }));
+    assert!(failed.is_err());
+
+    let processes = started.into_inner().unwrap();
+    assert_eq!(processes.len(), 4, "{processes:?}");
+    assert!(!running(processes[0]), "`ap run` outlived its guard");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
+    assert_eq!(left, Vec::<u32>::new(), "processes outlived the failed test");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
 }
 
 /// Starts a headless run of `agent`, and returns it and its name, once the

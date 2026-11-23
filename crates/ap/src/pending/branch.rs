@@ -209,9 +209,9 @@ impl<'a> Agent<'a> {
         Ok(commits)
     }
 
-    /// Each file and symlink of the agent's that would replace a directory
-    /// the tree `tree` holds at `path`, or beneath it, with a git-ignored
-    /// file in it. Git can't hold both, and that file stays.
+    /// Puts in `found` each file and symlink of the agent's beneath `path`,
+    /// where its `HEAD` holds `tree`, that would replace a directory with a
+    /// git-ignored file in it. Git can't hold both, and that file stays.
     fn replacing(
         &self,
         ignore: &Gitignore,
@@ -220,10 +220,10 @@ impl<'a> Agent<'a> {
         found: &mut BTreeSet<Vec<u8>>,
     ) -> Result<(), git::Error> {
         for entry in self.object(&tree)?.entries()? {
-            let inner = beneath(path, &entry.name);
             if entry.mode != TREE {
                 continue;
             }
+            let inner = beneath(path, &entry.name);
             match self.records.view(&inner) {
                 View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => {
                     if self.holds_ignored(ignore, &inner, entry.id)? {

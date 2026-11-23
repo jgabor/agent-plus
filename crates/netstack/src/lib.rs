@@ -25,7 +25,8 @@ use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, IpAddress, IpCidr,
-    IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket, UdpPacket,
+    IpProtocol, Ipv4Packet, Ipv6ExtHeader, Ipv6ExtHeaderRepr, Ipv6HopByHopHeader, Ipv6HopByHopRepr,
+    Ipv6OptionFailureType, Ipv6OptionRepr, Ipv6Packet, TcpPacket, UdpPacket,
 };
 
 /// Bytes each TCP connection buffers in each direction.
@@ -413,9 +414,10 @@ impl Stack {
 
     /// What `frame` is to the stack. Only a frame the stack can decide on
     /// reaches smoltcp: a flow sent to the stack, or a frame that opens
-    /// none. A frame that hides its transport, such as behind an IPv6
-    /// extension header or in a fragment, or a flow sent to every station,
-    /// is dropped, because smoltcp would take it without asking.
+    /// none. It reads past one hop-by-hop header, as smoltcp does. A frame
+    /// that hides its transport, such as behind any other IPv6 extension
+    /// header or in a fragment, or a flow sent to every station, is dropped,
+    /// because smoltcp would take it without asking.
     fn classify(&self, frame: &[u8]) -> Seen {
         let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
             return Seen::Drop;
@@ -446,11 +448,18 @@ impl Stack {
                     let Ok(ip) = Ipv6Packet::new_checked(ethernet.payload()) else {
                         return Seen::Drop;
                     };
+                    let (protocol, payload) = match ip.next_header() {
+                        IpProtocol::HopByHop => match behind_hop_by_hop(ip.payload()) {
+                            Some(behind) => behind,
+                            None => return Seen::Drop,
+                        },
+                        protocol => (protocol, ip.payload()),
+                    };
                     (
                         IpAddr::V6(ip.src_addr()),
                         IpAddr::V6(ip.dst_addr()),
-                        ip.next_header(),
-                        ip.payload(),
+                        protocol,
+                        payload,
                     )
                 }
                 _ => return Seen::Drop,
@@ -524,6 +533,25 @@ impl Stack {
             self.udp.insert(port, self.sockets.add(socket));
         }
     }
+}
+
+/// The protocol behind the hop-by-hop header that starts `payload`, and its
+/// bytes, as smoltcp reads them. `None` if smoltcp would discard the packet,
+/// because the header is malformed, or holds an option it must not skip.
+fn behind_hop_by_hop(payload: &[u8]) -> Option<(IpProtocol, &[u8])> {
+    let header = Ipv6ExtHeader::new_checked(payload).ok()?;
+    let repr = Ipv6ExtHeaderRepr::parse(&header).ok()?;
+    let options = Ipv6HopByHopHeader::new_checked(repr.data).ok()?;
+    let options = Ipv6HopByHopRepr::parse(&options).ok()?;
+    let discarded = options.options.iter().any(|option| {
+        matches!(option, Ipv6OptionRepr::Unknown { type_, .. }
+            if Ipv6OptionFailureType::from(*type_) != Ipv6OptionFailureType::Skip)
+    });
+    if discarded {
+        return None;
+    }
+    let rest = payload.get(repr.header_len() + repr.data.len()..)?;
+    Some((repr.next_header, rest))
 }
 
 /// What a frame from the guest is to the stack.

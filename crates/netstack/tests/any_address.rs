@@ -150,7 +150,20 @@ fn exchange_deciding(
     guest: &mut Guest,
     stack: &mut Stack,
     start: Instant,
+    decide: impl FnMut(&Flow) -> bool,
+) -> Vec<Vec<u8>> {
+    exchange_rewriting(guest, stack, start, decide, |frame| frame)
+}
+
+/// Moves frames both ways until the link is quiet, as [`exchange_deciding`]
+/// does, with each frame the guest sends turned into what `rewrite` makes
+/// of it.
+fn exchange_rewriting(
+    guest: &mut Guest,
+    stack: &mut Stack,
+    start: Instant,
     mut decide: impl FnMut(&Flow) -> bool,
+    rewrite: impl Fn(Vec<u8>) -> Vec<u8>,
 ) -> Vec<Vec<u8>> {
     let mut sent = Vec::new();
     for _ in 0..64 {
@@ -163,7 +176,7 @@ fn exchange_deciding(
         );
         let mut moved = false;
         while let Some(frame) = guest.link.from_guest.pop_front() {
-            stack.receive(&frame, now, &mut decide);
+            stack.receive(&rewrite(frame), now, &mut decide);
             moved = true;
         }
         stack.poll(now);
@@ -535,15 +548,22 @@ fn datagram_frame(to: SocketAddr) -> Vec<u8> {
     frame
 }
 
-/// `frame`, an IPv6 datagram, with an empty hop-by-hop header before its
-/// UDP header. The UDP checksum covers neither, so it still holds.
+/// `frame`, an IPv6 packet, with an empty hop-by-hop header before its TCP
+/// or UDP header. The checksum covers neither, so it still holds.
 fn with_hop_by_hop(frame: &[u8]) -> Vec<u8> {
+    // Padding.
+    with_hop_by_hop_option(frame, 1)
+}
+
+/// `frame`, an IPv6 packet, with a hop-by-hop header that holds one option
+/// of type `option`, and four bytes of data.
+fn with_hop_by_hop_option(frame: &[u8], option: u8) -> Vec<u8> {
     let mut out = frame[..14 + 40].to_vec();
     let next = out[14 + 6];
     out[14 + 6] = 0;
     let length = u16::from_be_bytes([out[14 + 4], out[14 + 5]]) + 8;
     out[14 + 4..14 + 6].copy_from_slice(&length.to_be_bytes());
-    out.extend([next, 0, 1, 4, 0, 0, 0, 0]);
+    out.extend([next, 0, option, 4, 0, 0, 0, 0]);
     out.extend(&frame[14 + 40..]);
     out
 }
@@ -552,7 +572,8 @@ fn with_hop_by_hop(frame: &[u8]) -> Vec<u8> {
 fn a_flow_behind_an_ipv6_extension_header_is_never_taken_unasked() {
     let to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
     let plain = datagram_frame(to);
-    let hidden = with_hop_by_hop(&plain);
+    // smoltcp reads past one hop-by-hop header, and no further.
+    let hidden = with_hop_by_hop(&with_hop_by_hop(&plain));
     let now = Instant::now();
     let mut stack = stack();
     // An earlier datagram to the port was taken, so a socket holds it.
@@ -564,6 +585,109 @@ fn a_flow_behind_an_ipv6_extension_header_is_never_taken_unasked() {
         "a refused datagram was taken"
     );
     assert!(!std::iter::from_fn(|| stack.transmit()).any(|frame| unreachable(&frame)));
+}
+
+/// `frame`, behind a hop-by-hop header if it is IPv6 carrying TCP or UDP.
+fn behind_hop_by_hop(frame: Vec<u8>) -> Vec<u8> {
+    match (&frame[12..14], frame[14 + 6]) {
+        ([0x86, 0xdd], 6 | 17) => with_hop_by_hop(&frame),
+        _ => frame,
+    }
+}
+
+/// Opens a connection to `tcp`, and sends a datagram to `udp`, every frame
+/// behind a hop-by-hop header. Returns the guest and the stack after, and
+/// each flow the stack asked about, which `take` decides.
+fn open_behind_hop_by_hop(
+    tcp: SocketAddr,
+    udp: SocketAddr,
+    take: bool,
+) -> (Guest, SocketHandle, Stack, Vec<Flow>) {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let connection = guest.connect(tcp, 49152);
+    let socket = guest.udp(40000);
+    guest
+        .sockets
+        .get_mut::<udp::Socket>(socket)
+        .send_slice(b"query", udp)
+        .unwrap();
+    let mut asked = Vec::new();
+    exchange_rewriting(
+        &mut guest,
+        &mut stack,
+        start,
+        |flow| {
+            asked.push(*flow);
+            take
+        },
+        behind_hop_by_hop,
+    );
+    (guest, connection, stack, asked)
+}
+
+#[test]
+fn takes_a_flow_behind_a_hop_by_hop_header_when_the_caller_does() {
+    let tcp_to = SocketAddr::new(IpAddr::V6("2001:db8::1".parse().unwrap()), 443);
+    let udp_to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
+    let (guest, connection, mut stack, mut asked) = open_behind_hop_by_hop(tcp_to, udp_to, true);
+    asked.sort_by_key(|flow| matches!(flow, Flow::Udp { .. }));
+    assert_eq!(
+        asked,
+        [
+            Flow::Tcp {
+                source: SocketAddr::new(IpAddr::V6(GUEST_V6), 49152),
+                destination: tcp_to,
+            },
+            Flow::Udp {
+                source: SocketAddr::new(IpAddr::V6(GUEST_V6), 40000),
+                destination: udp_to,
+            },
+        ]
+    );
+    assert_eq!(
+        guest.sockets.get::<tcp::Socket>(connection).state(),
+        tcp::State::Established
+    );
+    let accepted = stack.accept().expect("the stack accepted the connection");
+    assert_eq!(accepted.destination, tcp_to);
+    let datagram = stack.recv_datagram().expect("the stack took the datagram");
+    assert_eq!(datagram.destination, udp_to);
+    assert_eq!(datagram.payload, b"query");
+}
+
+#[test]
+fn a_flow_behind_a_hop_by_hop_header_that_the_caller_refuses_opens_no_socket() {
+    let tcp_to = SocketAddr::new(IpAddr::V6("2001:db8::1".parse().unwrap()), 443);
+    let udp_to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
+    let (guest, connection, mut stack, asked) = open_behind_hop_by_hop(tcp_to, udp_to, false);
+    assert!(
+        asked.iter().any(|flow| matches!(flow, Flow::Tcp { .. }))
+            && asked.iter().any(|flow| matches!(flow, Flow::Udp { .. })),
+        "{asked:?}"
+    );
+    assert_eq!(stack.sockets(), 0);
+    assert!(stack.accept().is_none());
+    assert!(stack.recv_datagram().is_none());
+    // smoltcp resets a SYN that no socket takes.
+    assert_eq!(
+        guest.sockets.get::<tcp::Socket>(connection).state(),
+        tcp::State::Closed
+    );
+}
+
+#[test]
+fn a_flow_behind_an_option_smoltcp_discards_is_never_asked_about() {
+    let to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
+    // An option type smoltcp doesn't know, whose top bits say to discard
+    // the packet.
+    let frame = with_hop_by_hop_option(&datagram_frame(to), 0x7e);
+    let mut stack = stack();
+    stack.receive(&frame, Instant::now(), |flow| {
+        panic!("asked about {flow:?}")
+    });
+    assert_eq!(stack.sockets(), 0);
 }
 
 #[test]

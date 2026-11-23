@@ -810,6 +810,7 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
 /// processes `ap run` started, and the VM, end soon after.
 #[test]
 fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
+    const ON_PURPOSE: &str = "this test fails on purpose, before `ap stop`";
     let scratch = Scratch::new("failed");
     scratch.build("sleepy", &fake("ENV FAKE_HARNESS_SLEEP 300\n"));
     let started = Mutex::new(Vec::new());
@@ -834,9 +835,12 @@ fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
         // `ap run` first, then the run, network, and cleanup processes it
         // started.
         started.lock().unwrap().extend(descendants(run.0.id()));
-        panic!("this test fails on purpose, before `ap stop`");
+        panic!("{ON_PURPOSE}");
     }));
-    assert!(failed.is_err());
+    let failure = failed.unwrap_err();
+    if failure.downcast_ref::<String>().map(String::as_str) != Some(ON_PURPOSE) {
+        std::panic::resume_unwind(failure);
+    }
 
     let processes = started.into_inner().unwrap();
     assert_eq!(processes.len(), 4, "{processes:?}");
@@ -846,7 +850,11 @@ fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
         thread::sleep(Duration::from_millis(10));
     }
     let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
-    assert_eq!(left, Vec::<u32>::new(), "processes outlived the failed test");
+    assert_eq!(
+        left,
+        Vec::<u32>::new(),
+        "processes outlived the failed test"
+    );
     assert_eq!(scratch.ps(), Vec::<String>::new());
 }
 

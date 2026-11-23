@@ -18,7 +18,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, ExitStatus, Output, Stdio};
+use std::process::{self, Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use ap::fetch;
 use ap::store::Store;
 use guest::net;
+use t1::started::Started;
 use t1::{guest_binary, kernel, os};
 
 /// How long `ap` may take, in seconds, before `timeout` stops it, and the VM
@@ -171,17 +172,6 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-/// A process this test started, killed and reaped when it's dropped, so a
-/// failed test leaves no VM behind.
-struct Started(Child);
-
-impl Drop for Started {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 

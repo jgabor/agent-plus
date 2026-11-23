@@ -1,7 +1,7 @@
 //! A guard for a process a test starts, so a failed test leaves no `ap run`
 //! or VM behind.
 
-use std::process::Child;
+use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,8 +12,8 @@ const GRACE: Duration = Duration::from_secs(15);
 
 /// A process a test started, stopped and reaped when it's dropped.
 ///
-/// The guard sends `SIGTERM`, not `SIGKILL`, because `timeout` passes
-/// `SIGTERM` on to its command but can't pass on `SIGKILL`. It then waits
+/// The guard sends `SIGTERM` and `SIGCONT`, not `SIGKILL`, because `timeout`
+/// passes `SIGTERM` on to its command but can't pass on `SIGKILL`. It then waits
 /// for the process to exit, so an `ap run` under `timeout` has exited by
 /// the time the guard is gone. A process that hasn't exited within
 /// [`GRACE`] gets `SIGKILL`.
@@ -23,8 +23,12 @@ impl Drop for Started {
     fn drop(&mut self) {
         if let Ok(None) = self.0.try_wait() {
             // The process is unreaped until the wait below, so its id is
-            // still its own.
+            // still its own. `SIGCONT` lets a process a test stopped act on
+            // `SIGTERM`, as `timeout` does for its command.
             let _ = guest::linux::terminate(self.0.id());
+            let _ = Command::new("kill")
+                .args(["-CONT", &self.0.id().to_string()])
+                .status();
             let deadline = Instant::now() + GRACE;
             while let Ok(None) = self.0.try_wait() {
                 if Instant::now() >= deadline {
@@ -35,5 +39,25 @@ impl Drop for Started {
         }
         let _ = self.0.kill();
         let _ = self.0.wait();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A process a test stopped, as `SIGSTOP` or Ctrl-Z would, stops as
+    /// soon as its guard drops, not only after [`GRACE`].
+    #[test]
+    fn a_stopped_process_ends_without_waiting_out_the_grace() {
+        let sleeper = Started(Command::new("sleep").arg("600").spawn().unwrap());
+        let status = Command::new("kill")
+            .args(["-STOP", &sleeper.0.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let start = Instant::now();
+        drop(sleeper);
+        assert!(start.elapsed() < GRACE / 2, "{:?}", start.elapsed());
     }
 }

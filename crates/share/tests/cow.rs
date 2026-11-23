@@ -670,4 +670,30 @@ fn a_lock_held_across_the_agent_s_first_write_stands_against_its_copy() {
     // The agent's copy holds no more than the agent locked.
     assert_eq!(guest.lock(SETLK, writer, 8, F_RDLCK, 0).0, 0);
     assert_eq!(guest.lock(SETLK, writer, 8, F_RDLCK, LK_FLOCK).0, 0);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_UNLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_UNLCK, LK_FLOCK).0, 0);
+    // Closing the file lets them go there too.
+    let mut flush = reader.to_le_bytes().to_vec();
+    flush.extend([0; 8]);
+    flush.extend(7u64.to_le_bytes());
+    assert_eq!(guest.call(FLUSH, hello, &flush).0, 0);
+    guest.release(reader);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, LK_FLOCK).0, 0);
+}
+
+#[test]
+fn a_flock_lost_to_a_failed_change_is_not_taken_on_the_agent_s_copy() {
+    let tree = Tree::new("cow-flock-lost");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    let first = guest.open(hello, 0).unwrap();
+    let second = guest.open(hello, 0).unwrap();
+    assert_eq!(guest.lock(SETLK, first, 7, F_RDLCK, LK_FLOCK).0, 0);
+    assert_eq!(guest.lock(SETLK, second, 8, F_RDLCK, LK_FLOCK).0, 0);
+    // A change that fails lets the shared lock go, as in Linux.
+    assert_eq!(guest.lock(SETLK, first, 7, F_WRLCK, LK_FLOCK).0, EAGAIN);
+    assert_eq!(guest.lock(SETLK, second, 8, F_WRLCK, LK_FLOCK).0, 0);
+    guest.overwrite("hello.txt", b"agent").unwrap();
+    assert_eq!(guest.lock(SETLK, first, 7, F_RDLCK, LK_FLOCK).0, EAGAIN);
 }

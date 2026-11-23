@@ -907,18 +907,18 @@ impl Cow {
         for id in readers {
             let fd = self.open_upper(path, READ_FLAGS)?;
             if let Some(Handle::File {
-                fd: old,
+                fd: open,
                 lower,
                 kept,
                 flock,
                 ..
             }) = self.handles.get_mut(&id)
             {
-                *kept = Some(std::mem::replace(old, fd));
-                *lower = false;
                 if let Some(operation) = *flock {
-                    sys::flock(old.as_fd(), operation | libc::LOCK_NB).map_err(errno)?;
+                    sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(errno)?;
                 }
+                *kept = Some(std::mem::replace(open, fd));
+                *lower = false;
             }
         }
         Ok(())
@@ -1629,11 +1629,13 @@ impl Cow {
                 libc::F_WRLCK => libc::LOCK_EX,
                 _ => libc::LOCK_UN,
             };
-            sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(|error| busy(error, wait))?;
+            let taken = sys::flock(fd.as_fd(), operation | libc::LOCK_NB);
+            // A change that fails has let go of what the handle held.
             let handle = u64_at(body, 0).ok_or(libc::EINVAL)?;
             if let Some(Handle::File { flock, .. }) = self.handles.get_mut(&handle) {
-                *flock = (operation != libc::LOCK_UN).then_some(operation);
+                *flock = (taken.is_ok() && operation != libc::LOCK_UN).then_some(operation);
             }
+            taken.map_err(|error| busy(error, wait))?;
             return Ok(Vec::new());
         }
         let locks = self.lock_file(node, owner)?;
@@ -1817,15 +1819,18 @@ mod tests {
                 let mut lock: libc::flock = unsafe { std::mem::zeroed() };
                 lock.l_type =
                     [libc::F_RDLCK, libc::F_WRLCK, libc::F_UNLCK][next(3) as usize] as i16;
-                lock.l_start = next(16);
-                lock.l_len = next(6);
+                // Some ranges end where the largest offset does.
+                (lock.l_start, lock.l_len) = match next(4) {
+                    0 => (i64::MAX - 3 + next(3), next(2)),
+                    _ => (next(16), next(6)),
+                };
                 sys::ofd_lock(locks.fd.as_fd(), libc::F_OFD_SETLK, &mut lock).unwrap();
                 locks.record(&lock);
             }
             let copy = memfd();
             locks.take(copy.as_fd()).unwrap();
             let (held, taken) = (again(&kernel), again(&copy));
-            for at in (0..24).chain([i64::MAX - 1]) {
+            for at in (0..24).chain(i64::MAX - 4..i64::MAX) {
                 assert_eq!(
                     seen(&held, at),
                     seen(&taken, at),

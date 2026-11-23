@@ -1,8 +1,8 @@
 //! Fetches the pinned guest kernel for tests, until `ap` can download it.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process::Command;
 
 const PIN: &str = include_str!("../../../guest/kernel/pin.toml");
 
@@ -21,15 +21,27 @@ pub fn release() -> &'static str {
 
 /// Returns the path of the pinned `vmlinux`, downloading it if it's missing.
 pub fn vmlinux() -> PathBuf {
-    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest");
+    vmlinux_in(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest"))
+}
+
+/// Returns the path of the pinned `vmlinux` in `directory`, downloading it if
+/// it's missing. Callers check and download it under a lock, so concurrent
+/// ones, in one process or many, fetch it once and never share a part file.
+pub fn vmlinux_in(directory: &Path) -> PathBuf {
     let path = directory.join("vmlinux");
     if path.exists() && digest_matches(&path) {
         return path;
     }
 
-    fs::create_dir_all(&directory).expect("target/guest should be writable");
-    // One name per process, so that concurrent test binaries can't mix.
-    let partial = directory.join(format!("vmlinux.{}.part", process::id()));
+    fs::create_dir_all(directory).expect("the kernel's directory should be writable");
+    let lock = File::create(directory.join("vmlinux.lock")).unwrap();
+    lock.lock().unwrap();
+    if path.exists() && digest_matches(&path) {
+        return path;
+    }
+    // Only the lock's holder writes this, and curl replaces what a killed
+    // one left.
+    let partial = directory.join("vmlinux.part");
     let status = Command::new("curl")
         .args(["--fail", "--silent", "--show-error", "--location"])
         .args(["--proto", "=https", "--output"])

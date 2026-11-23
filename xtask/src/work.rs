@@ -1284,29 +1284,6 @@ mod tests {
         assert!(matches!(try_claim_on(&forge, "7-x"), Claim::Won { .. }));
     }
 
-    /// #737: five worker slots, less the ones that are held.
-    #[test]
-    fn next_names_up_to_five_issues_less_the_held_ones() {
-        let apart = |number: u64| Issue {
-            number,
-            body: format!("## Touches\n`crates/{number}`\n"),
-            ..issue(vec![])
-        };
-        let free: Vec<Issue> = (1..=7).map(apart).collect();
-        let forge = Fake::new(free.clone());
-        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
-        let numbers: Vec<u64> = entries.iter().map(|e| e.issue).collect();
-        assert_eq!(numbers, [1, 2, 3, 4, 5]);
-
-        let mut held = held_by("other");
-        held.number = 20;
-        held.body = "## Touches\n`crates/20`\n".to_string();
-        let forge = Fake::new([free, vec![held]].concat());
-        let entries = next(&forge, NOW, &HashMap::new()).unwrap();
-        let numbers: Vec<u64> = entries.iter().map(|e| e.issue).collect();
-        assert_eq!(numbers, [1, 2, 3, 4]);
-    }
-
     #[test]
     fn a_claim_replaces_no_thread_when_it_is_the_first_or_the_same() {
         let forge = Fake::new(vec![issue(vec![])]);

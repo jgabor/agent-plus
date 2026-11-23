@@ -640,20 +640,26 @@ fn an_abandoned_issue_does_not_hold_its_paths() {
 
 #[test]
 fn entries_are_in_number_order_up_to_the_free_slots() {
-    let paths = ["`a`", "`b`", "`c`", "`d`", "`e`"];
-    let issues: Vec<String> = [9, 8, 7, 6, 5]
+    let paths = ["`a`", "`b`", "`c`", "`d`", "`e`", "`f`", "`g`"];
+    let issues: Vec<String> = [11, 10, 9, 8, 7, 6, 5]
         .iter()
         .zip(paths)
         .map(|(number, path)| open(*number, &["auto:merge"], path))
         .collect();
-    assert_eq!(listed("slots-free", &issues), vec![5, 6, 7]);
+    assert_eq!(listed("slots-free", &issues), vec![5, 6, 7, 8, 9]);
 
     let mut one_held = issues.clone();
     one_held.push(claimed(2, "`z`"));
-    assert_eq!(listed("slots-one", &one_held), vec![5, 6]);
+    assert_eq!(listed("slots-one", &one_held), vec![5, 6, 7, 8]);
 
     let mut full = issues;
-    full.extend([claimed(1, "`x`"), claimed(2, "`y`"), claimed(3, "`z`")]);
+    full.extend([
+        claimed(1, "`v`"),
+        claimed(2, "`w`"),
+        claimed(3, "`x`"),
+        claimed(4, "`y`"),
+        claimed(12, "`z`"),
+    ]);
     assert_eq!(listed("slots-full", &full), Vec::<u64>::new());
 }
 

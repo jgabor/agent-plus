@@ -137,9 +137,29 @@ fn pr_json(pr: &Pr, state: &str) -> String {
     )
 }
 
+/// Where these tests keep their repositories and variants. Each test deletes
+/// its own directory first, so a second run of them in this checkout would
+/// delete what the first is using. The first use takes a lock that the
+/// process holds until it ends, and a second run waits for it.
+fn held_tmp() -> &'static Path {
+    static HELD: OnceLock<fs::File> = OnceLock::new();
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    HELD.get_or_init(|| {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(tmp.join("merge.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        lock
+    });
+    tmp
+}
+
 /// Where a variant of this xtask is built.
 fn variant_binary(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_TARGET_TMPDIR"))
+    held_tmp()
         .join("variants")
         .join(name)
         .join("target/debug/xtask")
@@ -181,9 +201,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// This xtask with one edit, built once per run of these tests. It judges a
 /// PR differently from the xtask that `main` holds in a test.
 fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("variants")
-        .join(name);
+    let directory = held_tmp().join("variants").join(name);
     if directory.exists() {
         fs::remove_dir_all(&directory).unwrap();
     }
@@ -262,9 +280,7 @@ impl Repo {
     }
 
     fn with(name: &str, on_main: &[(&str, &str)], on_branch: &[(&str, &str)]) -> Repo {
-        let parent = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("merge")
-            .join(name);
+        let parent = held_tmp().join("merge").join(name);
         if parent.exists() {
             fs::remove_dir_all(&parent).unwrap();
         }
@@ -1470,7 +1486,7 @@ fn a_merge_removes_trees_no_live_run_holds() {
 
 #[test]
 fn a_tool_just_written_can_run_while_other_threads_start_processes() {
-    let directory = Path::new(env!("CARGO_TARGET_TMPDIR")).join("merge/fresh-tool");
+    let directory = held_tmp().join("merge/fresh-tool");
     if directory.exists() {
         fs::remove_dir_all(&directory).unwrap();
     }
@@ -1795,8 +1811,10 @@ fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
     assert_eq!(
         repo.calls().matches("cargo fmt --all").count(),
         2,
-        "{}",
-        repo.calls()
+        "{}\nstdout: {}\nstderr: {}",
+        repo.calls(),
+        stdout(&output),
+        stderr(&output)
     );
     assert_merged(&repo, &output);
 }

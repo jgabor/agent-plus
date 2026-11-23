@@ -376,6 +376,23 @@ fn a_url_rule_is_a_host_and_a_plain_path() {
     }
 }
 
+// spec(NETWORK): A URL rule's path can't have a `.` or `..` segment, even one written with `%2e`, because a normalized request path never has one.
+#[test]
+fn a_url_rule_path_has_no_escaped_dot_segment() {
+    for path in [
+        "%2e", "%2E", "%2e%2e", "%2E%2E", ".%2e", "%2e.", ".%2E", "%2E.",
+    ] {
+        error_of(&format!("NETWORK +https://a.com/public/{path}/secret\n"));
+        error_of(&format!("NETWORK +https://a.com/public/{path}\n"));
+    }
+    for path in ["/a%2eb", "/%2e%2e%2e", "/.%2e."] {
+        assert_eq!(
+            destination_of(&format!("NETWORK +https://a.com{path}\n")),
+            url(Scheme::Https, "a.com", None, path)
+        );
+    }
+}
+
 #[test]
 fn a_network_rule_needs_a_sign() {
     let error = error_of("NETWORK kagi.com\n");

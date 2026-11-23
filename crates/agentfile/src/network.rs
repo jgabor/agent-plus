@@ -718,10 +718,10 @@ fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
     if path.to_ascii_lowercase().contains("%2f") {
         return Err("its path has an encoded slash".to_string());
     }
-    if path
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
-    {
+    if path.split('/').any(|segment| {
+        let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+        segment == "." || segment == ".."
+    }) {
         return Err("its path has a `.` or `..` segment".to_string());
     }
     let (host, port) = match authority.split_once(':') {

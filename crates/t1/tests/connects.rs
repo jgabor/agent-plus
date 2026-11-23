@@ -284,6 +284,56 @@ fn settled(seen: &Seen, want: usize) -> Vec<String> {
     seen.lock().unwrap().clone()
 }
 
+/// A TCP listener on `127.0.0.1` and on `::1`, and a UDP socket on
+/// `127.0.0.1`, all on one port.
+fn one_port() -> (TcpListener, TcpListener, UdpSocket) {
+    one_port_after(|| TcpListener::bind("127.0.0.1:0"))
+}
+
+/// Binds the rest on the port of the first TCP listener that `first` binds.
+/// The kernel promised that port to the first listener alone, so when
+/// another socket holds it for one of the rest, this tries another. It keeps
+/// each port it skips until it returns, so that it never tries one twice.
+fn one_port_after(
+    mut first: impl FnMut() -> io::Result<TcpListener>,
+) -> (TcpListener, TcpListener, UdpSocket) {
+    let mut skipped = Vec::new();
+    for _ in 0..100 {
+        let tcp4 = first().unwrap();
+        let port = tcp4.local_addr().unwrap().port();
+        let rest = TcpListener::bind(("::1", port))
+            .and_then(|tcp6| Ok((tcp6, UdpSocket::bind(("127.0.0.1", port))?)));
+        match rest {
+            Ok((tcp6, udp4)) => return (tcp4, tcp6, udp4),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => skipped.push(tcp4),
+            Err(error) => panic!("binding port {port}: {error}"),
+        }
+    }
+    panic!("another socket held each of {} ports", skipped.len());
+}
+
+#[test]
+fn one_port_skips_a_port_another_socket_holds() {
+    // The first listener's port, which this test holds for UDP too.
+    let (first, _taken) = loop {
+        let first = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = first.local_addr().unwrap().port();
+        if let Ok(taken) = UdpSocket::bind(("127.0.0.1", port)) {
+            break (first, taken);
+        }
+    };
+    let port = first.local_addr().unwrap().port();
+    let mut first = Some(first);
+    let (tcp4, tcp6, udp4) = one_port_after(|| match first.take() {
+        Some(first) => Ok(first),
+        None => TcpListener::bind("127.0.0.1:0"),
+    });
+    let chosen = tcp4.local_addr().unwrap().port();
+    assert_ne!(chosen, port);
+    assert_eq!(tcp6.local_addr().unwrap().port(), chosen);
+    assert_eq!(udp4.local_addr().unwrap().port(), chosen);
+}
+
 // spec(NETWORK): **Your host.** Services on your host's loopback interface are reachable only as `host.ap.internal`, and only when a `+` rule names it.
 // spec(NETWORK): A connection is attributed to the name behind the address it connects to, which is how host rules apply to traffic without a server name, such as SSH.
 // spec(NETWORK): **UDP** follows the same rules, with names attributed through the resolver.
@@ -291,9 +341,8 @@ fn settled(seen: &Seen, want: usize) -> Vec<String> {
 fn a_rule_for_your_host_reaches_its_loopback_over_tcp_and_udp() {
     let scratch = Scratch::new("your-host");
     scratch.build("reaching", "NETWORK -\nNETWORK +host.ap.internal\n");
-    let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (tcp, _, udp) = one_port();
     let port = tcp.local_addr().unwrap().port();
-    let udp = UdpSocket::bind(("127.0.0.1", port)).unwrap();
     let tcp_seen = tcp_echo(tcp, "host");
     let udp_seen = udp_echo(udp, "host");
 
@@ -340,10 +389,8 @@ fn a_rule_from_the_command_line_reaches_your_host_for_that_run_only() {
 fn unreachable(test: &str, network: &str) {
     let scratch = Scratch::new(test);
     scratch.build(test, network);
-    let tcp4 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (tcp4, tcp6, udp4) = one_port();
     let port = tcp4.local_addr().unwrap().port();
-    let tcp6 = TcpListener::bind(("::1", port)).unwrap();
-    let udp4 = UdpSocket::bind(("127.0.0.1", port)).unwrap();
     let seen = [
         tcp_echo(tcp4, "host"),
         tcp_echo(tcp6, "host"),

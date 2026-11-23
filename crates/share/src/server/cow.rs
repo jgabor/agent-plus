@@ -583,6 +583,12 @@ fn walk(from: BorrowedFd, path: &[u8], out: &mut Seen) -> io::Result<()> {
 /// Removes the directory `name` in `directory`, which a capture made, and
 /// everything in it.
 fn remove_tree(directory: BorrowedFd, name: &CStr) -> io::Result<()> {
+    // An empty one goes as it is, as `objects` does, whose mode may not let
+    // it be read.
+    match sys::unlinkat(directory, name, libc::AT_REMOVEDIR) {
+        Err(error) if error.raw_os_error() == Some(libc::ENOTEMPTY) => {}
+        removed => return removed,
+    }
     let made = sys::open_beneath(directory, name, libc::O_RDONLY | libc::O_DIRECTORY)?;
     // The copy can have your mode, which may not let it be changed.
     sys::fchmod(made.as_fd(), DIR_MODE)?;
@@ -635,13 +641,21 @@ fn copy_tree(
                 copied.insert(inner, seen(&stat));
             }
             libc::S_IFREG => {
+                // Git can replace the file since, even with a symlink or a
+                // directory. It is left out, so the check sees the change.
                 let source = match sys::open_beneath(from, &name, READ_FLAGS) {
                     Ok(source) => source,
-                    Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+                    Err(error)
+                        if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ELOOP)) =>
+                    {
+                        continue;
+                    }
                     Err(error) => return Err(error),
                 };
-                // What was opened may be newer than what was looked at.
                 let stat = sys::fstat(source.as_fd())?;
+                if !is(stat.st_mode, libc::S_IFREG) {
+                    continue;
+                }
                 let flags = libc::O_WRONLY | libc::O_EXCL;
                 let made = sys::create_beneath(to, &name, flags, FILE_MODE)?;
                 copy_contents(source.as_fd(), made.as_fd())?;

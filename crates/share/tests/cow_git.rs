@@ -265,6 +265,11 @@ fn refs_packed_while_git_is_captured_are_captured_again() {
 fn git_that_keeps_changing_fails_the_capture() {
     let tree = Tree::new("cow-git-changing");
     repository(&tree.root);
+    // Each copy that is made again goes, whatever mode yours gave it.
+    let modes = [(".git/info", 0o555), (".git/objects", 0o111)];
+    for (path, mode) in modes {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
     let pending = pending(&tree);
     let root = cow_root(&tree.root, &pending);
     let repository = tree.root.clone();
@@ -281,4 +286,7 @@ fn git_that_keeps_changing_fails_the_capture() {
     // Nothing of a capture is left behind.
     assert!(!pending.join("git").exists());
     assert!(!pending.join("head").exists());
+    for (path, _) in modes {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }

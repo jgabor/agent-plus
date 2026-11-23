@@ -1983,6 +1983,11 @@ allow one.
   resolver. QUIC to a host that needs decrypting is blocked, so clients
   fall back to TCP. UDP port 443 is denied to a host the proxy decrypts.
 - **ICMP** isn't carried, so `ping` gets no reply.
+- **Connections at once.** The guest can have at most 64 TCP connections
+  that it has started but not finished opening, and a SYN past that is
+  dropped unanswered, so the guest sends it again. The guest can send UDP to
+  at most 32 destination ports at once, and a datagram to another port is
+  dropped.
 - **Limits.**
   - Under `NETWORK +`, a deny rule for a name is best effort: a client that
     connects to a literal IP address without a name only meets IP rules.

@@ -7,13 +7,14 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
-use netstack::{Config, Flow, Stack};
+use netstack::{Config, Flow, Stack, Verdict};
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, HardwareAddress, IpAddress, IpCidr, Ipv4Packet, TcpPacket,
+    UdpPacket,
 };
 
 const GUEST_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x15];
@@ -708,4 +709,149 @@ fn a_forgotten_connection_sends_its_reset_once_the_guest_s_address_is_known_agai
         resets += usize::from(tcp_flags(&frame).is_some_and(|flags| flags.2));
     }
     assert_eq!(resets, 1);
+}
+
+#[test]
+fn every_socket_is_freed_after_connections_end_by_fin_and_by_reset() {
+    let start = Instant::now();
+    let mut guest = Guest::new();
+    let mut stack = stack();
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    for round in 0..100u16 {
+        let handle = guest.connect(to, 40000 + round);
+        exchange(&mut guest, &mut stack, start);
+        let connection = stack.accept().expect("the stack accepted the connection");
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        if round % 2 == 0 {
+            socket.close();
+            exchange(&mut guest, &mut stack, start);
+            assert!(stack.received_all(connection.id));
+            stack.close(connection.id);
+        } else {
+            socket.abort();
+        }
+        exchange(&mut guest, &mut stack, start);
+        assert!(stack.ended(connection.id), "round {round}");
+        stack.forget(connection.id);
+        exchange(&mut guest, &mut stack, start);
+        guest.sockets.remove(handle);
+    }
+    assert_eq!(stack.sockets(), 0);
+}
+
+/// `frame`, a TCP or UDP frame over IPv4, from another `source` port and to
+/// another `destination` port, with its checksum filled, or spoiled if
+/// `bad`.
+fn with_ports(frame: &[u8], source: u16, destination: u16, bad: bool) -> Vec<u8> {
+    let mut frame = frame.to_vec();
+    let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..]);
+    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
+    let (from, to) = (ip.src_addr().into(), ip.dst_addr().into());
+    let udp = ip.next_header() == smoltcp::wire::IpProtocol::Udp;
+    let payload = ip.payload_mut();
+    if udp {
+        let mut udp = UdpPacket::new_unchecked(payload);
+        udp.set_src_port(source);
+        udp.set_dst_port(destination);
+        udp.fill_checksum(&from, &to);
+        let spoiled = udp.checksum() ^ 0xff;
+        if bad {
+            udp.set_checksum(spoiled);
+        }
+    } else {
+        let mut tcp = TcpPacket::new_unchecked(payload);
+        tcp.set_src_port(source);
+        tcp.set_dst_port(destination);
+        tcp.fill_checksum(&from, &to);
+        let spoiled = tcp.checksum() ^ 0xff;
+        if bad {
+            tcp.set_checksum(spoiled);
+        }
+    }
+    frame
+}
+
+// spec(NETWORK): **Connections at once.** The guest can have at most 64 TCP connections that it has started but not finished opening, and a SYN past that is dropped unanswered, so the guest sends it again.
+#[test]
+fn half_open_connections_and_held_syns_stay_within_their_limit() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
+    let syn = syn_frame(to);
+    let now = Instant::now();
+    for verdict in [Verdict::Take, Verdict::Hold] {
+        for bad in [false, true] {
+            let mut stack = introduced();
+            let mut asked = Vec::new();
+            for port in 0..200 {
+                let frame = with_ports(&syn, 30000 + port, 443, bad);
+                stack.receive_holding(&frame, now, |flow| {
+                    asked.push(*flow);
+                    verdict
+                });
+                assert!(stack.sockets() <= 64, "{verdict:?}, bad {bad}");
+                assert!(stack.held() <= 64, "{verdict:?}, bad {bad}");
+            }
+            // A taken SYN with a bad checksum opens nothing, so each new
+            // one is asked about.
+            let expected = if bad && verdict == Verdict::Take {
+                200
+            } else {
+                64
+            };
+            assert_eq!(asked.len(), expected, "{verdict:?}, bad {bad}");
+            while stack.transmit().is_some() {}
+            // A SYN past the limit isn't asked about, and gets no answer.
+            if !bad || verdict == Verdict::Hold {
+                let frame = with_ports(&syn, 29999, 443, bad);
+                stack.receive_holding(&frame, now, |flow| panic!("asked about {flow:?}"));
+                assert!(stack.transmit().is_none(), "{verdict:?}, bad {bad}");
+            }
+            // Once one is freed, the next SYN is asked about again.
+            match verdict {
+                Verdict::Hold => stack.release(asked[0], false, now),
+                _ => stack.abandon(asked[0]),
+            }
+            stack.poll(now);
+            let mut again = 0;
+            stack.receive_holding(&with_ports(&syn, 29998, 443, bad), now, |_| {
+                again += 1;
+                Verdict::Refuse
+            });
+            assert_eq!(again, 1, "{verdict:?}, bad {bad}");
+        }
+    }
+}
+
+// spec(NETWORK): The guest can send UDP to at most 32 destination ports at once, and a datagram to another port is dropped.
+#[test]
+fn udp_ports_stay_within_their_limit() {
+    let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53);
+    let datagram = datagram_frame(to);
+    let now = Instant::now();
+    for bad in [false, true] {
+        let mut stack = stack();
+        let mut asked = 0;
+        for port in 0..100 {
+            let frame = with_ports(&datagram, 40000, 1000 + port, bad);
+            stack.receive(&frame, now, |_| {
+                asked += 1;
+                true
+            });
+            assert!(stack.sockets() <= 32, "bad {bad}");
+        }
+        assert_eq!(asked, 32, "bad {bad}");
+        assert_eq!(stack.sockets(), 32, "bad {bad}");
+        // A port already open still takes datagrams.
+        while stack.recv_datagram().is_some() {}
+        stack.receive(&with_ports(&datagram, 40000, 1000, false), now, |_| true);
+        assert!(stack.recv_datagram().is_some(), "bad {bad}");
+        // Once one is freed, a datagram to a new port is asked about again.
+        stack.unbind(1001);
+        let mut again = 0;
+        stack.receive(&with_ports(&datagram, 40000, 2000, false), now, |_| {
+            again += 1;
+            true
+        });
+        assert_eq!(again, 1, "bad {bad}");
+        assert!(stack.recv_datagram().is_some(), "bad {bad}");
+    }
 }

@@ -151,7 +151,8 @@ impl Stack {
     }
 
     /// Takes one Ethernet frame from the guest, and handles it. If it opens a
-    /// [`Flow`], `take` decides whether the stack takes it.
+    /// [`Flow`], `take` decides whether the stack takes it, as
+    /// [`Stack::receive_holding`] says.
     pub fn receive(&mut self, frame: &[u8], now: Instant, take: impl FnOnce(&Flow) -> bool) {
         self.receive_holding(frame, now, |flow| match take(flow) {
             true => Verdict::Take,

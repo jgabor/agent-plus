@@ -1983,6 +1983,11 @@ allow one.
   resolver. QUIC to a host that needs decrypting is blocked, so clients
   fall back to TCP. UDP port 443 is denied to a host the proxy decrypts.
 - **ICMP** isn't carried, so `ping` gets no reply.
+- **Connections at once.** The guest can have at most 64 TCP connections
+  that it has started but not finished opening, and a SYN past that is
+  dropped unanswered, so the guest sends it again. The guest can send UDP to
+  at most 32 destination ports at once, and a datagram to another port is
+  dropped.
 - **Limits.**
   - Under `NETWORK +`, a deny rule for a name is best effort: a client that
     connects to a literal IP address without a name only meets IP rules.
@@ -1991,11 +1996,6 @@ allow one.
     for other names it serves, including names the policy denies: other
     names on its certificate, or other sites behind the same shared front,
     such as a CDN.
-  - The guest can have at most 64 TCP connections that it has started but
-    not finished opening, and a SYN past that is dropped unanswered, so the
-    guest sends it again.
-  - The guest can send UDP to at most 32 destination ports at once, and a
-    datagram to another port is dropped.
   - `NETWORK` covers only the agent's own connections. The agent can ask
     an agent it may call to connect for it (see [POLICY](#policy)), and a
     harness's hosted tools, such as web search, run on the vendor's servers,

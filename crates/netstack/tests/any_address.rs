@@ -771,7 +771,7 @@ fn with_ports(frame: &[u8], source: u16, destination: u16, bad: bool) -> Vec<u8>
     frame
 }
 
-// spec(NETWORK): The guest can have at most 64 TCP connections that it has started but not finished opening, and a SYN past that is dropped unanswered, so the guest sends it again.
+// spec(NETWORK): **Connections at once.** The guest can have at most 64 TCP connections that it has started but not finished opening, and a SYN past that is dropped unanswered, so the guest sends it again.
 #[test]
 fn half_open_connections_and_held_syns_stay_within_their_limit() {
     let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443);
@@ -795,9 +795,10 @@ fn half_open_connections_and_held_syns_stay_within_their_limit() {
             let expected = if bad && verdict == Verdict::Take { 200 } else { 64 };
             assert_eq!(asked.len(), expected, "{verdict:?}, bad {bad}");
             while stack.transmit().is_some() {}
-            // A SYN past the limit gets no answer.
-            stack.receive_holding(&with_ports(&syn, 29999, 443, bad), now, |_| verdict);
+            // A SYN past the limit isn't asked about, and gets no answer.
             if !bad || verdict == Verdict::Hold {
+                let frame = with_ports(&syn, 29999, 443, bad);
+                stack.receive_holding(&frame, now, |flow| panic!("asked about {flow:?}"));
                 assert!(stack.transmit().is_none(), "{verdict:?}, bad {bad}");
             }
             // Once one is freed, the next SYN is asked about again.

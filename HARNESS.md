@@ -561,9 +561,11 @@ is a failure, and 2 is bad usage or an environment error.
 
 `cargo xtask next` prints an array of
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
-first, with
-at most one entry per free worker slot. When two issues overlap, the lower
-number stays. Any issue that overlaps a live claim is left out, and an abandoned
+first, with at most one entry per free worker slot on this host. On a Mac it
+names only issues with `host:macos`, and on Linux only issues without it.
+`claim` refuses an issue for the other host. When two issues overlap, the
+lower number stays, whichever host each is for, because no claim slot spans
+the two. Any issue that overlaps a live claim is left out, and an abandoned
 issue is included. `branch` names the existing branch of an abandoned issue,
 or the branch of the last claim on an available issue, if GitHub still has it.
 `worktree` names where that branch is still checked out. Both are otherwise
@@ -588,10 +590,14 @@ diagnostics go to stderr.
 | Unavailable | No `auto:*` label | Available, when the owner labels it, or the planner adopts it under a labeled parent |
 | Blocked | An issue in `Blocked by` is open | Available, when it closes |
 | Available | Claimable under AGENTS.md | Claimed |
-| Claimed | `in-progress`, with a live lease | Parked, Abandoned, or Closed |
+| Claimed | `in-progress`, with a live lease | Parked, Abandoned, Closed, or Available on its branch, when a Mac hands it over |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
 | Parked | `land-needed` or `answer-needed` | Available on its branch, when the owner removes the label |
 | Closed | Its PR merged, or triage closed it as fixed or covered | |
+
+An issue with `host:macos` is Available and Abandoned only on a Mac, and one
+without it only on Linux. A live claim takes a worker slot only on its own
+host, but its `Touches` hold on both, because both push to one `main`.
 
 ## Processes
 
@@ -615,6 +621,10 @@ Runs every dispatch period.
 
 Dispatch is idempotent, because all state is on GitHub. A worker that loses a
 claim race exits.
+
+A Mac runs a dispatcher of its own, with the same brief. `next` there names
+only issues with `host:macos`, against the Mac's own worker slots, and `next`
+on Linux leaves those issues out. `xtask` learns the host from `uname -s`.
 
 ### Planning
 
@@ -687,6 +697,14 @@ a parent is the owner's.
 7. Get a review, within the round limit.
 8. Open the PR, and wait for checks and reviews.
 9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
+
+A worker on a Mac does steps 1 to 4 and 7, with the checks that run there,
+because the gate needs Linux, KVM, and systemd. It then opens the PR with its
+proof and its review, parks its status comment, and removes `host:macos` and
+`in-progress`. The issue is Available on its branch, so the next dispatch on
+Linux starts a worker that takes it over, runs the gate, and merges or
+prepares the PR. That worker keeps the Mac's proof, as AGENTS.md says. Only
+the gate on Linux decides a merge, so no merge slot spans machines.
 
 Model selection escalates in a fixed order: improve the brief, raise the
 effort, then change the model. Reviewers use a different provider from the
@@ -1038,7 +1056,8 @@ GitHub.
 
 | Setting | Initial value |
 |---|---|
-| Worker slots | 5 |
+| Worker slots on Linux | 5 |
+| Worker slots on a Mac | 1 |
 | Measuring slots | 1 |
 | Merge slots | 1 |
 | Places for test runs | 2 per repository |
@@ -1056,9 +1075,9 @@ GitHub.
 | Review rounds | 3, or 5 for security, data loss, or concurrency |
 | Minimum free disk | 50 GiB |
 
-The places stay at 2, below the 5 worker slots, because three test runs at
-once failed on timing in 13 of 18 runs on the owner's host. If gates start
-to fail on timing, lower the worker slots to 4.
+The places stay at 2, below the 5 worker slots on Linux, because three test
+runs at once failed on timing in 13 of 18 runs on the owner's host. If gates
+start to fail on timing, lower the worker slots on Linux to 4.
 
 ## Failure handling
 
@@ -1133,7 +1152,6 @@ The harness is built before product features.
 | Decision | Default until decided |
 |---|---|
 | Whether the nightly job may merge a pure revert | It opens the PR, and the owner merges |
-| Hosts for macOS, and a merge slot that spans machines. GitHub-hosted macOS runners don't support nested virtualization, so macOS needs a real host | Those lanes don't run |
 | Limit on model spend for workers | Workers run no step marked `spend` |
 | The binary size target, and bands for every budget except boot, idle overhead, a build with nothing changed, `ap --version`, and the binary | Those budgets are recorded, and don't fail |
 | Whether agents get their own GitHub account. Everyone acts as the owner's account today, so no program can tell an agent from the owner | The guards stop mistakes, not an agent that ignores its rules |

@@ -18,7 +18,8 @@ can't continue alone, park the issue as AGENTS.md says.
    ToolSearch, and call it with `action` set to `settle` and `threadId` set to
    that thread. If that fails, go on.
 3. If the branch or worktree holds earlier work, treat it as context, not
-   proof. Follow the loop in AGENTS.md from there.
+   proof, except for proof from a Mac, as Proof in AGENTS.md says. Follow the
+   loop in AGENTS.md from there.
 4. For each status update, pipe the whole comment to `cargo xtask status
    <issue> --thread <id>`. Keep its format. It sets `Thread` and `Lease until`
    itself. If it exits 1, this thread no longer holds the issue, so stop and
@@ -83,6 +84,22 @@ can't continue alone, park the issue as AGENTS.md says.
    Any other exit 1 names the path it couldn't delete, so say that instead.
    When you stop in any other way, such as parking before `prepare` passes,
    keep the worktree, except as step 2 says.
+
+On a Mac, which runs only issues with `host:macos`, the gate can't run,
+because it needs Linux, KVM, and systemd. Prove the change with the checks
+that run there. Then, in place of steps 7 to 9:
+
+1. Make sure the body of the PR from step 6 has your proof and your review,
+   and names the commit you proved.
+2. Set your status comment's state to `parked`, and say in `Next` that a
+   worker on Linux takes the branch through the gate. This comes first, so
+   that the issue stays Claimed on both hosts until the labels go.
+3. Run `gh issue edit <issue> --remove-label host:macos --remove-label
+   in-progress`, and run it again until it succeeds, because a parked status
+   never expires. The issue is then Available on its branch, so the next
+   dispatch on Linux starts a worker that takes it over.
+4. Remove your worktree as step 9 says, and stop. Never run `merge` or
+   `prepare` on a Mac.
 
 Your checkout's `xtask` may be older than this brief. If `status`, or a command
 given `--thread`, exits 2 with a usage message, rebase your branch onto

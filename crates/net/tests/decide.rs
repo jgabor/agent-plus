@@ -386,6 +386,35 @@ fn bad_paths_under_a_host_with_url_rules_are_denied() {
     );
 }
 
+// spec(NETWORK): So are paths there with an empty segment, as in `/a//b`, though a path may end with one `/`.
+#[test]
+fn empty_segments_under_a_host_with_url_rules_are_denied() {
+    let rules = "NETWORK +github.com\nNETWORK -https://github.com/jgabor/secret\n";
+    for url in [
+        "https://github.com//jgabor/secret",
+        "https://github.com/jgabor//secret",
+        "https://github.com/jgabor/secret//x",
+        "https://github.com/x//",
+    ] {
+        decides(rules, request(url), DENY, "path");
+    }
+    // A final `/` is no empty segment, so the rules still decide.
+    decides(
+        rules,
+        request("https://github.com/jgabor/secret/"),
+        DENY,
+        "-https://github.com/jgabor/secret",
+    );
+    for url in [
+        "https://github.com/",
+        "https://github.com/jgabor/",
+        // A query isn't part of the path.
+        "https://github.com/jgabor/?next=//jgabor/secret",
+    ] {
+        decides(rules, request(url), ALLOW, "+github.com");
+    }
+}
+
 // spec(NETWORK): **Evaluation.** The most specific matching rule wins, so line order never matters.
 #[test]
 fn line_order_never_matters() {

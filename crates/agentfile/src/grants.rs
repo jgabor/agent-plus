@@ -272,10 +272,16 @@ impl Grants {
                 .harness
                 .map(|old| adapter(old).hosts)
                 .unwrap_or(&[]);
-            // A host that the approved rules allow on every connection
-            // stays allowed whatever the harness is.
+            // A host that the approved grants allow on every connection
+            // stays allowed whatever the harness is. The proxy reads what
+            // goes to a secret's bound host, and denies some of it.
+            let bound = |host: &str| {
+                (approved.secrets.iter().chain(&approved.seals))
+                    .any(|secret| secret.hosts.iter().any(|it| it.eq_ignore_ascii_case(host)))
+            };
+            let allowed = |host: &str| approved.network.allows(host) && !bound(host);
             let hosts: Vec<String> = (adapter(harness).hosts.iter())
-                .filter(|host| !old.contains(host) && !approved.network.allows(host))
+                .filter(|host| !old.contains(host) && !allowed(host))
                 .map(|host| host.to_string())
                 .collect();
             if !hosts.is_empty() {

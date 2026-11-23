@@ -348,12 +348,17 @@ fn another_harness_leaves_out_a_host_that_approved_rules_allow() {
     assert_eq!(codex_with(address), []);
 }
 
-// spec(NETWORK): A host that a `+` rule allows only on some ports or paths stays in the list, and so does one that a `-` rule denies on some connection.
+// spec(NETWORK): A host stays in the list when no name rule allows it on every port, when a `-` rule denies some connection to it, when it has a URL rule, or when it is a secret's bound host.
 #[test]
 fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
     for approved in [
         "NETWORK -\nNETWORK +sign-in.codex.test:443\n",
+        // IP rules alone don't make the resolver answer the name.
+        "NETWORK -\nNETWORK +0.0.0.0/0\nNETWORK +[::]/0\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test:443\nNETWORK +0.0.0.0/0\nNETWORK +[::]/0\n",
+        // The proxy denies what isn't HTTP to a host with a URL rule.
         "NETWORK -\nNETWORK +https://sign-in.codex.test/\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK +https://sign-in.codex.test/x\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test:80\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -https://sign-in.codex.test/x\n",
@@ -367,6 +372,13 @@ fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
     ] {
         assert_eq!(codex_with(approved), sign_in(), "{approved}");
     }
+    // The proxy reads what goes to a secret's bound host. A bound host can't
+    // be a harness host, so the secret goes with the change.
+    let bound = "NETWORK -\nNETWORK +sign-in.codex.test\nSECRET T @Sign-In.Codex.Test\n";
+    let now = ("codex", "NETWORK -\nNETWORK +sign-in.codex.test\n");
+    assert_eq!(widened_with(("claude", bound), now), sign_in());
+    let sealed = bound.replace("SECRET", "SEAL");
+    assert_eq!(widened_with(("claude", &sealed), now), sign_in());
 }
 
 #[test]

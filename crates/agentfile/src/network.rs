@@ -94,7 +94,12 @@ impl Network {
                 }
             }
         }
-        let decide = |name, by_address| self.decide(name, by_address);
+        // Step 3 of the evaluation.
+        let decide = |name: Option<Sign>, by_address: Option<Sign>| match (name, by_address) {
+            (Some(one), Some(other)) if one != other => Sign::Deny,
+            (Some(sign), _) | (None, Some(sign)) => sign,
+            (None, None) => self.default,
+        };
         // Your host is reachable only when a `+` rule names it, and IP rules
         // still check its real address, your host's loopback.
         if host == "host.ap.internal" {
@@ -144,31 +149,26 @@ impl Network {
     }
 
     /// Whether these rules allow every connection to the name `host`, by the
-    /// evaluation under NETWORK in SPEC.md: on every port, scheme, and path,
-    /// and to every address it could have that the proxy doesn't refuse.
+    /// evaluation and the enforcement under NETWORK in SPEC.md: on every
+    /// port, and to every address it could have that the proxy doesn't
+    /// refuse. A name rule or the default must allow it, or the resolver
+    /// doesn't answer it. A host with a URL rule never counts, because the
+    /// proxy denies what isn't HTTP to it, and neither do your host and an
+    /// address.
     pub fn allows(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        let (ports, paths) = self.cases();
-        ports.iter().all(|&port| {
-            let by_address = self.address_decisions(port);
-            [Scheme::Https, Scheme::Http].into_iter().all(|scheme| {
-                paths.iter().all(|path| {
-                    let name = self.name_decision(&host, scheme, port, path);
-                    (by_address.iter())
-                        .all(|&by_address| self.decide(name, by_address) == Sign::Allow)
-                })
-            })
-        })
-    }
-
-    /// Step 3 of the evaluation: the sign from a connection's name decision
-    /// and its address decision.
-    fn decide(&self, name: Option<Sign>, by_address: Option<Sign>) -> Sign {
-        match (name, by_address) {
-            (Some(one), Some(other)) if one != other => Sign::Deny,
-            (Some(sign), _) | (None, Some(sign)) => sign,
-            (None, None) => self.default,
+        let url = (self.rules.iter()).any(
+            |rule| matches!(&rule.destination, Destination::Url { host: name, .. } if *name == host),
+        );
+        if url || host == "host.ap.internal" || host.parse::<IpAddr>().is_ok() {
+            return false;
         }
+        let (ports, _) = self.cases();
+        ports.iter().all(|&port| {
+            let name = self.name_decision(&host, Scheme::Https, port, "/");
+            name.unwrap_or(self.default) == Sign::Allow
+                && !self.address_decisions(port).contains(&Some(Sign::Deny))
+        })
     }
 
     /// Each port and path a rule names, and one that none names, so that

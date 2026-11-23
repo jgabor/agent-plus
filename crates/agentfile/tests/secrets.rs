@@ -801,6 +801,15 @@ fn reserved_names_and_hosts_fail_on_their_own_lines() {
 }
 
 #[test]
+fn a_secret_that_uses_a_set_name_fails() {
+    let errors =
+        reserved_errors("SECRET SET_BY_ADAPTER visible\nSECRET SET_BY_ADAPTER_2 visible\n");
+    assert_eq!(lines_of(&errors), [2], "{errors:?}");
+    assert!(errors[0].message.contains("`SET_BY_ADAPTER`"), "{errors:?}");
+    assert!(errors[0].message.contains("`SECRET`"), "{errors:?}");
+}
+
+#[test]
 fn names_and_hosts_no_list_holds_pass() {
     let errors = reserved_errors(
         "ENV set_by_adapter 1\n\

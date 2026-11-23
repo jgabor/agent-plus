@@ -23,8 +23,11 @@ build() {
     echo "ap build didn't download $2 or write $1/Agentfile.lock" >&2
     exit 1
   fi
-  if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}( [0-9a-f]{64}| -)?\$" \
-    "$1/Agentfile.lock" ||
+  case $1 in
+    codex) host=' ([0-9a-f]{64}|-)' ;;
+    *) host='' ;;
+  esac
+  if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}$host\$" "$1/Agentfile.lock" ||
     grep -Eq "^HARNESS $1 (stable|latest) " "$1/Agentfile.lock"; then
     echo "ap build didn't lock $2 to an exact version and digest:" >&2
     cat "$1/Agentfile.lock" >&2

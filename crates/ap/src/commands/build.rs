@@ -882,9 +882,10 @@ fn open_cached(what: &str, path: &Path) -> io::Result<fs::File> {
 }
 
 /// The size of the binary in the zstd frame at `path`, which `what` is
-/// installed from and whose digest must be `sha256`, and a reader of it. The frame is read whole and checked before
-/// it is unpacked, so only the locked file is. Unpacking it once first gives
-/// the binary's size without holding the binary.
+/// installed from and whose digest must be `sha256`, and a reader of it. The
+/// frame is read whole and checked before it is unpacked, so only the locked
+/// file is. Unpacking it once first gives the binary's size without holding
+/// the binary.
 fn unpacked(what: &str, path: &Path, sha256: &str) -> io::Result<(u64, Box<dyn Read>)> {
     let hash = Rc::new(RefCell::new(Sha256Context::new()));
     let mut frame = Vec::new();

@@ -209,7 +209,8 @@ impl Lock {
 /// Settles the harness that `agent` names, and returns whether `lock`
 /// changed. A lock that resolves `agent` is kept. A Codex lock that would,
 /// but doesn't record the code-mode host, resolves the version it locks
-/// again. Any other resolves again:
+/// again, and a digest for Codex's file that isn't the lock's is an error.
+/// Any other resolves again:
 /// a channel resolves to the exact version the harness's publisher
 /// publishes for it, and the lock gets that version and the digest the
 /// publisher publishes for its file, and for Codex's code-mode host. Each
@@ -229,7 +230,28 @@ pub fn settle(
     let locked = match &lock.harness {
         Some(locked) if locked.resolves(agent) => locked.clone(),
         Some(locked) if locked.pins(agent) => {
-            resolve_codex(&locked.version, client, origins.codex_api)?
+            let again = |error: io::Error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Agentfile.lock doesn't record the code-mode host of `{}`, \
+                         so `ap` resolves it again: {error}",
+                        locked.label()
+                    ),
+                )
+            };
+            let resolved =
+                resolve_codex(&locked.version, client, origins.codex_api).map_err(again)?;
+            if resolved.sha256 != locked.sha256 {
+                return Err(again(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GitHub gives its file the digest {}, not the {} that the lock locks",
+                        resolved.sha256, locked.sha256
+                    ),
+                )));
+            }
+            resolved
         }
         _ if agent.harness == Harness::Codex => {
             resolve_codex(&agent.version, client, origins.codex_api)?

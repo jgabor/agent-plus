@@ -1614,6 +1614,27 @@ fn an_old_codex_lock_resolves_its_version_again_and_gets_the_host() {
 }
 
 #[test]
+fn an_old_codex_lock_whose_digest_github_no_longer_gives_fails() {
+    let server = openai_with_host(&common::digest(&host_file()));
+    let settling = Settling::new("settle-codex-old-digest", "AGENT codex\nOS minimal\n");
+    let locked = common::digest(b"another codex");
+    let old = format!("HARNESS codex 0.169.0 {locked}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&locked), "{error}");
+    assert!(
+        error.contains("code-mode host of `AGENT codex:0.169.0`"),
+        "{error}"
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        ["/repos/openai/codex/releases/tags/rust-v0.169.0"]
+    );
+    assert_eq!(settling.lockfile().unwrap(), old);
+    assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+}
+
+#[test]
 fn a_code_mode_host_asset_without_a_digest_writes_no_lock() {
     let digest = common::digest(&common::codex_file());
     let release = String::from_utf8(release_with_host(&digest, "00ff")).unwrap();

@@ -654,3 +654,20 @@ fn a_lock_held_on_your_file_holds_after_the_agent_writes_it() {
     guest.release(reader);
     assert!(!host_locked(&path, libc::F_WRLCK as i16));
 }
+
+#[test]
+fn a_lock_held_across_the_agent_s_first_write_stands_against_its_copy() {
+    let tree = Tree::new("cow-lock-across");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, LK_FLOCK).0, 0);
+    let writer = guest.open(hello, O_RDWR).unwrap();
+    assert_eq!(guest.write(writer, 0, b"agent"), Ok(5));
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, 0).0, EAGAIN);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, LK_FLOCK).0, EAGAIN);
+    // The agent's copy holds no more than the agent locked.
+    assert_eq!(guest.lock(SETLK, writer, 8, F_RDLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_RDLCK, LK_FLOCK).0, 0);
+}

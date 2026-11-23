@@ -1002,6 +1002,14 @@ impl Share {
         if valid & FATTR_SIZE != 0 {
             sys::ftruncate(fd, field(16)?).map_err(errno)?;
         }
+        let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
+        if valid & times != 0 {
+            let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
+            let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
+            sys::futimens(fd, &[access, modify]).map_err(errno)?;
+        }
+        // The mode changes after the times, so times that fail leave no
+        // permission taken away without the file kept.
         let mode = match valid & FATTR_MODE {
             0 => None,
             _ => Some(word(68)? & 0o7777),
@@ -1009,16 +1017,8 @@ impl Share {
         if let Some(mode) = mode {
             sys::fchmod(fd, mode).map_err(errno)?;
         }
-        let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
-        if valid & times != 0 {
-            let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
-            let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
-            sys::futimens(fd, &[access, modify]).map_err(errno)?;
-        }
         let answer = attr_out(&sys::fstat(fd).map_err(errno)?, self.owner);
-        if let Some(mode) = mode
-            && valid & FATTR_FH == 0
-        {
+        if let Some(mode) = mode {
             // Opening a directory again takes searching it too.
             let needed = match directory {
                 true => libc::S_IRUSR | libc::S_IXUSR,

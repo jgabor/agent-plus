@@ -391,7 +391,7 @@ fn writes_in_a_read_write_share_change_the_host_s_files() {
     assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
 }
 
-// spec(SHARE): In an `rw` share, the agent can give back a mode it took away from a file or a directory.
+// spec(SHARE): In an `rw` share, the agent can give back a mode it took away from a file or a directory, while the agent's kernel still holds the file in its cache.
 #[test]
 fn an_rw_share_gives_back_a_mode_it_took_away() {
     let tree = Tree::new("rw-mode-back");
@@ -401,6 +401,7 @@ fn an_rw_share_gives_back_a_mode_it_took_away() {
         ("hello.txt", 0, 0o600),
         ("dir", 0, 0o700),
         ("dir", 0o600, 0o700),
+        ("dir", 0o300, 0o700),
         ("", 0, 0o755),
     ];
     for (path, taken, back) in taken {
@@ -411,6 +412,40 @@ fn an_rw_share_gives_back_a_mode_it_took_away() {
         assert_eq!(guest.setattr(node, FATTR_MODE, 0, back), 0, "{path}");
         assert_eq!(mode(path), back, "{path}");
     }
+    // What it can't write, it still can't truncate.
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0), 0);
+    assert_eq!(guest.setattr(hello, FATTR_SIZE, 0, 0), EACCES);
+    // Once given back, a mode the host takes away stays taken, and so does
+    // one the agent took from a file its kernel then forgot.
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), 0);
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
+    fs::set_permissions(tree.root.join("hello.txt"), fs::Permissions::from_mode(0o0)).unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), EACCES);
+    fs::set_permissions(
+        tree.root.join("hello.txt"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0), 0);
+    guest.call(FORGET, hello, &u64::MAX.to_le_bytes());
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), EACCES);
+    fs::set_permissions(
+        tree.root.join("hello.txt"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    // A directory with no search permission is changed only at its name
+    // beneath the root.
+    fs::create_dir_all(tree.root.join("leaving/inner")).unwrap();
+    let inner = guest.walk("leaving/inner").unwrap();
+    assert_eq!(guest.setattr(inner, FATTR_MODE, 0, 0), 0);
+    let gone = tree.base.join("outside/leaving");
+    fs::rename(tree.root.join("leaving"), &gone).unwrap();
+    assert_eq!(guest.setattr(inner, FATTR_MODE, 0, 0o700), ENOENT);
+    assert_eq!(fs::metadata(gone.join("inner")).unwrap().mode() & 0o7777, 0);
+    fs::set_permissions(gone.join("inner"), fs::Permissions::from_mode(0o700)).unwrap();
     // The file it gives a mode back to is still the one at its name, beneath
     // the root.
     let file = guest.walk("dir/nested.txt").unwrap();

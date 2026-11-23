@@ -529,10 +529,10 @@ pub(super) fn terminal_size() -> Size {
     }
 }
 
-/// Writes the run's output to this process's and to the run's log,
-/// filtered, and hands each `ap exec` what is for it, until the run ends.
-/// Write errors are ignored: a reader that went away, or a full disk,
-/// shouldn't change what the harness does or how it ends.
+/// Writes the run's output, filtered, to the run's log and then to this
+/// process's, as [`show`] does, and hands each `ap exec` what is for it,
+/// until the run ends. Write errors are ignored: a reader that went away,
+/// or a full disk, shouldn't change what the harness does or how it ends.
 fn relay(stream: &mut UnixStream, execs: &runs::Execs, log: &mut File) -> io::Result<End> {
     let mut stdout_filter = Filter::default();
     let mut stderr_filter = Filter::default();

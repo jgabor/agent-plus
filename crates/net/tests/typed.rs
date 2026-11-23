@@ -3,8 +3,8 @@
 
 use std::net::IpAddr;
 
-use agentfile::{Error, Instruction, Network, Sign, parse, with_typed_network};
-use net::{Connection, decide};
+use agentfile::{Error, Instruction, Network, Scheme, Sign, parse, with_typed_network};
+use net::{Connection, Request, decide};
 
 /// The Agentfile's `lines`, after an `AGENT` line, with `typed` from the
 /// command line.
@@ -23,6 +23,23 @@ fn sign(lines: &str, typed: &[&str], name: &str) -> Sign {
         address: "192.0.2.1".parse::<IpAddr>().unwrap(),
         port: 443,
         request: None,
+    };
+    decide(&network.rules, network.default, &connection).sign
+}
+
+/// The sign an HTTPS request for `target` on `example.com` gets under the
+/// merged rules.
+fn request_sign(lines: &str, typed: &[&str], target: &str) -> Sign {
+    let merged = merged(lines, typed).unwrap_or_else(|errors| panic!("{errors:?}"));
+    let network = Network::read(&merged).unwrap();
+    let connection = Connection {
+        name: Some("example.com"),
+        address: "192.0.2.1".parse::<IpAddr>().unwrap(),
+        port: 443,
+        request: Some(Request {
+            scheme: Scheme::Https,
+            target,
+        }),
     };
     decide(&network.rules, network.default, &connection).sign
 }
@@ -110,6 +127,30 @@ fn a_typed_rule_wins_a_tie_against_an_agentfile_rule() {
             "NETWORK -\nNETWORK +example.com:443\n",
             &["-example.com"],
             "example.com"
+        ),
+        Sign::Allow
+    );
+    // A URL rule ties with one whose path normalizes the same. As above,
+    // the typed rule allows, because a tie in the Agentfile would deny.
+    for (agentfile, typed) in [
+        ("https://example.com/%7Euser", "https://example.com/~user"),
+        ("https://example.com/~user", "https://example.com/%7euser"),
+        ("https://example.com/a%3ab", "https://example.com/a%3Ab"),
+    ] {
+        let lines = format!("NETWORK -\nNETWORK -{agentfile}\n");
+        let target = typed.strip_prefix("https://example.com").unwrap();
+        assert_eq!(
+            request_sign(&lines, &[&format!("+{typed}")], &format!("{target}/x")),
+            Sign::Allow,
+            "{lines:?} {typed}"
+        );
+    }
+    // A URL rule with its port written is more specific, so no tie.
+    assert_eq!(
+        request_sign(
+            "NETWORK -\nNETWORK +https://example.com:443/~user\n",
+            &["-https://example.com/~user"],
+            "/~user/x"
         ),
         Sign::Allow
     );

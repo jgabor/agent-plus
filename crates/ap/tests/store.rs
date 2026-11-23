@@ -317,3 +317,101 @@ fn the_pin_names_the_os_layer_in_pin_toml() {
     assert!(pin.url.starts_with("https://"));
     assert_eq!(pin.sha256.len(), 64);
 }
+
+#[test]
+fn a_long_head_is_read() {
+    // Past 1 KiB, and well under the 64 KiB a head may hold.
+    let mut reply = format!(
+        "HTTP/1.1 200 OK\r\nX-Padding: {}\r\nContent-Length: {}\r\n\r\n",
+        "x".repeat(4096),
+        BODY.len()
+    )
+    .into_bytes();
+    reply.extend_from_slice(BODY);
+    let server = Server::start(|_| vec![("/vmlinux", reply)]);
+    let root = empty_root("long-head");
+    let url = server.url("/vmlinux");
+    let pin = Pin {
+        url: &url,
+        sha256: BODY_SHA256,
+    };
+    let path = fetch::fetch(&Store::new(&root), &trusting_client(), &pin).unwrap();
+    assert_eq!(fs::read(path).unwrap(), BODY);
+}
+
+#[test]
+fn a_body_of_exactly_the_most_a_download_may_hold_is_accepted() {
+    // The server sends less than it says, so the download ends early, after
+    // the length was accepted.
+    let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\nbody".to_vec();
+    let server = Server::start(|_| vec![("/vmlinux", reply)]);
+    fails_and_stores_nothing(&server, "most", "/vmlinux", BODY_SHA256, "ended early");
+}
+
+/// `body` as a chunked response of one chunk.
+fn one_chunk(body: &[u8]) -> Vec<u8> {
+    let mut reply = format!(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+        body.len()
+    )
+    .into_bytes();
+    reply.extend_from_slice(body);
+    reply.extend_from_slice(b"\r\n0\r\n\r\n");
+    reply
+}
+
+#[test]
+fn a_text_may_hold_exactly_its_most_and_no_more() {
+    let server = Server::start(|_| {
+        vec![
+            ("/most", ok(b"12345")),
+            ("/more", ok(b"123456")),
+            ("/most-chunked", one_chunk(b"12345")),
+            ("/more-chunked", one_chunk(b"123456")),
+            // Refused for its length, before a body that ends early.
+            (
+                "/said-more",
+                b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\n1".to_vec(),
+            ),
+        ]
+    });
+    let client = trusting_client();
+    for path in ["/most", "/most-chunked"] {
+        let text = fetch::text(&client, &server.url(path), 5).unwrap();
+        assert_eq!(text, "12345", "{path}");
+    }
+    for path in ["/more", "/more-chunked", "/said-more"] {
+        let error = fetch::text(&client, &server.url(path), 5).unwrap_err();
+        assert!(error.to_string().contains("too large"), "{path}: {error}");
+    }
+}
+
+#[test]
+fn a_digest_is_64_lowercase_hex_digits() {
+    let store = Store::new("/nowhere");
+    assert!(store.path(BODY_SHA256).is_ok());
+    let short = &BODY_SHA256[1..];
+    let upper = BODY_SHA256.to_uppercase();
+    let other = format!("{short}g");
+    for digest in [short, &upper, &other] {
+        let error = store.path(digest).unwrap_err();
+        assert!(error.to_string().contains("isn't a SHA-256"), "{digest}");
+    }
+}
+
+#[test]
+fn a_store_nobody_can_write_to_fails_instead_of_retrying() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = empty_root("read-only");
+    let layers = root.join("layers");
+    fs::create_dir_all(&layers).unwrap();
+    fs::set_permissions(&layers, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = Store::new(&root).put(BODY_SHA256, BODY);
+    fs::set_permissions(&layers, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = result.unwrap_err();
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
+}

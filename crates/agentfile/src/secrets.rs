@@ -98,7 +98,7 @@ impl Secrets {
 pub struct Reserved<'a> {
     /// The harness, as an error names it.
     pub harness: &'a str,
-    /// The variables the adapter sets.
+    /// The variables `ap` and the adapter set.
     pub set: Vec<&'a str>,
     /// The variables the harness reads for sign-in.
     pub sign_in: &'a [&'a str],
@@ -107,8 +107,9 @@ pub struct Reserved<'a> {
 }
 
 /// The errors from an `ENV` that sets a key in `reserved`, and from a
-/// `SECRET` that uses a sign-in name or binds one of the harness's hosts, in
-/// line order. It skips the instructions that have errors of their own.
+/// `SECRET` that uses one of those names or binds one of the harness's
+/// hosts, in line order. It skips the instructions that have errors of their
+/// own.
 pub fn reserved(instructions: &[Instruction], reserved: &Reserved) -> Vec<Error> {
     let harness = reserved.harness;
     let mut errors = Vec::new();
@@ -129,7 +130,9 @@ pub fn reserved(instructions: &[Instruction], reserved: &Reserved) -> Vec<Error>
                 let own = hosts
                     .iter()
                     .find(|host| (reserved.hosts.iter()).any(|own| own.eq_ignore_ascii_case(host)));
-                if reserved.sign_in.contains(&name.as_str()) {
+                if reserved.set.contains(&name.as_str()) {
+                    format!("`ap` sets `{name}` for {harness}, so it can't be a `SECRET`")
+                } else if reserved.sign_in.contains(&name.as_str()) {
                     format!(
                         "{harness} reads `{name}` to sign in, so it can't be a `SECRET`. Use `AUTH` to sign it in"
                     )

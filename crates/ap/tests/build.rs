@@ -2040,6 +2040,60 @@ fn a_secret_cannot_bind_a_harness_host_or_use_a_sign_in_name() {
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
+// spec(ENV): `ap` sets `HOME`, `USER`, and `LOGNAME` for every run, as [Run](#run) says, so a key that names one of them is an error too.
+#[test]
+fn env_cannot_set_what_every_run_sets() {
+    let scratch = Scratch::new("env-run-set");
+    for (agent, key) in [("claude", "HOME"), ("claude", "USER"), ("codex", "LOGNAME")] {
+        let dir = scratch.project(
+            &format!("{agent}-{key}"),
+            &format!("AGENT {agent}\nOS minimal\nENV OK 1\nENV {key} x\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {key}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.starts_with("Agentfile:4: "), "{message}");
+        assert!(message.contains(&format!("`{key}`")), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+// spec(SECRET): A `SECRET` that uses a name `ap` or the adapter sets is an error, as it is for an [`ENV`](#env) key, such as `HOME`, `USER`, `CLAUDE_CONFIG_DIR`, or the certificate variables below, because the run would replace its value.
+#[test]
+fn a_secret_cannot_use_a_name_ap_or_the_adapter_sets() {
+    let scratch = Scratch::new("secret-set");
+    for (agent, line, named) in [
+        ("claude", "SECRET HOME @example.com", "HOME"),
+        ("claude", "SECRET USER visible", "USER"),
+        ("codex", "SECRET LOGNAME visible", "LOGNAME"),
+        (
+            "claude",
+            "SECRET CLAUDE_CONFIG_DIR @example.com",
+            "CLAUDE_CONFIG_DIR",
+        ),
+        ("claude", "SECRET SSL_CERT_FILE visible", "SSL_CERT_FILE"),
+        (
+            "codex",
+            "SECRET GIT_SSL_CAINFO @example.com",
+            "GIT_SSL_CAINFO",
+        ),
+    ] {
+        let dir = scratch.project(
+            &format!("{agent}-{named}"),
+            &format!("AGENT {agent}\nOS minimal\nSECRET OK @example.com\n{line}\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {line}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.starts_with("Agentfile:4: "), "{message}");
+        assert!(message.contains(&format!("`{named}`")), "{message}");
+        assert!(message.contains("`SECRET`"), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
 // spec(Overview): `ap build` reports every error it can find in the Agentfile itself.
 #[test]
 fn a_reserved_name_is_reported_with_other_errors() {

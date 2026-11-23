@@ -18,8 +18,12 @@ pub const CERTIFICATES: [&str; 5] = [
     "GIT_SSL_CAINFO",
 ];
 
-/// What the adapter for `harness` keeps for itself: the variables it sets,
-/// the ones the harness reads for sign-in, and the harness's own hosts.
+/// The variables `ap` sets for every run, from SPEC.md's Run section.
+pub const RUN: [&str; 3] = ["HOME", "USER", "LOGNAME"];
+
+/// What the adapter for `harness` keeps for itself: the variables `ap` and
+/// it set, the ones the harness reads for sign-in, and the harness's own
+/// hosts.
 pub fn reserved(harness: Harness) -> Reserved<'static> {
     let (name, set, sign_in, hosts) = match harness {
         Harness::Claude => ("Claude Code", claude::SET, claude::SIGN_IN, claude::HOSTS),
@@ -27,7 +31,12 @@ pub fn reserved(harness: Harness) -> Reserved<'static> {
     };
     Reserved {
         harness: name,
-        set: CERTIFICATES.iter().chain(set).copied().collect(),
+        set: RUN
+            .iter()
+            .chain(&CERTIFICATES)
+            .chain(set)
+            .copied()
+            .collect(),
         sign_in,
         hosts,
     }

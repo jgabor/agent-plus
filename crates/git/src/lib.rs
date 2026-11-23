@@ -237,7 +237,8 @@ pub enum Target {
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// The repository holds something git wouldn't read.
+    /// The repository holds something git wouldn't read, or an object
+    /// larger than the limit.
     Corrupt(String),
 }
 
@@ -263,6 +264,8 @@ pub struct Repository {
     git_dir: PathBuf,
     /// The packs, found when an object is first looked for in one.
     packs: OnceLock<Vec<Pack>>,
+    /// The most bytes of contents an object may hold.
+    limit: usize,
 }
 
 /// How many symbolic refs `resolve` follows, as git's `SYMREF_MAXDEPTH`.
@@ -331,7 +334,19 @@ impl Repository {
         Repository {
             git_dir: git_dir.into(),
             packs: OnceLock::new(),
+            limit: usize::MAX,
         }
+    }
+
+    /// The same repository, refusing as corrupt an object whose contents are
+    /// larger than `limit` bytes. A loose object or a pack entry larger than
+    /// that is refused before it is inflated past its header, and a delta
+    /// whose result is larger is refused before it is applied. A chain of
+    /// deltas is applied one delta at a time, so reading an object holds no
+    /// more than its file or pack entry, its base, one delta, and itself.
+    /// Without a limit, an object can be as large as its header says.
+    pub fn with_limit(self, limit: usize) -> Repository {
+        Repository { limit, ..self }
     }
 
     /// The object named `id`, loose or packed, or `None` if there is none.
@@ -349,7 +364,7 @@ impl Repository {
     pub fn packed_object(&self, id: &Id) -> Result<Option<Object>, Error> {
         for pack in self.packs()? {
             if let Some(offset) = pack.find(id)? {
-                return pack.read(offset).map(Some);
+                return pack.read(offset, self.limit).map(Some);
             }
         }
         Ok(None)
@@ -436,6 +451,9 @@ impl Repository {
         };
         let (kind, size, header) =
             parse_header(&prefix).ok_or_else(|| corrupt(format!("{hex} has a bad header")))?;
+        if size > self.limit {
+            return Err(corrupt(format!("{hex} is larger than the limit")));
+        }
         let total = header
             .checked_add(size)
             .ok_or_else(|| corrupt(format!("{hex} is too large")))?;

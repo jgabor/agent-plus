@@ -153,30 +153,33 @@ impl Pack {
     }
 
     /// The object whose entry starts at `offset`, with its deltas applied.
-    pub(crate) fn read(&self, mut offset: u64) -> Result<Object, Error> {
+    /// An entry or a result larger than `limit` is refused before it is
+    /// inflated or applied. The deltas are inflated and applied one at a
+    /// time, from the base, so a long chain holds only one of them.
+    pub(crate) fn read(&self, mut offset: u64, limit: usize) -> Result<Object, Error> {
         let mut deltas = Vec::new();
-        let kind = loop {
+        let (kind, size, data) = loop {
             // An offset delta's base comes before it, but a delta by id can
             // name any entry, so a longer chain than there are entries loops.
             if deltas.len() > self.count {
                 return Err(self.bad("has a delta chain that loops"));
             }
             let (entry, size, data) = self.entry(offset)?;
-            let bytes = self.inflate(data, size)?;
+            if size > limit {
+                return Err(self.bad(format!("has an entry at {offset} larger than the limit")));
+            }
             match entry {
-                Entry::Whole(kind) => {
-                    deltas.push(bytes);
-                    break kind;
-                }
+                Entry::Whole(kind) => break (kind, size, data),
                 Entry::Delta { base } => {
-                    deltas.push(bytes);
+                    deltas.push((size, data));
                     offset = base;
                 }
             }
         };
-        let mut data = deltas.pop().expect("a chain ends in a whole object");
-        while let Some(delta) = deltas.pop() {
-            data = self.apply(&data, &delta)?;
+        let mut data = self.inflate(data, size)?;
+        while let Some((size, at)) = deltas.pop() {
+            let delta = self.inflate(at, size)?;
+            data = self.apply(&data, &delta, limit)?;
         }
         Ok(Object { kind, data })
     }
@@ -284,10 +287,11 @@ impl Pack {
             loop {
                 let result = inflate(&mut state, rest, &mut output, MZFlush::None);
                 rest = &rest[result.bytes_consumed..];
-                out.extend_from_slice(&output[..result.bytes_written]);
-                if out.len() > size {
+                // Checked before the output grows, so it never holds more.
+                if result.bytes_written > size - out.len() {
                     return Err(self.bad("has an entry longer than its header says"));
                 }
+                out.extend_from_slice(&output[..result.bytes_written]);
                 match result.status {
                     Ok(MZStatus::StreamEnd) if out.len() == size => return Ok(out),
                     Ok(MZStatus::StreamEnd) => {
@@ -304,7 +308,8 @@ impl Pack {
     }
 
     /// Applies `delta` to `base`, as git's `patch_delta` does.
-    fn apply(&self, base: &[u8], delta: &[u8]) -> Result<Vec<u8>, Error> {
+    /// A result larger than `limit` is refused before anything is copied.
+    fn apply(&self, base: &[u8], delta: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         let bad = || self.bad("has a bad delta");
         if delta.len() < MIN_DELTA {
             return Err(bad());
@@ -316,6 +321,9 @@ impl Pack {
         }
         let size = delta_size(&mut bytes).ok_or_else(bad)?;
         let size = usize::try_from(size).map_err(|_| bad())?;
+        if size > limit {
+            return Err(self.bad("has a delta whose result is larger than the limit"));
+        }
         let mut out = Vec::with_capacity(size.min(1 << 24));
         while let Some(op) = bytes.next() {
             let piece = if op & 0x80 != 0 {

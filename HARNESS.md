@@ -1016,10 +1016,11 @@ issue, so closing that issue turns the roadmap off.
 The owner starts this check before a release, through a GitHub workflow with a
 `workflow_dispatch` trigger. A fresh GitHub-hosted runner installs the release
 binary and runs the journey, which is what the clean-machine requirement in
-[Release criteria](#release-criteria) needs. Such a runner boots our guest once
-the `runner-setup` action opens KVM, as the [runner gate](#runner-gate) shows,
-so the release check uses that action first. It is built once journey step 18
-passes. No scheduled work runs on GitHub.
+[Release criteria](#release-criteria) needs. Such an x86_64 runner boots our
+guest once the `runner-setup` action readies it, as the
+[runner gate](#runner-gate) shows, so the release check uses that action
+first. It is built once journey step 18 passes. No scheduled work runs on
+GitHub.
 
 ## Isolation and limits
 

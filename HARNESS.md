@@ -610,8 +610,8 @@ Runs every planning period. The planner reads `cargo xtask gaps`, and files
 sub-issues under a parent. Each sub-issue inherits its parent's `auto:*` label,
 whatever paths it will touch, because `merge` decides from the diff whether its
 PR waits for the owner. Before it files one, the planner looks for an open
-issue with no parent and no `auto:*`, `answer-needed`, or `land-needed` label
-that already covers the gap. It adopts that issue as a sub-issue, with the
+issue with no parent and no `auto:*`, `answer-needed`, `land-needed`, or
+`in-progress` label that already covers the gap. It adopts that issue as a sub-issue, with the
 parent's label, if it has no sub-issues of its own, and its definition of done
 names checks and not a decision of the owner's. An adopted issue counts as a
 filed one. The planner files none if the issues in progress and the issues

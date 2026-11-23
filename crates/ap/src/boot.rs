@@ -1977,10 +1977,12 @@ mod tests {
         let input = Input::new([-1, -1]);
         let key = ToGuest::Input(b"k".to_vec());
         let mut driver = Driver::new(&memory, no_parts(), Some(&run()), Some(&input));
-        driver.connect(INIT, PORT);
+        // A second connection for keys is closed, even before the init's.
         driver.connect(KEYS, KEYS_PORT);
         driver.connect(MORE_KEYS, KEYS_PORT);
+        driver.connect(INIT, PORT);
         assert!(driver.shut_down(MORE_KEYS));
+        assert!(!driver.shut_down(INIT));
         input.send(&key).unwrap();
         input.terminate().unwrap();
         driver.woken();
@@ -2124,7 +2126,7 @@ mod tests {
                 Block::new(vec![0; 512], b"a").unwrap(),
                 Block::new(vec![0; 1024], b"b").unwrap(),
             ],
-            shares: 2,
+            shares: 3,
             net: Some(Net::new(link.into(), net::MAC).unwrap()),
             relay: Some(ShareRelay::new(share_server.into(), Instant::now()).unwrap()),
         };
@@ -2135,17 +2137,17 @@ mod tests {
             devices.iter().map(|(_, line)| line.0).collect()
         }
         assert_eq!(lines(&machine.disks), [6, 7]);
-        assert_eq!(lines(&machine.shares), [8, 9]);
-        assert_eq!(machine.net.as_ref().map(|(_, line)| line.0), Some(10));
+        assert_eq!(lines(&machine.shares), [8, 9, 10]);
+        assert_eq!(machine.net.as_ref().map(|(_, line)| line.0), Some(11));
 
         // Each slot reads and writes its own device.
-        let ids: Vec<u32> = (0..8).map(|slot| driver.get_in(slot, DEVICE_ID)).collect();
-        assert_eq!(ids, [19, 2, 2, 26, 26, 1, u32::MAX, u32::MAX]);
-        for slot in 1..6 {
+        let ids: Vec<u32> = (0..9).map(|slot| driver.get_in(slot, DEVICE_ID)).collect();
+        assert_eq!(ids, [19, 2, 2, 26, 26, 26, 1, u32::MAX, u32::MAX]);
+        for slot in 1..=6 {
             driver.set_in(slot, STATUS, slot as u32);
         }
-        let statuses: Vec<u32> = (0..6).map(|slot| driver.get_in(slot, STATUS)).collect();
-        assert_eq!(statuses, [DRIVER_OK, 1, 2, 3, 4, 5]);
+        let statuses: Vec<u32> = (0..=6).map(|slot| driver.get_in(slot, STATUS)).collect();
+        assert_eq!(statuses, [DRIVER_OK, 1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

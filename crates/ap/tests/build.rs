@@ -11,6 +11,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use ap::lock::CodeModeHost;
 use store::{Agent, Agents, Declared, Layers};
 
 /// A test's own directory, with a home directory and a project in it.
@@ -1471,6 +1472,205 @@ fn openai(sha256: &str) -> common::Server {
     openai_with(common::codex_file(), release("rust-v0.169.0", sha256))
 }
 
+/// The path of Codex 0.169.0's code-mode host, under [`CODEX`].
+const HOST_FILE: &str = "/openai/codex/releases/download/rust-v0.169.0/codex-code-mode-host-x86_64-unknown-linux-musl.zst";
+
+/// The code-mode host the tests lock, and the file Codex's release ships
+/// it in: one zstd frame.
+const HOST: &[u8] = b"#!/bin/sh\necho a code-mode host\n";
+fn host_file() -> Vec<u8> {
+    store::compress(HOST, 3)
+}
+
+/// [`release`], with a code-mode host whose asset has the digest `host`.
+fn release_with_host(sha256: &str, host: &str) -> Vec<u8> {
+    let release = String::from_utf8(release("rust-v0.169.0", sha256)).unwrap();
+    let asset = format!(
+        r#"{{"name":"codex-code-mode-host-x86_64-unknown-linux-musl.zst","size":1,"digest":"sha256:{host}"}},"#
+    );
+    release
+        .replacen("\"assets\":[\n", &format!("\"assets\":[\n{asset}\n"), 1)
+        .into_bytes()
+}
+
+/// Serves Codex 0.169.0 as [`openai`] does, with [`host_file`] as its
+/// code-mode host, which the API gives the digest `host`.
+fn openai_with_host(host: &str) -> common::Server {
+    let release = release_with_host(&common::digest(&common::codex_file()), host);
+    let (file, host) = (common::codex_file(), host_file());
+    common::Server::start(move |_| {
+        vec![
+            ("/repos/openai/codex/releases/latest", common::ok(&release)),
+            (
+                "/repos/openai/codex/releases/tags/rust-v0.169.0",
+                common::ok(&release),
+            ),
+            (CODEX_FILE, common::ok(&file)),
+            (HOST_FILE, common::ok(&host)),
+        ]
+    })
+}
+
+// spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
+#[test]
+fn a_codex_release_with_a_code_mode_host_locks_downloads_and_installs_it() {
+    let digest = common::digest(&common::codex_file());
+    let host = common::digest(&host_file());
+    let server = openai_with_host(&host);
+    let settling = Settling::new("settle-codex-host", "AGENT codex\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS codex 0.169.0 {digest} {host}\n")
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        ["/repos/openai/codex/releases/latest", CODEX_FILE, HOST_FILE]
+    );
+    let mut cached = [digest.clone(), host.clone()];
+    cached.sort();
+    assert_eq!(settling.cached(), cached);
+    let out = settling.scratch.build(&settling.dir, &[]);
+    assert!(out.contains("built AGENT codex:0.169.0\n"), "{out}");
+    let layers = settling.scratch.agent("notes").layers;
+    let image = Layers::new(settling.scratch.store())
+        .get(&layers[1].digest)
+        .unwrap();
+    assert!(holds(&image, std::str::from_utf8(common::HARNESS).unwrap()));
+    assert!(holds(&image, std::str::from_utf8(HOST).unwrap()));
+    assert!(holds(&image, "codex-code-mode-host"));
+    // A rebuild takes both from the cache, and one that lacks the host
+    // downloads only the host.
+    fs::remove_file(settling.cache.join(&host)).unwrap();
+    assert!(!settling.settle(&server).unwrap());
+    assert_eq!(Settling::paths(&server)[3..], [HOST_FILE]);
+}
+
+#[test]
+fn a_code_mode_host_with_the_wrong_digest_is_not_stored_and_writes_no_lock() {
+    let wrong = common::digest(b"another host");
+    let server = openai_with_host(&wrong);
+    let settling = Settling::new("settle-codex-host-digest", "AGENT codex\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&common::digest(&host_file())), "{error}");
+    assert!(error.contains("code-mode host"), "{error}");
+    assert!(error.contains("codex:0.169.0"), "{error}");
+    assert_eq!(settling.lockfile(), None);
+    assert_eq!(settling.cached(), [common::digest(&common::codex_file())]);
+}
+
+#[test]
+fn a_build_whose_cached_code_mode_host_has_another_digest_fails() {
+    let host = common::digest(&host_file());
+    let server = openai_with_host(&host);
+    let settling = Settling::new("build-codex-host-digest", "AGENT codex\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    fs::write(
+        settling.cache.join(&host),
+        store::compress(b"another host", 3),
+    )
+    .unwrap();
+    let output = settling.scratch.ap(&settling.dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:1: "), "{message}");
+    assert!(message.contains(&host), "{message}");
+    assert!(settling.scratch.agents().list().unwrap().is_empty());
+}
+
+// spec(AGENT): A lockfile from before `ap` recorded the host resolves the Codex version it locks again.
+#[test]
+fn an_old_codex_lock_resolves_its_version_again_and_gets_the_host() {
+    let digest = common::digest(&common::codex_file());
+    let host = common::digest(&host_file());
+    let server = openai_with_host(&host);
+    // `AGENT codex` names the channel, but the lock's own version resolves.
+    let settling = Settling::new("settle-codex-old", "AGENT codex\nOS minimal\n");
+    let old = format!("HARNESS codex 0.169.0 {digest}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS codex 0.169.0 {digest} {host}\n")
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/repos/openai/codex/releases/tags/rust-v0.169.0",
+            CODEX_FILE,
+            HOST_FILE
+        ]
+    );
+    // A lock that records the release publishes no host resolves nothing
+    // again.
+    let settling = Settling::new("settle-codex-none", "AGENT codex\nOS minimal\n");
+    let none = format!("HARNESS codex 0.169.0 {digest} -\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &none).unwrap();
+    let requests = server.requests();
+    assert!(!settling.settle(&server).unwrap());
+    assert_eq!(server.requests(), requests + 1);
+    assert_eq!(Settling::paths(&server).last().unwrap(), CODEX_FILE);
+    assert_eq!(settling.lockfile().unwrap(), none);
+}
+
+#[test]
+fn an_old_codex_lock_whose_digest_github_no_longer_gives_fails() {
+    let server = openai_with_host(&common::digest(&host_file()));
+    let settling = Settling::new("settle-codex-old-digest", "AGENT codex\nOS minimal\n");
+    let locked = common::digest(b"another codex");
+    let old = format!("HARNESS codex 0.169.0 {locked}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&locked), "{error}");
+    assert!(
+        error.contains("code-mode host of `AGENT codex:0.169.0`"),
+        "{error}"
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        ["/repos/openai/codex/releases/tags/rust-v0.169.0"]
+    );
+    assert_eq!(settling.lockfile().unwrap(), old);
+    assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+}
+
+#[test]
+fn a_code_mode_host_asset_without_a_digest_writes_no_lock() {
+    let digest = common::digest(&common::codex_file());
+    let release = String::from_utf8(release_with_host(&digest, "00ff")).unwrap();
+    let release = release.replace(",\"digest\":\"sha256:00ff\"", "");
+    let server = openai_with(common::codex_file(), release.into_bytes());
+    let settling = Settling::new("settle-codex-host-none", "AGENT codex\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains("codex-code-mode-host"), "{error}");
+    assert_eq!(server.requests(), 1);
+    assert_eq!(settling.lockfile(), None);
+}
+
+#[test]
+fn a_lock_reads_a_code_mode_host_only_for_codex() {
+    let (digest, host) = ("a".repeat(64), "b".repeat(64));
+    let text = format!("HARNESS codex 0.169.0 {digest} {host}\n");
+    let lock = ap::lock::Lock::read(&text).unwrap();
+    let locked = lock.harness.as_ref().unwrap();
+    assert_eq!(locked.code_mode_host, CodeModeHost::Digest(host.clone()));
+    assert_eq!(lock.text(), text);
+    let none = format!("HARNESS codex 0.169.0 {digest} -\n");
+    let lock = ap::lock::Lock::read(&none).unwrap();
+    let locked = lock.harness.as_ref().unwrap();
+    assert_eq!(locked.code_mode_host, CodeModeHost::Unpublished);
+    assert_eq!(lock.text(), none);
+    for text in [
+        format!("HARNESS claude 2.1.3 {digest} {host}\n"),
+        format!("HARNESS claude 2.1.3 {digest} -\n"),
+        format!("HARNESS codex 0.169.0 {digest} 00ff\n"),
+        format!("HARNESS codex 0.169.0 {digest} {host} {host}\n"),
+    ] {
+        let error = ap::lock::Lock::read(&text).unwrap_err();
+        assert_eq!(error.line, 1, "{text}");
+    }
+}
+
 // spec(Build): **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile.
 // spec(AGENT): Channels resolve to an exact version at build time and are recorded in the lockfile.
 #[test]
@@ -1482,7 +1682,7 @@ fn codex_latest_resolves_downloads_and_writes_the_lock() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest}\n")
+        format!("HARNESS codex 0.169.0 {digest} -\n")
     );
     assert_eq!(
         Settling::paths(&server),
@@ -1516,7 +1716,7 @@ fn codex_without_a_version_resolves_latest() {
     );
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest}\n")
+        format!("HARNESS codex 0.169.0 {digest} -\n")
     );
 }
 
@@ -1582,7 +1782,7 @@ fn a_codex_file_in_the_cache_or_store_is_not_downloaded_again() {
     );
     assert_eq!(
         fs::read_to_string(path).unwrap(),
-        format!("HARNESS codex 0.169.0 {digest}\n")
+        format!("HARNESS codex 0.169.0 {digest} -\n")
     );
 }
 
@@ -1605,7 +1805,7 @@ fn a_codex_download_that_does_not_match_the_lock_stores_nothing() {
     let server = openai_with(b"another file".to_vec(), Vec::new());
     let settling = Settling::new("settle-codex-locked", "AGENT codex:latest\nOS minimal\n");
     let digest = common::digest(&common::codex_file());
-    let lock = format!("HARNESS codex 0.169.0 {digest}\n");
+    let lock = format!("HARNESS codex 0.169.0 {digest} -\n");
     fs::write(settling.dir.join("Agentfile.lock"), &lock).unwrap();
     let error = settling.settle(&server).unwrap_err().to_string();
     assert!(error.contains(&common::digest(b"another file")), "{error}");
@@ -1645,7 +1845,7 @@ fn an_exact_codex_version_resolves_its_own_release() {
     );
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest}\n")
+        format!("HARNESS codex 0.169.0 {digest} -\n")
     );
 }
 
@@ -1678,7 +1878,7 @@ fn a_chunked_codex_release_resolves() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest}\n")
+        format!("HARNESS codex 0.169.0 {digest} -\n")
     );
 }
 
@@ -1752,7 +1952,7 @@ fn a_cached_codex_file_that_is_not_zstd_fails_the_build() {
     fs::write(common::cached(&scratch.home, &digest), "not zstd\n").unwrap();
     fs::write(
         dir.join("Agentfile.lock"),
-        format!("HARNESS codex 0.169.0 {digest}\n"),
+        format!("HARNESS codex 0.169.0 {digest} -\n"),
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build"]);

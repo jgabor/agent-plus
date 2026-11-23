@@ -41,6 +41,9 @@ use super::{effort_name, version};
 pub const INSTRUCTIONS: &str = "/home/agent/.codex/AGENTS.md";
 /// The user configuration.
 pub const CONFIGURATION: &str = "/home/agent/.codex/config.toml";
+/// Where the harness layer puts Codex's code-mode host, which Codex runs
+/// its tools through: beside Codex, where Codex 0.171.0 looks for it.
+pub const CODE_MODE_HOST: &str = "/usr/local/bin/codex-code-mode-host";
 
 /// The variables the adapter sets, besides the certificate variables.
 pub const SET: &[&str] = &[];

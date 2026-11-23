@@ -17,7 +17,10 @@
 //!   which an IP rule can allow, as it can't allow a loopback address.
 //!
 //! Plain TCP answers a connection's first line with `upstream:<line>`.
-//! HTTPS answers every request with a 404. Each line it gets, and each
+//! HTTPS answers every request with a 404, except a `POST` to a path that
+//! ends in `/responses`, which it answers as a fake model on OpenAI's
+//! Responses API: [`MODEL_TOOL`] while the request holds no tool's output,
+//! and then a message. Each line it gets, and each
 //! request's target, is noted in `<directory>/seen` as one line, `plain
 //! <line>`, `address <line>`, or `tls <target>`, so a check can tell what
 //! reached it. Each HTTPS request, its head and body as they arrived, is
@@ -43,6 +46,12 @@ use rustls::{ServerConfig, ServerConnection, StreamOwned};
 const HOST: &str = "host.ap.internal";
 /// How long a connection may stay quiet before the upstream drops it.
 const QUIET: Duration = Duration::from_secs(60);
+
+/// The JavaScript the fake model asks Codex's code-mode `exec` tool to run,
+/// as a JSON string. It runs a command, which writes `tool-ran` in Codex's
+/// working directory.
+const MODEL_TOOL: &str =
+    r#""text(JSON.stringify(await tools.exec_command({cmd: \"echo the tool ran > tool-ran\"})));""#;
 
 /// Where each line that reached the upstream is noted.
 type Seen = Arc<Mutex<File>>;
@@ -180,6 +189,7 @@ fn https(
         }
         let target = line.split(' ').nth(1).unwrap_or_default();
         note(seen, &format!("tls {target}"));
+        let model = line.starts_with("POST ") && target.ends_with("/responses");
         let mut request = line.into_bytes();
         let mut length = 0;
         let mut header = String::new();
@@ -195,11 +205,60 @@ fn https(
             }
             header.clear();
         }
+        let start = request.len();
         (&mut stream).take(length).read_to_end(&mut request)?;
         requests.keep(&request)?;
-        let answer = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        stream.get_mut().write_all(answer)?;
+        let answer = match model {
+            true => model_answer(&request[start..]),
+            false => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        };
+        stream.get_mut().write_all(&answer)?;
     }
+}
+
+/// The fake model's answer to a request with this body, as a stream of
+/// server-sent events: a call of Codex's code-mode `exec` tool with
+/// [`MODEL_TOOL`], until the body holds the output of a tool's call, and then
+/// a message.
+fn model_answer(body: &[u8]) -> Vec<u8> {
+    let answered = body
+        .windows(b"_call_output\"".len())
+        .any(|window| window == b"_call_output\"");
+    let item = match answered {
+        false => format!(
+            r#"{{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","namespace":"functions","name":"exec","status":"completed","input":{}}}"#,
+            MODEL_TOOL
+        ),
+        true => r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}"#.to_string(),
+    };
+    let usage = r#"{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}"#;
+    let events = [
+        (
+            "response.created",
+            r#"{"type":"response.created","response":{"id":"resp_1"}}"#.to_string(),
+        ),
+        (
+            "response.output_item.done",
+            format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{item}}}"#),
+        ),
+        (
+            "response.completed",
+            format!(
+                r#"{{"type":"response.completed","response":{{"id":"resp_1","object":"response","status":"completed","output":[{item}],"usage":{usage}}}}}"#
+            ),
+        ),
+    ];
+    let mut body = String::new();
+    for (event, data) in events {
+        body.push_str(&format!("event: {event}\ndata: {data}\n\n"));
+    }
+    let mut answer = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    answer.extend_from_slice(body.as_bytes());
+    answer
 }
 
 /// This host's IPv4 address on its route out, which isn't a loopback

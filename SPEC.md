@@ -753,6 +753,11 @@ lockfile, and never redistributes it.
 
 Open-source harnesses, such as Codex, ship inside images as-is.
 
+A Codex release that publishes a code-mode host, which Codex runs its tools
+through, has it installed beside Codex, and the lockfile records its digest.
+A lockfile from before `ap` recorded the host resolves the Codex version it
+locks again.
+
 ### OS
 
 ```

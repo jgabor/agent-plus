@@ -1,8 +1,8 @@
 //! `ap logs <run>`, from SPEC.md's `ap logs` section. It reads the run's log
 //! from the store, which `ap run` writes as it shows the run's output, and
 //! writes each part to the stream it was shown on, then the run's network
-//! decisions on standard error. For an active run, it stops at what `ap
-//! run` has written so far.
+//! decisions on standard error, with control characters escaped. For an
+//! active run, it stops at what `ap run` has written so far.
 
 use std::ffi::OsString;
 use std::io::{self, BufReader, Read, Write};
@@ -75,6 +75,7 @@ fn show(mut log: impl Read, stdout: &mut impl Write, stderr: &mut impl Write) ->
             Logged::Stdout(bytes) => stdout.write_all(&bytes),
             Logged::Stderr(bytes) => stdout.flush().and_then(|()| stderr.write_all(&bytes)),
             Logged::Decision(at, line) => {
+                let line = escaped(&line);
                 decisions.push(format!("{}  {line}\n", super::ps::utc(at.into())));
                 Ok(())
             }
@@ -91,6 +92,16 @@ fn show(mut log: impl Read, stdout: &mut impl Write, stderr: &mut impl Write) ->
     }
     let _ = stderr.write_all(decisions.concat().as_bytes());
     Ok(())
+}
+
+/// A decision's line, with each word printed the way an Agentfile argument
+/// is, so a name the agent chose can't drive your terminal.
+fn escaped(line: &str) -> String {
+    let words = line.split(' ').map(|word| match word {
+        "" => String::new(),
+        word => agentfile::print_argument(word),
+    });
+    words.collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]

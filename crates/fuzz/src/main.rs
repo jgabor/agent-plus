@@ -675,8 +675,9 @@ fn same_requests(passed: &[u8], ours: &[Framed]) {
 
 /// The requests that hyper's HTTP/1.1 server reads from `passed`, fed to it
 /// one byte at a time, the offset where it stopped reading, if it did, and
-/// the offset where it refused a body, if it did. Only a body's framing can
-/// make it refuse a body, since the stream never ends.
+/// the offset where it refused a body, if it did. Since the stream never
+/// ends, only a body's framing makes it refuse one, or chunk extensions of
+/// more than 16 KiB in all, which hyper limits and the fuzzer never makes.
 /// A request ends where hyper has read all of its body.
 fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>) {
     use hyper::body::{Body, Bytes, Frame, Incoming};
@@ -776,11 +777,12 @@ fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>)
         fed: fed.clone(),
         read: read.clone(),
     };
-    // As many headers as the name check reads, so that hyper refuses fewer
-    // of the heads that the check passes.
+    // As many headers and bytes as the name check reads, in heads and in
+    // trailers, so that hyper refuses fewer of those that the check passes.
     let mut connection = pin!(
         hyper::server::conn::http1::Builder::new()
             .max_headers(128)
+            .max_header_size(64 * 1024)
             .serve_connection(stream, service)
     );
     let mut cx = Context::from_waker(Waker::noop());

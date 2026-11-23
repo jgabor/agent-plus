@@ -206,7 +206,8 @@ fn a_request_the_server_could_read_another_way_is_refused() {
     ] {
         refused(format!("{head}{headers}\r\nx").as_bytes());
     }
-    // A server may end a trailer line only at CRLF, as hyper does.
+    // A chunk size line needs a digit, and it and a trailer line end only
+    // at CRLF, as hyper reads them.
     let bad_chunks = [
         "zz\r\n",
         "1\r\nab\r\n",
@@ -217,7 +218,7 @@ fn a_request_the_server_could_read_another_way_is_refused() {
         "0;\n\r\n\r\n",
         "\r\n\r\n",
         ";x\r\n\r\n",
-        " 0\r\n\r\n",
+        " \r\n\r\n",
     ];
     for chunks in bad_chunks {
         let input = format!("{head}Transfer-Encoding: chunked\r\n\r\n{chunks}");

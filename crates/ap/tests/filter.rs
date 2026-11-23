@@ -231,3 +231,37 @@ fn state_lives_in_the_filter_so_each_stream_gets_its_own() {
     assert_eq!(stderr.push(b"1t"), b"1t");
     assert_eq!(stdout.push(b"1t"), b"");
 }
+
+#[test]
+fn a_character_ends_after_as_many_bytes_as_it_says() {
+    // U+201D is three bytes, and ends in 0x9D, the 8-bit OSC.
+    assert_passes("\u{201d}52;c;aGk=\x07".as_bytes());
+    // After a whole character, 0x9D is an OSC again.
+    assert_filters(b"\xc3\xa9\x9d52;c;aGk=\x07b", "éb".as_bytes());
+}
+
+#[test]
+fn an_8_bit_string_terminator_passes_and_ends_the_string() {
+    assert_passes(b"a\x9cb");
+    // The string has ended, so removing what follows doesn't end it again.
+    assert_filters(b"\x1b]0;a\x9c\x1b[21tb", b"\x1b]0;a\x9cb");
+}
+
+#[test]
+fn a_byte_past_ascii_ends_a_sequence_and_is_written() {
+    assert_filters("\x1b[1ém".as_bytes(), "ém".as_bytes());
+    assert_filters("\x1bPéq".as_bytes(), "éq".as_bytes());
+}
+
+#[test]
+fn only_a_space_and_above_is_part_of_an_osc_code() {
+    // A space ends the code, so this is OSC 5, not the clipboard's 52.
+    assert_passes(b"\x1b]5 2;c;aGk=\x07");
+}
+
+#[test]
+fn sixel_graphics_and_other_lookalikes_pass() {
+    assert_passes(b"\x1bPq#0;2;0;0;0#0~~\x1b\\");
+    assert_passes(b"\x1b[21m");
+    assert_passes(b"\x1b[20 t");
+}

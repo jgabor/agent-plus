@@ -25,6 +25,7 @@ fn bad_arguments_print_usage_and_exit_2() {
         &["boot", "--timeout", "-1"],
         &["boot", "--timeout", "1", "--timeout", "2"],
         &["boot", "--nope"],
+        &["boot", "--nope", "1"],
         &["boot", "extra"],
     ] {
         let output = ap(args);

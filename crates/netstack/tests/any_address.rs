@@ -572,7 +572,8 @@ fn with_hop_by_hop_option(frame: &[u8], option: u8) -> Vec<u8> {
 fn a_flow_behind_an_ipv6_extension_header_is_never_taken_unasked() {
     let to = SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53);
     let plain = datagram_frame(to);
-    let hidden = with_hop_by_hop(&plain);
+    // smoltcp reads past one hop-by-hop header, and no further.
+    let hidden = with_hop_by_hop(&with_hop_by_hop(&plain));
     let now = Instant::now();
     let mut stack = stack();
     // An earlier datagram to the port was taken, so a socket holds it.

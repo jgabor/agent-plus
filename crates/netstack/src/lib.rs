@@ -535,7 +535,6 @@ impl Stack {
     }
 }
 
-/// What a frame from the guest is to the stack.
 /// The protocol behind the hop-by-hop header that starts `payload`, and its
 /// bytes, as smoltcp reads them. `None` if smoltcp would discard the packet,
 /// because the header is malformed, or holds an option it must not skip.
@@ -555,6 +554,7 @@ fn behind_hop_by_hop(payload: &[u8]) -> Option<(IpProtocol, &[u8])> {
     Some((repr.next_header, rest))
 }
 
+/// What a frame from the guest is to the stack.
 enum Seen {
     /// It opens a flow, for the caller to take or refuse.
     Flow(Flow),

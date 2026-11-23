@@ -342,6 +342,10 @@ struct Node {
     inode: u64,
     lookups: u64,
     place: Place,
+    /// The file, open as it was when the agent took away a permission of
+    /// its owner's that the server can't open it again without. Its mode
+    /// and times change through this until the agent gives that back.
+    kept: Option<OwnedFd>,
 }
 
 /// A file or a directory the guest has open.
@@ -607,6 +611,7 @@ impl Share {
             inode: stat.st_ino,
             lookups: 1,
             place,
+            kept: None,
         };
         Ok(Self {
             root,
@@ -743,6 +748,7 @@ impl Share {
                 inode: stat.st_ino,
                 lookups: 1,
                 place,
+                kept: None,
             },
         );
         Ok(entry(id, &stat, self.owner))
@@ -948,7 +954,7 @@ impl Share {
 
     /// `struct fuse_setattr_in`. Owners don't change, because the agent's
     /// aren't the host's.
-    fn setattr(&self, node: u64, body: &[u8]) -> Answer {
+    fn setattr(&mut self, node: u64, body: &[u8]) -> Answer {
         let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
         let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
         let valid = word(0)?;
@@ -956,25 +962,39 @@ impl Share {
         if found.place == Place::Fixed || valid & (FATTR_UID | FATTR_GID) != 0 {
             return Err(libc::EPERM);
         }
-        let own;
+        let directory = is(found.mode, libc::S_IFDIR);
+        let mut own = None;
         let fd = if valid & FATTR_FH != 0 {
             let handle = self.handle(body.get(8..).ok_or(libc::EINVAL)?)?;
             if handle.node != node {
                 return Err(libc::EBADF);
             }
             handle.fd.as_fd()
-        } else if is(found.mode, libc::S_IFDIR) {
-            self.served(&found.fd)?;
-            let flags = libc::O_RDONLY | libc::O_DIRECTORY;
-            own = sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno)?;
-            own.as_fd()
         } else {
-            let access = match valid & FATTR_SIZE {
-                0 => libc::O_RDONLY,
-                _ => libc::O_WRONLY,
+            let opened = if directory {
+                let flags = libc::O_RDONLY | libc::O_DIRECTORY;
+                self.served(&found.fd)
+                    .and_then(|()| sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno))
+            } else {
+                let access = match valid & FATTR_SIZE {
+                    0 => libc::O_RDONLY,
+                    _ => libc::O_WRONLY,
+                };
+                self.reopen(found, access | libc::O_NOFOLLOW | libc::O_NONBLOCK)
             };
-            own = self.reopen(found, access | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
-            own.as_fd()
+            match (opened, &found.kept) {
+                // Only the file the node is, still at its name beneath the
+                // root, changes through what was kept. A directory with no
+                // search permission can't be walked up from, so its name
+                // shows where it is.
+                (Err(libc::EACCES), Some(kept)) if valid & FATTR_SIZE == 0 => {
+                    if node != ROOT {
+                        self.reopen(found, libc::O_PATH | libc::O_NOFOLLOW)?;
+                    }
+                    kept.as_fd()
+                }
+                (opened, _) => OwnedFd::as_fd(own.insert(opened?)),
+            }
         };
         if aliased(&sys::fstat(fd).map_err(errno)?) {
             return Err(libc::EPERM);
@@ -982,16 +1002,35 @@ impl Share {
         if valid & FATTR_SIZE != 0 {
             sys::ftruncate(fd, field(16)?).map_err(errno)?;
         }
-        if valid & FATTR_MODE != 0 {
-            sys::fchmod(fd, word(68)? & 0o7777).map_err(errno)?;
-        }
         let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
         if valid & times != 0 {
             let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
             let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
             sys::futimens(fd, &[access, modify]).map_err(errno)?;
         }
-        Ok(attr_out(&sys::fstat(fd).map_err(errno)?, self.owner))
+        // The mode changes after the times, so times that fail leave no
+        // permission taken away without the file kept.
+        let mode = match valid & FATTR_MODE {
+            0 => None,
+            _ => Some(word(68)? & 0o7777),
+        };
+        if let Some(mode) = mode {
+            sys::fchmod(fd, mode).map_err(errno)?;
+        }
+        let answer = attr_out(&sys::fstat(fd).map_err(errno)?, self.owner);
+        if let Some(mode) = mode {
+            // Opening a directory again takes searching it too.
+            let needed = match directory {
+                true => libc::S_IRUSR | libc::S_IXUSR,
+                false => libc::S_IRUSR,
+            };
+            let found = self.nodes.get_mut(&node).ok_or(libc::ESTALE)?;
+            found.kept = match mode & needed == needed {
+                true => None,
+                false => own.or(found.kept.take()),
+            };
+        }
+        Ok(answer)
     }
 
     /// `struct fuse_mkdir_in`, then the name.

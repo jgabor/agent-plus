@@ -88,8 +88,9 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     assert_eq!(guest.call(FLUSH, file, &flush).0, 0);
     guest.release(handle);
     assert_eq!(guest.setattr(file, FATTR_SIZE, 4, 0), 0);
-    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o640), 0);
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0), 0);
     assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
+    assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o640), 0);
     let made = guest.mkdir(1, b"made").unwrap();
     guest.symlink(made, b"link", b"../new.txt").unwrap();
     guest.link(file, made, b"hard").unwrap();

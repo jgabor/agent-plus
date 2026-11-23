@@ -98,6 +98,10 @@ fn what_cannot_be_read_as_elf_is_not_static() {
     let mut far_away = elf(&[1]);
     far_away[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
     assert!(!boot::is_static(&far_away));
+    // Headers too small to hold a type and its place can't be read.
+    let mut too_small = elf(&[1]);
+    too_small[54..56].copy_from_slice(&8u16.to_le_bytes());
+    assert!(!boot::is_static(&too_small));
 }
 
 #[test]

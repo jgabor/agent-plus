@@ -409,5 +409,9 @@ fn a_store_nobody_can_write_to_fails_instead_of_retrying() {
     let result = Store::new(&root).put(BODY_SHA256, BODY);
     fs::set_permissions(&layers, fs::Permissions::from_mode(0o755)).unwrap();
     let error = result.unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{error}");
+    assert_eq!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "{error}"
+    );
 }

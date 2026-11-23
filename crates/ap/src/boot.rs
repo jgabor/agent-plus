@@ -333,35 +333,48 @@ pub fn check_kvm(device: &Path) -> Result<(), Error> {
 /// it, and returns 0. With one it relays the command's output, filtered, and
 /// returns its status.
 pub fn boot_bare(timeout: Duration, command: &[Vec<u8>]) -> Result<u8, Error> {
-    let request = (!command.is_empty()).then(|| ToGuest::Run {
-        argv: command.to_vec(),
-    });
-    let print_release = request.is_none();
-    let mut stdout_filter = Filter::default();
-    let mut stderr_filter = Filter::default();
-    // Write errors are ignored: a reader that went away shouldn't change what
-    // the guest's command does or how it ends.
-    let print = move |report: Report| match report {
-        Report::Ready(release) if print_release => {
-            let _ = writeln!(io::stdout(), "{release}");
-        }
-        Report::Ready(_) => {}
-        Report::Stdout(bytes) => {
-            let mut stdout = io::stdout();
-            let _ = stdout.write_all(&stdout_filter.push(bytes));
-            let _ = stdout.flush();
-        }
-        Report::Stderr(bytes) => {
-            let _ = io::stderr().write_all(&stderr_filter.push(bytes));
-        }
-        Report::Exec(..) | Report::ExecTook(_) => {}
-    };
+    let request = bare_request(command);
+    let print = bare_output(request.is_none(), io::stdout(), io::stderr());
     let devices = Devices {
         layers: Vec::new(),
         shares: None,
         link: None,
     };
     relayed(timeout, devices, request, None, print)
+}
+
+/// What `ap boot` asks of the init: to run `command`, if there is one.
+fn bare_request(command: &[Vec<u8>]) -> Option<ToGuest> {
+    (!command.is_empty()).then(|| ToGuest::Run {
+        argv: command.to_vec(),
+    })
+}
+
+/// Writes what the guest reports for `ap boot`: the kernel release, if
+/// `print_release`, and the command's output, filtered.
+fn bare_output(
+    print_release: bool,
+    mut stdout: impl Write + Send + 'static,
+    mut stderr: impl Write + Send + 'static,
+) -> impl FnMut(Report) + Send + 'static {
+    let mut stdout_filter = Filter::default();
+    let mut stderr_filter = Filter::default();
+    // Write errors are ignored: a reader that went away shouldn't change what
+    // the guest's command does or how it ends.
+    move |report: Report| match report {
+        Report::Ready(release) if print_release => {
+            let _ = writeln!(stdout, "{release}");
+        }
+        Report::Ready(_) => {}
+        Report::Stdout(bytes) => {
+            let _ = stdout.write_all(&stdout_filter.push(bytes));
+            let _ = stdout.flush();
+        }
+        Report::Stderr(bytes) => {
+            let _ = stderr.write_all(&stderr_filter.push(bytes));
+        }
+        Report::Exec(..) | Report::ExecTook(_) => {}
+    }
 }
 
 /// A run's machine: the agent's layers and `shares`, and a network device
@@ -428,7 +441,7 @@ fn relayed(
         confine: true,
         input,
     };
-    let mut relay = Relay::start(Instant::now() + timeout, output);
+    let mut relay = Relay::start(timeout, output);
     let result = boot_linked(guest, devices.shares, devices.link, |report| match report {
         Report::Ready(release) => relay.send(Piece::Release(release.to_owned())),
         Report::Stdout(bytes) => relay.send(Piece::Stdout(bytes.to_vec())),
@@ -459,7 +472,8 @@ struct Relay {
 }
 
 impl Relay {
-    fn start(deadline: Instant, output: impl FnMut(Report) + Send + 'static) -> Self {
+    /// A relay whose waits end `timeout` from now.
+    fn start(timeout: Duration, output: impl FnMut(Report) + Send + 'static) -> Self {
         let (pieces, received) = mpsc::channel();
         let (acknowledge, written) = mpsc::channel();
         thread::spawn(move || forward(&received, &acknowledge, output));
@@ -467,7 +481,7 @@ impl Relay {
             pieces,
             written,
             unwritten: 0,
-            deadline,
+            deadline: Instant::now() + timeout,
         }
     }
 
@@ -571,58 +585,30 @@ pub fn boot_linked(
     vm.expose_cpu_features(&vcpu).map_err(vm_failed)?;
     loader::enter(&vcpu, &entry).map_err(vm_failed)?;
 
-    let first_share_line = LINE + 1 + guest.layers.len() as u32;
-    let disks: Vec<_> = (guest.layers.into_iter().zip(LINE + 1..))
-        .map(|(layer, line)| {
+    let disks = guest
+        .layers
+        .into_iter()
+        .map(|layer| {
             let name = root::name(&layer.digest).as_bytes().to_vec();
-            let block = Block::new(layer.disk, &name)
-                .map_err(|error| failed("can't read a layer", error))?;
-            Ok((block, vm.interrupt(line)))
+            Block::new(layer.disk, &name).map_err(|error| failed("can't read a layer", error))
         })
         .collect::<Result<_, Error>>()?;
-    let devices = (0..share_count)
-        .zip(first_share_line..)
-        .map(|(index, line)| {
-            let device = Fs::new(index as u32, share::tag(index).as_bytes());
-            (device, vm.interrupt(line))
-        })
-        .collect();
-    let net_line = first_share_line + share_count as u32;
     let net = link
-        .map(|link| Net::new(link, net::MAC).map(|device| (device, vm.interrupt(net_line))))
+        .map(|link| Net::new(link, net::MAC))
         .transpose()
         .map_err(|error| failed("can't attach the network", error))?;
     let relay = shares
         .map(|shares| ShareRelay::new(shares.socket, Instant::now() + guest.timeout))
         .transpose()
         .map_err(|error| failed("can't reach the share server", error))?;
-    // Only a run has keys for its harness, and commands beside it.
-    let ports: &[u32] = match guest.input {
-        Some(_) => &[PORT, EXEC_PORT, KEYS_PORT],
-        None => &[PORT],
-    };
-    let mut machine = Machine {
-        serial: Serial::new(),
-        vsock: Vsock::new(GUEST_CID, ports),
+    let parts = Parts {
         disks,
-        shares: devices,
+        shares: share_count,
         net,
         relay,
-        memory: vm.memory(),
-        interrupt: vm.interrupt(LINE),
-        connection: None,
-        frame: Vec::new(),
-        run_frame,
-        finished: false,
-        ready: false,
-        status: None,
-        failure: None,
-        on_report,
-        input: guest.input,
-        keys: None,
-        spares: VecDeque::new(),
-        bound: BTreeMap::new(),
     };
+    let lines = |line| vm.interrupt(line);
+    let mut machine = Machine::new(vm.memory(), lines, parts, run_frame, guest.input, on_report);
     let waker = guest
         .input
         .map_or_else(Arc::default, |input| Arc::clone(&input.waker));
@@ -649,21 +635,7 @@ pub fn boot_linked(
     let stop = vcpu
         .run_waking(guest.timeout, &mut machine, &waker)
         .map_err(vm_failed)?;
-
-    match (stop, machine.failure, machine.ready) {
-        (Stop::TimedOut, ..) => Err(Error::TimedOut),
-        (_, Some(reason), _) => Err(Error::Failed(reason)),
-        (Stop::Shutdown, None, true) if wants_status && machine.status.is_none() => Err(
-            Error::Failed("the guest powered off before its command finished".to_owned()),
-        ),
-        (Stop::Shutdown, None, true) => Ok(machine.status),
-        (Stop::Shutdown, None, false) => Err(Error::Failed(
-            "the guest powered off before its init reported ready".to_owned(),
-        )),
-        (stop, None, _) => Err(Error::Failed(format!(
-            "the guest stopped unexpectedly: {stop:?}"
-        ))),
-    }
+    machine.outcome(stop, wants_status)
 }
 
 /// The kernel command line: a slot for each layer's disk after the vsock
@@ -718,19 +690,19 @@ fn failed(context: &str, error: io::Error) -> Error {
 /// The serial port, the vsock device, the layers' disks, the shares'
 /// devices, the network device, and the host's end of the channel. It all
 /// runs on the vCPU thread, during the guest's exits.
-struct Machine<'vm, F> {
+struct Machine<'vm, F, I> {
     serial: Serial,
     vsock: Vsock,
     /// Each layer's disk, bottom first, and its interrupt.
-    disks: Vec<(Block, Interrupt<'vm>)>,
+    disks: Vec<(Block, I)>,
     /// Each share's device, in share order, and its interrupt.
-    shares: Vec<(Fs, Interrupt<'vm>)>,
+    shares: Vec<(Fs, I)>,
     /// The network device and its interrupt, when the guest has a link.
-    net: Option<(Net, Interrupt<'vm>)>,
+    net: Option<(Net, I)>,
     /// The share server's socket, when there are shares.
     relay: Option<ShareRelay>,
     memory: &'vm GuestMemory,
-    interrupt: Interrupt<'vm>,
+    interrupt: I,
     connection: Option<Connection>,
     frame: Vec<u8>,
     /// The request to send once the init is ready.
@@ -758,7 +730,95 @@ enum ExecReport {
     Took(u32),
 }
 
-impl<F: FnMut(Report)> Machine<'_, F> {
+/// The devices a machine gets beside its vsock device, before each has an
+/// interrupt line.
+struct Parts {
+    disks: Vec<Block>,
+    shares: usize,
+    net: Option<Net>,
+    relay: Option<ShareRelay>,
+}
+
+/// An interrupt line that a device raises.
+trait Line {
+    fn pulse(&self);
+}
+
+impl Line for Interrupt<'_> {
+    fn pulse(&self) {
+        // A failed pulse leaves the guest waiting, and the timeout ends it.
+        let _ = Interrupt::pulse(self);
+    }
+}
+
+impl<'vm, F: FnMut(Report), I: Line> Machine<'vm, F, I> {
+    /// A machine whose devices take the lines that `line` gives, in the order
+    /// of their slots: the vsock device's first, then each disk's, each
+    /// share's, and the network device's. It sends `run_frame` once the init
+    /// is ready.
+    fn new(
+        memory: &'vm GuestMemory,
+        line: impl Fn(u32) -> I,
+        parts: Parts,
+        run_frame: Option<Vec<u8>>,
+        input: Option<&'vm Input>,
+        on_report: F,
+    ) -> Self {
+        let mut lines = (LINE + 1..).map(&line);
+        let disks = parts.disks.into_iter().zip(&mut lines).collect();
+        let shares = (0..parts.shares)
+            .map(|index| Fs::new(index as u32, share::tag(index).as_bytes()))
+            .zip(&mut lines)
+            .collect();
+        let net = parts.net.zip(lines.next());
+        // Only a run has keys for its harness, and commands beside it.
+        let ports: &[u32] = match input {
+            Some(_) => &[PORT, EXEC_PORT, KEYS_PORT],
+            None => &[PORT],
+        };
+        Machine {
+            serial: Serial::new(),
+            vsock: Vsock::new(GUEST_CID, ports),
+            disks,
+            shares,
+            net,
+            relay: parts.relay,
+            memory,
+            interrupt: line(LINE),
+            connection: None,
+            frame: Vec::new(),
+            run_frame,
+            finished: false,
+            ready: false,
+            status: None,
+            failure: None,
+            on_report,
+            input,
+            keys: None,
+            spares: VecDeque::new(),
+            bound: BTreeMap::new(),
+        }
+    }
+
+    /// How the machine ended, once it stopped this way: the status of the
+    /// guest's command, if `wants_status`, or why it failed.
+    fn outcome(self, stop: Stop, wants_status: bool) -> Result<Option<u8>, Error> {
+        match (stop, self.failure, self.ready) {
+            (Stop::TimedOut, ..) => Err(Error::TimedOut),
+            (_, Some(reason), _) => Err(Error::Failed(reason)),
+            (Stop::Shutdown, None, true) if wants_status && self.status.is_none() => Err(
+                Error::Failed("the guest powered off before its command finished".to_owned()),
+            ),
+            (Stop::Shutdown, None, true) => Ok(self.status),
+            (Stop::Shutdown, None, false) => Err(Error::Failed(
+                "the guest powered off before its init reported ready".to_owned(),
+            )),
+            (stop, None, _) => Err(Error::Failed(format!(
+                "the guest stopped unexpectedly: {stop:?}"
+            ))),
+        }
+    }
+
     /// Takes what the guest has sent. Hanging up powers it off.
     fn run_host(&mut self) {
         self.accept();
@@ -1005,7 +1065,7 @@ fn printable(release: &[u8]) -> Option<String> {
         .then(|| String::from_utf8_lossy(release).into_owned())
 }
 
-impl<F: FnMut(Report)> Ports for Machine<'_, F> {
+impl<F: FnMut(Report), I: Line> Ports for Machine<'_, F, I> {
     fn write(&mut self, port: u16, data: &[u8]) {
         self.serial.write(port, data);
     }
@@ -1020,8 +1080,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
         };
         if let Some((disk, interrupt)) = slot.checked_sub(1).and_then(|at| self.disks.get_mut(at)) {
             if disk.write(self.memory, offset, data) {
-                // A failed pulse leaves the guest waiting, and the timeout ends it.
-                let _ = interrupt.pulse();
+                interrupt.pulse();
             }
             return;
         }
@@ -1031,8 +1090,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
             self.relay.as_mut(),
         ) {
             if device.write(self.memory, offset, data, relay) {
-                // A failed pulse leaves the guest waiting, and the timeout ends it.
-                let _ = interrupt.pulse();
+                interrupt.pulse();
             }
             return;
         }
@@ -1040,8 +1098,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
             && let Some((device, interrupt)) = self.net.as_mut()
         {
             if device.write(self.memory, offset, data) {
-                // A failed pulse leaves the guest waiting, and the timeout ends it.
-                let _ = interrupt.pulse();
+                interrupt.pulse();
             }
             return;
         }
@@ -1054,8 +1111,7 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
         self.serve_execs();
         interrupt |= self.vsock.service(self.memory);
         if interrupt {
-            // A failed pulse leaves the guest waiting, and the timeout ends it.
-            let _ = self.interrupt.pulse();
+            self.interrupt.pulse();
         }
     }
 
@@ -1063,14 +1119,12 @@ impl<F: FnMut(Report)> Ports for Machine<'_, F> {
         if let Some((device, interrupt)) = self.net.as_mut()
             && device.service(self.memory)
         {
-            // A failed pulse leaves the guest waiting, and the timeout ends it.
-            let _ = interrupt.pulse();
+            interrupt.pulse();
         }
         self.pass_input();
         self.serve_execs();
         if self.vsock.service(self.memory) {
-            // A failed pulse leaves the guest waiting, and the timeout ends it.
-            let _ = self.interrupt.pulse();
+            self.interrupt.pulse();
         }
     }
 
@@ -1132,6 +1186,10 @@ fn protocol_failed(error: guest::protocol::ProtocolError) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use guest::protocol::Exec as ExecRequest;
+    use std::cell::RefCell;
+    use std::os::unix::net::{UnixDatagram, UnixStream};
+    use std::rc::Rc;
 
     fn layer(digest: &str) -> Layer {
         Layer {
@@ -1228,5 +1286,893 @@ mod tests {
             None
         );
         assert_eq!(device_offset(DEVICE_ADDRESS - 1), None);
+    }
+
+    #[test]
+    fn a_machine_has_the_memory_spec_md_gives_a_run() {
+        assert_eq!(MEMORY, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn too_many_layers_fail_before_a_vm_starts() {
+        let guest = || Guest {
+            kernel: Cow::Borrowed(&[]),
+            init: Cow::Borrowed(&[]),
+            files: &[],
+            layers: (0..=MAX_DEVICES).map(|_| layer("ab")).collect(),
+            request: None,
+            timeout: Duration::from_secs(1),
+            confine: false,
+            input: None,
+        };
+        let failed = |result: Result<Option<u8>, Error>| matches!(result, Err(Error::Failed(reason)) if reason.contains("at most"));
+        assert!(failed(boot(guest(), |_| {})));
+        assert!(failed(boot_sharing(guest(), None, |_| {})));
+        assert!(failed(boot_linked(guest(), None, None, |_| {})));
+    }
+
+    #[test]
+    fn ap_boot_runs_its_command_or_only_reports_ready() {
+        assert_eq!(bare_request(&[]), None);
+        assert_eq!(
+            bare_request(&[b"true".to_vec()]),
+            Some(ToGuest::Run {
+                argv: vec![b"true".to_vec()]
+            })
+        );
+    }
+
+    /// A writer whose bytes the test reads after handing it away.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Shared {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn ap_boot_prints_the_release_only_without_a_command_and_filters_output() {
+        for print_release in [true, false] {
+            let (stdout, stderr) = (Shared::default(), Shared::default());
+            let mut print = bare_output(print_release, stdout.clone(), stderr.clone());
+            print(Report::Ready("6.1.0"));
+            print(Report::Stdout(b"a\x1b]52;c;aGk=\x07b"));
+            print(Report::Stderr(b"c\x1b[21td"));
+            let release: &[u8] = if print_release { b"6.1.0\n" } else { b"" };
+            assert_eq!(stdout.bytes(), [release, b"ab"].concat());
+            assert_eq!(stderr.bytes(), b"cd");
+        }
+    }
+
+    #[test]
+    fn a_relay_writes_every_piece_in_order_and_finishes_once_they_are_written() {
+        let (seen, written) = mpsc::channel();
+        let start = Instant::now();
+        let mut relay = Relay::start(Duration::from_secs(10), move |report| {
+            if let Report::Stdout(bytes) = report {
+                thread::sleep(Duration::from_millis(1));
+                seen.send(bytes.to_vec()).unwrap();
+            }
+        });
+        let pieces = 0..(OUTPUT_WINDOW as u8 * 3);
+        for piece in pieces.clone() {
+            relay.send(Piece::Stdout(vec![piece]));
+        }
+        relay.finish();
+        let written: Vec<Vec<u8>> = written.try_iter().collect();
+        assert_eq!(written, pieces.map(|piece| vec![piece]).collect::<Vec<_>>());
+        assert!(start.elapsed() < Duration::from_secs(5));
+        // With nothing unwritten, finishing doesn't wait.
+        relay.finish();
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_reader_that_stops_reading_holds_the_relay_only_until_its_timeout() {
+        let (release, released) = mpsc::channel::<()>();
+        let (seen, written) = mpsc::channel();
+        let timeout = Duration::from_millis(300);
+        let start = Instant::now();
+        let mut relay = Relay::start(timeout, move |report| {
+            if let Report::Stdout(bytes) = report {
+                if bytes == [0] {
+                    let _ = released.recv();
+                }
+                seen.send(bytes.to_vec()).unwrap();
+            }
+        });
+        // One more than the window, which waits, and is dropped at the timeout.
+        for piece in 0..=OUTPUT_WINDOW as u8 {
+            relay.send(Piece::Stdout(vec![piece]));
+        }
+        let waited = start.elapsed();
+        assert!(waited >= timeout, "{waited:?}");
+        relay.finish();
+        assert!(start.elapsed() < timeout * 10, "{:?}", start.elapsed());
+        release.send(()).unwrap();
+        let mut got = Vec::new();
+        while let Ok(piece) = written.recv_timeout(Duration::from_millis(500)) {
+            got.push(piece);
+        }
+        let window: Vec<Vec<u8>> = (0..OUTPUT_WINDOW as u8).map(|piece| vec![piece]).collect();
+        assert_eq!(got, window);
+    }
+
+    #[test]
+    fn a_request_frame_reads_back_as_the_request() {
+        let request = ToGuest::Run {
+            argv: vec![b"echo".to_vec(), b"hi".to_vec()],
+        };
+        let frame = request_frame(&request).unwrap();
+        assert_eq!(ToGuest::read(&mut frame.as_slice()).unwrap(), Some(request));
+    }
+
+    fn header(length: usize) -> Vec<u8> {
+        (length as u32).to_le_bytes().to_vec()
+    }
+
+    #[test]
+    fn a_frame_is_complete_once_its_body_has_arrived() {
+        assert!(!frame_is_complete(&[]));
+        assert!(!frame_is_complete(&[3, 0, 0]));
+        assert!(!frame_is_complete(&[header(3), vec![1, 2]].concat()));
+        assert!(frame_is_complete(&[header(3), vec![1, 2, 3]].concat()));
+        assert!(frame_is_complete(&[header(3), vec![1, 2, 3, 4]].concat()));
+        assert!(frame_is_complete(&header(0)));
+        // Nothing waits for a body larger than a frame may hold.
+        assert!(!frame_is_complete(&header(MAX_BODY)));
+        assert!(frame_is_complete(&header(MAX_BODY + 1)));
+        assert!(frame_is_complete(&header(u32::MAX as usize)));
+    }
+
+    #[test]
+    fn a_reason_or_a_release_reaches_the_terminal_without_controls() {
+        assert_eq!(shown(b"no\x1b[31m\n"), "no?[31m?");
+        assert_eq!(printable(b"6.1.0-ap"), Some("6.1.0-ap".to_owned()));
+        for release in [&b""[..], b"6.1 x", b"6.1\x1b", "6.1é".as_bytes()] {
+            assert_eq!(printable(release), None, "{release:?}");
+        }
+    }
+
+    #[test]
+    fn input_queues_keys_a_stop_and_each_commands_frames() {
+        let input = Input::new([-1, -1]);
+        let key = ToGuest::Input(b"k".to_vec());
+        input.send(&key).unwrap();
+        assert_eq!(*lock(&input.keys), request_frame(&key).unwrap());
+        input.terminate().unwrap();
+        assert_eq!(
+            *lock(&input.stops),
+            request_frame(&ToGuest::Terminate).unwrap()
+        );
+
+        let exec = ToGuest::Exec(ExecRequest {
+            argv: vec![b"ls".to_vec()],
+            terminal: None,
+        });
+        // Nothing reaches a command that hasn't started.
+        input.send_exec(7, &key).unwrap();
+        assert!(input.execs().is_empty());
+        input.send_exec(7, &exec).unwrap();
+        input.send_exec(7, &exec).unwrap();
+        input.send_exec(7, &key).unwrap();
+        let frames = [request_frame(&exec).unwrap(), request_frame(&key).unwrap()];
+        assert_eq!(input.execs()[&7].frames, frames);
+
+        input.execs().get_mut(&7).unwrap().unread = 2;
+        input.exec_taken(7);
+        assert_eq!(input.execs()[&7].unread, 1);
+        assert!(!input.execs()[&7].hung_up);
+        input.exec_hung_up(7);
+        assert!(input.execs()[&7].hung_up);
+    }
+
+    /// An interrupt line that records each pulse.
+    struct TestLine(u32, Rc<RefCell<Vec<u32>>>);
+
+    impl Line for TestLine {
+        fn pulse(&self) {
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    /// What the machine reported, owned.
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Ready(String),
+        Stdout(Vec<u8>),
+        Stderr(Vec<u8>),
+        Exec(u32, ToHost),
+        ExecTook(u32),
+    }
+
+    type Reports<'a> = Box<dyn FnMut(Report) + 'a>;
+
+    const QUEUE_SELECT: u64 = 0x030;
+    const QUEUE_NUM: u64 = 0x038;
+    const QUEUE_READY: u64 = 0x044;
+    const QUEUE_NOTIFY: u64 = 0x050;
+    const STATUS: u64 = 0x070;
+    const QUEUE_DESC: u64 = 0x080;
+    const QUEUE_DRIVER: u64 = 0x090;
+    const QUEUE_DEVICE: u64 = 0x0a0;
+    const DEVICE_ID: u64 = 0x008;
+    const DRIVER_OK: u32 = 4;
+    const NEXT: u16 = 1;
+    const WRITE: u16 = 2;
+    const RX: u16 = 0;
+    const TX: u16 = 1;
+    const SIZE: u16 = 64;
+    const TX_DATA: u64 = 0x10_0000;
+    const RX_DATA: u64 = 0x20_0000;
+    const RX_BUFFER: u32 = 4096;
+    const PACKET_HEADER: usize = 44;
+    const OP_REQUEST: u16 = 1;
+    const OP_RST: u16 = 3;
+    const OP_SHUTDOWN: u16 = 4;
+    const OP_RW: u16 = 5;
+    const SHUTDOWN_RECEIVE: u32 = 1;
+    const SHUTDOWN_BOTH: u32 = 3;
+
+    /// The guest port of the init's connection.
+    const INIT: u32 = 5000;
+    /// The guest ports of the connections for keys.
+    const KEYS: u32 = 5001;
+    const MORE_KEYS: u32 = 5002;
+    /// The guest port of a connection for a command beside the harness.
+    const COMMAND: u32 = 5003;
+
+    fn table(queue: u16) -> u64 {
+        0x1_0000 * (u64::from(queue) + 1)
+    }
+
+    fn available(queue: u16) -> u64 {
+        table(queue) + 0x1000
+    }
+
+    fn used(queue: u16) -> u64 {
+        table(queue) + 0x2000
+    }
+
+    fn memory() -> GuestMemory {
+        GuestMemory::new(1 << 23).unwrap()
+    }
+
+    fn no_parts() -> Parts {
+        Parts {
+            disks: Vec::new(),
+            shares: 0,
+            net: None,
+            relay: None,
+        }
+    }
+
+    /// A fake guest, which drives the machine's vsock device as Linux's
+    /// driver would, and keeps what the host sent on each of its ports.
+    struct Driver<'a> {
+        machine: Machine<'a, Reports<'a>, TestLine>,
+        seen: Rc<RefCell<Vec<Seen>>>,
+        pulses: Rc<RefCell<Vec<u32>>>,
+        tx_published: u16,
+        rx_published: u16,
+        rx_seen: u16,
+        bytes: BTreeMap<u32, Vec<u8>>,
+        ops: BTreeMap<u32, Vec<u16>>,
+    }
+
+    impl<'a> Driver<'a> {
+        fn new(
+            memory: &'a GuestMemory,
+            parts: Parts,
+            request: Option<&ToGuest>,
+            input: Option<&'a Input>,
+        ) -> Self {
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let pulses = Rc::new(RefCell::new(Vec::new()));
+            let into = Rc::clone(&seen);
+            let reports: Reports<'a> = Box::new(move |report: Report| {
+                into.borrow_mut().push(match report {
+                    Report::Ready(release) => Seen::Ready(release.to_owned()),
+                    Report::Stdout(bytes) => Seen::Stdout(bytes.to_vec()),
+                    Report::Stderr(bytes) => Seen::Stderr(bytes.to_vec()),
+                    Report::Exec(id, message) => Seen::Exec(id, message.clone()),
+                    Report::ExecTook(id) => Seen::ExecTook(id),
+                });
+            });
+            let lines = Rc::clone(&pulses);
+            let machine = Machine::new(
+                memory,
+                move |line| TestLine(line, Rc::clone(&lines)),
+                parts,
+                request.map(|request| request_frame(request).unwrap()),
+                input,
+                reports,
+            );
+            let mut driver = Driver {
+                machine,
+                seen,
+                pulses,
+                tx_published: 0,
+                rx_published: 0,
+                rx_seen: 0,
+                bytes: BTreeMap::new(),
+                ops: BTreeMap::new(),
+            };
+            for queue in 0..3 {
+                driver.set(QUEUE_SELECT, u32::from(queue));
+                driver.set(QUEUE_NUM, u32::from(SIZE));
+                driver.set(QUEUE_DESC, table(queue) as u32);
+                driver.set(QUEUE_DRIVER, available(queue) as u32);
+                driver.set(QUEUE_DEVICE, used(queue) as u32);
+                driver.set(QUEUE_READY, 1);
+            }
+            driver.set(STATUS, DRIVER_OK);
+            driver.post_rx(0..SIZE);
+            driver
+        }
+
+        fn memory(&self) -> &GuestMemory {
+            self.machine.memory
+        }
+
+        /// Writes a register of the device in `slot`.
+        fn set_in(&mut self, slot: u64, offset: u64, value: u32) {
+            let address = DEVICE_ADDRESS + slot * DEVICE_SIZE + offset;
+            self.machine.mmio_write(address, &value.to_le_bytes());
+        }
+
+        /// Reads a register of the device in `slot`.
+        fn get_in(&mut self, slot: u64, offset: u64) -> u32 {
+            let mut value = [0; 4];
+            let address = DEVICE_ADDRESS + slot * DEVICE_SIZE + offset;
+            self.machine.mmio_read(address, &mut value);
+            u32::from_le_bytes(value)
+        }
+
+        fn set(&mut self, offset: u64, value: u32) {
+            self.set_in(0, offset, value);
+        }
+
+        fn descriptor(
+            &self,
+            queue: u16,
+            index: u16,
+            address: u64,
+            len: u32,
+            flags: u16,
+            next: u16,
+        ) {
+            let at = table(queue) + u64::from(index) * 16;
+            let memory = self.memory();
+            memory.write(at, &address.to_le_bytes()).unwrap();
+            memory.write(at + 8, &len.to_le_bytes()).unwrap();
+            memory.write(at + 12, &flags.to_le_bytes()).unwrap();
+            memory.write(at + 14, &next.to_le_bytes()).unwrap();
+        }
+
+        /// Gives the device these receive buffers, and notifies it.
+        fn post_rx(&mut self, heads: impl IntoIterator<Item = u16>) {
+            for head in heads {
+                let address = RX_DATA + u64::from(head) * u64::from(RX_BUFFER);
+                self.descriptor(RX, head, address, RX_BUFFER, WRITE, 0);
+                let slot = u64::from(self.rx_published % SIZE);
+                self.memory()
+                    .write(available(RX) + 4 + slot * 2, &head.to_le_bytes())
+                    .unwrap();
+                self.rx_published = self.rx_published.wrapping_add(1);
+            }
+            let published = self.rx_published.to_le_bytes();
+            self.memory().write(available(RX) + 2, &published).unwrap();
+            self.set(QUEUE_NOTIFY, u32::from(RX));
+            self.collect();
+        }
+
+        /// Keeps what the device has written to the receive buffers, and
+        /// gives each buffer back.
+        fn collect(&mut self) {
+            let mut heads = Vec::new();
+            loop {
+                let mut index = [0; 2];
+                self.memory().read(used(RX) + 2, &mut index).unwrap();
+                if self.rx_seen == u16::from_le_bytes(index) {
+                    break;
+                }
+                let at = used(RX) + 4 + u64::from(self.rx_seen % SIZE) * 8;
+                let mut element = [0; 8];
+                self.memory().read(at, &mut element).unwrap();
+                let head = u16::from_le_bytes([element[0], element[1]]);
+                let len = u32::from_le_bytes(element[4..].try_into().unwrap()) as usize;
+                let address = RX_DATA + u64::from(head) * u64::from(RX_BUFFER);
+                let mut packet = vec![0; len];
+                self.memory().read(address, &mut packet).unwrap();
+                let port = u32::from_le_bytes(packet[20..24].try_into().unwrap());
+                let op = u16::from_le_bytes([packet[30], packet[31]]);
+                if op == OP_RW {
+                    let payload = &packet[PACKET_HEADER..];
+                    self.bytes
+                        .entry(port)
+                        .or_default()
+                        .extend_from_slice(payload);
+                } else {
+                    self.ops.entry(port).or_default().push(op);
+                }
+                self.rx_seen = self.rx_seen.wrapping_add(1);
+                heads.push(head);
+            }
+            if !heads.is_empty() {
+                self.post_rx(heads);
+            }
+        }
+
+        /// Sends one packet from `port` to the host's `to`.
+        fn packet(&mut self, port: u32, to: u32, op: u16, flags: u32, payload: &[u8]) {
+            let mut header = Vec::with_capacity(PACKET_HEADER);
+            header.extend_from_slice(&GUEST_CID.to_le_bytes());
+            header.extend_from_slice(&2u64.to_le_bytes());
+            header.extend_from_slice(&port.to_le_bytes());
+            header.extend_from_slice(&to.to_le_bytes());
+            header.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            header.extend_from_slice(&1u16.to_le_bytes());
+            header.extend_from_slice(&op.to_le_bytes());
+            header.extend_from_slice(&flags.to_le_bytes());
+            header.extend_from_slice(&(1u32 << 20).to_le_bytes());
+            header.extend_from_slice(&0u32.to_le_bytes());
+            self.memory().write(TX_DATA, &header).unwrap();
+            self.memory().write(TX_DATA + 4096, payload).unwrap();
+            self.descriptor(TX, 0, TX_DATA, PACKET_HEADER as u32, NEXT, 1);
+            self.descriptor(TX, 1, TX_DATA + 4096, payload.len() as u32, 0, 0);
+            let slot = u64::from(self.tx_published % SIZE);
+            self.memory()
+                .write(available(TX) + 4 + slot * 2, &0u16.to_le_bytes())
+                .unwrap();
+            self.tx_published = self.tx_published.wrapping_add(1);
+            let published = self.tx_published.to_le_bytes();
+            self.memory().write(available(TX) + 2, &published).unwrap();
+            self.set(QUEUE_NOTIFY, u32::from(TX));
+            self.collect();
+        }
+
+        fn connect(&mut self, port: u32, to: u32) {
+            self.packet(port, to, OP_REQUEST, 0, &[]);
+        }
+
+        /// Sends these messages from `port` in one packet.
+        fn say(&mut self, port: u32, to: u32, messages: &[ToHost]) {
+            let mut bytes = Vec::new();
+            for message in messages {
+                message.write(&mut bytes).unwrap();
+            }
+            self.packet(port, to, OP_RW, 0, &bytes);
+        }
+
+        fn woken(&mut self) {
+            self.machine.woken();
+            self.collect();
+        }
+
+        /// What the host sent `port`, since this was last asked.
+        fn received(&mut self, port: u32) -> Vec<u8> {
+            self.bytes.remove(&port).unwrap_or_default()
+        }
+
+        fn shut_down(&self, port: u32) -> bool {
+            self.ops
+                .get(&port)
+                .is_some_and(|ops| ops.contains(&OP_SHUTDOWN))
+        }
+
+        fn was_reset(&self, port: u32) -> bool {
+            self.ops.get(&port).is_some_and(|ops| ops.contains(&OP_RST))
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.borrow_mut().drain(..).collect()
+        }
+    }
+
+    fn frames(messages: &[ToGuest]) -> Vec<u8> {
+        messages
+            .iter()
+            .flat_map(|message| request_frame(message).unwrap())
+            .collect()
+    }
+
+    fn ready() -> ToHost {
+        ToHost::Ready(b"6.1.0".to_vec())
+    }
+
+    fn run() -> ToGuest {
+        ToGuest::Run {
+            argv: vec![b"true".to_vec()],
+        }
+    }
+
+    #[test]
+    fn the_init_reports_ready_and_a_machine_with_no_request_hangs_up() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), None, None);
+        driver.connect(INIT, PORT);
+        // A frame after the hang-up is never read.
+        driver.say(INIT, PORT, &[ready(), ToHost::Stdout(b"late".to_vec())]);
+        assert_eq!(driver.seen(), [Seen::Ready("6.1.0".to_owned())]);
+        assert!(driver.shut_down(INIT));
+        assert_eq!(driver.machine.outcome(Stop::Shutdown, false).unwrap(), None);
+    }
+
+    #[test]
+    fn the_request_follows_ready_and_the_command_reports_until_it_exits() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), Some(&run()), None);
+        driver.connect(INIT, PORT);
+        assert_eq!(driver.received(INIT), b"");
+        driver.say(INIT, PORT, &[ready()]);
+        assert_eq!(driver.received(INIT), frames(&[run()]));
+        // A frame may arrive in pieces, and several in one.
+        let mut output = Vec::new();
+        ToHost::Stdout(b"out".to_vec()).write(&mut output).unwrap();
+        driver.packet(INIT, PORT, OP_RW, 0, &output[..3]);
+        assert_eq!(driver.seen(), [Seen::Ready("6.1.0".to_owned())]);
+        driver.packet(INIT, PORT, OP_RW, 0, &output[3..]);
+        let rest = [ToHost::Stderr(b"err".to_vec()), ToHost::Exited(3)];
+        driver.say(INIT, PORT, &rest);
+        let expected = [Seen::Stdout(b"out".to_vec()), Seen::Stderr(b"err".to_vec())];
+        assert_eq!(driver.seen(), expected);
+        assert!(driver.shut_down(INIT));
+        assert_eq!(
+            driver.machine.outcome(Stop::Shutdown, true).unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn a_failed_command_ends_the_machine_with_its_reason() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), Some(&run()), None);
+        driver.connect(INIT, PORT);
+        driver.say(
+            INIT,
+            PORT,
+            &[ready(), ToHost::Failed(b"no\x1b[31m".to_vec())],
+        );
+        assert!(driver.shut_down(INIT));
+        let error = driver.machine.outcome(Stop::Shutdown, true).unwrap_err();
+        assert_eq!(error.to_string(), "no?[31m");
+    }
+
+    /// The failure of a machine whose guest sent `messages`, and what it
+    /// reported.
+    fn failure(request: Option<&ToGuest>, messages: &[ToHost]) -> (String, Vec<Seen>) {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), request, None);
+        driver.connect(INIT, PORT);
+        driver.say(INIT, PORT, messages);
+        assert!(driver.shut_down(INIT));
+        let seen = driver.seen();
+        let error = driver.machine.outcome(Stop::Shutdown, true).unwrap_err();
+        (error.to_string(), seen)
+    }
+
+    #[test]
+    fn anything_but_ready_first_is_a_failure() {
+        for first in [
+            ToHost::Stdout(b"x".to_vec()),
+            ToHost::Stderr(b"x".to_vec()),
+            ToHost::Exited(0),
+            ToHost::Failed(b"x".to_vec()),
+        ] {
+            for request in [None, Some(&run())] {
+                let (error, seen) = failure(request, &[first.clone(), ready()]);
+                assert_eq!(error, "the guest's init didn't report ready", "{first:?}");
+                assert_eq!(seen, [], "{first:?}");
+            }
+        }
+        let (error, seen) = failure(Some(&run()), &[ready(), ready()]);
+        assert_eq!(error, "the guest's init didn't report ready");
+        assert_eq!(seen, [Seen::Ready("6.1.0".to_owned())]);
+    }
+
+    #[test]
+    fn a_release_with_controls_is_a_failure() {
+        let (error, seen) = failure(None, &[ToHost::Ready(b"6.1\x1b[2J".to_vec())]);
+        assert_eq!(error, "the guest reported an invalid release");
+        assert_eq!(seen, []);
+    }
+
+    #[test]
+    fn a_request_the_guest_won_t_receive_is_a_failure() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), Some(&run()), None);
+        driver.connect(INIT, PORT);
+        driver.packet(INIT, PORT, OP_SHUTDOWN, SHUTDOWN_RECEIVE, &[]);
+        driver.say(INIT, PORT, &[ready()]);
+        let error = driver.machine.outcome(Stop::Shutdown, true).unwrap_err();
+        assert_eq!(error.to_string(), "can't send the command to the guest");
+    }
+
+    #[test]
+    fn a_second_connection_to_the_init_s_port_is_closed() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), None, None);
+        driver.connect(INIT, PORT);
+        driver.connect(INIT + 100, PORT);
+        assert!(driver.shut_down(INIT + 100));
+        assert!(!driver.shut_down(INIT));
+        driver.say(INIT, PORT, &[ready()]);
+        assert_eq!(driver.seen(), [Seen::Ready("6.1.0".to_owned())]);
+    }
+
+    #[test]
+    fn the_vsock_device_interrupts_on_its_own_line_when_it_answers() {
+        let memory = memory();
+        let mut driver = Driver::new(&memory, no_parts(), None, None);
+        driver.pulses.borrow_mut().clear();
+        driver.connect(INIT, PORT);
+        assert_eq!(*driver.pulses.borrow(), [LINE]);
+    }
+
+    #[test]
+    fn the_machine_ends_as_its_guest_did() {
+        let memory = memory();
+        let outcome = |stop, ready, status, failure: Option<&str>, wants_status| {
+            let mut machine = Driver::new(&memory, no_parts(), None, None).machine;
+            machine.ready = ready;
+            machine.status = status;
+            machine.failure = failure.map(str::to_owned);
+            match machine.outcome(stop, wants_status) {
+                Ok(status) => Ok(status),
+                Err(Error::TimedOut) => Err("timed out".to_owned()),
+                Err(error) => Err(error.to_string()),
+            }
+        };
+        assert_eq!(
+            outcome(Stop::Shutdown, true, Some(2), None, true),
+            Ok(Some(2))
+        );
+        assert_eq!(outcome(Stop::Shutdown, true, None, None, false), Ok(None));
+        let unfinished = Err("the guest powered off before its command finished".to_owned());
+        assert_eq!(outcome(Stop::Shutdown, true, None, None, true), unfinished);
+        let unready = Err("the guest powered off before its init reported ready".to_owned());
+        assert_eq!(outcome(Stop::Shutdown, false, None, None, false), unready);
+        let failed = Err("why".to_owned());
+        assert_eq!(
+            outcome(Stop::Shutdown, true, Some(0), Some("why"), true),
+            failed
+        );
+        let timed_out = Err("timed out".to_owned());
+        assert_eq!(
+            outcome(Stop::TimedOut, true, Some(0), Some("why"), true),
+            timed_out
+        );
+        let halted = outcome(Stop::Halted, true, Some(0), None, true).unwrap_err();
+        assert!(halted.contains("stopped unexpectedly: Halted"), "{halted}");
+    }
+
+    /// A run's machine with its harness started and its keys' connection
+    /// open.
+    fn started<'a>(memory: &'a GuestMemory, input: &'a Input) -> Driver<'a> {
+        let mut driver = Driver::new(memory, no_parts(), Some(&run()), Some(input));
+        driver.connect(INIT, PORT);
+        driver.connect(KEYS, KEYS_PORT);
+        driver.say(INIT, PORT, &[ready()]);
+        assert_eq!(driver.received(INIT), frames(&[run()]));
+        driver
+    }
+
+    #[test]
+    fn keys_and_a_stop_wait_until_the_harness_was_asked_to_start() {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let key = ToGuest::Input(b"k".to_vec());
+        let mut driver = Driver::new(&memory, no_parts(), Some(&run()), Some(&input));
+        driver.connect(INIT, PORT);
+        driver.connect(KEYS, KEYS_PORT);
+        driver.connect(MORE_KEYS, KEYS_PORT);
+        assert!(driver.shut_down(MORE_KEYS));
+        input.send(&key).unwrap();
+        input.terminate().unwrap();
+        driver.woken();
+        assert_eq!(driver.received(KEYS), b"");
+        assert_eq!(driver.received(INIT), b"");
+
+        driver.say(INIT, PORT, &[ready()]);
+        driver.woken();
+        assert_eq!(driver.received(KEYS), frames(std::slice::from_ref(&key)));
+        assert_eq!(driver.received(INIT), frames(&[run(), ToGuest::Terminate]));
+        assert!(lock(&input.keys).is_empty());
+
+        driver.say(INIT, PORT, &[ToHost::Exited(0)]);
+        input.send(&key).unwrap();
+        driver.woken();
+        assert_eq!(driver.received(KEYS), b"");
+    }
+
+    #[test]
+    fn keys_wait_for_the_init_even_without_a_request() {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let mut driver = Driver::new(&memory, no_parts(), None, Some(&input));
+        driver.connect(INIT, PORT);
+        driver.connect(KEYS, KEYS_PORT);
+        input.send(&ToGuest::Input(b"k".to_vec())).unwrap();
+        driver.woken();
+        assert_eq!(driver.received(KEYS), b"");
+    }
+
+    fn exec() -> ToGuest {
+        ToGuest::Exec(ExecRequest {
+            argv: vec![b"ls".to_vec()],
+            terminal: None,
+        })
+    }
+
+    /// A run's machine with the command `7` started beside its harness.
+    fn executing<'a>(memory: &'a GuestMemory, input: &'a Input) -> Driver<'a> {
+        let mut driver = started(memory, input);
+        driver.connect(COMMAND, EXEC_PORT);
+        input.send_exec(7, &exec()).unwrap();
+        driver.woken();
+        assert_eq!(driver.received(COMMAND), frames(&[exec()]));
+        assert_eq!(
+            driver.seen(),
+            [Seen::Ready("6.1.0".to_owned()), Seen::ExecTook(7)]
+        );
+        driver
+    }
+
+    #[test]
+    fn a_command_beside_the_harness_gets_its_input_and_reports_until_it_exits() {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let mut driver = executing(&memory, &input);
+        let typed = ToGuest::Input(b"in".to_vec());
+        input.send_exec(7, &typed).unwrap();
+        driver.woken();
+        assert_eq!(driver.received(COMMAND), frames(&[typed]));
+        assert_eq!(driver.seen(), [Seen::ExecTook(7)]);
+
+        let output = [ToHost::Stdout(b"o".to_vec()), ToHost::Stderr(b"e".to_vec())];
+        driver.say(COMMAND, EXEC_PORT, &output);
+        driver.woken();
+        let expected = [
+            Seen::Exec(7, ToHost::Stdout(b"o".to_vec())),
+            Seen::Exec(7, ToHost::Stderr(b"e".to_vec())),
+        ];
+        assert_eq!(driver.seen(), expected);
+
+        driver.say(COMMAND, EXEC_PORT, &[ToHost::Exited(4)]);
+        driver.woken();
+        assert_eq!(driver.seen(), [Seen::Exec(7, ToHost::Exited(4))]);
+        assert!(driver.shut_down(COMMAND));
+        assert!(!driver.was_reset(COMMAND));
+        assert!(input.execs().is_empty());
+    }
+
+    #[test]
+    fn a_command_s_output_waits_for_room_in_its_window() {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let mut driver = executing(&memory, &input);
+        let output = vec![ToHost::Stdout(b"o".to_vec()); EXEC_WINDOW + 2];
+        driver.say(COMMAND, EXEC_PORT, &output);
+        driver.woken();
+        let one = || Seen::Exec(7, ToHost::Stdout(b"o".to_vec()));
+        assert_eq!(driver.seen().len(), EXEC_WINDOW);
+        input.exec_taken(7);
+        driver.woken();
+        assert_eq!(driver.seen(), [one()]);
+        driver.woken();
+        assert_eq!(driver.seen(), []);
+    }
+
+    #[test]
+    fn a_command_whose_ap_exec_is_gone_is_reset() {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let mut driver = executing(&memory, &input);
+        input.exec_hung_up(7);
+        driver.woken();
+        assert!(driver.was_reset(COMMAND));
+        assert!(input.execs().is_empty());
+        assert_eq!(driver.seen(), []);
+    }
+
+    /// Asserts that the command `7` fails for `reason` once the guest does
+    /// `end`.
+    fn ends_for(end: impl Fn(&mut Driver), reason: &[u8]) {
+        let memory = memory();
+        let input = Input::new([-1, -1]);
+        let mut driver = executing(&memory, &input);
+        end(&mut driver);
+        driver.woken();
+        let failed = Seen::Exec(7, ToHost::Failed(reason.to_vec()));
+        assert_eq!(driver.seen(), [failed]);
+        assert!(input.execs().is_empty());
+    }
+
+    #[test]
+    fn a_command_s_connection_that_ends_or_breaks_ends_it() {
+        ends_for(
+            |driver| driver.packet(COMMAND, EXEC_PORT, OP_SHUTDOWN, SHUTDOWN_BOTH, &[]),
+            b"the guest closed the command's connection",
+        );
+        ends_for(
+            |driver| driver.say(COMMAND, EXEC_PORT, &[ready()]),
+            b"the guest sent a malformed message for the command",
+        );
+    }
+
+    #[test]
+    fn each_device_has_its_slot_and_the_line_after_the_one_before() {
+        let memory = memory();
+        let (share_server, _) = UnixStream::pair().unwrap();
+        let (link, _peer) = UnixDatagram::pair().unwrap();
+        let parts = Parts {
+            disks: vec![
+                Block::new(vec![0; 512], b"a").unwrap(),
+                Block::new(vec![0; 1024], b"b").unwrap(),
+            ],
+            shares: 2,
+            net: Some(Net::new(link.into(), net::MAC).unwrap()),
+            relay: Some(ShareRelay::new(share_server.into(), Instant::now()).unwrap()),
+        };
+        let mut driver = Driver::new(&memory, parts, None, None);
+        let machine = &driver.machine;
+        assert_eq!(machine.interrupt.0, LINE);
+        fn lines<D>(devices: &[(D, TestLine)]) -> Vec<u32> {
+            devices.iter().map(|(_, line)| line.0).collect()
+        }
+        assert_eq!(lines(&machine.disks), [6, 7]);
+        assert_eq!(lines(&machine.shares), [8, 9]);
+        assert_eq!(machine.net.as_ref().map(|(_, line)| line.0), Some(10));
+
+        // Each slot reads and writes its own device.
+        let ids: Vec<u32> = (0..8).map(|slot| driver.get_in(slot, DEVICE_ID)).collect();
+        assert_eq!(ids, [19, 2, 2, 26, 26, 1, u32::MAX, u32::MAX]);
+        for slot in 1..6 {
+            driver.set_in(slot, STATUS, slot as u32);
+        }
+        let statuses: Vec<u32> = (0..6).map(|slot| driver.get_in(slot, STATUS)).collect();
+        assert_eq!(statuses, [DRIVER_OK, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn without_a_network_device_its_slot_is_empty() {
+        let memory = memory();
+        let parts = Parts {
+            disks: vec![Block::new(vec![0; 512], b"a").unwrap()],
+            ..no_parts()
+        };
+        let mut driver = Driver::new(&memory, parts, None, None);
+        driver.set_in(2, STATUS, 1);
+        assert_eq!(driver.get_in(2, DEVICE_ID), u32::MAX);
+        assert_eq!(driver.get_in(1, STATUS), 0);
+    }
+
+    #[test]
+    fn the_serial_port_logs_and_answers_its_own_registers() {
+        let memory = memory();
+        let mut machine = Driver::new(&memory, no_parts(), None, None).machine;
+        machine.write(0x3f8, b"h");
+        assert_eq!(machine.serial.output(), b"h");
+        let mut status = [0];
+        assert!(machine.read(0x3fd, &mut status));
+        assert_eq!(status[0] & 0x60, 0x60);
+        // A port with nothing behind it reads as all ones.
+        let mut nothing = [0];
+        assert!(machine.read(0x80, &mut nothing));
+        assert_eq!(nothing, [0xff]);
     }
 }

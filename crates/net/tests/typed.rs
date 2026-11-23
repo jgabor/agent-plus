@@ -130,31 +130,20 @@ fn a_typed_rule_wins_a_tie_against_an_agentfile_rule() {
         ),
         Sign::Allow
     );
-    // A URL rule ties with one whose path normalizes the same.
+    // A URL rule ties with one whose path normalizes the same. As above,
+    // the typed rule allows, because a tie in the Agentfile would deny.
     for (agentfile, typed) in [
         ("https://example.com/%7Euser", "https://example.com/~user"),
         ("https://example.com/~user", "https://example.com/%7euser"),
         ("https://example.com/a%3ab", "https://example.com/a%3Ab"),
     ] {
-        for (lines, typed, wins) in [
-            (
-                format!("NETWORK -\nNETWORK -{agentfile}\n"),
-                format!("+{typed}"),
-                Sign::Allow,
-            ),
-            (
-                format!("NETWORK +\nNETWORK +{agentfile}\n"),
-                format!("-{typed}"),
-                Sign::Deny,
-            ),
-        ] {
-            let target = typed[1..].strip_prefix("https://example.com").unwrap();
-            assert_eq!(
-                request_sign(&lines, &[&typed], &format!("{target}/x")),
-                wins,
-                "{lines:?} {typed}"
-            );
-        }
+        let lines = format!("NETWORK -\nNETWORK -{agentfile}\n");
+        let target = typed.strip_prefix("https://example.com").unwrap();
+        assert_eq!(
+            request_sign(&lines, &[&format!("+{typed}")], &format!("{target}/x")),
+            Sign::Allow,
+            "{lines:?} {typed}"
+        );
     }
     // A URL rule with its port written is more specific, so no tie.
     assert_eq!(

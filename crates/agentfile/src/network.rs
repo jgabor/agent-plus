@@ -369,7 +369,7 @@ fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
 /// Agentfile rule it ties with: one for the same destination, which is the
 /// only rule that is as specific and matches the same connections. An IPv4
 /// block is the same destination as its IPv4-mapped form, and a URL is the
-/// same as one whose path has the same escapes decoded. The typed
+/// same as one whose path decodes to the same. The typed
 /// rules come last, on lines past the Agentfile's. It returns the errors that
 /// `ap build`'s checks of `NETWORK` and `SECRET` find in the merged rules.
 pub fn with_typed_network(
@@ -427,8 +427,9 @@ pub fn with_typed_network(
 }
 
 /// `destination` with an IPv4 block in its IPv4-mapped form, and a URL path
-/// with its escapes decoded as the proxy matches it, so destinations the
-/// proxy gives the same specificity are equal.
+/// with its escapes decoded as the proxy matches it, so two destinations are
+/// equal exactly when the proxy gives them the same specificity and they
+/// match the same connections.
 fn canonical(destination: Destination) -> Destination {
     match destination {
         Destination::Url {

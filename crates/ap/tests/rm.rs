@@ -453,6 +453,36 @@ fn rm_refuses_for_pending_changes_after_the_agent_is_gone() {
 }
 
 // spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+#[test]
+fn rm_keeps_a_run_that_gains_pending_changes_while_it_removes_the_agent() {
+    let scratch = Scratch::new("pending-meanwhile");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let runs = Runs::new(scratch.store());
+    let (run, pending) = run_sharing(&scratch, "notes", 1);
+    runs.create_log(&run).unwrap();
+    let held = runs.hold(&run).unwrap();
+    // The test holds the lock on the store's agents, so `ap rm` waits for it
+    // after it found no pending changes, and before it removes the runs.
+    let lock = File::open(scratch.store().join("agents/.lock")).unwrap();
+    lock.lock().unwrap();
+    let mut rm = scratch.spawn(&["rm", "notes"]);
+    wait_until("ap rm", || rm.exited() || waits_for_a_lock(rm.id()));
+
+    // Meanwhile the run changes a file, and finishes.
+    fs::write(pending.join("records"), "DELETE \"data\"\n").unwrap();
+    drop(held);
+    drop(lock);
+
+    let rm = rm.output();
+    assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
+    assert_eq!(scratch.ok_in(&scratch.root, &["ls"]), "");
+    assert!(runs.get(&run).unwrap().is_some());
+    assert!(runs.log(&run).unwrap().is_some());
+    assert!(runs.has_pending(&run).unwrap());
+}
+
+// spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
 // spec(ap rm): `ap rm --force` keeps an active run's pending changes, as it keeps the run's log.
 #[test]
 fn rm_force_deletes_the_pending_changes_of_the_agent_s_finished_runs() {

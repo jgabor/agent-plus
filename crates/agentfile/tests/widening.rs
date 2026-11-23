@@ -348,7 +348,8 @@ fn another_harness_leaves_out_a_host_that_approved_rules_allow() {
     assert_eq!(codex_with(address), []);
 }
 
-// spec(NETWORK): A host stays in the list when no name rule allows it on every port, when a `-` rule denies some connection to it, when it has a URL rule, or when it is a secret's bound host.
+// spec(NETWORK): A host stays in the list when no name rule allows it on every port, or when a `-` rule denies some connection to it.
+// spec(NETWORK): So does a host whose traffic the proxy reads: one with a URL rule, one under a `+` rule with a narrower `-` rule, and a secret's bound host.
 #[test]
 fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
     for approved in [
@@ -359,6 +360,10 @@ fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
         // The proxy denies what isn't HTTP to a host with a URL rule.
         "NETWORK -\nNETWORK +https://sign-in.codex.test/\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK +https://sign-in.codex.test/x\n",
+        // The proxy reads what a `+` rule allows when a narrower `-` rule
+        // lies under it, since a client can reuse one connection for both.
+        "NETWORK -\nNETWORK +codex.test\nNETWORK -other.codex.test\n",
+        "NETWORK -\nNETWORK +codex.test\nNETWORK -https://codex.test/x\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test:80\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -https://sign-in.codex.test/x\n",
@@ -379,6 +384,14 @@ fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
     assert_eq!(widened_with(("claude", bound), now), sign_in());
     let sealed = bound.replace("SECRET", "SEAL");
     assert_eq!(widened_with(("claude", &sealed), now), sign_in());
+    // An approval written by hand can bind a name with a final dot.
+    let approved: Grants = "AGENT claude\nSECRET T @sign-in.codex.test.\nNETWORK -\n\
+                            NETWORK +sign-in.codex.test\nPOLICY +\n"
+        .parse()
+        .unwrap();
+    let instructions = parse("AGENT codex\nNETWORK -\nNETWORK +sign-in.codex.test\n").unwrap();
+    let now = Grants::read(&instructions, resolve).unwrap();
+    assert_eq!(now.widening(&approved, adapter), sign_in());
 }
 
 #[test]

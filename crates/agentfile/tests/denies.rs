@@ -141,4 +141,5 @@ fn allows_never_counts_your_host_or_an_address() {
     assert!(network.allows("kagi.com"));
     assert!(!network.allows("host.ap.internal"));
     assert!(!network.allows("1.2.3.4"));
+    assert!(!network.allows(""));
 }

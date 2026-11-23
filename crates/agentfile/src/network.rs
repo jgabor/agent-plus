@@ -152,15 +152,35 @@ impl Network {
     /// evaluation and the enforcement under NETWORK in SPEC.md: on every
     /// port, and to every address it could have that the proxy doesn't
     /// refuse. A name rule or the default must allow it, or the resolver
-    /// doesn't answer it. A host with a URL rule never counts, because the
-    /// proxy denies what isn't HTTP to it, and neither do your host and an
-    /// address.
+    /// doesn't answer it. A host whose traffic the proxy reads never counts,
+    /// because it denies some of that traffic: a host with a URL rule, and a
+    /// host under a `+` rule with a narrower `-` rule. Neither do your host,
+    /// an address, and an empty name.
     pub fn allows(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
+        let under = |host: &str, name: &str| {
+            host.strip_suffix(name)
+                .is_some_and(|start| start.ends_with('.'))
+        };
         let url = (self.rules.iter()).any(
             |rule| matches!(&rule.destination, Destination::Url { host: name, .. } if *name == host),
         );
-        if url || host == "host.ap.internal" || host.parse::<IpAddr>().is_ok() {
+        let split = (self.rules.iter()).any(|broad| match &broad.destination {
+            Destination::Host { name, .. } if broad.sign == Sign::Allow => {
+                (host == *name || under(&host, name))
+                    && (self.rules.iter()).any(|narrow| match &narrow.destination {
+                        Destination::Host { name: other, .. }
+                        | Destination::Url { host: other, .. } => {
+                            narrow.sign == Sign::Deny && (other == name || under(other, name))
+                        }
+                        Destination::Address { .. } => false,
+                    })
+            }
+            _ => false,
+        });
+        let named =
+            !host.is_empty() && host != "host.ap.internal" && host.parse::<IpAddr>().is_err();
+        if url || split || !named {
             return false;
         }
         let (ports, _) = self.cases();

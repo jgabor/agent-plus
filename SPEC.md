@@ -1881,8 +1881,9 @@ changes the harness under `NETWORK -` asks again, and names the hosts the
 new harness adds. It leaves out a host that the approved rules already allow
 on every connection, so with `+api.openai.com` approved, a change to
 `AGENT codex` names only `auth.openai.com` and `chatgpt.com`. A host stays
-in the list when no name rule allows it on every port, when a `-` rule
-denies some connection to it, when it has a URL rule, or when it is a
+in the list when no name rule allows it on every port, or when a `-` rule
+denies some connection to it. So does a host whose traffic the proxy reads:
+one with a URL rule, one under a `+` rule with a narrower `-` rule, and a
 secret's bound host. When the approved rules allow every host that the new
 harness adds, the build doesn't ask. These hosts are an exfiltration path:
 code in the agent can send data to them with a key it brought itself.

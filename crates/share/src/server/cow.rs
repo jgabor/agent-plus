@@ -1815,7 +1815,8 @@ mod tests {
             for _ in 0..12 {
                 // SAFETY: `struct flock` is plain data, valid when zeroed.
                 let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-                lock.l_type = [libc::F_RDLCK, libc::F_WRLCK, libc::F_UNLCK][next(3) as usize] as i16;
+                lock.l_type =
+                    [libc::F_RDLCK, libc::F_WRLCK, libc::F_UNLCK][next(3) as usize] as i16;
                 lock.l_start = next(16);
                 lock.l_len = next(6);
                 sys::ofd_lock(locks.fd.as_fd(), libc::F_OFD_SETLK, &mut lock).unwrap();
@@ -1825,15 +1826,18 @@ mod tests {
             locks.take(copy.as_fd()).unwrap();
             let (held, taken) = (again(&kernel), again(&copy));
             for at in (0..24).chain([i64::MAX - 1]) {
-                assert_eq!(seen(&held, at), seen(&taken, at), "at {at}: {:?}", locks.ranges);
+                assert_eq!(
+                    seen(&held, at),
+                    seen(&taken, at),
+                    "at {at}: {:?}",
+                    locks.ranges
+                );
             }
             let mut sorted = locks.ranges.clone();
             sorted.sort();
             assert!(
-                sorted
-                    .windows(2)
-                    .all(|pair| pair[0].1 < pair[1].0
-                        && (pair[0].2 != pair[1].2 || pair[0].1 + 1 < pair[1].0)),
+                sorted.windows(2).all(|pair| pair[0].1 < pair[1].0
+                    && (pair[0].2 != pair[1].2 || pair[0].1 + 1 < pair[1].0)),
                 "{sorted:?}"
             );
         }

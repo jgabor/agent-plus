@@ -123,7 +123,7 @@ enum Content {
     Image(Vec<u8>),
     /// A layer to download, unless the store has it.
     Fetch(Pin<'static>),
-    /// The locked harness, from its file in the download cache.
+    /// The locked harness, from its files in the download cache.
     Harness(Locked, PathBuf),
 }
 
@@ -617,7 +617,7 @@ fn plan(
                 label: locked.label(),
                 key: harness_key(locked),
                 level: BASE_LEVEL,
-                content: Content::Harness(locked.clone(), cache.join(&locked.sha256)),
+                content: Content::Harness(locked.clone(), cache.to_path_buf()),
             });
         }
         // `ap build` resolves the harness after approval, and plans again.
@@ -789,11 +789,73 @@ pub fn harness_path(harness: Harness) -> String {
 }
 
 /// The harness layer, as an uncompressed EROFS image: the binary in the
-/// cached file at `path`, as an executable at [`harness_path`]. Claude
-/// Code's file is the binary, and Codex's holds it in one zstd frame. The
-/// file is hashed as it is read, and a digest that isn't the locked one is
-/// an error.
-fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
+/// locked file in the download cache `cache`, as an executable at
+/// [`harness_path`], and for Codex its code-mode host, if it has one, at
+/// [`ap::adapter::codex::CODE_MODE_HOST`]. Claude Code's file is the binary, and each of
+/// Codex's holds one in one zstd frame. Each file is hashed as it is read,
+/// and a digest that isn't the locked one is an error.
+fn harness(locked: &Locked, cache: &Path) -> io::Result<Vec<u8>> {
+    let path = cache.join(&locked.sha256);
+    let shown = path.display();
+    let mut root = erofs::Dir {
+        mode: 0o755,
+        entries: BTreeMap::new(),
+    };
+    let hash = Rc::new(RefCell::new(Sha256Context::new()));
+    match locked.harness {
+        Harness::Claude => {
+            let file = open_cached(locked, &path)?;
+            let size = file.metadata()?.len();
+            let content = Hashing {
+                file,
+                hash: Rc::clone(&hash),
+            };
+            insert(
+                &mut root,
+                &harness_path(locked.harness),
+                executable(size, Box::new(content)),
+            );
+        }
+        Harness::Codex => {
+            let (size, content) = unpacked(locked, &path, &locked.sha256)?;
+            insert(
+                &mut root,
+                &harness_path(locked.harness),
+                executable(size, content),
+            );
+            if let Some(host) = &locked.code_mode_host {
+                let (size, content) = unpacked(locked, &cache.join(host), host)?;
+                insert(
+                    &mut root,
+                    ap::adapter::codex::CODE_MODE_HOST,
+                    executable(size, content),
+                );
+            }
+        }
+    }
+    let mut image = Vec::new();
+    erofs::write(root, &mut image).map_err(|error| match error {
+        erofs::Error::Io(error) => io::Error::new(error.kind(), format!("{shown}: {error}")),
+        error => io::Error::new(io::ErrorKind::InvalidData, format!("{shown}: {error}")),
+    })?;
+    if locked.harness == Harness::Claude {
+        check_digest(&locked.sha256, &path, &hash)?;
+    }
+    Ok(image)
+}
+
+/// An executable file of `size` bytes, which `content` reads.
+fn executable(size: u64, content: Box<dyn Read>) -> erofs::Node {
+    erofs::Node::File(erofs::File {
+        mode: 0o755,
+        size,
+        content,
+    })
+}
+
+/// The file at `path` in the download cache, which `locked` is installed
+/// from.
+fn open_cached(locked: &Locked, path: &Path) -> io::Result<fs::File> {
     let shown = path.display();
     // Nonblocking, so that a FIFO fails the check below instead of waiting
     // for a writer. A regular file reads the same either way.
@@ -811,81 +873,61 @@ fn harness(locked: &Locked, path: &Path) -> io::Result<Vec<u8>> {
             ),
             _ => io::Error::new(error.kind(), format!("{shown}: {error}")),
         })?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
+    if !file.metadata()?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{shown} isn't a file"),
         ));
     }
+    Ok(file)
+}
+
+/// The size of the binary in the zstd frame at `path`, whose digest must be
+/// `sha256`, and a reader of it. The frame is read whole and checked before
+/// it is unpacked, so only the locked file is. Unpacking it once first gives
+/// the binary's size without holding the binary.
+fn unpacked(locked: &Locked, path: &Path, sha256: &str) -> io::Result<(u64, Box<dyn Read>)> {
     let hash = Rc::new(RefCell::new(Sha256Context::new()));
-    let mut root = erofs::Dir {
-        mode: 0o755,
-        entries: BTreeMap::new(),
-    };
-    let content = Hashing {
-        file,
+    let mut frame = Vec::new();
+    Hashing {
+        file: open_cached(locked, path)?,
         hash: Rc::clone(&hash),
-    };
-    let (size, content): (u64, Box<dyn Read>) = match locked.harness {
-        Harness::Claude => (metadata.len(), Box::new(content)),
-        Harness::Codex => {
-            // The frame is read whole and checked before it is unpacked, so
-            // only the locked file is. Unpacking it once first gives the
-            // binary's size without holding the binary.
-            let mut frame = Vec::new();
-            { content }.read_to_end(&mut frame)?;
-            check_digest(locked, path, &hash)?;
-            let unpacking = |error: io::Error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("{shown}: unpacking `{}`: {error}", locked.label()),
-                )
-            };
-            let mut counting = unzstd(&frame[..]).map_err(unpacking)?;
-            let size = io::copy(&mut counting, &mut io::sink()).map_err(unpacking)?;
-            (
-                size,
-                Box::new(unzstd(Cursor::new(frame)).map_err(unpacking)?),
-            )
-        }
-    };
-    insert(
-        &mut root,
-        &harness_path(locked.harness),
-        erofs::Node::File(erofs::File {
-            mode: 0o755,
-            size,
-            content,
-        }),
-    );
-    let mut image = Vec::new();
-    erofs::write(root, &mut image).map_err(|error| match error {
-        erofs::Error::Io(error) => io::Error::new(error.kind(), format!("{shown}: {error}")),
-        error => io::Error::new(io::ErrorKind::InvalidData, format!("{shown}: {error}")),
-    })?;
-    if locked.harness == Harness::Claude {
-        check_digest(locked, path, &hash)?;
     }
-    Ok(image)
+    .read_to_end(&mut frame)?;
+    check_digest(sha256, path, &hash)?;
+    let unpacking = |error: io::Error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "{}: unpacking `{}`: {error}",
+                path.display(),
+                locked.label()
+            ),
+        )
+    };
+    let mut counting = unzstd(&frame[..]).map_err(unpacking)?;
+    let size = io::copy(&mut counting, &mut io::sink()).map_err(unpacking)?;
+    Ok((
+        size,
+        Box::new(unzstd(Cursor::new(frame)).map_err(unpacking)?),
+    ))
 }
 
 /// Checks that the file at `path`, read whole into `hash`, has the digest
-/// `locked` names.
-fn check_digest(locked: &Locked, path: &Path, hash: &RefCell<Sha256Context>) -> io::Result<()> {
+/// `sha256`.
+fn check_digest(sha256: &str, path: &Path, hash: &RefCell<Sha256Context>) -> io::Result<()> {
     let actual: String = hash
         .replace(Sha256Context::new())
         .finish()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if actual != locked.sha256 {
+    if actual != sha256 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "{} has digest {actual}, not the {} that Agentfile.lock locks",
+                "{} has digest {actual}, not the {sha256} that Agentfile.lock locks",
                 path.display(),
-                locked.sha256
             ),
         ));
     }
@@ -912,14 +954,18 @@ impl Read for Hashing {
     }
 }
 
-/// The harness layer's key. Its image is a function of the harness and the
-/// file's digest.
+/// The harness layer's key. Its image is a function of the harness and its
+/// files' digests.
 fn harness_key(locked: &Locked) -> String {
     let mut hash = Sha256Context::new();
     hash.update(b"harness\0");
     hash.update(lock::name(locked.harness).as_bytes());
     hash.update(b"\0");
     hash.update(locked.sha256.as_bytes());
+    if let Some(host) = &locked.code_mode_host {
+        hash.update(b"\0");
+        hash.update(host.as_bytes());
+    }
     hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 

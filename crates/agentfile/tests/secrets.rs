@@ -330,6 +330,17 @@ fn a_run_cannot_read_a_hidden_secret_into_env() {
     assert_eq!(lines_of(&errors), [1], "{errors:?}");
 }
 
+#[test]
+fn an_env_value_that_reads_a_hidden_secret_twice_has_one_error() {
+    let errors = errors_after_agent(
+        "SECRET GITHUB_TOKEN\nSECRET OTHER @example.com\n\
+         ENV PAIR $GITHUB_TOKEN:${GITHUB_TOKEN}:$OTHER\n",
+    );
+    assert_eq!(lines_of(&errors), [4, 4], "{errors:?}");
+    assert!(errors[0].message.contains("`$GITHUB_TOKEN`"), "{errors:?}");
+    assert!(errors[1].message.contains("`$OTHER`"), "{errors:?}");
+}
+
 // spec(ENV): A value can read the variable of a `visible` secret.
 #[test]
 fn an_env_value_can_read_a_visible_secret() {
@@ -338,6 +349,7 @@ fn an_env_value_can_read_a_visible_secret() {
         "ENV KEY ${AWS_KEY:-none}\nSECRET AWS_KEY visible\n",
         // A name on several lines is visible if any of them says so.
         "SECRET GITHUB_TOKEN\nSECRET GITHUB_TOKEN visible\nENV TOKEN $GITHUB_TOKEN\n",
+        "SECRET GITHUB_TOKEN visible\nSECRET GITHUB_TOKEN\nENV TOKEN $GITHUB_TOKEN\n",
         // `\$` reads no variable.
         "SECRET GITHUB_TOKEN\nENV TOKEN \\$GITHUB_TOKEN\n",
     ] {

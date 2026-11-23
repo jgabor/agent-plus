@@ -545,16 +545,20 @@ fn next(
         if entries.len() == free {
             break;
         }
-        if !state.claimable() || !host.starts(issue) {
+        if !state.claimable() {
             continue;
         }
         let paths = touches(&issue.body);
         if any_overlap(&paths, &taken) {
             continue;
         }
+        taken.extend(paths.iter().cloned());
+        // Its paths stay taken, because no claim slot spans the two hosts.
+        if !host.starts(issue) {
+            continue;
+        }
         let branch = state.branch().cloned();
         let worktree = branch.as_ref().and_then(|b| worktrees.get(b).cloned());
-        taken.extend(paths.iter().cloned());
         entries.push(Entry {
             issue: issue.number,
             touches: paths,

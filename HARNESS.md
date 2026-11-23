@@ -563,8 +563,9 @@ is a failure, and 2 is bad usage or an environment error.
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
 first, with at most one entry per free worker slot on this host. On a Mac it
 names only issues with `host:macos`, and on Linux only issues without it.
-`claim` refuses an issue for the other host. When two issues overlap, the lower
-number stays. Any issue that overlaps a live claim is left out, and an abandoned
+`claim` refuses an issue for the other host. When two issues overlap, the
+lower number stays, whichever host each is for, because no claim slot spans
+the two. Any issue that overlaps a live claim is left out, and an abandoned
 issue is included. `branch` names the existing branch of an abandoned issue,
 or the branch of the last claim on an available issue, if GitHub still has it.
 `worktree` names where that branch is still checked out. Both are otherwise

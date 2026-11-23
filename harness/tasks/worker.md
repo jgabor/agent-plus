@@ -89,12 +89,14 @@ On a Mac, which runs only issues with `host:macos`, the gate can't run,
 because it needs Linux, KVM, and systemd. Prove the change with the checks
 that run there. Then, in place of steps 7 to 9:
 
-1. Open the PR with your proof and your review, and link it, as step 6 says.
-   Name the commit you proved.
+1. Make sure the body of the PR from step 6 has your proof and your review,
+   and names the commit you proved.
 2. Set your status comment's state to `parked`, and say in `Next` that a
-   worker on Linux takes the branch through the gate.
+   worker on Linux takes the branch through the gate. This comes first, so
+   that the issue stays Claimed on both hosts until the labels go.
 3. Run `gh issue edit <issue> --remove-label host:macos --remove-label
-   in-progress`. The issue is then Available on its branch, so the next
+   in-progress`, and run it again until it succeeds, because a parked status
+   never expires. The issue is then Available on its branch, so the next
    dispatch on Linux starts a worker that takes it over.
 4. Remove your worktree as step 9 says, and stop. Never run `merge` or
    `prepare` on a Mac.

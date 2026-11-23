@@ -911,6 +911,19 @@ fn a_claim_on_either_host_holds_its_paths_on_both() {
     assert_eq!(on_each_host("host-paths-linux", &issues), (vec![], vec![]));
 }
 
+/// Nothing orders a claim on a Mac against one on Linux, so of two issues
+/// that overlap, only the lower one is named, on either host.
+#[test]
+fn of_two_overlapping_issues_only_the_lower_is_named_on_either_host() {
+    let issues = [open(7, MAC, T), open(8, &["auto:pr"], T)];
+    assert_eq!(on_each_host("host-overlap-mac", &issues), (vec![], vec![7]));
+    let issues = [open(7, &["auto:pr"], T), open(8, MAC, T)];
+    assert_eq!(
+        on_each_host("host-overlap-linux", &issues),
+        (vec![7], vec![])
+    );
+}
+
 #[test]
 fn a_claim_on_the_wrong_host_fails_without_writing() {
     for (name, host, labels) in [
@@ -943,13 +956,20 @@ fn a_mac_hands_its_issue_over_to_linux_on_its_branch() {
     repo.set_host("Darwin");
     assert_eq!(repo.numbers(), vec![7]);
 
+    let parked = [status(70, OWNER, "parked", "7-mac", LIVE)];
     repo.set_issues(&[issue(
         7,
         "OPEN",
-        &["auto:pr"],
+        &["auto:pr", "host:macos", "in-progress"],
         &body(T, ""),
-        &[status(70, OWNER, "parked", "7-mac", LIVE)],
+        &parked,
     )]);
+    assert_eq!(repo.numbers(), Vec::<u64>::new());
+    repo.set_host("Linux");
+    assert_eq!(repo.numbers(), Vec::<u64>::new());
+
+    repo.set_issues(&[issue(7, "OPEN", &["auto:pr"], &body(T, ""), &parked)]);
+    repo.set_host("Darwin");
     assert_eq!(repo.numbers(), Vec::<u64>::new());
     repo.set_host("Linux");
     assert_eq!(

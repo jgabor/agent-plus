@@ -4,8 +4,8 @@ use crate::forge::{Forge, Gh};
 use crate::journey::Outcome;
 use crate::report::ISSUE_TITLE;
 use crate::{
-    Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, lock, mutation, report,
-    roadmap, workspace,
+    Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, limit, lock, mutation,
+    report, roadmap, workspace,
 };
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
@@ -19,8 +19,17 @@ const SKIP: &str = "skip";
 /// as `<provider>-api-key`. Each belongs to a workspace or project whose spend
 /// limit the provider enforces.
 const PAID_KEYS: &str = ".config/agent-plus/paid-checks";
+/// The limit for the whole run, inside the scheduled task's timeout of 2 hours,
+/// which also covers building `xtask`. A step with a limit of its own stops
+/// there, or once only the report's share of this is left.
+const SECONDS: u64 = 6600;
+const SECONDS_OVERRIDE: &str = "XTASK_NIGHTLY_SECONDS";
+/// The report's share: building and posting it, the status, and the roadmap.
+const REPORT_SECONDS: u64 = 600;
 
 pub fn run() -> Result<Verdict, Problem> {
+    let deadline =
+        limit::Deadline::after(limit::seconds(SECONDS_OVERRIDE, SECONDS)?, REPORT_SECONDS);
     let root = workspace::root()?;
     let commit = tested_commit(&root)?;
     gate::require_tools(&root)?;
@@ -43,9 +52,11 @@ pub fn run() -> Result<Verdict, Problem> {
     checks.push(("journey", state(journey_holds(&root, &walked))));
     checks.push((
         "fuzz",
-        fuzz::run(&root, &hold).transpose().map_or(SKIP, state),
+        fuzz::run(&root, &hold, deadline)
+            .transpose()
+            .map_or(SKIP, state),
     ));
-    let mutated = mutation::run(&root, &hold).transpose();
+    let mutated = mutation::run(&root, &hold, deadline).transpose();
     checks.push(("mutation", mutated.map_or(SKIP, state)));
     drop(hold);
 

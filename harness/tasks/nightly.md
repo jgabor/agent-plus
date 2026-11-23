@@ -17,7 +17,9 @@ edit those issues.
    cargo xtask nightly > target/nightly.log 2>&1; echo "exit $?"
    ```
 
-   It takes more than an hour, because fuzzing alone takes most of one.
+   It takes more than an hour, because fuzzing alone takes most of one. Fuzzing
+   and mutation testing stop early when they must, so the report goes out
+   within the command's limit of 110 minutes.
 
 2. Load `mcp__t3-code__t3_background_wait` with ToolSearch, pass it the task's
    ID, and end your turn. You are woken when the command ends. Never use

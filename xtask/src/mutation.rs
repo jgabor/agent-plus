@@ -2,9 +2,10 @@
 //! report, and files an issue for each crate where a check didn't notice.
 
 use crate::forge::{Gh, OpenIssue};
+use crate::limit::{self, Deadline};
 use crate::lock::Hold;
 use crate::workspace::{self, Package};
-use crate::{Problem, Verdict, base, limit, report};
+use crate::{Problem, Verdict, base, report};
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
@@ -38,8 +39,9 @@ pub fn require_tool(root: &Path) -> Result<(), Problem> {
 }
 
 /// `None` when nothing it covers has changed. Survivors become issues, so they
-/// don't fail the night.
-pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
+/// don't fail the night. The job stops at its own limit, or at `deadline`,
+/// whichever comes first.
+pub fn run(root: &Path, hold: &Hold, deadline: Deadline) -> Result<Option<Verdict>, Problem> {
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
     let changed = changed_packages(root, &gh, &issues)?;
@@ -59,7 +61,7 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Option<Verdict>, Problem> {
     // takes only its own processes with it, and `cargo test` sees it fail.
     let runner = output.join("runner");
     write_script(&runner, &limit::job_script()?)?;
-    let limit = limit::seconds(SECONDS_OVERRIDE, SECONDS)?;
+    let limit = deadline.limit(limit::seconds(SECONDS_OVERRIDE, SECONDS)?)?;
     let finished = limit::run(
         hold,
         root,

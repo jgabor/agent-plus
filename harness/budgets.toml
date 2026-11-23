@@ -42,8 +42,8 @@ band_abs = 2.0
 
 [[budget]]
 key = "os_bytes"
-name = "The `OS minimal` layer that `guest/os/pin.toml` pins"
+name = "The pinned `OS minimal` layer"
 
 [[budget]]
 key = "kernel_bytes"
-name = "The guest kernel that `guest/kernel/pin.toml` pins"
+name = "The pinned guest kernel"

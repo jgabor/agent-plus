@@ -12,13 +12,14 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use ap::fetch;
 use ap::store::Store;
+use t1::started::Started;
 use t1::{guest_binary, kernel, os};
 
 /// How long `ap` may take, in seconds, before `timeout` stops it, and the VM
@@ -132,17 +133,6 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
-    }
-}
-
-/// A process this test started, killed and reaped when it's dropped, so a
-/// failed test leaves no VM behind.
-struct Started(Child);
-
-impl Drop for Started {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
     }
 }
 

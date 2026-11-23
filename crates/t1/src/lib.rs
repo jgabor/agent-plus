@@ -7,6 +7,7 @@ use std::process::Command;
 pub mod guest_binary;
 pub mod kernel;
 pub mod os;
+pub mod started;
 
 /// The value of `key` in a `pin.toml`.
 fn pinned(pin: &'static str, key: &str) -> &'static str {

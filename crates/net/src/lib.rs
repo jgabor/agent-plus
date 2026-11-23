@@ -10,7 +10,9 @@ pub use inject::{LONGEST, Swap, inject};
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use agentfile::{Destination, Instruction, Network, NetworkRule, Scheme, Sign};
+use agentfile::{
+    Destination, Instruction, Network, NetworkRule, Scheme, Sign, unescape_unreserved,
+};
 
 /// A connection the agent makes.
 #[derive(Clone, Copy, Debug)]
@@ -522,28 +524,6 @@ fn request_path(target: &str) -> Option<String> {
 /// escape of two hex digits.
 pub fn normalize_path(path: &str) -> Option<String> {
     Some(remove_dot_segments(&unescape_unreserved(path)?))
-}
-
-fn unescape_unreserved(path: &str) -> Option<String> {
-    let mut out = String::with_capacity(path.len());
-    let mut rest = path;
-    while let Some(at) = rest.find('%') {
-        out.push_str(&rest[..at]);
-        let hex = rest.get(at + 1..at + 3)?;
-        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return None;
-        }
-        let byte = u8::from_str_radix(hex, 16).ok()?;
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            out.push('%');
-            out.push_str(&hex.to_ascii_uppercase());
-        }
-        rest = &rest[at + 3..];
-    }
-    out.push_str(rest);
-    Some(out)
 }
 
 /// The algorithm of RFC 3986 section 5.2.4.

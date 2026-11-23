@@ -219,3 +219,31 @@ fn a_refused_name_is_refused_by_its_most_specific_rule_or_the_default() {
         Some("-127.0.0.0/8".to_owned())
     );
 }
+
+// spec(NETWORK): Request paths are normalized (RFC 3986) before matching.
+#[test]
+fn a_url_rule_path_matches_unescaped_when_the_resolver_decides() {
+    // Both rules cover `/a`, and the `-` rule wins the tie, so no request
+    // passes, and the name doesn't resolve.
+    let lines = "NETWORK -\nNETWORK +https://example.com/a\nNETWORK -https://example.com/%61\n";
+    resolves(lines, &[("example.com", false)]);
+    let network = network(lines);
+    for target in ["/a", "/%61", "/a/b", "/b"] {
+        let connection = net::Connection {
+            name: Some("example.com"),
+            address: "100.64.0.9".parse().unwrap(),
+            port: 443,
+            request: Some(net::Request {
+                scheme: agentfile::Scheme::Https,
+                target,
+            }),
+        };
+        let decision = net::decide(&network.rules, network.default, &connection);
+        assert_eq!(decision.sign, agentfile::Sign::Deny, "{target}");
+    }
+    // An escaped `+` rule still lets its own path through.
+    resolves(
+        "NETWORK -\nNETWORK -https://example.com/b\nNETWORK +https://example.com/%61\n",
+        &[("example.com", true)],
+    );
+}

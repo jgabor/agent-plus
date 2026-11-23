@@ -621,6 +621,11 @@ fn a_bound_host_that_the_closed_default_denies_is_an_error() {
             "T",
             &["a.com"],
         ),
+        (
+            "SECRET T @a.com\nNETWORK -\nNETWORK +https://a.com/a\nNETWORK -https://a.com/%61\n",
+            "T",
+            &["a.com"],
+        ),
         ("SECRET T @10.0.0.1\nNETWORK -\n", "T", &["10.0.0.1"]),
         (
             "SECRET T @api.a.com\nNETWORK -\nNETWORK +10.0.0.0/8\n",

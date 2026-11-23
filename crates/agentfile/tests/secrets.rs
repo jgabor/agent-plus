@@ -280,6 +280,71 @@ fn an_env_key_cannot_be_a_secret_or_a_seal() {
     }
 }
 
+// spec(ENV): A value that reads the host variable of a hidden `SECRET` is an error, as in `ENV TOKEN $GITHUB_TOKEN` with `SECRET GITHUB_TOKEN`, because it would hand the agent the value the secret hides.
+#[test]
+fn an_env_value_cannot_read_a_hidden_secret() {
+    for value in [
+        "$GITHUB_TOKEN",
+        "${GITHUB_TOKEN}",
+        "${GITHUB_TOKEN:-none}",
+        "\"Bearer $GITHUB_TOKEN\"",
+        "x${GITHUB_TOKEN}y",
+    ] {
+        let env = format!("ENV TOKEN {value}");
+        for (lines, env_line, secret_line) in [
+            (format!("SECRET GITHUB_TOKEN\n{env}\n"), 3, 2),
+            (format!("{env}\nSECRET GITHUB_TOKEN\n"), 2, 3),
+        ] {
+            let errors = errors_after_agent(&lines);
+            assert_eq!(lines_of(&errors), [env_line], "{lines:?}: {errors:?}");
+            let message = &errors[0].message;
+            for named in [
+                "`ENV TOKEN`",
+                "`GITHUB_TOKEN`",
+                &format!("line {secret_line}"),
+                "Remove",
+                "`visible`",
+            ] {
+                assert!(message.contains(named), "{named}: {message}");
+            }
+        }
+    }
+}
+
+// spec(ENV): A value that reads the host variable of a hidden `SECRET` is an error, as in `ENV TOKEN $GITHUB_TOKEN` with `SECRET GITHUB_TOKEN`, because it would hand the agent the value the secret hides.
+#[test]
+fn a_run_cannot_read_a_hidden_secret_into_env() {
+    // `ap run` reads a built agent's instructions with `Secrets::read`, not
+    // `parse`.
+    let instruction = |line, name: &str, arguments: &[&str]| agentfile::Instruction {
+        line,
+        name: name.to_string(),
+        arguments: arguments.iter().map(|argument| argument.to_string()).collect(),
+        text: None,
+    };
+    let instructions = [
+        instruction(1, "ENV", &["TOKEN $GITHUB_TOKEN"]),
+        instruction(2, "SECRET", &["GITHUB_TOKEN"]),
+    ];
+    let errors = Secrets::read(&instructions).unwrap_err();
+    assert_eq!(lines_of(&errors), [1], "{errors:?}");
+}
+
+// spec(ENV): A value can read the variable of a `visible` secret.
+#[test]
+fn an_env_value_can_read_a_visible_secret() {
+    for lines in [
+        "SECRET AWS_KEY visible\nENV KEY $AWS_KEY\n",
+        "ENV KEY ${AWS_KEY:-none}\nSECRET AWS_KEY visible\n",
+        // A name on several lines is visible if any of them says so.
+        "SECRET GITHUB_TOKEN\nSECRET GITHUB_TOKEN visible\nENV TOKEN $GITHUB_TOKEN\n",
+        // `\$` reads no variable.
+        "SECRET GITHUB_TOKEN\nENV TOKEN \\$GITHUB_TOKEN\n",
+    ] {
+        secrets_of(lines);
+    }
+}
+
 #[test]
 fn secret_reads_a_name_hosts_and_visible() {
     assert_eq!(

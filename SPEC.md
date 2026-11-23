@@ -1221,6 +1221,10 @@ ENV EDITOR ${EDITOR:-vi}
   a host variable is a [grant](#grants).
 - Every `ENV` value is visible to the agent and to every process in the VM.
   Never put credentials in `ENV`; use `SECRET`.
+- A value that reads the host variable of a hidden `SECRET` is an error,
+  as in `ENV TOKEN $GITHUB_TOKEN` with `SECRET GITHUB_TOKEN`, because it
+  would hand the agent the value the secret hides. A value can read the
+  variable of a `visible` secret.
 - Setting the same key twice, or a key that a `SECRET` or `SEAL` also names,
   is an error. So is a key the adapter sets, such as `CLAUDE_CONFIG_DIR` or the
   certificate variables under [SECRET](#secret), and a name the harness

@@ -193,9 +193,17 @@ each step as the last journey ran it.
 | Desktop cost until first use | disk only | none |
 | Stripped release binary | to be set | 5% |
 | `ap --version` | none | 20% or 2 ms, whichever is larger |
+| The pinned `OS minimal` layer | none | none |
+| The pinned guest kernel | none | none |
 
 `harness/budgets.toml` holds the targets and bands. A budget with no band is
 recorded and can't fail.
+
+The sizes of the pinned layer and kernel are the same on every machine, so the
+bench doesn't measure them, and they can't have a target or a band. A record
+reads them from the copies that T1 fetches into `target/guest`, unless a
+refresh keeps the budgets of the record at the branch's tip. A missing copy,
+or one whose digest isn't the one its pin names, is a problem.
 
 The bench compares the medians of 15 interleaved pairs of base and candidate
 runs. A change that worsens a budget by more than its band fails, unless its

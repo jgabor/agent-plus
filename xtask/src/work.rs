@@ -191,7 +191,7 @@ pub fn refusal(issue: &Issue, owner: &str, now: i64, thread: Option<&str>) -> Op
     })
 }
 
-fn touches(body: &str) -> Vec<String> {
+pub(crate) fn touches(body: &str) -> Vec<String> {
     let mut lines = body.lines().map(str::trim);
     if !lines.any(|line| line == "## Touches") {
         return Vec::new();

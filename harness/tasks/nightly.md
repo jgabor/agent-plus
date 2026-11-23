@@ -60,7 +60,7 @@ edit those issues.
    `cargo xtask nightly` prints `pass <step>`.
 
    ## Touches
-   Whatever the failure below points to.
+   <the paths>
 
    ## What was seen
    On commit `<commit>`:
@@ -70,8 +70,22 @@ edit those issues.
    ```
    ````
 
+   The paths go in backticks, separated by commas. They are the files that
+   the quoted lines name, without line numbers. If those lines name none,
+   use the failing step's own code:
+
+   | Step | Path |
+   |---|---|
+   | `bench` | `xtask/src/bench.rs` |
+   | `gate` | `xtask/src/gate.rs` |
+   | `t2`, `release`, `t3` | `xtask/src/nightly.rs` |
+   | `journey` | `xtask/src/journey.rs` |
+   | `fuzz` | `xtask/src/fuzz.rs` |
+   | `mutation` | `xtask/src/mutation.rs` |
+
    For `The nightly job can't finish`, the goal is instead that the nightly
    job finishes on `main`, and the check is that `cargo xtask nightly` exits 0.
+   Its own code is `xtask/src/nightly.rs`.
 
 8. Reply with `nightly: fail`, the steps that failed, and each issue's number.
    Then stop.

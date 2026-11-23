@@ -92,7 +92,7 @@ fn prepared(root: &Path, pr: u64) -> bool {
 
 fn issue_body(head: &str) -> String {
     format!(
-        "`cargo xtask nightly` found that `{head}` fails the gate.\n\n## Goal\n`main` passes the gate again.\n\n## Definition of done\n`cargo xtask gate` passes on `main`.\n\n## Touches\nWhatever the first bad commit touched.\n"
+        "`cargo xtask nightly` found that `{head}` fails the gate.\n\n## Goal\n`main` passes the gate again.\n\n## Definition of done\n`cargo xtask gate` passes on `main`.\n\n## Touches\n`xtask/src/gate.rs`, and whatever the first bad commit touched.\n"
     )
 }
 
@@ -206,4 +206,17 @@ fn open_revert(
         "## Problem\n`main` fails the gate at `{head}`.\n\n## Change\nReverts `{bad}`, apart from its ledger record. It is the first bad commit between `{good}`, the newest with a passing nightly, and `{head}`.\n\n## Proof\n`cargo xtask nightly` ran the gate at each step of the bisect, and took `{head}` as bad from its own run. If the bisect blames only the newest commit, that run may have hit a flaky check.\n\n## Decisions\nThe owner merges this. Once `xtask/gate` is green, a comment on this PR says what merging accepts.\n\nHill: none, this is a revert.\n\nCloses #{issue}.\n\nCreated by `cargo xtask nightly`.\n"
     );
     gh.create_pr(&branch, &title, &body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_issue_names_a_path_it_touches() {
+        assert_ne!(
+            crate::work::touches(&issue_body("abc123")),
+            Vec::<String>::new()
+        );
+    }
 }

@@ -79,26 +79,7 @@ impl Network {
     /// could have passes.
     pub fn denies(&self, host: &str) -> bool {
         let host = host.to_ascii_lowercase();
-        // Each port and path a rule names, and one that none names, so that
-        // every way a request can match the rules gets tried.
-        let mut ports = vec![80, 443];
-        let mut paths = Vec::new();
-        for rule in &self.rules {
-            match &rule.destination {
-                Destination::Host { port, .. } | Destination::Address { port, .. } => {
-                    ports.extend(*port)
-                }
-                Destination::Url { port, path, .. } => {
-                    ports.extend(*port);
-                    paths.push(path.clone());
-                }
-            }
-        }
-        let longest = paths.iter().map(String::len).max().unwrap_or(0);
-        paths.push(format!("/{}", "x".repeat(longest)));
-        ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
-        ports.sort_unstable();
-        ports.dedup();
+        let (ports, paths) = self.cases();
         if let Ok(address) = host.parse::<IpAddr>() {
             return refused(address)
                 || ports.iter().all(|&port| {
@@ -165,6 +146,75 @@ impl Network {
             }
         }
         true
+    }
+
+    /// Whether these rules allow every connection to the name `host`, by the
+    /// evaluation and the enforcement under NETWORK in SPEC.md: on every
+    /// port, and to every address it could have that the proxy doesn't
+    /// refuse. A name rule or the default must allow it, or the resolver
+    /// doesn't answer it. A host whose traffic the proxy reads never counts,
+    /// because it denies some of that traffic: a host with a URL rule, and a
+    /// host under a `+` rule with a narrower `-` rule. Neither do your host,
+    /// an address, and an empty name. A name is in any case, with or without
+    /// a final dot.
+    pub fn allows(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        let host = host.strip_suffix('.').unwrap_or(&host).to_string();
+        let under = |host: &str, name: &str| {
+            host.strip_suffix(name)
+                .is_some_and(|start| start.ends_with('.'))
+        };
+        let url = (self.rules.iter()).any(
+            |rule| matches!(&rule.destination, Destination::Url { host: name, .. } if *name == host),
+        );
+        let split = (self.rules.iter()).any(|broad| match &broad.destination {
+            Destination::Host { name, .. } if broad.sign == Sign::Allow => {
+                (host == *name || under(&host, name))
+                    && (self.rules.iter()).any(|narrow| match &narrow.destination {
+                        Destination::Host { name: other, .. }
+                        | Destination::Url { host: other, .. } => {
+                            narrow.sign == Sign::Deny && (other == name || under(other, name))
+                        }
+                        Destination::Address { .. } => false,
+                    })
+            }
+            _ => false,
+        });
+        let named =
+            !host.is_empty() && host != "host.ap.internal" && host.parse::<IpAddr>().is_err();
+        if url || split || !named {
+            return false;
+        }
+        let (ports, _) = self.cases();
+        ports.iter().all(|&port| {
+            let name = self.name_decision(&host, Scheme::Https, port, "/");
+            name.unwrap_or(self.default) == Sign::Allow
+                && !self.address_decisions(port).contains(&Some(Sign::Deny))
+        })
+    }
+
+    /// Each port and path a rule names, and one that none names, so that
+    /// every way a request can match the rules gets tried.
+    fn cases(&self) -> (Vec<u16>, Vec<String>) {
+        let mut ports = vec![80, 443];
+        let mut paths = Vec::new();
+        for rule in &self.rules {
+            match &rule.destination {
+                Destination::Host { port, .. } | Destination::Address { port, .. } => {
+                    ports.extend(*port)
+                }
+                Destination::Url { port, path, .. } => {
+                    ports.extend(*port);
+                    paths.push(path.clone());
+                }
+            }
+        }
+        let longest = paths.iter().map(String::len).max().unwrap_or(0);
+        paths.push(format!("/{}", "x".repeat(longest)));
+        ports.extend((1..=u16::MAX).find(|port| !ports.contains(port)));
+        ports.sort_unstable();
+        ports.dedup();
+        (ports, paths)
     }
 
     /// Every decision the IP rules give on `port` to some address that the

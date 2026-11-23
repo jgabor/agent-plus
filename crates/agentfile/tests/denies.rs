@@ -1,5 +1,5 @@
-//! Whether `NETWORK` rules deny every request to a host, by the evaluation
-//! and the enforcement under NETWORK in SPEC.md.
+//! Whether `NETWORK` rules deny every request to a host, or allow every one,
+//! by the evaluation and the enforcement under NETWORK in SPEC.md.
 
 use agentfile::{Network, parse};
 
@@ -131,4 +131,27 @@ fn an_ipv6_rule_never_matches_an_ipv4_address() {
         false,
     );
     denies("NETWORK +\nNETWORK -[2606:4700::]/64\n", "1.1.1.1", false);
+}
+
+#[test]
+fn allows_never_counts_your_host_or_an_address() {
+    let instructions =
+        parse("AGENT claude\nNETWORK +\nNETWORK +host.ap.internal\nNETWORK +1.2.3.4\n").unwrap();
+    let network = Network::read(&instructions).unwrap();
+    assert!(network.allows("kagi.com"));
+    assert!(!network.allows("host.ap.internal"));
+    assert!(!network.allows("1.2.3.4"));
+    assert!(!network.allows(""));
+    assert!(!network.allows("."));
+    assert!(!network.allows("host.ap.internal."));
+}
+
+// spec(NETWORK): Names match in any case, with or without a final dot.
+#[test]
+fn allows_reads_a_name_with_or_without_a_final_dot() {
+    let lines = "AGENT claude\nNETWORK +\nNETWORK -kagi.com\nNETWORK -https://kagi.org/x\n";
+    let network = Network::read(&parse(lines).unwrap()).unwrap();
+    assert!(network.allows("Example.com."));
+    assert!(!network.allows("Kagi.com."));
+    assert!(!network.allows("kagi.org."));
 }

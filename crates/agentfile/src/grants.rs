@@ -216,7 +216,7 @@ impl Grants {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Widening {
     /// A harness whose hosts stay allowed under `NETWORK -`, with the hosts
-    /// that the approved grants didn't allow.
+    /// that the approved grants didn't allow on every connection.
     Harness {
         harness: Harness,
         hosts: Vec<String>,
@@ -272,8 +272,18 @@ impl Grants {
                 .harness
                 .map(|old| adapter(old).hosts)
                 .unwrap_or(&[]);
+            // A host that the approved grants allow on every connection
+            // stays allowed whatever the harness is. The proxy reads what
+            // goes to a secret's bound host, and denies some of it.
+            let bound = |host: &str| {
+                (approved.secrets.iter().chain(&approved.seals)).any(|secret| {
+                    (secret.hosts.iter())
+                        .any(|it| it.trim_end_matches('.').eq_ignore_ascii_case(host))
+                })
+            };
+            let allowed = |host: &str| approved.network.allows(host) && !bound(host);
             let hosts: Vec<String> = (adapter(harness).hosts.iter())
-                .filter(|host| !old.contains(host))
+                .filter(|host| !old.contains(host) && !allowed(host))
                 .map(|host| host.to_string())
                 .collect();
             if !hosts.is_empty() {

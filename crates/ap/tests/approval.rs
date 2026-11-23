@@ -294,6 +294,39 @@ fn another_harness_under_network_deny_asks_again_and_lists_its_hosts() {
     );
 }
 
+// spec(NETWORK): It leaves out a host that the approved rules already allow on every connection, so with `+api.openai.com` approved, a change to `AGENT codex` names only `auth.openai.com` and `chatgpt.com`.
+// spec(NETWORK): When the approved rules allow every host that the new harness adds, the build doesn't ask.
+#[test]
+fn another_harness_leaves_out_the_hosts_that_approved_rules_allow() {
+    let scratch = Scratch::new("harness-allowed");
+    let claude = NOTES.replace("+github.com", "+api.openai.com");
+    let dir = scratch.project("notes", &claude);
+    assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
+    let codex = claude.replace("AGENT claude", "AGENT codex:0.169.0");
+    fs::write(dir.join("Agentfile"), codex).unwrap();
+    common::pin_harness(&scratch.home, &dir);
+    let run = scratch.on_terminal(&dir, &["build"], "n\n");
+    assert_eq!(run.code, Some(1), "{}", run.screen);
+    assert!(
+        run.screen.contains(
+            "asks for more than you approved:\n  AGENT codex, which may reach \
+             auth.openai.com and chatgpt.com\nApprove them? [y/N] "
+        ),
+        "{}",
+        run.screen
+    );
+    // Rules that allow every host codex adds leave nothing to ask, so a
+    // build without a terminal goes ahead.
+    let open = NOTES.replace("+github.com", "+openai.com\nNETWORK +chatgpt.com");
+    let dir = scratch.project("open", &open);
+    assert_eq!(scratch.on_terminal(&dir, &["build"], "y\n").code, Some(0));
+    let codex = open.replace("AGENT claude", "AGENT codex:0.169.0");
+    fs::write(dir.join("Agentfile"), codex).unwrap();
+    common::pin_harness(&scratch.home, &dir);
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
 // spec(Grants): The approval is stored with the Agentfile's canonical path, not with the agent's name, so another directory never inherits it.
 #[test]
 fn the_same_agentfile_in_another_directory_asks_again() {

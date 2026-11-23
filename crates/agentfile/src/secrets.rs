@@ -254,6 +254,42 @@ fn together(instructions: &[Instruction], items: &[(usize, Item)]) -> Vec<Error>
             Item::Auth(_) => {}
         }
     }
+    errors.extend(reads_hidden(items));
+    errors
+}
+
+/// The errors from an `ENV` value that reads the host variable of a hidden
+/// `SECRET`, on a line before it or after. A name on several lines is
+/// visible if any of them says so.
+fn reads_hidden(items: &[(usize, Item)]) -> Vec<Error> {
+    // The first line that names each secret, and whether any says `visible`.
+    let mut secrets: HashMap<&str, (usize, bool)> = HashMap::new();
+    for (line, item) in items {
+        if let Item::Secret(Secret { name, visible, .. }) = item {
+            secrets.entry(name).or_insert((*line, false)).1 |= *visible;
+        }
+    }
+    let mut errors = Vec::new();
+    for (line, item) in items {
+        let Item::Env(Env { key, value }) = item else {
+            continue;
+        };
+        let mut named = Vec::new();
+        for part in value {
+            if let Part::Variable { name, .. } = part
+                && let Some((first, false)) = secrets.get(name.as_str())
+                && !named.contains(&name)
+            {
+                named.push(name);
+                errors.push(Error {
+                    line: *line,
+                    message: format!(
+                        "`ENV {key}` reads `${name}`, which line {first} makes a hidden `SECRET`, so the agent would see its value. Remove this `ENV` line, or mark `{name}` `visible`"
+                    ),
+                });
+            }
+        }
+    }
     errors
 }
 

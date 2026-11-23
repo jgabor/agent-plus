@@ -119,14 +119,13 @@ build codex codex:latest
 # Claude Code reports its `init` event before it needs a sign-in. With no
 # credentials, it exits 1 after that, so the probe needs no input. Any other
 # status fails the step, such as the 125 of an `ap exec` whose run ended
-# before the command did. It prints
-# the event only once its start is done, which took 38 to 132 seconds on a
-# loaded machine. A traced start kept making progress the whole time, with
-# no wait on the network. The deadline is far past that, because Claude Code
-# exits as soon as it has reported, so a slow start costs only its own time.
-# Claude Code prints nothing before its `init` event, so a probe that times
-# out leaves an empty report. A failed check says how the probe ended, and
-# after how long.
+# before the command did. It prints the event only once its start is done,
+# which took 38 to 132 seconds on a loaded machine. A traced start kept
+# making progress the whole time, with no wait on the network. The deadline
+# is far past that, because Claude Code exits as soon as it has reported, so
+# a slow start costs only its own time. Claude Code prints nothing before its
+# `init` event, so a probe that times out leaves an empty report. A failed
+# check says how the probe ended, and after how long.
 start claude
 in_home "$run"
 begun=$(date +%s)

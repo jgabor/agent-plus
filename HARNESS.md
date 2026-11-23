@@ -193,9 +193,18 @@ each step as the last journey ran it.
 | Desktop cost until first use | disk only | none |
 | Stripped release binary | to be set | 5% |
 | `ap --version` | none | 20% or 2 ms, whichever is larger |
+| The pinned `OS minimal` layer | none | none |
+| The pinned guest kernel | none | none |
 
 `harness/budgets.toml` holds the targets and bands. A budget with no band is
 recorded and can't fail.
+
+The sizes of the pinned layer and kernel are the same on every machine, so the
+bench doesn't measure them. Nothing compares them, so they can't have a target
+or a band. Every record reads them from the copies that T1 fetches into
+`target/guest`. A missing copy, or one whose digest isn't the one its pin
+names, is a problem. A refresh then puts back the values of the record at the
+branch's tip, if that record has them.
 
 The bench compares the medians of 15 interleaved pairs of base and candidate
 runs. A change that worsens a budget by more than its band fails, unless its
@@ -289,9 +298,9 @@ doesn't run. Claude Code runs on Haiku 5.5, `claude-haiku-5-5`, and Codex on
 its default model.
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
-change can affect a budget when its diff touches `crates/`, `.cargo/`,
-`guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
-`harness/budgets.toml`, or `xtask/src/bench.rs`.
+change can affect a budget that the bench measures when its diff touches
+`crates/`, `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`,
+`rust-toolchain.toml`, `harness/budgets.toml`, or `xtask/src/bench.rs`.
 
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps
@@ -492,7 +501,7 @@ binary_bytes = 9312000
 | `commit` | The rebased head that was gated. The merge is that tree plus this record |
 | `spec`, `journey` | Scores at that commit |
 | `reason` | Required when a budget is outside its band, otherwise empty |
-| `budgets` | Every budget's latest value. One this change didn't measure carries over from the previous record |
+| `budgets` | Every budget's latest value. One this change didn't measure carries over from the previous record. The pinned sizes are read for every record |
 
 A change's base scores are those of the newest record in the history of its
 base, or zero if there is none.

@@ -39,3 +39,11 @@ key = "version_ms"
 name = "`ap --version`"
 band_pct = 20.0
 band_abs = 2.0
+
+[[budget]]
+key = "os_bytes"
+name = "The pinned `OS minimal` layer"
+
+[[budget]]
+key = "kernel_bytes"
+name = "The pinned guest kernel"

@@ -41,8 +41,8 @@ pub enum By<'a> {
     /// The default, because no rule matched.
     Default,
     /// The request path, which a host with URL rules refuses: it has an
-    /// encoded slash, a dot segment, or a broken escape, or it doesn't
-    /// start with `/`.
+    /// encoded slash, a dot segment, an empty segment, or a broken escape,
+    /// or it doesn't start with `/`.
     Path,
 }
 
@@ -503,7 +503,10 @@ fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
 fn request_path(target: &str) -> Option<String> {
     let path = target.split(['?', '#']).next().unwrap_or_default();
     let path = unescape_unreserved(path.strip_prefix('/')?)?;
+    // An empty segment is refused, but not the empty last one of `/a/`.
     if path.contains("%2F")
+        || path.starts_with('/')
+        || path.contains("//")
         || path
             .split('/')
             .any(|segment| segment == "." || segment == "..")

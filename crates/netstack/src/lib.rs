@@ -33,6 +33,13 @@ const TCP_BUFFER: usize = 64 * 1024;
 /// Datagrams, and their bytes, each UDP port buffers in each direction.
 const UDP_DATAGRAMS: usize = 32;
 const UDP_BUFFER: usize = 64 * 1024;
+/// The TCP connections the guest may have started but not finished opening,
+/// whether the stack took or the caller holds them. Each one taken costs
+/// two [`TCP_BUFFER`]s.
+const HALF_OPEN: usize = 64;
+/// The destination ports the guest may send UDP to at once. Each one costs
+/// two [`UDP_BUFFER`]s.
+const UDP_PORTS: usize = 32;
 /// How long a forgotten connection may wait to send its reset.
 const FORGET_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// The largest Ethernet frame on the link, without its check sequence.
@@ -153,7 +160,9 @@ impl Stack {
     }
 
     /// Takes one Ethernet frame from the guest, and handles it. If it opens a
-    /// [`Flow`], `decide` says what the stack makes of it.
+    /// [`Flow`], `decide` says what the stack makes of it. A flow past the
+    /// stack's limits on half-open connections and UDP ports is dropped,
+    /// unasked.
     pub fn receive_holding(
         &mut self,
         frame: &[u8],
@@ -169,6 +178,8 @@ impl Stack {
                 destination,
             }) if self.holds(source, destination) => {}
             Seen::Flow(flow) if self.held.iter().any(|(held, _)| *held == flow) => return,
+            // The guest sends a SYN again, and a datagram is best effort.
+            Seen::Flow(flow) if self.full(&flow) => return,
             Seen::Flow(flow) => match (decide(&flow), flow) {
                 (Verdict::Take, Flow::Tcp { destination, .. }) => self.listen(destination),
                 (Verdict::Take, Flow::Udp { destination, .. }) => self.bind(destination.port()),
@@ -262,6 +273,16 @@ impl Stack {
         self.iface
             .poll_delay(SmolInstant::from_millis(millis), &self.sockets)
             .map(|delay| std::time::Duration::from_micros(delay.total_micros()))
+    }
+
+    /// How many TCP and UDP sockets the stack keeps.
+    pub fn sockets(&self) -> usize {
+        self.sockets.iter().count()
+    }
+
+    /// How many SYNs the caller holds.
+    pub fn held(&self) -> usize {
+        self.held.len()
     }
 
     /// The next Ethernet frame for the guest.
@@ -453,6 +474,16 @@ impl Stack {
                 Err(_) => Seen::Drop,
             },
             _ => Seen::Drop,
+        }
+    }
+
+    /// Whether the stack holds all it may of what a new `flow` would need.
+    fn full(&self, flow: &Flow) -> bool {
+        match flow {
+            Flow::Tcp { .. } => self.opening.len() + self.held.len() >= HALF_OPEN,
+            Flow::Udp { destination, .. } => {
+                self.udp.len() >= UDP_PORTS && !self.udp.contains_key(&destination.port())
+            }
         }
     }
 

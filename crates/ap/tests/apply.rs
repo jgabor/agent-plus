@@ -1991,3 +1991,92 @@ fn a_deleted_directory_of_ignored_files_lands_as_committed() {
         repo::history(guest, "HEAD")
     );
 }
+
+/// A file and a symlink the agent wrote, each in place of a directory its
+/// `HEAD` holds with a git-ignored file in it, are skipped, because git
+/// can't hold a file and a directory at one path. Each directory is in the
+/// last commit as if the agent had deleted it, so the file it deleted
+/// beside the ignored one is gone. A file in place of a directory with no
+/// ignored file in it lands.
+// spec(SHARE): Where the agent's `HEAD` holds a directory with a git-ignored file in it, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why.
+// spec(SHARE): The last commit holds the directory as if the agent had deleted it, so its git-ignored files are as that `HEAD` holds them.
+#[test]
+fn a_file_in_place_of_a_directory_with_an_ignored_file_is_skipped() {
+    let files = [
+        "logs/debug.log",
+        "logs/README",
+        "var/cache/deep/run.log",
+        "plain/a",
+    ];
+    let ignored = |share: &Path| {
+        fs::write(share.join(".gitignore"), "*.log\n").unwrap();
+        for file in files {
+            fs::create_dir_all(share.join(file).parent().unwrap()).unwrap();
+            fs::write(share.join(file), "noise\n").unwrap();
+            repo::run(share, &["add", "-f", file]);
+        }
+        repo::run(share, &["commit", "-q", "-m", "files"]);
+    };
+    let repository = Repository::with(
+        "file-for-ignored",
+        true,
+        Setup {
+            before: Some(&ignored),
+            ..Setup::default()
+        },
+    );
+    let (share, pending) = (repository.share(), &repository.pending);
+    for file in files {
+        delete(share, pending, file);
+    }
+    for dir in ["logs", "var/cache", "plain"] {
+        delete(share, pending, dir);
+    }
+    write(pending, "logs", 0o644, b"one file\n");
+    fs::create_dir(pending.join("tree/var")).unwrap();
+    link(pending, "var/cache", "../README");
+    write(pending, "plain", 0o644, b"plain\n");
+    let guest = &repository.guest;
+    fs::remove_dir_all(guest.join("plain")).unwrap();
+    fs::write(guest.join("plain"), "plain\n").unwrap();
+    let tree = repository.tree_after(&[
+        &["rm", "-q", "--cached", "logs/README", "plain/a"],
+        &["add", "plain"],
+    ]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it would replace a directory that holds a git-ignored file";
+    assert_eq!(
+        stdout(&output),
+        format!("skipped logs: {why}\nskipped var/cache: {why}\nskipped 2 git-ignored files\n")
+    );
+    repository.assert_last_commit(&tree, during);
+}
+
+/// A submodule that a pattern for directories names isn't a git-ignored
+/// file, as `ap apply` reads it, so a file the agent wrote in place of the
+/// directory that holds it lands.
+#[test]
+fn a_file_in_place_of_a_directory_with_a_submodule_lands() {
+    let repository = Repository::new("file-for-submodule", true, &[]);
+    fs::write(repository.share().join(".gitignore"), "vendor/\n").unwrap();
+    let guest = &repository.guest;
+    let start = repository.start.as_deref().unwrap();
+    let gitlink = format!("160000,{start},deps/vendor");
+    repo::run(guest, &["update-index", "--add", "--cacheinfo", &gitlink]);
+    repo::run(guest, &["commit", "-q", "-m", "vendor"]);
+    repository.land();
+    let pending = &repository.pending;
+    record(pending, "DELETE \"deps\"");
+    write(pending, "deps", 0o644, b"deps\n");
+    fs::write(guest.join("deps"), "deps\n").unwrap();
+    let tree = repository.tree_after(&[&["rm", "-q", "--cached", "deps/vendor"], &["add", "deps"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+    repository.assert_last_commit(&tree, during);
+}

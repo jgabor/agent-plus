@@ -46,6 +46,7 @@ pub fn run() -> Result<Verdict, Problem> {
     };
     checks.push(("gate", gated));
     checks.push(("t2", t2(&root)));
+    checks.push(("release", release(&root)));
     // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
     let walked = paid_keys().and_then(|keys| journey::outcomes(&root, &keys));
@@ -166,6 +167,16 @@ fn t2(root: &Path) -> &'static str {
         return SKIP;
     }
     let passed = gate::cargo_passes(root, &["test", "--locked", "--package", "t2"]);
+    state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))
+}
+
+/// The tests that the gate leaves out because they download from a real
+/// release.
+fn release(root: &Path) -> &'static str {
+    let args = [
+        "test", "--locked", "--package", "t1", "--test", "fetch", "--", "--ignored",
+    ];
+    let passed = gate::cargo_passes(root, &args);
     state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))
 }
 

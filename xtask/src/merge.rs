@@ -187,6 +187,9 @@ fn sequence(
     {
         return refuse(&why);
     }
+    // The xtask of `main` waits for the slot again, because it is let go on
+    // the `exec`, and the timeout has started by then.
+    report_place(true)?;
     let slot = lock::merge_slot(&root)?;
     report_slot()?;
     Tree::sweep(&root)?;
@@ -603,8 +606,8 @@ fn report_slot() -> Result<(), Problem> {
     tell_supervisor(SLOT)
 }
 
-/// Tells the supervisor that the worker waits for a place, or has one. The
-/// timeout stops during the wait, and starts again after it.
+/// Tells the supervisor that the worker waits for the slot or a place, or has
+/// it. The timeout stops during the wait, and starts again after it.
 fn report_place(waiting: bool) -> Result<(), Problem> {
     tell_supervisor(if waiting { WAITING } else { SLOT })
 }

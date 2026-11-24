@@ -398,11 +398,18 @@ impl RawMode {
             // job control suspends `ap run` until it is in the foreground,
             // or until it ignores job control, and it changes nothing.
             // SAFETY: `tcdrain` takes and returns plain integers.
-            if unsafe { libc::tcdrain(libc::STDIN_FILENO) } != 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
+            if unsafe { libc::tcdrain(libc::STDIN_FILENO) } == 0 {
+                if runs::stopping() {
+                    return Ok(RawMode(None));
                 }
+                // Either `ap run` is in the foreground now, or job control
+                // doesn't hold it, as when it started with `SIGTTOU`
+                // ignored, and waiting again would never end.
+                break;
+            }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
             }
         }
         let mut saved = MaybeUninit::uninit();

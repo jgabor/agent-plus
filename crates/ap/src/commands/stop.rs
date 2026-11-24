@@ -89,9 +89,10 @@ fn stop(name: &str) -> Result<(), String> {
 }
 
 /// The `ap run` that serves the socket at the other end of `stream`, which
-/// the kernel names, as a pidfd, so that no process that takes its id later
-/// is resumed in its place.
-fn server(stream: &UnixStream) -> Option<OwnedFd> {
+/// the kernel names: its process id, and a pidfd for it where the kernel has
+/// them, so that no process that takes its id later is resumed in its
+/// place.
+fn server(stream: &UnixStream) -> Option<(libc::pid_t, Option<OwnedFd>)> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -117,24 +118,31 @@ fn server(stream: &UnixStream) -> Option<OwnedFd> {
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) };
     // SAFETY: the kernel just returned this descriptor, and nothing else
     // owns it.
-    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    let pidfd = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) });
+    Some((credentials.pid, pidfd))
 }
 
-/// Resumes the `ap run` behind this pidfd, in case it is suspended.
-/// `SIGCONT` does nothing to one that runs, so a failure here holds back no
-/// stop that would reach the run anyway.
-fn resume(serving: Option<&OwnedFd>) {
-    if let Some(pidfd) = serving {
-        // SAFETY: `pidfd_send_signal` takes plain integers, and a null
-        // `siginfo_t`, which makes it act as `kill` does.
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                pidfd.as_raw_fd(),
-                libc::SIGCONT,
-                std::ptr::null::<libc::siginfo_t>(),
-                0,
-            )
-        };
-    }
+/// Resumes this `ap run`, in case it is suspended. `SIGCONT` does nothing
+/// to one that runs, so a failure here holds back no stop that would reach
+/// the run anyway.
+fn resume(serving: Option<&(libc::pid_t, Option<OwnedFd>)>) {
+    let Some((pid, pidfd)) = serving else {
+        return;
+    };
+    let Some(pidfd) = pidfd else {
+        // SAFETY: `kill` takes and returns plain integers.
+        unsafe { libc::kill(*pid, libc::SIGCONT) };
+        return;
+    };
+    // SAFETY: `pidfd_send_signal` takes plain integers, and a null
+    // `siginfo_t`, which makes it act as `kill` does.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            libc::SIGCONT,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
 }

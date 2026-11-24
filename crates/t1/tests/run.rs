@@ -1056,35 +1056,9 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let scratch = Scratch::new("background");
     scratch.build("open", &fake(""));
     let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
-    // A shell with job control, as yours is, starts an interactive run in
-    // the background of its terminal, as `ap run open &` would. Raw mode
-    // can't be set from there, so `ap run` stops on `SIGTTOU`, and again
-    // each time it resumes. Once the shell gets `SIGTERM`, as from its
-    // guard, it kills the run's process group, and waits for it.
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(format!(
-            "set -m
-            timeout -k 10 {TIMEOUT} \"$0\" run open &
-            run=$!
-            sleep {TIMEOUT} &
-            sleeper=$!
-            trap 'kill -KILL -- -$run $sleeper; wait $run; exit 0' TERM
-            wait $sleeper"
-        ))
-        .arg(&shared().0)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("HOME", &scratch.home)
-        .env("XDG_RUNTIME_DIR", &scratch.runtime)
-        .stdin(terminal.try_clone().unwrap())
-        .stdout(terminal.try_clone().unwrap())
-        .stderr(terminal.try_clone().unwrap());
-    // SAFETY: `take_terminal` only makes system calls.
-    unsafe { command.pre_exec(take_terminal) };
-    let shell = Started(command.spawn().unwrap());
-    drop(command);
+    // Raw mode can't be set from the background, so `ap run` stops on
+    // `SIGTTOU`, and again each time it resumes.
+    let shell = in_background(&scratch, &terminal, "");
     let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
     program.extend_from_slice(b"\0run\0");
     let deadline = Instant::now() + SHOWN_WITHIN;
@@ -1137,6 +1111,74 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 143"));
     assert_eq!(stty(&terminal, &["-g"]), modes);
+}
+
+/// Starts `ap run open` in the background of `terminal`, as `ap run open &`
+/// would from a shell with job control, as yours is, through `wrapper`, a
+/// command that runs the rest. Once the shell gets `SIGTERM`, as from its
+/// guard, it kills the run's process group, and waits for it.
+fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "set -m
+            timeout -k 10 {TIMEOUT} {wrapper} \"$0\" run open &
+            run=$!
+            sleep {TIMEOUT} &
+            sleeper=$!
+            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM
+            wait $sleeper"
+        ))
+        .arg(&shared().0)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &scratch.home)
+        .env("XDG_RUNTIME_DIR", &scratch.runtime)
+        .stdin(terminal.try_clone().unwrap())
+        .stdout(terminal.try_clone().unwrap())
+        .stderr(terminal.try_clone().unwrap());
+    // SAFETY: `take_terminal` only makes system calls.
+    unsafe { command.pre_exec(take_terminal) };
+    Started(command.spawn().unwrap())
+}
+
+/// An interactive `ap run` that starts in the background of its terminal
+/// with `SIGTTOU` and `SIGTTIN` ignored isn't held by job control, so it
+/// goes on there, as it did before it waited for the foreground.
+#[test]
+fn an_interactive_run_that_ignores_job_control_goes_on_in_the_background() {
+    let scratch = Scratch::new("ignoring");
+    scratch.build("open", &fake(""));
+    let (controller, terminal) = open_terminal(size(24, 80)).unwrap();
+    // `timeout` gives its command the default actions for both, so they
+    // are ignored after it.
+    let ignoring = "sh -c 'trap \"\" TTOU TTIN; exec \"$@\"' sh";
+    let _shell = in_background(&scratch, &terminal, ignoring);
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let screen = Arc::clone(&shown);
+    let (stopped, stop_reading) = io::pipe().unwrap();
+    let mut side = controller;
+    let reader = thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(false) = program_has_ended(side.as_fd(), stopped.as_fd()) {
+            match side.read(&mut buffer) {
+                Ok(count @ 1..) => screen.lock().unwrap().extend_from_slice(&buffer[..count]),
+                _ => return,
+            }
+        }
+    });
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    while !String::from_utf8_lossy(&shown.lock().unwrap()).contains("\"user\":") {
+        assert!(
+            Instant::now() < deadline,
+            "the harness never showed: {:?}",
+            String::from_utf8_lossy(&shown.lock().unwrap())
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(stop_reading);
+    reader.join().unwrap();
 }
 
 /// Runs `stty` with `args` on `terminal`, from outside its session, and

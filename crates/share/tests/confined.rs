@@ -1,7 +1,8 @@
 //! The share server as its own confined process, as `ap` starts it: every
 //! change an agent makes in an `rw` share gets past its Landlock rules and
 //! its filter, which would kill it, and an `ro` share beside it still
-//! refuses every write.
+//! refuses every write. A copy-on-write share's server can't change your
+//! files' modes or times, even if its own code were turned against it.
 
 mod guest;
 
@@ -21,8 +22,8 @@ use std::process::{Command, ExitStatus, Stdio};
 const ARGS: &str = "AP_SHARE_CONFINED_ARGS";
 /// What the server's process does once it has served, as if its own code
 /// were turned against it: the number of a descriptor it inherited, the
-/// call it opens with, and a path from the descriptor to a file whose mode
-/// and times it tries to change.
+/// call it opens with, a path from the descriptor to a file, and the calls
+/// it tries on that file, `fchmod`, `futimens`, or both.
 const AIM: &str = "AP_SHARE_CONFINED_AIM";
 const SERVER: &str = "confined_server_process";
 /// The server runs on a test's thread here, and `ap` runs it on its main
@@ -49,11 +50,13 @@ fn confined_server_process() {
         let fd = unsafe { BorrowedFd::borrow_raw(fd) };
         let call = lines.next().unwrap() == "openat2";
         let path = CString::new(lines.next().unwrap()).unwrap();
-        (share::inheritable(fd).unwrap(), call, path)
+        let changes: Vec<_> = lines.next().unwrap().split(' ').collect();
+        let changes = ["fchmod", "futimens"].map(|change| changes.contains(&change));
+        (share::inheritable(fd).unwrap(), call, path, changes)
     });
     let status = share::main(&args);
-    if let (0, Some((directory, openat2, path))) = (status, aim) {
-        turn(&directory, openat2, &path);
+    if let (0, Some((directory, openat2, path, changes))) = (status, aim) {
+        turn(&directory, openat2, &path, changes);
     }
     // The filter allows nothing the test harness does after a test, so
     // the process ends here.
@@ -63,9 +66,10 @@ fn confined_server_process() {
 
 /// What a server's code could do if it were turned against its rules: open
 /// the file at `path` from `directory`, with `openat2` or `openat` and no
-/// rule to stay beneath it, and change its mode and times through what it
-/// opened. Access mode 3 asks for neither reading nor writing.
-fn turn(directory: &OwnedFd, openat2: bool, path: &CStr) {
+/// rule to stay beneath it, and change its mode, its times, or both, as
+/// `[mode, times]` says, through what it opened. Access mode 3 asks for
+/// neither reading nor writing.
+fn turn(directory: &OwnedFd, openat2: bool, path: &CStr, [mode, times]: [bool; 2]) {
     #[repr(C)]
     struct How {
         flags: u64,
@@ -104,16 +108,20 @@ fn turn(directory: &OwnedFd, openat2: bool, path: &CStr) {
         if fd < 0 {
             continue;
         }
-        let times = [libc::timespec {
+        let zero = [libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         }; 2];
         // SAFETY: both calls take a descriptor and plain values, and
-        // `times` outlives the call.
+        // `zero` outlives the call.
         unsafe {
-            libc::syscall(libc::SYS_fchmod, fd, 0o777);
-            let null = std::ptr::null::<libc::c_char>();
-            libc::syscall(libc::SYS_utimensat, fd, null, times.as_ptr(), 0);
+            if mode {
+                libc::syscall(libc::SYS_fchmod, fd, 0o777);
+            }
+            if times {
+                let null = std::ptr::null::<libc::c_char>();
+                libc::syscall(libc::SYS_utimensat, fd, null, zero.as_ptr(), 0);
+            }
         }
     }
 }
@@ -128,7 +136,7 @@ fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
     let mut server = Command::new(env::current_exe().unwrap())
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, format!("rw\n{fd}"))
-        .env(AIM, format!("{fd}\n{call}\n{path}"))
+        .env(AIM, format!("{fd}\n{call}\n{path}\nfchmod futimens"))
         .env(ARENAS, "1")
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null())
@@ -309,6 +317,15 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
     guest.release(neither);
     assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), 0);
     assert_eq!(guest.setattr(hello, FATTR_MTIME, 0, 0), 0);
+    // A file the agent removed takes its times through its handle.
+    let (file, handle) = guest.create(1, b"temp", 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    let mut body = (FATTR_MTIME | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(handle.to_le_bytes());
+    body.resize(88, 0);
+    assert_eq!(guest.call(SETATTR, file, &body).0, 0);
+    guest.release(handle);
     let made = guest.mkdir(1, b"made").unwrap();
     guest.symlink(made, b"link", b"../hello.txt").unwrap();
     assert!(guest.mknod(made, b"fifo", S_IFIFO | 0o644, 0).is_ok());
@@ -328,6 +345,49 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
         b"from the agent"
     );
     assert!(records(&pending).contains(&r#"DELETE "dir""#.to_owned()));
+}
+
+#[test]
+fn a_copy_on_write_server_can_t_change_the_mode_or_times_of_your_file() {
+    for call in ["fchmod", "futimens"] {
+        let tree = Tree::new(&format!("confined-cow-turned-{call}"));
+        let pending = tree.base.join("pending");
+        fs::create_dir(&pending).unwrap();
+        let hello = tree.root.join("hello.txt");
+        let before = mode_and_time(&hello);
+        let (mine, theirs) = UnixStream::pair().unwrap();
+        let dirs = [&tree.root, &pending].map(|dir| File::open(dir).unwrap());
+        let inherited = dirs
+            .each_ref()
+            .map(|dir| share::inheritable(dir.as_fd()).unwrap());
+        let args = format!(
+            "cow\n{}\n{}",
+            inherited[0].as_raw_fd(),
+            inherited[1].as_raw_fd()
+        );
+        let aim = format!("{}\nopenat\nhello.txt\n{call}", inherited[0].as_raw_fd());
+        let mut server = Command::new(env::current_exe().unwrap())
+            .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
+            .env(ARGS, args)
+            .env(AIM, aim)
+            .env(ARENAS, "1")
+            .stdin(OwnedFd::from(theirs))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(inherited);
+        let mut guest = Guest::over(OwnedFd::from(mine));
+        // The agent changes its own copy's mode and times first.
+        let file = guest.walk("hello.txt").unwrap();
+        assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), 0);
+        assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
+
+        drop(guest);
+        let status = server.wait().unwrap();
+        assert_eq!(mode_and_time(&hello), before, "{call}");
+        assert_eq!(status.signal(), Some(libc::SIGSYS), "{call} {status}");
+    }
 }
 
 #[test]

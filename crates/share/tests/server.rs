@@ -991,6 +991,7 @@ fn file_locks_pass_through_to_the_host() {
         let tree = Tree::new(&format!("locks-{mode:?}"));
         let path = tree.root.join("hello.txt");
         let mut guest = Guest::with(&tree.root, mode);
+        let _quiet = no_server_starts();
         let mut init = Vec::new();
         for value in [7u32, 31, 1 << 17, u32::MAX] {
             init.extend(value.to_le_bytes());

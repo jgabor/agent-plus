@@ -19,7 +19,7 @@ fn check(result: c_long) -> io::Result<c_long> {
 pub fn open_beneath(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<OwnedFd> {
     let (above, last) = walk(directory, name)?;
     let from = above.as_ref().map_or(directory, AsFd::as_fd);
-    openat(from, &last, flags, 0)
+    openat(from, last.as_c_str(), flags, 0)
 }
 
 /// Opens `name` beneath `directory` as [`open_beneath`] does, and with
@@ -36,12 +36,14 @@ pub fn create_beneath(
     if let Some(at) = bytes.iter().rposition(|&byte| byte != b'/')
         && at + 1 < bytes.len()
     {
-        walk(directory, &component(&bytes[..=at])?)?;
+        let way =
+            CString::new(&bytes[..=at]).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+        walk(directory, &way)?;
         return Err(io::Error::from_raw_os_error(libc::EISDIR));
     }
     let (above, last) = walk(directory, name)?;
     let from = above.as_ref().map_or(directory, AsFd::as_fd);
-    openat(from, &last, flags | libc::O_CREAT, mode)
+    openat(from, last.as_c_str(), flags | libc::O_CREAT, mode)
 }
 
 /// The directory above `directory`, opened with `O_PATH`, so it reads
@@ -53,8 +55,9 @@ pub fn parent(directory: BorrowedFd) -> io::Result<OwnedFd> {
 /// Opens each directory on the way to `name`'s last component, one at a
 /// time, so no component is a symlink, `..`, or a path from the top. Returns
 /// the directory the last component is in, unless it is `directory` itself,
-/// and that component.
-fn walk(directory: BorrowedFd, name: &CStr) -> io::Result<(Option<OwnedFd>, CString)> {
+/// and that component. It allocates nothing, so the times process can walk
+/// too.
+fn walk(directory: BorrowedFd, name: &CStr) -> io::Result<(Option<OwnedFd>, Component)> {
     let name = name.to_bytes();
     if name.starts_with(b"/") {
         return Err(io::Error::from_raw_os_error(libc::EXDEV));
@@ -69,18 +72,37 @@ fn walk(directory: BorrowedFd, name: &CStr) -> io::Result<(Option<OwnedFd>, CStr
     for next in components {
         let from = above.as_ref().map_or(directory, AsFd::as_fd);
         let step = component(last)?;
-        above = Some(openat(from, &step, libc::O_PATH | libc::O_DIRECTORY, 0)?);
+        let flags = libc::O_PATH | libc::O_DIRECTORY;
+        above = Some(openat(from, step.as_c_str(), flags, 0)?);
         last = next;
     }
     Ok((above, component(last)?))
 }
 
-fn component(name: &[u8]) -> io::Result<CString> {
-    if name == b".." {
-        return Err(io::Error::from_raw_os_error(libc::EXDEV));
+/// One component of a name, NUL-terminated, and no longer than the kernel
+/// takes.
+struct Component([u8; libc::NAME_MAX as usize + 1]);
+
+impl Component {
+    fn as_c_str(&self) -> &CStr {
+        // It holds a NUL, as `component` made it.
+        CStr::from_bytes_until_nul(&self.0).unwrap_or_default()
     }
-    // It came from a `CStr`, so it holds no NUL.
-    CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+fn component(name: &[u8]) -> io::Result<Component> {
+    let error = match name {
+        b".." => libc::EXDEV,
+        // It came from a `CStr`, so it holds no NUL.
+        name if name.contains(&0) => libc::EINVAL,
+        name if name.len() > libc::NAME_MAX as usize => libc::ENAMETOOLONG,
+        name => {
+            let mut component = Component([0; libc::NAME_MAX as usize + 1]);
+            component.0[..name.len()].copy_from_slice(name);
+            return Ok(component);
+        }
+    };
+    Err(io::Error::from_raw_os_error(error))
 }
 
 /// Opens the one entry `name` in `directory`, never following it if it is a
@@ -438,8 +460,13 @@ mod tests {
             libc::O_PATH | libc::O_NOFOLLOW,
             libc::O_PATH | libc::O_DIRECTORY,
         ];
+        // A component as long as the kernel takes, and one longer.
+        let long = ["x".repeat(255), "x".repeat(256)];
+        let long = long
+            .iter()
+            .flat_map(|x| [x.clone(), format!("dir/{x}"), format!("{x}/x")]);
         let mut checked = 0;
-        for name in names {
+        for name in names.map(str::to_owned).into_iter().chain(long) {
             let name = CString::new(name).unwrap();
             for flags in flags {
                 let walked = outcome(open_beneath(root.as_fd(), &name, flags));
@@ -475,6 +502,6 @@ mod tests {
             checked += 1;
         }
         let _ = fs::remove_dir_all(&base);
-        assert_eq!(checked, 114);
+        assert_eq!(checked, 144);
     }
 }

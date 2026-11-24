@@ -8,12 +8,15 @@
 //! can't start a process, refuses every write to an `ro` share, and in an
 //! `rw` share refuses the writes [`server`] protects against. It writes a
 //! copy-on-write share's changes beneath that share's pending directory,
-//! and reads the share's root alone. The frames on the socket are the ones
-//! [`vmm::fs`] describes.
+//! and reads the share's root alone. A server with no `rw` share can't
+//! change a file's mode or times, and a process of its own, in [`times`],
+//! sets the times of a copy-on-write share's copies. The frames on the
+//! socket are the ones [`vmm::fs`] describes.
 
 mod landlock;
 mod server;
 mod sys;
+mod times;
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
@@ -127,10 +130,8 @@ fn run(args: &[OsString]) -> io::Result<()> {
     // SAFETY: standard input is the socket `start` passed, and nothing else
     // in this process owns it.
     let mut socket = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
-    let writes = access
-        .iter()
-        .any(|(_, access)| matches!(access, landlock::Access::ReadWrite));
-    vmm::confine::confine_share_server(socket.as_raw_fd(), writes)?;
+    let times = server.times();
+    vmm::confine::confine_share_server(socket.as_raw_fd(), server.changes(), &times)?;
     serve(&mut socket, &mut server)
 }
 

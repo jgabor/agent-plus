@@ -11,8 +11,10 @@
 //! as the kernel reads them.
 //!
 //! The share server, which reaches a run's shared files for its guest, has a
-//! filter of its own, in [`confine_share_server`], and so does the network
-//! process, which runs the guest's network, in [`confine_network`], or in
+//! filter of its own, in [`confine_share_server`], and so does the process
+//! that sets the times of a copy-on-write share's copies, in
+//! [`share_times_filter`]. The network process, which runs the guest's
+//! network, has one in [`confine_network`], or in
 //! [`confine_network_connecting`] once it may connect out.
 
 use std::ffi::{c_int, c_long, c_ulong};
@@ -107,6 +109,8 @@ const SOCKET: u32 = 41;
 const CONNECT: u32 = 42;
 const SENDTO: u32 = 44;
 const RECVFROM: u32 = 45;
+const SENDMSG: u32 = 46;
+const RECVMSG: u32 = 47;
 const SHUTDOWN: u32 = 48;
 const GETSOCKOPT: u32 = 55;
 const PPOLL: u32 = 271;
@@ -216,6 +220,19 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
     rules
 }
 
+/// What a share server changes once it is confined, each more than the one
+/// before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Changes {
+    /// Nothing, for `ro` shares alone.
+    Nothing,
+    /// Files, but never a mode or a time, for copy-on-write shares, whose
+    /// copies' times another process sets.
+    Files,
+    /// Files, and their modes and times, for an `rw` share.
+    FilesModesAndTimes,
+}
+
 /// The calls the share server makes once it has opened each share's root.
 /// It has one thread, so it starts none, and it reads requests from
 /// `socket` alone. It opens a file only relative to a descriptor it holds,
@@ -224,20 +241,26 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
 /// the kernel has it. Landlock checks an open only for reading or writing,
 /// so the filter refuses access mode 3, which asks for neither, and
 /// `openat2`, whose flags it can't read. A descriptor opened with `O_PATH`
-/// takes neither `fchmod` nor `futimens`. It takes and checks locks on
-/// the files it holds. With `writes`, for an `rw` share, it also changes
-/// files: through a descriptor it holds, or by one name in a directory it
-/// holds, which Landlock holds to the `rw` roots. Changing a file's times
-/// takes no name at all. Landlock doesn't cover a file's mode or times, so
-/// for those, an `ro` share beside an `rw` one rests on the server's own
-/// checks.
-fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
+/// takes neither `fchmod` nor `futimens`. It takes and checks locks on the
+/// files it holds. As `changes` says, it also changes files: through a
+/// descriptor it holds, or by one name in a directory it holds, which
+/// Landlock holds to the roots it may change. Landlock doesn't cover a
+/// file's mode or times, so only a server with an `rw` share changes those
+/// itself, and an `ro` or copy-on-write share beside an `rw` one rests on
+/// the server's own checks. Changing a file's times takes no name at all.
+/// Only an `rw` share's server makes links, because a copy-on-write share
+/// keeps a symlink as a record, and makes no hard link. It asks the
+/// processes at `times` to set the times of a copy-on-write share's
+/// copies, sending each a message, and reads their answers.
+fn share_server_rules(socket: RawFd, changes: Changes, times: &[RawFd]) -> Vec<Rule> {
     use Rule::{
         Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither,
         AllowUnlessOrAllSet,
     };
+    let times: Vec<u32> = times.iter().map(|fd| *fd as u32).collect();
+    let read = [vec![socket as u32], times.clone()].concat();
     let mut rules = vec![
-        AllowIf(READ, 0, vec![socket as u32]),
+        AllowIf(READ, 0, read),
         AllowIf(WRITE, 0, vec![socket as u32, STDERR]),
         AllowUnlessOrAllSet(OPENAT, (0, AT_FDCWD), (2, O_ACCMODE)),
         AllowUnless(READLINKAT, 0, AT_FDCWD),
@@ -264,23 +287,53 @@ fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
         Allow(EXIT),
         Allow(EXIT_GROUP),
     ];
-    if writes {
+    if !times.is_empty() {
+        rules.push(AllowIf(SENDMSG, 0, times));
+    }
+    if changes != Changes::Nothing {
         rules.extend([
             Allow(PWRITE64),
             Allow(FTRUNCATE),
             Allow(FALLOCATE),
             Allow(FSYNC),
             Allow(FDATASYNC),
-            Allow(FCHMOD),
-            AllowIfNull(UTIMENSAT, 1),
             AllowUnless(MKDIRAT, 0, AT_FDCWD),
             AllowUnless(UNLINKAT, 0, AT_FDCWD),
-            AllowUnless(SYMLINKAT, 1, AT_FDCWD),
-            AllowUnlessEither(LINKAT, [0, 2], AT_FDCWD),
             AllowUnlessEither(RENAMEAT2, [0, 2], AT_FDCWD),
         ]);
     }
+    if changes == Changes::FilesModesAndTimes {
+        rules.extend([
+            AllowUnless(SYMLINKAT, 1, AT_FDCWD),
+            AllowUnlessEither(LINKAT, [0, 2], AT_FDCWD),
+            Allow(FCHMOD),
+            AllowIfNull(UTIMENSAT, 1),
+        ]);
+    }
     rules
+}
+
+/// The calls of the process that sets the times of a copy-on-write share's
+/// copies for the share server. It has one thread, and allocates nothing.
+/// It reads each message from `socket`, which may carry a file, and writes
+/// its answer there. It opens a file beneath the tree, the directory it
+/// holds, one name at a time, and changes nothing but a time, through a
+/// descriptor. Landlock holds it to the tree for reading, and as for the
+/// share server, the filter refuses access mode 3 and `openat2`, and a
+/// descriptor opened with `O_PATH` takes no `futimens`.
+fn share_times_rules(socket: RawFd) -> Vec<Rule> {
+    use Rule::{Allow, AllowIf, AllowIfNull, AllowUnlessOrAllSet};
+    vec![
+        AllowIf(RECVMSG, 0, vec![socket as u32]),
+        AllowIf(WRITE, 0, vec![socket as u32]),
+        AllowUnlessOrAllSet(OPENAT, (0, AT_FDCWD), (2, O_ACCMODE)),
+        AllowIfNull(UTIMENSAT, 1),
+        Allow(FSTAT),
+        Allow(CLOSE),
+        AllowIf(FCNTL, 1, vec![F_GETFD]),
+        Allow(EXIT),
+        Allow(EXIT_GROUP),
+    ]
 }
 
 /// The calls the network process makes while it passes the guest's frames
@@ -426,10 +479,32 @@ pub fn confine(readable: &[RawFd]) -> io::Result<()> {
 }
 
 /// Confines the share server, which has one thread, for the rest of its
-/// life, and lets it change files if `writes`. Call it once every share's
-/// root is open. Requests come from `socket`, and answers go back on it.
-pub fn confine_share_server(socket: RawFd, writes: bool) -> io::Result<()> {
-    install(&share_server_rules(socket, writes))
+/// life, and lets it make the changes `changes` names. Call it once every
+/// share's root is open. Requests come from `socket`, and answers go back
+/// on it. It asks the processes at `times` to set times.
+pub fn confine_share_server(socket: RawFd, changes: Changes, times: &[RawFd]) -> io::Result<()> {
+    install(&share_server_rules(socket, changes, times))
+}
+
+/// The filter of the process that sets a copy-on-write share's times,
+/// which has one thread. Requests come from `socket`, and answers go back
+/// on it. Landlock holds the files it opens to the tree it holds. It is
+/// compiled here, before the process starts, because the process allocates
+/// nothing.
+pub fn share_times_filter(socket: RawFd) -> Filter {
+    Filter(compile(&share_times_rules(socket)))
+}
+
+/// A filter that is compiled, to install later.
+pub struct Filter(Vec<Instruction>);
+
+impl Filter {
+    /// Confines this process, which has one thread, for the rest of its
+    /// life. It allocates only to say which other thread refused the
+    /// filter, so with one thread, never.
+    pub fn install(&self) -> io::Result<()> {
+        load(&self.0)
+    }
 }
 
 /// Confines the network process, which has one thread, for the rest of its
@@ -446,7 +521,11 @@ pub fn confine_network_connecting(link: RawFd) -> io::Result<()> {
 }
 
 fn install(rules: &[Rule]) -> io::Result<()> {
-    let instructions = compile(rules);
+    load(&compile(rules))
+}
+
+/// Installs `instructions` on every thread.
+fn load(instructions: &[Instruction]) -> io::Result<()> {
     let program = Program {
         len: instructions.len() as u16,
         instructions: instructions.as_ptr(),
@@ -628,10 +707,14 @@ mod tests {
     }
 
     const SOCKET: u32 = 5;
+    /// The socket to a process that sets times.
+    const TIMES: u32 = 6;
+    /// The directory that process holds.
+    const TREE: u32 = 7;
 
     fn share_call(number: u32, args: [u32; 6]) -> u32 {
         run_rules(
-            &share_server_rules(SOCKET as RawFd, false),
+            &share_server_rules(SOCKET as RawFd, Changes::Nothing, &[]),
             AUDIT_ARCH_X86_64,
             number,
             args,
@@ -639,7 +722,17 @@ mod tests {
     }
 
     fn writing_call(number: u32, args: [u64; 6]) -> u32 {
-        let rules = share_server_rules(SOCKET as RawFd, true);
+        let rules = share_server_rules(SOCKET as RawFd, Changes::FilesModesAndTimes, &[]);
+        run_wide(&rules, AUDIT_ARCH_X86_64, number, args)
+    }
+
+    fn copying_call(number: u32, args: [u32; 6]) -> u32 {
+        let rules = share_server_rules(SOCKET as RawFd, Changes::Files, &[TIMES as RawFd]);
+        run_rules(&rules, AUDIT_ARCH_X86_64, number, args)
+    }
+
+    fn times_call(number: u32, args: [u64; 6]) -> u32 {
+        let rules = share_times_rules(SOCKET as RawFd);
         run_wide(&rules, AUDIT_ARCH_X86_64, number, args)
     }
 
@@ -663,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_server_with_an_rw_share_changes_files() {
+    fn a_server_of_ro_shares_alone_changes_nothing() {
         for number in WRITING {
             assert_eq!(
                 share_call(number, [4, 1, 4, 1, 0, 0]),
@@ -710,6 +803,96 @@ mod tests {
         assert_eq!(writing_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
         for args in [[cwd, 0, 1, 0, 0, 0], [4, 0, 3, 0, 0, 0]] {
             assert_eq!(writing_call(OPENAT, args), RET_KILL_PROCESS);
+        }
+    }
+
+    #[test]
+    fn a_copy_on_write_server_changes_files_but_no_mode_time_or_link() {
+        for number in WRITING {
+            let expected = match number {
+                FCHMOD | UTIMENSAT | SYMLINKAT | LINKAT => RET_KILL_PROCESS,
+                _ => RET_ALLOW,
+            };
+            assert_eq!(
+                copying_call(number, [4, 0, 4, 0, 0, 0]),
+                expected,
+                "{number}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_copy_on_write_server_asks_for_times_on_their_sockets_alone() {
+        assert_eq!(copying_call(SENDMSG, [TIMES, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(copying_call(READ, [TIMES, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(copying_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
+        for fd in [SOCKET, STDERR, 4] {
+            assert_eq!(copying_call(SENDMSG, [fd, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        }
+        assert_eq!(
+            share_call(SENDMSG, [TIMES, 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        assert_eq!(share_call(READ, [TIMES, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+    }
+
+    #[test]
+    fn the_times_process_sets_times_through_a_descriptor_alone() {
+        let socket = u64::from(SOCKET);
+        assert_eq!(times_call(RECVMSG, [socket, 0, 0, 0, 0, 0]), RET_ALLOW);
+        assert_eq!(times_call(WRITE, [socket, 0, 0, 0, 0, 0]), RET_ALLOW);
+        // From the tree, or a directory on the way beneath it, to read or
+        // with `O_PATH`.
+        let o_path = 0o1000_0000 | 0o200_0000;
+        for (from, flags) in [(u64::from(TREE), 0), (4, o_path), (4, 0)] {
+            let args = [from, 0, flags, 0, 0, 0];
+            assert_eq!(times_call(OPENAT, args), RET_ALLOW, "{from} {flags:#o}");
+        }
+        assert_eq!(times_call(UTIMENSAT, [4, 0, 1, 0, 0, 0]), RET_ALLOW);
+        for number in [FSTAT, CLOSE] {
+            assert_eq!(times_call(number, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        }
+        assert_eq!(
+            times_call(FCNTL, [4, u64::from(F_GETFD), 0, 0, 0, 0]),
+            RET_ALLOW
+        );
+        for path in [1, 1 << 32] {
+            assert_eq!(
+                times_call(UTIMENSAT, [4, path, 1, 0, 0, 0]),
+                RET_KILL_PROCESS
+            );
+        }
+        // Not from the working directory, and never with access mode 3,
+        // which Landlock doesn't check, or with `openat2`, whose flags the
+        // filter can't read.
+        let cwd = u64::from(AT_FDCWD);
+        for args in [
+            [cwd, 0, 0, 0, 0, 0],
+            [4, 0, 3, 0, 0, 0],
+            [4, 0, 0o1000_0003, 0, 0, 0],
+        ] {
+            assert_eq!(times_call(OPENAT, args), RET_KILL_PROCESS, "{args:?}");
+        }
+        assert_eq!(
+            times_call(OPENAT2, [u64::from(TREE), 0, 0, 0, 0, 0]),
+            RET_KILL_PROCESS
+        );
+        for fd in [4, u64::from(STDERR)] {
+            assert_eq!(times_call(RECVMSG, [fd, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+            assert_eq!(times_call(WRITE, [fd, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
+        }
+        for number in WRITING
+            .into_iter()
+            .filter(|number| *number != UTIMENSAT)
+            .chain([
+                READ, PREAD64, SENDMSG, MMAP, BRK, OPENAT2, FORK, CLONE, EXECVE,
+            ])
+        {
+            assert_eq!(
+                times_call(number, [4, 0, 4, 0, 0, 0]),
+                RET_KILL_PROCESS,
+                "{number}"
+            );
         }
     }
 

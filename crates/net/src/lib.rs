@@ -335,6 +335,52 @@ impl Blocked {
 /// rule for the host would tie with a `-` rule or lose to one. `None` when
 /// neither would allow it.
 pub fn allowing(network: &Network, harness: &[&str], blocked: &Blocked) -> Option<String> {
+    match blocked {
+        Blocked::Lookup(name) => suggest(network, blocked, |added| {
+            could_allow(added, harness, name)
+        }),
+        Blocked::Connection {
+            name,
+            address,
+            port,
+        } => {
+            let connection = Connection {
+                name: name.as_deref(),
+                address: *address,
+                port: *port,
+                request: None,
+            };
+            allowing_request(network, harness, &connection)
+        }
+    }
+}
+
+/// The rule that [`allowing`] suggests for `connection`, which allows the
+/// connection's request too, if it has one. `None` where the request's
+/// URL rules or its path decide it, because no rule for the host alone
+/// beats them.
+pub fn allowing_request(
+    network: &Network,
+    harness: &[&str],
+    connection: &Connection,
+) -> Option<String> {
+    let blocked = Blocked::Connection {
+        name: connection.name.map(str::to_owned),
+        address: connection.address,
+        port: connection.port,
+    };
+    suggest(network, &blocked, |added| {
+        proxied(added, harness, connection).allows()
+    })
+}
+
+/// The first rule for the host of `blocked`, alone or with its port, that
+/// `allows` once it is added to `network`'s rules.
+fn suggest(
+    network: &Network,
+    blocked: &Blocked,
+    allows: impl Fn(&Network) -> bool,
+) -> Option<String> {
     let host = match blocked {
         Blocked::Connection {
             name: None,
@@ -359,22 +405,7 @@ pub fn allowing(network: &Network, harness: &[&str], blocked: &Blocked) -> Optio
         };
         added.default = network.default;
         added.rules.splice(..0, network.rules.iter().cloned());
-        match blocked {
-            Blocked::Lookup(name) => could_allow(&added, harness, name),
-            Blocked::Connection {
-                name,
-                address,
-                port,
-            } => {
-                let connection = Connection {
-                    name: name.as_deref(),
-                    address: *address,
-                    port: *port,
-                    request: None,
-                };
-                proxied(&added, harness, &connection).allows()
-            }
-        }
+        allows(&added)
     })
 }
 

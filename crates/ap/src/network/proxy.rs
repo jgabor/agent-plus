@@ -274,8 +274,15 @@ impl Proxy {
             let (policy, reporter) = (&self.policy, self.reporter.as_deref());
             let (decryption, injection) = (self.decryption.as_ref(), &self.injection);
             let mut decide = |connection: &Connection| decide_request(policy, reporter, connection);
-            (self.decrypted)
-                .retain_mut(|decrypted| decrypted.pump(stack, decryption, injection, &mut decide));
+            (self.decrypted).retain_mut(|decrypted| {
+                let goes_on = decrypted.pump(stack, decryption, injection, &mut decide);
+                if let (Some(reporter), Some((name, address, port))) =
+                    (reporter, decrypted.not_http())
+                {
+                    reporter.not_http(Some(name), address, port);
+                }
+                goes_on
+            });
             stack.poll((self.clock)());
             while let Some(frame) = stack.transmit() {
                 match (&*link).write(&frame) {

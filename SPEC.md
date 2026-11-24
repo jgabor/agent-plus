@@ -480,6 +480,9 @@ directory) and writes an image into the local store.
   never asks during the run, and it never adds a rule itself. It lists each
   host once, and at most 100 hosts, and then says that it left others out.
   It leaves out UDP that a host's URL rules deny, which no rule can allow.
+  It also leaves out TCP that a host's URL rules refuse because it isn't
+  HTTP. Where no rule for a host alone would allow what it blocked, such as
+  a request that a `-` URL rule denies, it says so.
 - **Desktop.** With `OS desktop`, `ap run --gui <agent>` opens the agent's
   desktop in a native window.
 

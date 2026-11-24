@@ -3,13 +3,15 @@
 //!
 //! The network process reports each host the first time it blocks it, as
 //! one message on the socket it asks for lookups on: `!`, then `lookup
-//! <name>`, or `connect <name or -> <address> <port>`. Past
-//! [`MOST_BLOCKED`] hosts, it reports `more` once, and nothing after.
-//! `ap run` reads each report as data, and works out each host's rule
-//! itself, from the run's rules.
+//! <name>`, or `connect <name or -> <address> <port>`. Before a connection,
+//! `alone ` says that it blocked a request there that no rule for the host
+//! alone would allow, and it reports the host again, without it, once it
+//! blocks one that such a rule would. Past [`MOST_BLOCKED`] hosts, it
+//! reports `more` once, and nothing after. `ap run` reads each report as
+//! data, and works out each host's rule itself, from the run's rules.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::net::IpAddr;
@@ -28,22 +30,32 @@ pub const MOST_BLOCKED: usize = 100;
 #[derive(Debug, Default)]
 pub struct Reports {
     pub blocked: Vec<Blocked>,
+    /// The hosts of `blocked` where only requests that no rule for the host
+    /// alone would allow were blocked.
+    pub alone: HashSet<String>,
     /// Whether the network process blocked more hosts than it reported.
     pub more: bool,
 }
 
 impl Reports {
-    /// Takes one report. A host it has already is taken once.
+    /// Takes one report. A host it has already is taken once, unless only
+    /// requests that no rule for it would allow were blocked there before.
     pub(super) fn take(&mut self, message: &[u8]) {
         match read(message) {
             Some(Read::More) => self.more = true,
-            Some(Read::Blocked(blocked)) => {
-                let new = !self
-                    .blocked
-                    .iter()
-                    .any(|known| known.host() == blocked.host());
-                if new && self.blocked.len() < MOST_BLOCKED {
-                    self.blocked.push(blocked);
+            Some(Read::Blocked(blocked, alone)) => {
+                let host = blocked.host();
+                let known = self.blocked.iter().position(|known| known.host() == host);
+                match known {
+                    Some(at) if !alone && self.alone.remove(&host) => self.blocked[at] = blocked,
+                    Some(_) => {}
+                    None if self.blocked.len() < MOST_BLOCKED => {
+                        self.blocked.push(blocked);
+                        if alone {
+                            self.alone.insert(host);
+                        }
+                    }
+                    None => {}
                 }
             }
             None => {}
@@ -52,12 +64,17 @@ impl Reports {
 }
 
 enum Read {
-    Blocked(Blocked),
+    /// A host it blocked, and whether only requests there that no rule for
+    /// the host alone would allow.
+    Blocked(Blocked, bool),
     More,
 }
 
-fn write(blocked: &Blocked) -> Vec<u8> {
-    [&[TAG][..], text(blocked).as_bytes()].concat()
+/// The report of `blocked`, which says whether no rule for its host alone
+/// would allow it.
+fn write(blocked: &Blocked, alone: bool) -> Vec<u8> {
+    let alone = if alone { "alone " } else { "" };
+    [&[TAG][..], alone.as_bytes(), text(blocked).as_bytes()].concat()
 }
 
 /// `blocked` as a report writes it, after the tag.
@@ -77,9 +94,16 @@ pub(super) fn text(blocked: &Blocked) -> String {
 
 fn read(message: &[u8]) -> Option<Read> {
     let text = std::str::from_utf8(message.strip_prefix(&[TAG])?).ok()?;
-    match text {
-        "more" => Some(Read::More),
-        text => parse(text).map(Read::Blocked),
+    if text == "more" {
+        return Some(Read::More);
+    }
+    let (text, alone) = match text.strip_prefix("alone ") {
+        Some(text) => (text, true),
+        None => (text, false),
+    };
+    match parse(text)? {
+        Blocked::Lookup(_) if alone => None,
+        blocked => Some(Read::Blocked(blocked, alone)),
     }
 }
 
@@ -114,7 +138,9 @@ fn host_name(name: &str) -> Option<String> {
 /// [`super::decisions`] says, and each host it blocks once.
 pub(super) struct Reporter {
     fd: i32,
-    hosts: RefCell<HashSet<String>>,
+    /// The hosts reported, and whether only requests there that no rule for
+    /// the host alone would allow were blocked.
+    hosts: RefCell<HashMap<String, bool>>,
     /// The rules and the harness's hosts, which name what decided.
     network: Network,
     harness: Vec<String>,
@@ -130,7 +156,7 @@ impl Reporter {
     pub(super) fn new(fd: i32, network: Network, harness: Vec<String>) -> Reporter {
         Reporter {
             fd,
-            hosts: RefCell::new(HashSet::new()),
+            hosts: RefCell::new(HashMap::new()),
             network,
             harness,
             refused: RefCell::new(None),
@@ -179,8 +205,9 @@ impl Reporter {
         self.send_decision(allow, &rule, name, address, port);
     }
 
-    /// Reports a UDP flow to `name` at `address` on `port` that the proxy
-    /// refused, because the name has URL rules, and UDP isn't HTTP.
+    /// Reports a flow to `name` at `address` on `port` that the proxy
+    /// refused, because the name has URL rules, and what came wasn't HTTP
+    /// they could decide: UDP, or TCP that the request check refused.
     pub(super) fn not_http(&self, name: Option<&str>, address: IpAddr, port: u16) {
         self.send_decision(false, &Rule::NotHttp, name, address, port);
     }
@@ -230,7 +257,7 @@ impl Reporter {
                 port,
             } => self.decided(false, name.as_deref(), *address, *port),
         }
-        self.note(&blocked);
+        self.note(&blocked, false);
     }
 
     /// Reports a request on a connection to `name` at `address` on
@@ -245,30 +272,42 @@ impl Reporter {
         request: net::Request,
     ) {
         self.requested(allow, Some(name), address, port, Some(request));
-        if !allow {
-            self.note(&Blocked::Connection {
-                name: Some(name.to_owned()),
-                address,
-                port,
-            });
-        }
-    }
-
-    /// Notes the host of `blocked`, unless it was noted already.
-    fn note(&self, blocked: &Blocked) {
-        let mut hosts = self.hosts.borrow_mut();
-        let host = blocked.host();
-        if hosts.contains(&host) || hosts.len() > MOST_BLOCKED {
+        if allow {
             return;
         }
-        let message = match hosts.len() {
-            MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
-            _ => write(blocked),
+        let harness: Vec<&str> = self.harness.iter().map(String::as_str).collect();
+        let connection = net::Connection {
+            name: Some(name),
+            address,
+            port,
+            request: Some(request),
+        };
+        let alone = net::allowing_request(&self.network, &harness, &connection).is_none();
+        let blocked = Blocked::Connection {
+            name: Some(name.to_owned()),
+            address,
+            port,
+        };
+        self.note(&blocked, alone);
+    }
+
+    /// Notes the host of `blocked`, and whether no rule for the host alone
+    /// would allow it, unless it was noted already. A host noted as one
+    /// that no such rule would allow is noted again once one would.
+    fn note(&self, blocked: &Blocked, alone: bool) {
+        let mut hosts = self.hosts.borrow_mut();
+        let host = blocked.host();
+        let message = match hosts.get(&host) {
+            Some(&known) if alone || !known => return,
+            Some(_) => write(blocked, alone),
+            None if hosts.len() > MOST_BLOCKED => return,
+            None if hosts.len() == MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
+            None => write(blocked, alone),
         };
         // The socket doesn't wait. A report that doesn't fit is sent again
         // the next time the host is blocked.
         if self.send(&message) {
-            hosts.insert(host);
+            hosts.insert(host, alone);
         }
     }
 
@@ -296,7 +335,11 @@ pub fn report(args: &[OsString], reports: &Reports) -> Option<String> {
     };
     let mut text = format!("ap: NETWORK blocked {count}. The rule beside each would allow it:\n");
     for (blocked, host) in reports.blocked.iter().zip(&hosts) {
-        let rule = match (net::allowing(&network, &harness, blocked), blocked) {
+        let allowing = match reports.alone.contains(host) {
+            true => None,
+            false => net::allowing(&network, &harness, blocked),
+        };
+        let rule = match (allowing, blocked) {
             (Some(rule), _) => format!("NETWORK {rule}"),
             // SPEC.md's NETWORK, under **Your host**.
             (
@@ -346,7 +389,17 @@ mod tests {
             },
         ];
         for blocked in reports {
-            assert!(matches!(read(&write(&blocked)), Some(Read::Blocked(read)) if read == blocked));
+            for alone in [false, true] {
+                let read = read(&write(&blocked, alone));
+                let lookup = matches!(blocked, Blocked::Lookup(_));
+                match read {
+                    Some(Read::Blocked(read, was)) => {
+                        assert!(read == blocked && was == alone && !(lookup && alone));
+                    }
+                    None => assert!(lookup && alone),
+                    Some(Read::More) => panic!("{blocked:?}"),
+                }
+            }
         }
         assert!(matches!(read(b"!more"), Some(Read::More)));
         // Nothing that could change your terminal gets through.
@@ -490,8 +543,9 @@ mod tests {
     }
 
     // spec(Run): It leaves out UDP that a host's URL rules deny, which no rule can allow.
+    // spec(Run): It also leaves out TCP that a host's URL rules refuse because it isn't HTTP.
     #[test]
-    fn udp_that_url_rules_deny_is_no_blocked_host() {
+    fn traffic_that_url_rules_refuse_as_not_http_is_no_blocked_host() {
         let (mine, theirs) = super::super::link().unwrap();
         let args: Vec<OsString> = ["--", "+", "-https://example.com/secret"]
             .map(OsString::from)
@@ -503,7 +557,9 @@ mod tests {
             Vec::new(),
         );
         let address = "192.0.2.7".parse().unwrap();
+        // UDP, and TCP that isn't HTTP.
         reporter.not_http(Some("example.com"), address, 443);
+        reporter.not_http(Some("example.com"), address, 22);
         drop(theirs);
         let mine = std::os::unix::net::UnixDatagram::from(mine);
         let mut reports = Reports::default();
@@ -513,8 +569,64 @@ mod tests {
             decisions += usize::from(decisions::read(&buffer[..len]).is_some());
             reports.take(&buffer[..len]);
         }
-        assert_eq!(decisions, 1);
+        assert_eq!(decisions, 2);
         assert_eq!(report(&args, &reports), None);
+    }
+
+    // spec(Run): Where no rule for a host alone would allow what it blocked, such as a request that a `-` URL rule denies, it says so.
+    #[test]
+    fn a_denied_request_gets_a_rule_only_where_the_rule_would_allow_it() {
+        let (mine, theirs) = super::super::link().unwrap();
+        let args: Vec<OsString> = [
+            "--",
+            "-",
+            "+https://example.com/open",
+            "-https://example.com/open/secret",
+            "-https://example.net/secret",
+            "+https://example.org/open",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        let (network, _) = super::super::rules(&args).unwrap();
+        let reporter = Reporter::new(
+            std::os::fd::AsRawFd::as_raw_fd(&theirs),
+            network,
+            Vec::new(),
+        );
+        let address = "192.0.2.7".parse().unwrap();
+        let deny = |name, target| {
+            let request = net::Request {
+                scheme: agentfile::Scheme::Https,
+                target,
+            };
+            reporter.request(false, name, address, 443, request);
+        };
+        // A rule for the host would allow the second request, and only it.
+        deny("example.com", "/open/secret");
+        deny("example.com", "/other");
+        // None would allow this one.
+        deny("example.net", "/secret");
+        // A rule for the host would allow the first, which still decides.
+        deny("example.org", "/other");
+        deny("example.org", "/open/../x");
+        drop(theirs);
+        let mine = std::os::unix::net::UnixDatagram::from(mine);
+        let mut reports = Reports::default();
+        let mut buffer = [0; 512];
+        while let Ok(len @ 1..) = mine.recv(&mut buffer) {
+            reports.take(&buffer[..len]);
+        }
+        let text = report(&args, &reports).unwrap();
+        let lines: Vec<&str> = text.lines().skip(1).collect();
+        assert_eq!(
+            lines,
+            [
+                "  example.com  NETWORK +example.com",
+                "  example.net  no rule for this host alone allows it",
+                "  example.org  NETWORK +example.org",
+            ],
+            "{text}"
+        );
     }
 
     #[test]
@@ -529,7 +641,7 @@ mod tests {
                     port: 8080,
                 },
             ],
-            more: false,
+            ..Reports::default()
         };
         let text = report(&args, &reports).unwrap();
         assert!(

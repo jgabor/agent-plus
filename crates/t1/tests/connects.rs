@@ -932,6 +932,7 @@ fn https_listener(listener: TcpListener) -> (String, Seen) {
 // spec(NETWORK): on hosts with URL rules, because the rules need the request path
 // spec(NETWORK): The proxy verifies an upstream server's certificate against the root certificates compiled into `ap`, plus those in the file that `SSL_CERT_FILE` names in your host's environment.
 // spec(ap logs): Each line has the time, `allow` or `deny`, the destination, and the rule that decided.
+// spec(ap logs): On a host with URL rules, the rule can also be the request path, or, for traffic that isn't HTTP, the host's URL rules.
 #[test]
 fn a_url_rule_decides_each_https_request_to_your_host() {
     let scratch = Scratch::new("url");
@@ -945,7 +946,8 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
     // authority.
     let script = format!(
         "echo \"allowed $(timeout 20 git ls-remote {url}/allowed/repo 2>&1 | head -1)\"\n\
-         echo \"denied $(timeout 20 git ls-remote {url}/denied/repo 2>&1 | head -1)\"\n"
+         echo \"denied $(timeout 20 git ls-remote {url}/denied/repo 2>&1 | head -1)\"\n\
+         tcp not-http host.ap.internal {port}\n"
     );
     // Without the listener's authority in `SSL_CERT_FILE`, nothing reaches
     // it.
@@ -954,9 +956,10 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
     assert_eq!(settled(&seen, 1), Vec::<String>::new());
 
     scratch.trust(&pem);
-    let (lines, _, _, name) = run_to_end(&scratch, "url", &script);
+    let (lines, _, errors, name) = run_to_end(&scratch, "url", &script);
     // The allowed request reached the listener, which doesn't know the
     // repository. The denied one didn't, and the guest's connection reset.
+    // So did the connection that isn't HTTP.
     assert!(
         lines[0].starts_with("allowed ") && lines[0].contains("not found"),
         "{lines:?}"
@@ -965,6 +968,7 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
         lines[1].starts_with("denied ") && lines[1].contains("unable to access"),
         "{lines:?}"
     );
+    assert_eq!(lines[2], "not-http failed", "{lines:?}");
     assert_eq!(
         settled(&seen, 1),
         ["/allowed/repo/info/refs?service=git-upload-pack"]
@@ -981,8 +985,19 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
         [
             format!("allow  {host}  NETWORK {rule}"),
             format!("deny   {host}  the default"),
+            format!("deny   {host}  the host's URL rules, which only HTTP meets"),
         ],
         "{stderr}"
+    );
+    // A rule for the host would allow the denied request. No rule would
+    // allow what isn't HTTP.
+    assert_eq!(
+        listed(&errors),
+        [(
+            "host.ap.internal".to_owned(),
+            "NETWORK +host.ap.internal".to_owned()
+        )],
+        "{errors}"
     );
 }
 

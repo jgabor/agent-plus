@@ -5,8 +5,8 @@
 
 use std::net::IpAddr;
 
-use agentfile::{Network, parse};
-use net::{Blocked, Connection, allowing, could_allow, proxied};
+use agentfile::{Network, Scheme, parse};
+use net::{Blocked, Connection, Request, allowing, allowing_request, could_allow, proxied};
 
 /// Claude Code's hosts, as its adapter lists them.
 const HARNESS: &[&str] = &["api.anthropic.com", "claude.ai"];
@@ -171,4 +171,35 @@ fn no_rule_is_suggested_where_none_would_allow() {
     let closed = network("NETWORK -\n");
     let loopback = connection(None, "127.0.0.1", 8080);
     assert_eq!(allowing(&closed, HARNESS, &loopback), None);
+}
+
+// spec(Run): Where no rule for a host alone would allow what it blocked, such as a request that a `-` URL rule denies, it says so.
+#[test]
+fn a_request_gets_a_rule_only_where_the_rule_would_allow_the_request() {
+    let rules = network(
+        "NETWORK -\nNETWORK +https://example.com/open\n\
+         NETWORK -https://example.com/open/secret\n",
+    );
+    let request = |target| Connection {
+        name: Some("example.com"),
+        address: "192.0.2.1".parse().unwrap(),
+        port: 443,
+        request: Some(Request {
+            scheme: Scheme::Https,
+            target,
+        }),
+    };
+    // The default denied it, so a rule for the host allows it.
+    let rule = allowing_request(&rules, HARNESS, &request("/other"));
+    assert_eq!(rule.as_deref(), Some("+example.com"));
+    let after = network(
+        "NETWORK -\nNETWORK +https://example.com/open\n\
+         NETWORK -https://example.com/open/secret\nNETWORK +example.com\n",
+    );
+    assert!(proxied(&after, HARNESS, &request("/other")).allows());
+    // A `-` URL rule beats any rule for the host, and so does the path.
+    for target in ["/open/secret", "/open/secret/x", "/open/%2Fx", "/open/../x"] {
+        assert!(!proxied(&rules, HARNESS, &request(target)).allows());
+        assert_eq!(allowing_request(&rules, HARNESS, &request(target)), None);
+    }
 }

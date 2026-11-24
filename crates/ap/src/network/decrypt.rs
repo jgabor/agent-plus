@@ -163,6 +163,9 @@ pub(super) struct Decrypted {
     closed: bool,
     /// The rules allowed a request.
     allowed: bool,
+    /// The connection ended because its host has URL rules, and what came
+    /// wasn't HTTP that the rules could decide.
+    not_http: bool,
 }
 
 enum Stage {
@@ -212,6 +215,7 @@ impl Decrypted {
             upstream_closed: false,
             closed: false,
             allowed: false,
+            not_http: false,
         }
     }
 
@@ -255,18 +259,36 @@ impl Decrypted {
         injection: &Injection,
         decide: &mut Decide,
     ) -> bool {
-        match self.moved(stack, decryption, injection, decide) {
+        let denied = Cell::new(false);
+        let mut deciding = |connection: &net::Connection| {
+            let allows = decide(connection);
+            denied.set(denied.get() || !allows);
+            allows
+        };
+        match self.moved(stack, decryption, injection, &mut deciding) {
             Ok(()) if !stack.ended(self.id) => true,
             Ok(()) => {
                 stack.forget(self.id);
                 false
             }
-            Err(_) => {
+            Err(error) => {
+                // A request the rules denied was decided already.
+                self.not_http = self.reads == Reads::Requests
+                    && error.kind() == io::ErrorKind::PermissionDenied
+                    && !denied.get();
                 stack.abort(self.id);
                 stack.forget(self.id);
                 false
             }
         }
+    }
+
+    /// The name, address, and port of a connection that ended because its
+    /// host has URL rules, and what came wasn't HTTP that they could decide,
+    /// such as a protocol that isn't HTTP, or a head the check can't read.
+    pub(super) fn not_http(&self) -> Option<(&str, IpAddr, u16)> {
+        self.not_http
+            .then_some((self.name.as_str(), self.address, self.port))
     }
 
     fn moved(
@@ -461,7 +483,7 @@ impl Decrypted {
                     }
                     Ok(None) => return Ok(()),
                     Ok(Some(accepted)) => accepted,
-                    Err((error, _)) => return Err(io::Error::other(error)),
+                    Err(_) => return Err(refused("a client hello it can't read")),
                 };
                 let server = accepted.client_hello().server_name().map(str::to_owned);
                 let agrees = server.as_deref().map(|server| {

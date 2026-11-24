@@ -68,6 +68,7 @@ fn start_upstream(directory: &Path) -> (Started, u16) {
     assert_eq!(words.get(2), Some(&"tls"), "{line}");
     (upstream, words[3].parse().unwrap())
 }
+
 // spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
 #[test]
 fn codex_runs_a_tool_in_the_guest() {

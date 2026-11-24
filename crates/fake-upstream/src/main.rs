@@ -22,10 +22,9 @@
 //! Responses API: a call of Codex's code-mode `exec` tool while the request
 //! holds no tool's output, and then a message. The tool runs [`COMMAND`], or
 //! the text of `<directory>/command` when that file exists as the request
-//! arrives. Each line it gets, and each
-//! request's target, is noted in `<directory>/seen` as one line, `plain
-//! <line>`, `address <line>`, or `tls <target>`, so a check can tell what
-//! reached it. Each HTTPS request, its head and body as they arrived, is
+//! arrives. Each line it gets, and each request's target, is noted in
+//! `<directory>/seen` as one line, `plain <line>`, `address <line>`, or
+//! `tls <target>`, so a check can tell what reached it. Each HTTPS request, its head and body as they arrived, is
 //! also kept whole in `<directory>/requests/<n>`, numbered from 1 in the
 //! order each one finished arriving.
 

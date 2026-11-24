@@ -2026,7 +2026,7 @@ fn auth_key_approves_only_the_runs_placeholder() {
     printed(
         &scratch.exec(&name, &["cat", "/home/agent/.claude.json"], b""),
         &format!(
-            "{{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {{\n    \"/\": {{\n      \"hasTrustDialogAccepted\": true\n    }}\n  }},\n  \"customApiKeyResponses\": {{\n    \"approved\": [\"{approved}\"]\n  }}\n}}\n"
+            "{{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {{\n    \"/\": {{\n      \"hasTrustDialogAccepted\": true\n    }},\n    \"/home\": {{\n      \"hasTrustDialogAccepted\": true\n    }},\n    \"/home/agent\": {{\n      \"hasTrustDialogAccepted\": true\n    }}\n  }},\n  \"customApiKeyResponses\": {{\n    \"approved\": [\"{approved}\"]\n  }}\n}}\n"
         ),
     );
     // Claude Code keeps its state there, so the harness can change it.

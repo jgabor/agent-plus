@@ -69,7 +69,7 @@ fn project(root: &Path, home: &Path, name: &str) -> PathBuf {
     dir
 }
 
-/// A new directory for one test's homes and agents, with the grants file
+/// A new directory for one test's home and agents, with the grants file
 /// that approves them.
 fn scratch(test: &str) -> (PathBuf, PathBuf, PathBuf) {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("os-{test}-{}", process::id()));

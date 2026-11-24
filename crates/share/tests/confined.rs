@@ -137,9 +137,9 @@ fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
     server.wait().unwrap()
 }
 
-/// Starts the share server's process as `share::start` does, with each
-/// root a descriptor it inherits, numbered in its arguments after the
-/// words that come before it. With `aim`, once it has served, it turns
+/// Starts one share server's process for `roots`, which it serves
+/// together, passing each root as `share::start` does: a descriptor it
+/// inherits, numbered in its arguments after the words that come before it. With `aim`, once it has served, it turns
 /// from the descriptor of root `index` as the rest of the aim says.
 /// Returns the process, and the other end of its socket.
 fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd) {
@@ -218,7 +218,8 @@ fn a_server_that_changes_modes_and_times_serves_only_rw_shares() {
         drop(socket);
         let status = server.wait().unwrap();
         assert_eq!(mode_and_time(&hello), before, "{mode}");
-        assert!(!status.success(), "{mode} {status}");
+        // It refuses the roots before it serves, and exits with 1.
+        assert_eq!(status.code(), Some(1), "{mode} {status}");
     }
 }
 

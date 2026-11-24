@@ -146,9 +146,10 @@ pub fn inheritable(fd: BorrowedFd) -> io::Result<OwnedFd> {
 /// The share server's process: `args` are a mode and the number of an
 /// inherited descriptor of a root directory for each share, and for a
 /// copy-on-write share the number of its pending directory's after it. A
-/// file share has `file` and the file's name before its mode. It serves
-/// requests from its standard input, a socket, until the VMM hangs up, and
-/// returns the status to exit with.
+/// file share has `file` and the file's name before its mode. The shares
+/// are all `rw`, or none of them are. It serves requests from its standard
+/// input, a socket, until the VMM hangs up, and returns the status to exit
+/// with.
 pub fn main(args: &[OsString]) -> u8 {
     match run(args) {
         Ok(()) => 0,

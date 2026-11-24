@@ -266,6 +266,7 @@ send other other.example
 }
 
 // spec(SECRET): `SECRET` gives the agent a credential that, by default, it can use but never read.
+// spec(SECRET): The real value is never sent to any other host.
 #[test]
 fn floor_hidden_secret() {
     let _turn = ONE_AT_A_TIME

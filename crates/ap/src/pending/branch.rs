@@ -279,7 +279,7 @@ impl<'a> Agent<'a> {
 
     /// Puts in `found` each file and symlink of the agent's beneath `path`,
     /// where its `HEAD` holds `tree`, that would replace a directory with a
-    /// git-ignored file in it, and each directory of the agent's that would
+    /// git-ignored file in it, and each directory in the share that would
     /// replace a git-ignored file. Git can't hold both, and that file stays.
     fn replacing(
         &self,
@@ -402,7 +402,7 @@ impl<'a> Agent<'a> {
         let recorded = yours && self.recorded_beneath(path).next().is_some();
         // Something the agent deleted beneath it may be one of `head`'s.
         let swept = yours && self.records.deleted.range(below(path)).next().is_some();
-        // The agent's directory doesn't land where it would replace a
+        // A directory in the share doesn't land where it would replace a
         // git-ignored file, so that file is as `head` holds it.
         if self.replacing.dirs.contains(path) {
             return Ok(head);

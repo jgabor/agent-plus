@@ -1266,8 +1266,8 @@ struct Replacing {
     /// Each file and symlink of the agent's that would replace a directory
     /// its `HEAD` holds with a git-ignored file in it.
     files: BTreeSet<Vec<u8>>,
-    /// Each directory of the agent's that would replace a git-ignored file
-    /// its `HEAD` holds.
+    /// Each directory in the share, made by the agent or yours with what it
+    /// wrote in it, that would replace a git-ignored file its `HEAD` holds.
     dirs: BTreeSet<Vec<u8>>,
 }
 

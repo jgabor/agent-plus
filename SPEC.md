@@ -1642,6 +1642,12 @@ attributes, because those can run commands.
     `ap apply` reports it.
   - Nothing is ever applied under a path component that matches `.git`
     case-insensitively, in any repository, including nested ones.
+  - Nothing is applied to your files beneath a directory that holds
+    `HEAD`, and either `commondir` or both `objects` and `refs`, because
+    that is how git finds a bare repository. That counts what you have
+    there and what the agent made there, with the agent's names matched
+    case-insensitively, so nothing the agent wrote becomes a bare
+    repository.
   - Symlinks are never followed. A symlink is applied only if its target
     stays inside the share. Special files are never applied.
   - Git-ignored files are neither shown nor applied. `ap diff` and

@@ -25,17 +25,19 @@ impl Results {
 }
 
 pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
-    if !hold.has_place() {
-        return Err(Problem(
-            "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
-        ));
-    }
+    run_except(root, hold, None)
+}
+
+/// Runs every package's tests but those of `left_out`.
+pub fn run_except(root: &Path, hold: &Hold, left_out: Option<&str>) -> Result<Results, Problem> {
     let mut results = Results {
         by_test: HashMap::new(),
         all_passed: true,
     };
     for package in workspace::packages(root)? {
-        run_package(root, &package.name, hold, &mut results)?;
+        if Some(package.name.as_str()) != left_out {
+            run_package(root, &package.name, hold, &mut results)?;
+        }
     }
     Ok(results)
 }
@@ -44,13 +46,19 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
 /// the result. `CC` and `CXX` point at a program that fails, as in the gate.
 /// The package's build and tests share one memory limit, and a test that goes
 /// over it is killed, which fails the run. In a merge, our input is the pipe
-/// to the supervisor, which the tests mustn't reach.
-fn run_package(
+/// to the supervisor, which the tests mustn't reach. Says whether the
+/// package's tests passed.
+pub fn run_package(
     root: &Path,
     package: &str,
     hold: &Hold,
     results: &mut Results,
-) -> Result<(), Problem> {
+) -> Result<bool, Problem> {
+    if !hold.has_place() {
+        return Err(Problem(
+            "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
+        ));
+    }
     let arguments = ["test", "--package", package, "--locked", "--no-fail-fast"];
     let mut command = limit::scope("cargo", &arguments, None)?;
     command
@@ -88,7 +96,7 @@ fn run_package(
         .wait()
         .map_err(|e| Problem(format!("couldn't wait for `cargo test`: {e}")))?;
     results.all_passed &= status.success();
-    Ok(())
+    Ok(status.success())
 }
 
 /// Reads a `test path::to::name ... ok` line into the function name and

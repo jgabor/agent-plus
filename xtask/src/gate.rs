@@ -31,6 +31,21 @@ const CHECKS: &[Check] = &[
     },
 ];
 
+/// The package that holds the T2 checks.
+pub const T2_PACKAGE: &str = "t2";
+
+/// What an adapter change touches, as HARNESS.md lists it: the adapters, how
+/// a harness release is fetched and locked, the T2 checks and the fake model
+/// they talk to, and the guest that a harness runs on.
+const ADAPTER_PATHS: [&str; 6] = [
+    "crates/ap/src/adapter/",
+    "crates/ap/src/lock.rs",
+    "crates/t2/",
+    "crates/fake-upstream/",
+    "guest/os/",
+    "guest/kernel/",
+];
+
 /// What a merge already knows, which changes two of the checks.
 pub struct Merging<'a> {
     /// `prepare` leaves these to the owner, who decides by merging.
@@ -58,7 +73,7 @@ pub fn run() -> Result<Verdict, Problem> {
 }
 
 /// Runs every check, and returns those that failed and the spec score that
-/// the tests earned.
+/// the tests earned. A T2 check that didn't run earns nothing.
 pub fn check(
     root: &Path,
     hold: &Hold,
@@ -82,11 +97,24 @@ pub fn check(
     if let Some(kernel) = &kernel {
         kernel.copy(&kernel.store, &kernel.tree);
     }
-    let results = testrun::run(root, hold)?;
+    let mut results = testrun::run_except(root, hold, Some(T2_PACKAGE))?;
     if let Some(kernel) = &kernel {
         kernel.copy(&kernel.tree, &kernel.store);
     }
     record("tests", results.all_passed(), &mut failed);
+    let has_t2 = workspace::packages(root)?
+        .iter()
+        .any(|package| package.name == T2_PACKAGE);
+    if has_t2 && needs_t2(root)? {
+        if let Some(merging) = merging {
+            (merging.starting)(T2_PACKAGE);
+        }
+        let passed = testrun::run_package(root, T2_PACKAGE, hold, &mut results)?;
+        record("t2", passed, &mut failed);
+    } else if has_t2 {
+        println!("skip t2");
+        eprintln!("t2: no change touches an adapter path, so T2 didn't run. HARNESS.md lists them");
+    }
     let score = score::compute(root, &results)?;
     score::report_findings(&score);
     record("spec", score.findings.is_empty(), &mut failed);
@@ -97,6 +125,33 @@ pub fn check(
     };
     println!("gate: {word}");
     Ok((failed, score))
+}
+
+/// Whether the tree, with its untracked files, differs from its base on an
+/// adapter path, a file or a directory that ends in `/`. A tree with no base,
+/// or one that differs from it only in the ledger, where an earlier attempt at
+/// a record may be, is `main` as it is, which T2 checks too.
+fn needs_t2(root: &Path) -> Result<bool, Problem> {
+    let Some(commit) = base::find(root)? else {
+        return Ok(true);
+    };
+    let changed = base::git_text(
+        root,
+        &["diff", "--name-only", "--no-renames", "-z", &commit, "--"],
+    )?;
+    let untracked = base::git_text(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut paths = changed
+        .split('\0')
+        .chain(untracked.split('\0'))
+        .filter(|path| !path.is_empty() && !path.starts_with(&format!("{}/", ledger::DIRECTORY)))
+        .peekable();
+    let unchanged = paths.peek().is_none();
+    Ok(unchanged
+        || paths.any(|path| {
+            ADAPTER_PATHS
+                .iter()
+                .any(|entry| path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
+        }))
 }
 
 fn compare_with_base(

@@ -302,6 +302,17 @@ change can affect a budget that the bench measures when its diff touches
 `crates/`, `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`,
 `rust-toolchain.toml`, `harness/budgets.toml`, or `xtask/src/bench.rs`.
 
+**Adapter changes.** A change is an adapter change when the tree, with its
+untracked files, differs from its base under `crates/ap/src/adapter/`,
+`crates/ap/src/lock.rs`, `crates/t2/`, `crates/fake-upstream/`, `guest/os/`,
+or `guest/kernel/`. The gate runs `t2` for an adapter change, and for a tree
+that is `main` as it is: one with no base, or no change from it but in
+`harness/ledger/`. It prints `pass t2` or `fail t2` on a line of its own.
+Otherwise it prints `skip t2` and leaves `t2` out. A `t2` check counts toward
+the spec score only when `t2` runs, so a promise needs a check in another
+tier too. The nightly job tests `main` as it is, so its gate runs `t2`, and
+that run is its T2 check.
+
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps
 a copy at `xtask/kernel/vmlinux` in the shared git directory, and gives it to a
@@ -539,7 +550,7 @@ is a failure, and 2 is bad usage or an environment error.
 
 | Command | Behavior |
 |---|---|
-| `cargo xtask gate` | Runs T0, T1, and the floors, compares counts with the base, and prints the result. It posts no status |
+| `cargo xtask gate` | Runs T0, T1, the floors, and T2 for an [adapter change](#check-tiers), compares counts with the base, and prints the result. It posts no status |
 | `cargo xtask score` | Prints the three scores |
 | `cargo xtask gaps` | Names the first milestone on the roadmap with a step that doesn't pass. Then lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
@@ -798,7 +809,7 @@ ended:
 | When | State | Description |
 |---|---|---|
 | The proof starts | `pending` | `Proving: lint` |
-| The tests, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: journey`, `Proving: bench` |
+| The tests, T2, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: t2`, `Proving: journey`, `Proving: bench` |
 | The PR's own xtask starts | `pending` | `Proving: its own xtask` |
 | The PR is proven | `success` | The counts, as `spec 417 of 812, journey 7 of 19` |
 | A check failed | `failure` | The checks that failed, as `Failed: lint, tests` |
@@ -962,7 +973,7 @@ Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
 does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
-2. Run the gate, T2, the ignored t1 tests that download from a real
+2. Run the gate with T2, the ignored t1 tests that download from a real
    release, T3, the journey, fuzzing, and mutation testing.
 3. Post the report to one pinned issue. It leads with what needs the owner:
    a verdict that names each failed check, the three scores, what regressed

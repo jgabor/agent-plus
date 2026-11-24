@@ -451,3 +451,179 @@ fn an_unreadable_base_record_is_a_problem() {
         stderr(&output)
     );
 }
+
+const T2_MANIFEST: &str = "[package]\nname = \"t2\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+const T2_FAILS: &str = "#[test]\nfn planted_in_t2() {\n    panic!(\"planted\");\n}\n";
+const AP_MANIFEST: &str = "[package]\nname = \"ap\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+const UPSTREAM_MANIFEST: &str =
+    "[package]\nname = \"fake-upstream\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+
+/// A workspace whose `t2` package has a test that fails, so that a gate that
+/// runs it fails `t2`.
+fn with_failing_t2(name: &str) -> Repo {
+    Repo::new(
+        name,
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_FAILS),
+            ("crates/ap/Cargo.toml", AP_MANIFEST),
+            ("crates/ap/src/lib.rs", NO_CHECK),
+            ("crates/fake-upstream/Cargo.toml", UPSTREAM_MANIFEST),
+            ("crates/fake-upstream/src/lib.rs", NO_CHECK),
+        ],
+    )
+}
+
+#[test]
+fn a_change_outside_the_adapter_paths_leaves_t2_out() {
+    let repo = with_failing_t2("t2-left-out");
+    repo.write("crates/demo/src/lib.rs", &format!("{CHECK_ONE}{NO_CHECK}"));
+    repo.write("crates/ap/src/lib.rs", "pub fn g() {}\n");
+    repo.commit();
+    let output = repo.gate();
+    assert_passes(&output);
+    assert!(stdout(&output).contains("skip t2\n"), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("no change touches an adapter path"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("planted_in_t2"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_change_to_an_adapter_path_runs_t2() {
+    let paths: Vec<(usize, &str)> = [
+        "crates/ap/src/adapter/mod.rs",
+        "crates/ap/src/lock.rs",
+        "crates/t2/tests/probe.rs",
+        "crates/fake-upstream/src/main.rs",
+        "guest/os/pin.toml",
+        "guest/kernel/config",
+    ]
+    .into_iter()
+    .enumerate()
+    .collect();
+    common::each(&paths, |&(index, path)| {
+        let repo = with_failing_t2(&format!("t2-runs-{index}"));
+        repo.write(path, "// changed\n");
+        repo.commit();
+        assert_fails(&repo.gate(), "t2", "planted_in_t2");
+    });
+}
+
+#[test]
+fn an_untracked_file_on_an_adapter_path_runs_t2() {
+    let repo = with_failing_t2("t2-untracked");
+    repo.write("crates/t2/tests/new.rs", "#[test]\nfn new() {}\n");
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn an_uncommitted_edit_on_an_adapter_path_runs_t2() {
+    let repo = with_failing_t2("t2-uncommitted");
+    repo.write("crates/t2/src/lib.rs", &format!("{T2_FAILS}// edited\n"));
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+/// A tree with no change from its base is `main` as it is, as the nightly job,
+/// the runner gate, and the refresh's proof of `main` test it.
+#[test]
+fn a_tree_like_its_base_runs_t2() {
+    let repo = with_failing_t2("t2-unchanged");
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+/// An earlier attempt at a record may leave one in the ledger, as the nightly
+/// job allows.
+#[test]
+fn a_tree_like_its_base_but_in_the_ledger_runs_t2() {
+    let repo = with_failing_t2("t2-ledger");
+    repo.write("harness/ledger/9.toml", &record_with_proven(0));
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn a_file_beside_an_adapter_file_leaves_t2_out() {
+    let repo = with_failing_t2("t2-beside");
+    repo.write("crates/ap/src/lock.rs.orig", "// beside\n");
+    let output = repo.gate();
+    assert_passes(&output);
+    assert!(stdout(&output).contains("skip t2\n"), "{}", stdout(&output));
+}
+
+#[test]
+fn without_origin_main_t2_runs() {
+    let repo = Repo::files(
+        "t2-no-origin",
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_FAILS),
+        ],
+    );
+    repo.git(&["init", "-q", "-b", "main"]);
+    repo.commit();
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn without_a_base_t2_runs() {
+    let repo = Repo::files(
+        "t2-no-base",
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_FAILS),
+        ],
+    );
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+/// Sentence `Three.` has a check only in `t2`.
+const T2_CHECKS_THREE: &str = "// spec(B): Three.\n#[test]\nfn three() {}\n";
+
+#[test]
+fn a_t2_check_counts_toward_the_spec_score_when_t2_runs() {
+    let record = record_with_proven(2);
+    let repo = Repo::new(
+        "t2-counts",
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_CHECKS_THREE),
+            ("harness/ledger/1.toml", record.as_str()),
+        ],
+    );
+    repo.write("crates/t2/tests/probe.rs", "// changed\n");
+    repo.commit();
+    let output = repo.gate();
+    assert_passes(&output);
+    for line in ["pass t2\n", "pass hills\n"] {
+        assert!(stdout(&output).contains(line), "{}", stdout(&output));
+    }
+}
+
+#[test]
+fn a_t2_check_left_out_does_not_count() {
+    let record = record_with_proven(2);
+    let repo = Repo::new(
+        "t2-left-out-count",
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_CHECKS_THREE),
+            ("harness/ledger/1.toml", record.as_str()),
+        ],
+    );
+    repo.write("crates/demo/src/lib.rs", &format!("{CHECK_ONE}{NO_CHECK}"));
+    repo.commit();
+    let output = repo.gate();
+    assert!(stdout(&output).contains("skip t2\n"), "{}", stdout(&output));
+    assert_fails(&output, "hills", "from 2 to 1");
+}

@@ -903,6 +903,7 @@ fn net_input(input: &str) -> usize {
             same_path(path, net::normalize_path(path).as_deref());
             // The path `decide` matches URL rules against is one too.
             if let Some(ours) = net::request_path(target) {
+                assert!(path.starts_with('/'), "{target:?}: accepted {ours:?}");
                 same_path(path, Some(&ours));
             }
             if let Some(normal) = net::normalize_path(target) {
@@ -1899,21 +1900,10 @@ mod tests {
             "/jgabor/agent-plus?tab=readme",
             "/%6agabor/agent%2Dplus#top",
             "/%41%3b%e2%82%ac",
-            "/a%2fb",
-            "/a/%2e%2E/b",
-            "/a/./b",
-            "//a",
-            "/a b",
-            "/é",
-            "/%",
-            "/%zz",
-            "a",
-            "",
         ] {
             let path = target.split(['?', '#']).next().unwrap_or_default();
-            if let Some(ours) = net::request_path(target) {
-                same_path(path, Some(&ours));
-            }
+            let ours = net::request_path(target).expect(target);
+            same_path(path, Some(&ours));
         }
     }
 

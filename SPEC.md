@@ -1402,7 +1402,8 @@ MCP servers, so code that ran once can add one that starts on later runs
 it reads any [secret](#secret). The agent sees only a placeholder, and the
 adapter signs the harness in with it. The proxy swaps in the real value on
 the hosts the adapter lists for that key, with the same checks as for a
-hidden secret.
+hidden secret. With Claude Code, the run's `~/.claude.json` approves the
+placeholder, so an interactive run doesn't ask whether to use the key.
 
 **`AUTH token`** uses a subscription token you created, such as one from
 `claude setup-token`. On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN`

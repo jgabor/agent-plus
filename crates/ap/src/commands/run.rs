@@ -64,7 +64,7 @@ use ap::paths::HostPath;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
 use guest::protocol::Share as GuestShare;
-use guest::protocol::{Size, Start};
+use guest::protocol::{GuestFile, Size, Start};
 
 /// The `PATH` the harness gets, unless `ENV` sets one.
 const PATH: &str = "/usr/local/bin:/usr/bin:/bin";
@@ -760,6 +760,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     // SPEC.md's AUTH: `key` and `token` read their variable as a secret
     // does. A key is hidden, and every request to its hosts must carry its
     // placeholder. A token is visible.
+    let mut written = Vec::new();
     let harness = Settings::read(&instructions)
         .map_err(unreadable)?
         .agent
@@ -784,6 +785,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
                 let placeholder = random_placeholder()
                     .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
                 given.push((variable.as_bytes().to_vec(), placeholder.clone()));
+                // Only a key has hosts.
+                written = ap::adapter::key_files(harness, &placeholder);
                 hidden.push(Hidden {
                     name: variable.to_owned(),
                     value,
@@ -1020,6 +1023,12 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             .map(|(path, opened)| GuestShare {
                 path: path.into_bytes(),
                 file: (opened.file.as_ref()).map(|name| name.as_bytes().to_vec()),
+            })
+            .collect(),
+        files: (written.into_iter())
+            .map(|(path, contents)| GuestFile {
+                path: path.as_bytes().to_vec(),
+                contents,
             })
             .collect(),
         // The network process makes the run's authority, once it starts.

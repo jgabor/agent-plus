@@ -1854,6 +1854,38 @@ fn auth_token_hands_the_harness_its_token() {
     drop(run);
 }
 
+// spec(AUTH): With Claude Code, the run's `~/.claude.json` approves the placeholder, so an interactive run doesn't ask whether to use the key.
+#[test]
+fn auth_key_approves_only_the_runs_placeholder() {
+    let scratch = Scratch::new("auth-key-approved");
+    scratch.build("keyed", &fake("ENV FAKE_HARNESS_SLEEP 300\nAUTH key\n"));
+    let (run, name, report) = start_reporting(
+        &scratch,
+        "keyed",
+        &[("ANTHROPIC_API_KEY", "sk-ant-api03-key-8d1c")],
+    );
+    let placeholder = seen(&report, "ANTHROPIC_API_KEY");
+    assert_eq!(placeholder.len(), 32, "{report}");
+    // Claude Code approves a key by its last 20 characters.
+    let approved = &placeholder[12..];
+    printed(
+        &scratch.exec(&name, &["cat", "/home/agent/.claude.json"], b""),
+        &format!(
+            "{{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {{\n    \"/\": {{\n      \"hasTrustDialogAccepted\": true\n    }}\n  }},\n  \"customApiKeyResponses\": {{\n    \"approved\": [\"{approved}\"]\n  }}\n}}\n"
+        ),
+    );
+    // Claude Code keeps its state there, so the harness can change it.
+    printed(
+        &scratch.exec(
+            &name,
+            &["stat", "-c", "%U:%G %a", "/home/agent/.claude.json"],
+            b"",
+        ),
+        "agent:agent 644\n",
+    );
+    drop(run);
+}
+
 // spec(SECRET): A missing value makes the run fail, and the error names the secret.
 // spec(Run): **Exit status.** If `ap` fails before the harness starts, for example on a missing secret or a refused approval, it exits with status 125.
 #[test]

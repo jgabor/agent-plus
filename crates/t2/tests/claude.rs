@@ -70,7 +70,27 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
         &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\n"),
         &format!("HARNESS claude {VERSION} {DIGEST}\n"),
     );
-    let mut run = Interactive::start(scratch.run("claude"));
+    reaches_its_prompt(Interactive::start(scratch.run("claude")));
+}
+
+// Claude Code asks whether to use a key from its environment that its state
+// doesn't approve. The key isn't a real one, and nothing sends it anywhere
+// it could be used.
+#[test]
+fn an_interactive_run_with_auth_key_doesnt_ask_whether_to_use_it() {
+    let scratch = Scratch::new("key-dialog");
+    scratch.build(
+        "keyed",
+        &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\nAUTH key\n"),
+        &format!("HARNESS claude {VERSION} {DIGEST}\n"),
+    );
+    let mut run = scratch.run("keyed");
+    run.env("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key-5c0e");
+    reaches_its_prompt(Interactive::start(run));
+}
+
+/// Fails unless Claude Code shows its prompt, with no dialog before it.
+fn reaches_its_prompt(mut run: Interactive) {
     // The prompt's status line names the mode. Claude Code draws it only
     // once no dialog is in the way.
     let deadline = Instant::now() + STARTS_WITHIN;
@@ -81,6 +101,10 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
         assert!(
             !text.contains("Itrustthisfolder"),
             "Claude Code asked whether to trust its working directory: {text}"
+        );
+        assert!(
+            !text.contains("DetectedacustomAPIkey"),
+            "Claude Code asked whether to use its key: {text}"
         );
         if text.contains("⏵⏵automodeon") {
             break;

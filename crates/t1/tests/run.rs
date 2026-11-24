@@ -1523,8 +1523,9 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
         .read_line(&mut asleep)
         .unwrap();
     assert_eq!(asleep, "asleep\n");
-    run.0.kill().unwrap();
-    run.0.wait().unwrap();
+    // The guard sends `SIGTERM`, which `timeout` passes on to `ap run`. A
+    // `SIGKILL` would end only `timeout`.
+    drop(run);
     let status = wait_within(&mut sleeper, Duration::from_secs(10));
     assert_eq!(status.code(), Some(FAILED), "{status:?}");
 

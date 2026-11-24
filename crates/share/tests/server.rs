@@ -531,7 +531,7 @@ fn a_known_node_the_host_moves_outside_the_root_shows_no_attributes() {
     // A directory with no search permission still shows where it is, by
     // its name.
     let path = tree.root.join("dir/locked");
-    fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o0)).unwrap();
     let getattr = |guest: &mut Guest, node| guest.call(GETATTR, node, &[0; 16]).0;
     assert_eq!(getattr(&mut guest, locked), 0);
     let away = tree.base.join("outside/dir");

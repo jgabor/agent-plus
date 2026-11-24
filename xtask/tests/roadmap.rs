@@ -125,7 +125,7 @@ case "$1 $2" in
   "issue list") cat "$d/issues.json" ;;
   "pr list") cat "$d/prs.json" ;;
   "issue view") cat "$d/issue.json" 2>/dev/null || echo '{"number":2,"state":"OPEN","body":"","labels":[],"comments":[]}' ;;
-  "repo view") echo '{"owner":{"login":"o"}}' ;;
+  "repo view") echo '{"owner":{"login":"o"},"url":"https://github.com/o/r"}' ;;
   "api "*"/reactions?content=eyes")
     id="${2%/reactions*}"; id="${id##*/}"
     cat "$d/eyes-$id" 2>/dev/null || true ;;

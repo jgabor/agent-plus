@@ -29,7 +29,7 @@ case "$1 $2" in
       *) cat "$d/issues.json" ;;
     esac ;;
   "issue view") cat "$d/issue.json" ;;
-  "repo view") echo '{"owner":{"login":"o"}}' ;;
+  "repo view") echo '{"owner":{"login":"o"},"url":"https://github.com/o/r"}' ;;
   "issue create")
     if [ -e "$d/no-create" ]; then echo "issues are off" >&2; exit 1; fi
     n="$(cat "$d/next")"

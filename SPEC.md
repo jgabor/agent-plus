@@ -1636,6 +1636,10 @@ attributes, because those can run commands.
     `git fsck --strict` refuses. Past any of these limits, or at such an
     entry, `ap diff`'s first line says why, and `ap apply` refuses the
     branch import, says why, and everything stays pending.
+  - `ap diff` and `ap apply` read none of the agent's objects or pack
+    indexes larger than 512 MiB. At a larger one, `ap diff`'s first line
+    says why, and `ap apply` refuses the branch import, says why, and
+    everything stays pending.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and

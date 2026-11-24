@@ -134,6 +134,26 @@ pub fn commit_named(dir: &Path, name: &[u8]) {
     commit_tree(dir, &written, "named");
 }
 
+/// Commits `path` in the repository `dir` after its `HEAD`, as `size` zero
+/// bytes, and returns the name of its blob. Git writes the blob loose if
+/// `loose`, and to a pack of its own otherwise. The file is sparse, so it
+/// costs almost nothing on disk, and git compresses its blob about 1000 to
+/// 1.
+pub fn commit_zeros(dir: &Path, path: &str, size: u64, loose: bool) -> String {
+    fs::File::create(dir.join(path))
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    // Git writes a blob larger than this to a pack of its own.
+    let threshold = format!("core.bigFileThreshold={}", if loose { size } else { 1 });
+    run(dir, &["-c", &threshold, "add", path]);
+    run(dir, &["commit", "-q", "-m", path]);
+    let blob = run(dir, &["rev-parse", &format!("HEAD:{path}")]);
+    let held = dir.join(".git/objects").join(&blob[..2]).join(&blob[2..]);
+    assert_eq!(held.exists(), loose);
+    blob
+}
+
 fn entry(mode: u32, name: &[u8], id: git::Id) -> git::TreeEntry {
     git::TreeEntry {
         mode,

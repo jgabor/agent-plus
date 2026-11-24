@@ -9,7 +9,7 @@
 //! only on your repository, and on the agent's objects once it has written
 //! them to a quarantine directory.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
@@ -34,6 +34,12 @@ const MAX_DEPTH: usize = 5;
 const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
 const TREE: u32 = 0o40000;
+/// How many paths of the tree of the agent's `HEAD` `ap` reads, at most.
+const MAX_PATHS: usize = 1_000_000;
+/// How long a path of that tree may be, in bytes, at most. Each path is
+/// then cheap to read, and a walk of the tree goes no more than 512 deep,
+/// which the stack holds.
+const MAX_PATH: usize = 1024;
 /// The author and committer of the last commit.
 const IDENTITY: &str = "Agent+ <ap@localhost>";
 
@@ -58,6 +64,11 @@ struct Agent<'a> {
     /// Each file and symlink of the agent's that would replace a directory
     /// its `HEAD` holds with a git-ignored file in it.
     replacing: BTreeSet<Vec<u8>>,
+    /// How many paths of the tree of its `HEAD` have been read.
+    paths: Cell<usize>,
+    /// The entries of each tree of its `HEAD` that has been read, so that
+    /// one it names many times is read once.
+    trees: RefCell<HashMap<Id, Vec<git::TreeEntry>>>,
 }
 
 impl<'a> Agent<'a> {
@@ -69,6 +80,8 @@ impl<'a> Agent<'a> {
             yours: Repository::at(share.root.join(".git")),
             made: RefCell::default(),
             replacing: BTreeSet::new(),
+            paths: Cell::new(0),
+            trees: RefCell::default(),
         }
     }
 
@@ -152,6 +165,34 @@ impl<'a> Agent<'a> {
         Ok(object)
     }
 
+    /// The entries of the tree `tree`, at `path` in the tree of the agent's
+    /// `HEAD`. Each is a path read, which may be no longer than `MAX_PATH`.
+    fn entries(&self, path: &[u8], tree: &Id) -> Result<Vec<git::TreeEntry>, git::Error> {
+        let read = self.trees.borrow().get(tree).cloned();
+        let entries = match read {
+            Some(entries) => entries,
+            None => {
+                let entries = self.object(tree)?.entries()?;
+                self.trees.borrow_mut().insert(*tree, entries.clone());
+                entries
+            }
+        };
+        let paths = self.paths.get() + entries.len();
+        if paths > MAX_PATHS {
+            return Err(git::Error::Corrupt(
+                "the agent's HEAD holds more than the million paths that `ap` reads".to_owned(),
+            ));
+        }
+        self.paths.set(paths);
+        let above = path.len() + usize::from(!path.is_empty());
+        if (entries.iter()).any(|entry| above + entry.name.len() > MAX_PATH) {
+            return Err(git::Error::Corrupt(format!(
+                "the agent's HEAD holds a path longer than the {MAX_PATH} bytes that `ap` reads"
+            )));
+        }
+        Ok(entries)
+    }
+
     /// Walks from `head` to the objects your repository already has, and
     /// gives each other object to `found`, once. Each object must be of the
     /// type that names it, yours too, because `git fsck` doesn't look at
@@ -219,7 +260,7 @@ impl<'a> Agent<'a> {
         tree: Id,
         found: &mut BTreeSet<Vec<u8>>,
     ) -> Result<(), git::Error> {
-        for entry in self.object(&tree)?.entries()? {
+        for entry in self.entries(path, &tree)? {
             if entry.mode != TREE {
                 continue;
             }
@@ -241,7 +282,7 @@ impl<'a> Agent<'a> {
 
     /// Whether the tree `tree` at `path` holds a git-ignored file.
     fn holds_ignored(&self, ignore: &Gitignore, path: &[u8], tree: Id) -> Result<bool, git::Error> {
-        for entry in self.object(&tree)?.entries()? {
+        for entry in self.entries(path, &tree)? {
             let inner = beneath(path, &entry.name);
             // As `verdict` and `left_at` read it, a submodule is a file.
             if ignore.is_ignored(bytes_path(&inner), entry.mode == TREE) {
@@ -373,7 +414,7 @@ impl<'a> Agent<'a> {
         }
         let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();
         if let Some((TREE, tree)) = head {
-            for entry in self.object(&tree)?.entries()? {
+            for entry in self.entries(path, &tree)? {
                 entries.insert(entry.name, Some((entry.mode, entry.id)));
             }
         }

@@ -1,14 +1,15 @@
 //! What a repository can make `crates/git` allocate under a limit. Zlib
 //! inflates about 1000 to 1, so each test plants a small object that
 //! declares, and inflates to, far more than the limit, and counts what the
-//! read allocates on its thread.
+//! read allocates on its thread. A sparse file costs almost nothing on disk,
+//! so others plant a file whose length is far more than the limit.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use git::{Error, Id, Kind, Object, Repository};
+use git::{Error, Id, Kind, Object, Repository, Target};
 
 mod plant;
 
@@ -201,4 +202,79 @@ fn a_chain_of_deltas_is_applied_one_delta_at_a_time() {
     // The base, one delta, and the result, where holding the whole chain
     // would be 64 deltas.
     assert!(held < LIMIT, "held {held} bytes");
+}
+
+/// The length of a sparse file, far more than the limit.
+const SPARSE: u64 = 1 << 30;
+
+/// Writes `start` to `path`, and makes the file `SPARSE` bytes long.
+fn sparse(path: &Path, start: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, start).unwrap();
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_len(SPARSE).unwrap();
+}
+
+fn loose_path(git: &Path, id: &Id) -> PathBuf {
+    let hex = id.to_string();
+    git.join("objects").join(&hex[..2]).join(&hex[2..])
+}
+
+#[test]
+fn a_sparse_loose_object_is_read_a_piece_at_a_time() {
+    let root = scratch("sparse-loose");
+    let git = root.join(".git");
+    let repo = || Repository::at(&git).with_limit(LIMIT);
+    // Git reads the object, and ignores what follows its zlib stream.
+    let raw = miniz_oxide::deflate::compress_to_vec_zlib(b"blob 4\0four", 6);
+    sparse(&loose_path(&git, &id(1)), &raw);
+    let (result, held) = peak(|| repo().object(&id(1)));
+    assert_eq!(result.unwrap().unwrap().data, b"four");
+    assert!(held < LIMIT, "held {held} bytes");
+    let (result, held) = peak(|| repo().kind(&id(1)));
+    assert_eq!(result.unwrap(), Some(Kind::Blob));
+    assert!(held < LIMIT, "held {held} bytes");
+    // A file of nothing isn't zlib.
+    sparse(&loose_path(&git, &id(2)), b"");
+    let (result, held) = peak(|| repo().object(&id(2)));
+    assert_refused(result, held);
+    let (result, held) = peak(|| repo().kind(&id(2)));
+    assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
+    assert!(held < LIMIT, "held {held} bytes");
+}
+
+#[test]
+fn a_sparse_pack_index_is_refused_before_it_is_read() {
+    let root = scratch("sparse-index");
+    plant_pack(&root, &[(id(1), whole(3, b"four"))]);
+    let git = root.join(".git");
+    let index = git.join("objects/pack/pack-planted.idx");
+    let planted = fs::read(&index).unwrap();
+    sparse(&index, &planted);
+    let (result, held) = peak(|| Repository::at(&git).with_limit(LIMIT).object(&id(1)));
+    assert_refused(result, held);
+}
+
+#[test]
+fn sparse_refs_are_refused_before_they_are_read() {
+    let root = scratch("sparse-refs");
+    let git = root.join(".git");
+    let repo = || Repository::at(&git).with_limit(LIMIT);
+    let line = format!("{} refs/heads/packed\n", id(1));
+    sparse(&git.join("packed-refs"), line.as_bytes());
+    let (result, held) = peak(|| repo().find_ref("refs/heads/packed"));
+    assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
+    assert!(held < LIMIT, "held {held} bytes");
+    let (result, held) = peak(|| repo().refs());
+    assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
+    assert!(held < LIMIT, "held {held} bytes");
+    fs::remove_file(git.join("packed-refs")).unwrap();
+    // Git would read this ref: it ends at the first NUL.
+    sparse(&git.join("refs/heads/loose"), format!("{}\n", id(1)).as_bytes());
+    let (result, held) = peak(|| repo().find_ref("refs/heads/loose"));
+    assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
+    assert!(held < LIMIT, "held {held} bytes");
+    // Without a limit, the same ref reads.
+    let read = Repository::at(&git).find_ref("refs/heads/loose").unwrap();
+    assert_eq!(read, Some(Target::Object(id(1))));
 }

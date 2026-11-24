@@ -42,7 +42,9 @@
 //! at once with [`KILLED`], which powers the VM off, and reports nothing,
 //! so that no write can hold it back.
 //! `ap run` holds the connection until it exits itself, after the run
-//! process, so `ap stop` reads its end once the VM has stopped.
+//! process, so `ap stop` reads its end once the VM has stopped. From the
+//! stop on, the terminal's job control no longer suspends `ap run`, so it
+//! gets that far even from the background of its terminal.
 //!
 //! `ap run` writes what it shows of the run's output to the run's log, in the
 //! same messages the run process sends it, and `ap logs` reads them back.
@@ -485,6 +487,7 @@ impl Execs {
         let exec = match read_from_exec(&mut reader) {
             Ok(Some(FromExec::Exec(exec))) => exec,
             Ok(Some(FromExec::Stop)) => {
+                ignore_job_control();
                 if self.send_whole(STOP, &[]).is_ok() {
                     // Held until `ap stop` hangs up, or this process exits.
                     let _ = io::copy(&mut reader, &mut io::sink());
@@ -870,6 +873,18 @@ impl ToRun {
                 .0;
         }
         true
+    }
+}
+
+/// Keeps the terminal's job control from suspending this process again, so
+/// that a run `ap stop` has reached can end, and `ap run` with it, even from
+/// the background of its terminal. From here, writes and changes to the
+/// terminal's modes go through, and reads from it fail.
+fn ignore_job_control() {
+    for signal in [libc::SIGTTOU, libc::SIGTTIN] {
+        // SAFETY: `signal` takes and returns plain integers, and ignoring
+        // either signal is a valid action.
+        unsafe { libc::signal(signal, libc::SIG_IGN) };
     }
 }
 

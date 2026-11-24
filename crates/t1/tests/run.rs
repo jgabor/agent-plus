@@ -1048,6 +1048,84 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
     assert_eq!(scratch.ps(), Vec::<String>::new());
 }
 
+// spec(ap stop): If the run's `ap run` is suspended, `ap stop` resumes it.
+// spec(ap stop): Once `ap stop` has reached the run, its terminal's job control no longer suspends its `ap run`.
+#[test]
+fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
+    let scratch = Scratch::new("background");
+    scratch.build("open", &fake(""));
+    let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
+    // A shell with job control, as yours is, starts an interactive run in
+    // the background of its terminal, as `ap run open &` would. Raw mode
+    // can't be set from there, so `ap run` stops on `SIGTTOU`, and again
+    // each time it resumes.
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "set -m; timeout -k 10 {TIMEOUT} \"$0\" run open & exec sleep {TIMEOUT}"
+        ))
+        .arg(&shared().0)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &scratch.home)
+        .env("XDG_RUNTIME_DIR", &scratch.runtime)
+        .stdin(terminal.try_clone().unwrap())
+        .stdout(terminal.try_clone().unwrap())
+        .stderr(terminal.try_clone().unwrap());
+    // SAFETY: `take_terminal` only makes system calls.
+    unsafe { command.pre_exec(take_terminal) };
+    let shell = Started(command.spawn().unwrap());
+    drop(command);
+    let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
+    program.extend_from_slice(b"\0run\0");
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    let run = loop {
+        let found: Vec<u32> = descendants(shell.0.id())
+            .into_iter()
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline"))
+                    .is_ok_and(|cmdline| cmdline.starts_with(&program))
+            })
+            .collect();
+        if let [run] = found[..]
+            && stopped(run)
+        {
+            break run;
+        }
+        assert!(Instant::now() < deadline, "ap run didn't stop: {found:?}");
+        thread::sleep(Duration::from_millis(10));
+    };
+    let vm = run_process(run);
+    let rows = scratch.ps();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+
+    let mut stop = Started(
+        Command::new(&shared().0)
+            .args(["stop", &name])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let status = wait_within(&mut stop, Duration::from_secs(30));
+    let (mut stdout, mut stderr) = (stop.0.stdout.take().unwrap(), stop.0.stderr.take().unwrap());
+    let mut printed = String::new();
+    stdout.read_to_string(&mut printed).unwrap();
+    stderr.read_to_string(&mut printed).unwrap();
+    assert_eq!(status.code(), Some(0), "{printed}");
+    assert_eq!(printed, "", "{status:?}");
+    assert!(!running(vm), "the VM outlived ap stop");
+    assert!(!running(run), "ap run outlived ap stop");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 143"));
+}
+
 /// Whether the process `pid` is stopped, as by `SIGSTOP`.
 fn stopped(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))

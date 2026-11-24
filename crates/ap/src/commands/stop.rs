@@ -3,15 +3,22 @@
 //! [`ap::runs`] says. It returns once `ap run` hangs up, which it does only
 //! when it exits, after the run process that holds the VM. A suspended
 //! `ap run` can't take the connection, or exit, so `ap stop` resumes it.
+//! One in the background of its terminal can be suspended again as soon as
+//! it resumes, before it takes the stop, so `ap stop` resumes it every
+//! [`RESUME_EVERY`] until it hangs up.
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use ap::runs;
 use store::Runs;
+
+/// How often `ap stop` resumes the `ap run` it waits for.
+const RESUME_EVERY: Duration = Duration::from_millis(10);
 
 /// Reads `ap stop`'s arguments: one run's name. Anything else is bad usage.
 pub fn parse(args: &[OsString]) -> Option<String> {
@@ -50,13 +57,28 @@ fn stop(name: &str) -> Result<(), String> {
     // A run that ends first takes its socket with it, and has stopped as
     // asked, so only a run still active after a failure is an error.
     let dir = runs::runtime_dir(std::env::var_os("XDG_RUNTIME_DIR").as_deref(), &root);
-    let ask = || -> io::Result<u64> {
+    let ask = || -> io::Result<()> {
         // The path names the open directory, so it must stay open.
         let opened = File::open(&dir)?;
         let mut stream = UnixStream::connect(runs::short_path(&opened, &runs::socket_name(name)))?;
-        resume(&stream);
+        let serving = server(&stream);
         runs::send_stop(&mut stream)?;
-        io::copy(&mut stream, &mut io::sink())
+        stream.set_read_timeout(Some(RESUME_EVERY))?;
+        loop {
+            resume(serving);
+            match stream.read(&mut [0; 64]) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
     };
     match ask() {
         Err(error) if runs.active(name).map_err(|error| error.to_string())? => {
@@ -66,11 +88,9 @@ fn stop(name: &str) -> Result<(), String> {
     }
 }
 
-/// Resumes the `ap run` that serves the socket at the other end of
-/// `stream`, in case it is suspended. The kernel names the process that
-/// listens on the socket, and `SIGCONT` does nothing to one that runs, so a
-/// failure here holds back no stop that would reach the run anyway.
-fn resume(stream: &UnixStream) {
+/// The process id of the `ap run` that serves the socket at the other end
+/// of `stream`, which the kernel names, if it has one here.
+fn server(stream: &UnixStream) -> Option<libc::pid_t> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -89,8 +109,15 @@ fn resume(stream: &UnixStream) {
         )
     };
     // A listener in another process namespace has no process id here.
-    if read == 0 && credentials.pid > 0 {
+    (read == 0 && credentials.pid > 0).then_some(credentials.pid)
+}
+
+/// Resumes the `ap run` with this process id, in case it is suspended.
+/// `SIGCONT` does nothing to one that runs, so a failure here holds back no
+/// stop that would reach the run anyway.
+fn resume(serving: Option<libc::pid_t>) {
+    if let Some(pid) = serving {
         // SAFETY: `kill` takes and returns plain integers.
-        unsafe { libc::kill(credentials.pid, libc::SIGCONT) };
+        unsafe { libc::kill(pid, libc::SIGCONT) };
     }
 }

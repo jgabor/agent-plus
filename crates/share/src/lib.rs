@@ -18,7 +18,8 @@
 //! of a file it can't read. The frames on the socket are the ones
 //! [`vmm::fs`] describes. A server can hold one more file until it exits,
 //! such as a run's locked record, so the run stays active until it has
-//! answered its last request.
+//! answered its last request. Its filter refuses to lock or unlock that
+//! file.
 
 mod landlock;
 mod namespace;
@@ -29,7 +30,7 @@ mod times;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -186,11 +187,13 @@ pub fn main(args: &[OsString]) -> u8 {
 }
 
 fn run(args: &[OsString]) -> io::Result<()> {
+    // Never closed, so its number is never another file's, which the filter
+    // would refuse to lock.
     let (kept, args) = match args {
-        [keep, fd, rest @ ..] if keep == KEEP => (Some(open_kept(fd)?), rest),
+        [keep, fd, rest @ ..] if keep == KEEP => (Some(open_kept(fd)?.into_raw_fd()), rest),
         _ => (None, args),
     };
-    let roots = open_roots(args, kept.as_ref())?;
+    let roots = open_roots(args, kept)?;
     let read_write = |root: &Root| matches!(root.mode, Mode::ReadWrite);
     if roots.iter().any(read_write) && !roots.iter().all(read_write) {
         return Err(io::Error::other(
@@ -208,7 +211,7 @@ fn run(args: &[OsString]) -> io::Result<()> {
     // in this process owns it.
     let mut socket = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
     let times = server.times();
-    vmm::confine::confine_share_server(socket.as_raw_fd(), server.changes(), &times)?;
+    vmm::confine::confine_share_server(socket.as_raw_fd(), server.changes(), &times, kept)?;
     serve(&mut socket, &mut server)
 }
 
@@ -228,13 +231,13 @@ fn open_kept(arg: &OsString) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn open_roots(args: &[OsString], kept: Option<&OwnedFd>) -> io::Result<Vec<Root>> {
+fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
     let usage = || {
         io::Error::other(
             "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
         )
     };
-    let mut taken: Vec<i32> = kept.iter().map(|fd| fd.as_raw_fd()).collect();
+    let mut taken: Vec<i32> = kept.into_iter().collect();
     let mut take = |arg: Option<&OsString>| -> io::Result<OwnedFd> {
         let fd = (arg.and_then(|arg| arg.to_str()))
             .and_then(|fd| fd.parse::<i32>().ok())

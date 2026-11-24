@@ -257,7 +257,12 @@ pub enum Changes {
 /// keeps a symlink as a record, and makes no hard link. It asks the
 /// processes at `times` to set the times of a copy-on-write share's
 /// copies, sending each a message, and reads their answers.
-fn share_server_rules(socket: RawFd, changes: Changes, times: &[RawFd]) -> Vec<Rule> {
+fn share_server_rules(
+    socket: RawFd,
+    changes: Changes,
+    times: &[RawFd],
+    kept: Option<RawFd>,
+) -> Vec<Rule> {
     use Rule::{
         Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither,
         AllowUnlessOrAllSet,
@@ -278,7 +283,10 @@ fn share_server_rules(socket: RawFd, changes: Changes, times: &[RawFd]) -> Vec<R
         // Rust checks a descriptor this way before it closes it. The rest
         // are locks, which never wait.
         AllowIf(FCNTL, 1, vec![F_GETFD, F_OFD_GETLK, F_OFD_SETLK]),
-        Allow(FLOCK),
+        match kept {
+            Some(kept) => AllowUnless(FLOCK, 0, kept as u32),
+            None => Allow(FLOCK),
+        },
         AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
@@ -488,9 +496,15 @@ pub fn confine(readable: &[RawFd]) -> io::Result<()> {
 /// Confines the share server, which has one thread, for the rest of its
 /// life, and lets it make the changes `changes` names. Call it once every
 /// share's root is open. Requests come from `socket`, and answers go back
-/// on it. It asks the processes at `times` to set times.
-pub fn confine_share_server(socket: RawFd, changes: Changes, times: &[RawFd]) -> io::Result<()> {
-    install(&share_server_rules(socket, changes, times))
+/// on it. It asks the processes at `times` to set times. It can't lock or
+/// unlock `kept`, so a lock that `kept` holds lasts until it exits.
+pub fn confine_share_server(
+    socket: RawFd,
+    changes: Changes,
+    times: &[RawFd],
+    kept: Option<RawFd>,
+) -> io::Result<()> {
+    install(&share_server_rules(socket, changes, times, kept))
 }
 
 /// The filter of the process that sets a copy-on-write share's times,
@@ -721,7 +735,7 @@ mod tests {
 
     fn share_call(number: u32, args: [u32; 6]) -> u32 {
         run_rules(
-            &share_server_rules(SOCKET as RawFd, Changes::Nothing, &[]),
+            &share_server_rules(SOCKET as RawFd, Changes::Nothing, &[], None),
             AUDIT_ARCH_X86_64,
             number,
             args,
@@ -729,12 +743,12 @@ mod tests {
     }
 
     fn writing_call(number: u32, args: [u64; 6]) -> u32 {
-        let rules = share_server_rules(SOCKET as RawFd, Changes::FilesModesAndTimes, &[]);
+        let rules = share_server_rules(SOCKET as RawFd, Changes::FilesModesAndTimes, &[], None);
         run_wide(&rules, AUDIT_ARCH_X86_64, number, args)
     }
 
     fn copying_call(number: u32, args: [u32; 6]) -> u32 {
-        let rules = share_server_rules(SOCKET as RawFd, Changes::Files, &[TIMES as RawFd]);
+        let rules = share_server_rules(SOCKET as RawFd, Changes::Files, &[TIMES as RawFd], None);
         run_rules(&rules, AUDIT_ARCH_X86_64, number, args)
     }
 
@@ -760,6 +774,15 @@ mod tests {
             share_call(FCNTL, [4, f_ofd_setlkw, 0, 0, 0, 0]),
             RET_KILL_PROCESS
         );
+    }
+
+    #[test]
+    fn the_share_server_can_t_lock_or_unlock_what_it_keeps() {
+        let kept = 9;
+        let rules = share_server_rules(SOCKET as RawFd, Changes::Files, &[], Some(kept));
+        let flock = |fd| run_rules(&rules, AUDIT_ARCH_X86_64, FLOCK, [fd, 0, 0, 0, 0, 0]);
+        assert_eq!(flock(kept as u32), RET_KILL_PROCESS);
+        assert_eq!(flock(4), RET_ALLOW);
     }
 
     #[test]

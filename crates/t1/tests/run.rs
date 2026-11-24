@@ -2,9 +2,10 @@
 //! one, then boots it, headless or in a terminal, and reads what the harness
 //! saw.
 
+use std::ffi::{c_int, c_long, c_uint, c_void};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
@@ -1072,15 +1073,21 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
                     .is_ok_and(|cmdline| cmdline.starts_with(&program))
             })
             .collect();
-        // The run is listed once the run process holds its record.
+        // The run is listed once the run process holds its record. The
+        // harness ignores `SIGTERM` before it reports, and its report waits
+        // for the suspended `ap run`, so a stop from here finds it ignored.
         if let [run] = found[..]
             && stopped(run)
+            && waiting_to_be_read(run, b"{\"arguments\":")
             && let rows = scratch.ps()
             && rows.len() == 1
         {
             break (run, rows);
         }
-        assert!(Instant::now() < deadline, "ap run didn't stop: {found:?}");
+        assert!(
+            Instant::now() < deadline,
+            "ap run didn't stop, or the harness didn't report: {found:?}"
+        );
         thread::sleep(Duration::from_millis(10));
     };
     let vm = run_process(run);
@@ -1209,6 +1216,77 @@ fn stopped(pid: u32) -> bool {
         .ok()
         .and_then(|stat| stat.rsplit_once(") ")?.1.chars().next())
         == Some('T')
+}
+
+const SYS_PIDFD_OPEN: c_long = 434;
+const SYS_PIDFD_GETFD: c_long = 438;
+const MSG_PEEK: c_int = 2;
+const MSG_DONTWAIT: c_int = 0x40;
+const EBADF: i32 = 9;
+
+unsafe extern "C" {
+    fn syscall(number: c_long, ...) -> c_long;
+    fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_int) -> isize;
+}
+
+/// Whether `text` waits to be read on one of the sockets of `pid`, a process
+/// this test started, as what the run process sends waits for an `ap run`
+/// that is suspended. The test takes a copy of each socket, as an ancestor
+/// may, and looks without taking anything.
+fn waiting_to_be_read(pid: u32, text: &[u8]) -> bool {
+    // SAFETY: `pidfd_open` takes and returns plain integers.
+    let pidfd = unsafe { syscall(SYS_PIDFD_OPEN, pid as c_int, 0 as c_uint) };
+    assert!(pidfd >= 0, "pidfd_open: {}", io::Error::last_os_error());
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as c_int) };
+    let mut buffer = vec![0u8; 64 << 10];
+    for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
+        let entry = entry.unwrap();
+        let socket = fs::read_link(entry.path()).is_ok_and(|target| {
+            target
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(b"socket:")
+        });
+        let Some(theirs) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<c_int>().ok())
+        else {
+            continue;
+        };
+        if !socket {
+            continue;
+        }
+        // SAFETY: `pidfd_getfd` takes and returns plain integers.
+        let ours = unsafe { syscall(SYS_PIDFD_GETFD, pidfd.as_raw_fd(), theirs, 0 as c_uint) };
+        if ours < 0 {
+            let error = io::Error::last_os_error();
+            // It closed since it was listed.
+            assert_eq!(error.raw_os_error(), Some(EBADF), "pidfd_getfd: {error}");
+            continue;
+        }
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        let ours = unsafe { OwnedFd::from_raw_fd(ours as c_int) };
+        // SAFETY: the buffer is valid for its whole length, which `recv`
+        // writes no further than.
+        let peeked = unsafe {
+            recv(
+                ours.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                MSG_PEEK | MSG_DONTWAIT,
+            )
+        };
+        if let Ok(peeked) = usize::try_from(peeked)
+            && buffer[..peeked]
+                .windows(text.len())
+                .any(|window| window == text)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Sends `signal` to the process `pid`, which this test started.

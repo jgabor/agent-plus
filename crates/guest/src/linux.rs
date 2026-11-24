@@ -236,12 +236,12 @@ impl System for Linux {
                 _ => {}
             }
             if target == Path::new(TMP) {
-                let unmounted = CString::new(TMP).map_err(io::Error::other)?;
-                // SAFETY: the path is a `CString` that outlives the call.
-                checked(unsafe { umount2(unmounted.as_ptr(), 0) })?;
+                // SAFETY: the path is a `&'static CStr`.
+                checked(unsafe { umount2(mount.target.as_ptr(), 0) })?;
                 let moved = moved.to_string_lossy();
                 mount_with(&tmp, &moved, "", MS_BIND, "")?;
-                // A bind keeps none of the flags of the mount it comes from.
+                // A bind ignores the flags given with it, so a remount sets
+                // them.
                 mount_with("", &moved, "", MS_REMOUNT | MS_BIND | mount.flags, "")?;
                 continue;
             }

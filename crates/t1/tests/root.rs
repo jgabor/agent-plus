@@ -229,13 +229,19 @@ fn the_root_and_tmp_share_256_mib() {
     let init = fs::read(guest_binary::ap()).unwrap();
     let seen = boot_with(&init, &kernel, attached);
     // The probe writes 192 MiB to `/tmp`, then fills the root, a MiB at a
-    // time. The directories and the partial last MiB take a little.
+    // time, and then finds no room left in `/tmp`. The directories and the
+    // partial last MiB take a little.
     assert_eq!(seen["tmp"], "192", "{seen:?}");
     assert_eq!(seen["tmp_error"], "none", "{seen:?}");
     let root: usize = seen["root"].parse().unwrap();
     assert!((60..=64).contains(&root), "{seen:?}");
     assert_eq!(
         seen["root_error"], "No space left on device (os error 28)",
+        "{seen:?}"
+    );
+    assert_eq!(seen["after"], "0", "{seen:?}");
+    assert_eq!(
+        seen["after_error"], "No space left on device (os error 28)",
         "{seen:?}"
     );
     assert_eq!(seen["tmp_mode"], "1777", "{seen:?}");

@@ -1,7 +1,7 @@
-//! A static program for T1, kept in an agent's top layer: it writes to `/tmp`
-//! and then to the root until each is full or holds what it was asked to,
-//! and prints, one `name=value` line each, how many MiB each took, what the
-//! write that stopped it saw, and how `/tmp` is mounted.
+//! A static program for T1, kept in an agent's top layer: it writes to `/tmp`,
+//! then to the root, then to `/tmp` again, until each is full or holds what
+//! it was asked to, and prints, one `name=value` line each, how many MiB each
+//! took, what the write that stopped it saw, and how `/tmp` is mounted.
 
 use std::fs::{self, File};
 use std::io::Write;
@@ -31,10 +31,13 @@ fn fill(path: &str, limit: usize) -> (usize, String) {
 fn main() {
     let (tmp, tmp_error) = fill("/tmp/fill", IN_TMP);
     let (root, root_error) = fill("/fill", IN_ROOT);
+    let (after, after_error) = fill("/tmp/after", 1);
     println!("tmp={tmp}");
     println!("tmp_error={tmp_error}");
     println!("root={root}");
     println!("root_error={root_error}");
+    println!("after={after}");
+    println!("after_error={after_error}");
     let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
     let line = mounts
         .lines()

@@ -303,6 +303,14 @@ fn request(
         }
         Http::ChunkSize => match httparse::parse_chunk_size(held).map_err(|_| Refused)? {
             httparse::Status::Partial => short(),
+            // httparse reads a line with no size digit as size 0, and lets
+            // an extension hold a bare LF, which ends the line for another
+            // server.
+            httparse::Status::Complete((taken, _))
+                if !held[0].is_ascii_hexdigit() || held[..taken - 1].contains(&b'\n') =>
+            {
+                Err(Refused)
+            }
             httparse::Status::Complete((taken, 0)) => {
                 Ok(Some((taken, State::Http(Http::Trailers))))
             }
@@ -319,8 +327,14 @@ fn request(
             let mut headers = [httparse::EMPTY_HEADER; HEADERS];
             match httparse::parse_headers(held, &mut headers).map_err(|_| Refused)? {
                 httparse::Status::Partial => short(),
+                // httparse ends a line at a bare LF too, and a server that
+                // doesn't reads the trailers another way.
                 httparse::Status::Complete((taken, _)) => {
-                    Ok(Some((taken, State::Http(Http::Head))))
+                    let mut lines = held[..taken].split_inclusive(|&byte| byte == b'\n');
+                    match lines.all(|line| line.ends_with(b"\r\n")) {
+                        true => Ok(Some((taken, State::Http(Http::Head)))),
+                        false => Err(Refused),
+                    }
                 }
             }
         }

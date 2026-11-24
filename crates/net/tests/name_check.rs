@@ -206,7 +206,20 @@ fn a_request_the_server_could_read_another_way_is_refused() {
     ] {
         refused(format!("{head}{headers}\r\nx").as_bytes());
     }
-    let bad_chunks = ["zz\r\n", "1\r\nab\r\n", "1\r\na\n0\r\n\r\n"];
+    // A chunk size line needs a digit, and it and a trailer line end only
+    // at CRLF, as hyper reads them.
+    let bad_chunks = [
+        "zz\r\n",
+        "1\r\nab\r\n",
+        "1\r\na\n0\r\n\r\n",
+        "0\r\n\n",
+        "0\r\nT: 1\n\r\n",
+        "0\r\nT: 1\r\n\n",
+        "0;\n\r\n\r\n",
+        "\r\n\r\n",
+        ";x\r\n\r\n",
+        " \r\n\r\n",
+    ];
     for chunks in bad_chunks {
         let input = format!("{head}Transfer-Encoding: chunked\r\n\r\n{chunks}");
         let (_, result, _) = fed(input.as_bytes(), input.len());

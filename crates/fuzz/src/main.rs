@@ -592,16 +592,10 @@ fn name_check_input(input: &str) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut request = httparse::Request::new(&mut headers);
     if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes) {
-        let agrees = |header: &httparse::Header| {
-            let value = header.value.trim_ascii().to_ascii_lowercase();
-            let colon = value.iter().rposition(|&byte| byte == b':');
-            let name = &value[..colon.unwrap_or(value.len())];
-            name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
-        };
         let hosts: Vec<_> = (request.headers.iter())
             .filter(|header| header.name.eq_ignore_ascii_case("host"))
             .collect();
-        if !matches!(hosts[..], [host] if agrees(host)) {
+        if !matches!(hosts[..], [host] if names_host(host.value)) {
             assert!(
                 whole.0.len() < head,
                 "a head for another host passed: {:?}",
@@ -609,7 +603,206 @@ fn name_check_input(input: &str) -> bool {
             );
         }
     }
+    // hyper, as a server would, reads every request that passed.
+    same_requests(&whole.0, &checked_requests(&whole.0));
     whole.1 && whole.0 == bytes
+}
+
+/// Whether a `Host` header's value names `host.ap.internal`.
+fn names_host(value: &[u8]) -> bool {
+    let value = value.trim_ascii().to_ascii_lowercase();
+    let colon = value.iter().rposition(|&byte| byte == b':');
+    let (name, port) = value.split_at(colon.unwrap_or(value.len()));
+    let port_ok = port.iter().skip(1).all(u8::is_ascii_digit);
+    port_ok && name.strip_suffix(b".").unwrap_or(name) == b"host.ap.internal"
+}
+
+/// A request that a reader took from a stream: the offset just after its
+/// last byte, its method, and its `Host` values, escaped.
+#[derive(Debug, PartialEq)]
+struct Framed {
+    end: usize,
+    method: String,
+    hosts: Vec<String>,
+}
+
+/// The requests that the name check of a connection to `host.ap.internal`
+/// reads from `passed`, fed to it one byte at a time. A request ends where
+/// the check holds nothing.
+fn checked_requests(passed: &[u8]) -> Vec<Framed> {
+    let mut check = net::NameCheck::requests("host.ap.internal");
+    let mut requests = Vec::new();
+    let mut start = 0;
+    for end in 1..=passed.len() {
+        if check.feed(&passed[end - 1..end], &mut Vec::new()).is_err() {
+            break;
+        }
+        if check.holding() {
+            continue;
+        }
+        let mut headers = [httparse::EMPTY_HEADER; 128];
+        let mut head = httparse::Request::new(&mut headers);
+        let _ = head.parse(&passed[start..end]);
+        requests.push(Framed {
+            end,
+            method: head.method.unwrap_or_default().to_owned(),
+            hosts: (head.headers.iter())
+                .filter(|header| header.name.eq_ignore_ascii_case("host"))
+                .map(|header| header.value.escape_ascii().to_string())
+                .collect(),
+        });
+        start = end;
+    }
+    requests
+}
+
+/// Panics unless hyper's HTTP/1.1 server, reading `passed` one byte at a
+/// time, reads the same requests as `ours`, up to where it stops reading,
+/// and each names `host.ap.internal`.
+fn same_requests(passed: &[u8], ours: &[Framed]) {
+    let (theirs, stop, refused) = served_requests(passed);
+    let read = (ours.iter())
+        .take_while(|request| stop.is_none_or(|stop| request.end < stop))
+        .count();
+    let named = (theirs.iter())
+        .all(|request| matches!(&request.hosts[..], [host] if names_host(host.as_bytes())));
+    assert!(
+        ours.starts_with(&theirs) && theirs.len() >= read && named && refused.is_none(),
+        "{}: crates/net {ours:?}, hyper {theirs:?}, which stopped at {stop:?} and refused a body at {refused:?}",
+        passed.escape_ascii(),
+    );
+}
+
+/// The requests that hyper's HTTP/1.1 server reads from `passed`, fed to it
+/// one byte at a time, the offset where it stopped reading, if it did, and
+/// the offset where it refused a body, if it did. Since the stream never
+/// ends, only a body's framing makes it refuse one, or chunk extensions of
+/// more than 16 KiB in all, which hyper limits and the fuzzer never makes.
+/// A request ends where hyper has read all of its body.
+fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>) {
+    use hyper::body::{Body, Bytes, Frame, Incoming};
+    use std::cell::{Cell, RefCell};
+    use std::convert::Infallible;
+    use std::pin::{Pin, pin};
+    use std::rc::Rc;
+    use std::task::{Context, Poll, Waker};
+
+    /// The stream hyper reads, and how far it got.
+    struct Stream<'a> {
+        passed: &'a [u8],
+        fed: Rc<Cell<usize>>,
+        read: Rc<Cell<usize>>,
+    }
+    impl hyper::rt::Read for Stream<'_> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            mut buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let (read, fed) = (self.read.get(), self.fed.get());
+            if read == fed {
+                return Poll::Pending;
+            }
+            let end = fed.min(read + buf.remaining());
+            buf.put_slice(&self.passed[read..end]);
+            self.read.set(end);
+            Poll::Ready(Ok(()))
+        }
+    }
+    impl hyper::rt::Write for Stream<'_> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    /// An empty response body.
+    struct Nothing;
+    impl Body for Nothing {
+        type Data = Bytes;
+        type Error = Infallible;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            Poll::Ready(None)
+        }
+        fn is_end_stream(&self) -> bool {
+            true
+        }
+    }
+
+    let fed = Rc::new(Cell::new(0));
+    let read = Rc::new(Cell::new(0));
+    let served = Rc::new(RefCell::new(Vec::new()));
+    let refused = Rc::new(Cell::new(None));
+    let service = {
+        let (fed, served, refused) = (fed.clone(), served.clone(), refused.clone());
+        hyper::service::service_fn(move |request: hyper::Request<Incoming>| {
+            let (fed, served, refused) = (fed.clone(), served.clone(), refused.clone());
+            async move {
+                let method = request.method().as_str().to_owned();
+                let hosts = (request.headers().get_all(hyper::header::HOST).iter())
+                    .map(|value| value.as_bytes().escape_ascii().to_string())
+                    .collect();
+                let mut body = request.into_body();
+                loop {
+                    match std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+                        None => {
+                            let end = fed.get();
+                            served.borrow_mut().push(Framed { end, method, hosts });
+                            break;
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) => {
+                            refused.set(Some(fed.get()));
+                            break;
+                        }
+                    }
+                }
+                Ok::<_, Infallible>(hyper::Response::new(Nothing))
+            }
+        })
+    };
+    let stream = Stream {
+        passed,
+        fed: fed.clone(),
+        read: read.clone(),
+    };
+    // As many headers and bytes as the name check reads, in heads and in
+    // trailers, so that hyper refuses fewer of those that the check passes.
+    let mut connection = pin!(
+        hyper::server::conn::http1::Builder::new()
+            .max_headers(128)
+            .max_header_size(64 * 1024)
+            .serve_connection(stream, service)
+    );
+    let mut cx = Context::from_waker(Waker::noop());
+    for end in 0..=passed.len() {
+        fed.set(end);
+        // Hyper may stop to let other tasks run, so it has read all it can
+        // only once it makes no progress for a few polls in a row.
+        let mut idle = 0;
+        while idle < 4 {
+            let before = (read.get(), served.borrow().len());
+            if connection.as_mut().poll(&mut cx).is_ready() {
+                return (served.take(), Some(end), refused.get());
+            }
+            idle = match (read.get(), served.borrow().len()) == before {
+                true => idle + 1,
+                false => 0,
+            };
+        }
+    }
+    (served.take(), None, refused.get())
 }
 
 /// Feeds `input`, as the guest's requests on a decrypted connection to
@@ -1713,6 +1906,94 @@ mod tests {
         assert!(!name_check_input(
             "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"
         ));
+    }
+
+    #[test]
+    fn requests_end_where_hyper_ends_them() {
+        let host = "Host: host.ap.internal\r\n";
+        for (input, served_count) in [
+            format!("POST / HTTP/1.1\r\n{host}Transfer-Encoding: chunked\r\n\r\n0\r\n\r\nGET / HTTP/1.1\r\n{host}\r\n"),
+            format!("POST / HTTP/1.1\r\n{host}Content-Length: 3\r\n\r\nabcGET / HTTP/1.1\r\n{host}\r\n"),
+            format!("POST / HTTP/1.1\r\n{host}Content-Length: 0\r\n\r\nGET / HTTP/1.1\r\n{host}\r\n"),
+            format!(
+                "POST / HTTP/1.1\r\n{host}Transfer-Encoding: chunked\r\n\r\n3;a=b\r\nabc\r\n10\r\n{}\r\n0\r\nT: 1\r\n\r\nGET / HTTP/1.1\r\n{host}\r\n",
+                "x".repeat(16),
+            ),
+            format!("\r\nGET / HTTP/1.1\r\n{host}\r\nGET /b HTTP/1.1\r\n{host}Connection: close\r\n\r\nGET / HTTP/1.1\r\n{host}\r\n"),
+            format!("PUT / HTTP/1.0\r\n{host}Content-Length: 2\r\n\r\nab"),
+        ]
+        .into_iter()
+        .zip([2, 2, 2, 2, 2, 1])
+        {
+            assert!(name_check_input(&input), "{input:?}");
+            let served = served_requests(input.as_bytes()).0;
+            assert_eq!(served.len(), served_count, "{input:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_that_ends_elsewhere_is_found() {
+        let passed = b"POST / HTTP/1.1\r\nHost: host.ap.internal\r\nContent-Length: 3\r\n\r\nabc";
+        let mut ours = checked_requests(passed);
+        assert_eq!(ours.len(), 1);
+        ours[0].end -= 1;
+        same_requests(passed, &ours);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_that_names_another_host_is_found() {
+        let passed = b"GET / HTTP/1.1\r\nHost: host.ap.internal\r\n\r\n";
+        let mut ours = checked_requests(passed);
+        assert_eq!(ours.len(), 1);
+        ours[0].hosts = vec!["g".to_owned()];
+        same_requests(passed, &ours);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_hyper_has_not_finished_is_found() {
+        let passed = b"POST / HTTP/1.1\r\nHost: host.ap.internal\r\nContent-Length: 3\r\n\r\nab";
+        let mut ours = checked_requests(passed);
+        assert_eq!(ours, []);
+        let hosts = vec!["host.ap.internal".to_owned()];
+        let method = "POST".to_owned();
+        ours.push(Framed {
+            end: passed.len(),
+            method,
+            hosts,
+        });
+        same_requests(passed, &ours);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_for_another_host_that_both_read_is_found() {
+        let passed = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let hosts = vec!["example.com".to_owned()];
+        let method = "GET".to_owned();
+        same_requests(
+            passed,
+            &[Framed {
+                end: passed.len(),
+                method,
+                hosts,
+            }],
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_body_hyper_refuses_is_found() {
+        let passed = b"POST / HTTP/1.1\r\nHost: host.ap.internal\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n";
+        same_requests(passed, &[]);
+    }
+
+    #[test]
+    #[should_panic(expected = "hyper")]
+    fn a_request_hyper_reads_and_the_check_misses_is_found() {
+        same_requests(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n", &[]);
     }
 
     #[test]

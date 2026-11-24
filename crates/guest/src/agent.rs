@@ -308,7 +308,8 @@ pub fn trust(root: &Path, authority: &[u8]) -> io::Result<()> {
 /// returns it open. A new file has mode 644. A path that is a symlink is
 /// refused.
 pub fn place(root: &Path, file: &GuestFile) -> io::Result<File> {
-    let relative = file.path.strip_prefix(b"/").unwrap_or(&file.path);
+    let slashes = file.path.iter().take_while(|byte| **byte == b'/').count();
+    let relative = &file.path[slashes..];
     let path = root.join(OsStr::from_bytes(relative));
     let mut written = File::options()
         .write(true)

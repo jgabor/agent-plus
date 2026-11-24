@@ -440,6 +440,14 @@ fn a_file_the_host_gives_replaces_what_the_root_held() {
 }
 
 #[test]
+fn a_file_the_host_gives_stays_in_the_root_whatever_its_slashes() {
+    let root = fresh_root("place-slashes");
+    fs::create_dir_all(root.join("etc")).unwrap();
+    agent::place(&root, &guest_file("//etc/placed", b"in")).unwrap();
+    assert_eq!(fs::read(root.join("etc/placed")).unwrap(), b"in");
+}
+
+#[test]
 fn a_file_the_host_gives_isnt_written_through_a_symlink() {
     let root = fresh_root("place-symlink");
     fs::create_dir_all(root.join("home/agent")).unwrap();

@@ -433,6 +433,20 @@ fn a_start_whose_counts_dont_match_its_strings_is_refused() {
         to_guest(frame(&relative)),
         Err(ProtocolError::Malformed)
     ));
+    // A file with a path and no contents, which leaves no directory.
+    let cut = [
+        &[START][..],
+        &1u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &1u32.to_le_bytes(),
+        b"h\0/w\0",
+    ]
+    .concat();
+    assert!(matches!(
+        to_guest(frame(&cut)),
+        Err(ProtocolError::Malformed)
+    ));
     // A size that is cut short.
     for body in [
         &[START_IN_TERMINAL, 1, 0, 0][..],

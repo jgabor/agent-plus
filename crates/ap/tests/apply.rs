@@ -2270,6 +2270,65 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
     }
 }
 
+/// From #694: the agent commits `big`, a byte more than 512 MiB of zeros,
+/// which its git compresses to about half a MiB, loose or packed. Or it
+/// packs its commits, and the index of that pack is a byte more than 512
+/// MiB long, which costs almost nothing as a sparse file. `ap apply`
+/// refuses each before it reads it, within a fixed time.
+// spec(SHARE): `ap diff` and `ap apply` read none of the agent's objects or pack indexes larger than 512 MiB.
+// spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
+    const LARGER: u64 = (512 << 20) + 1;
+    for case in ["loose", "packed", "index"] {
+        let repository = Repository::new(&format!("too-large-{case}"), true, &[]);
+        let guest = &repository.guest;
+        let packs = || {
+            let dir = fs::read_dir(guest.join(".git/objects/pack"));
+            let names = dir
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.unwrap().file_name());
+            names.collect::<std::collections::BTreeSet<_>>()
+        };
+        let earlier = packs();
+        let blob = match case {
+            "index" => {
+                repository.commit("a", "a\n");
+                repo::run(guest, &["repack", "-q", "-d"]);
+                String::new()
+            }
+            _ => repo::commit_zeros(guest, "big", LARGER, case == "loose"),
+        };
+        let written = packs().difference(&earlier).cloned().collect::<Vec<_>>();
+        let idx = written
+            .iter()
+            .find(|name| name.to_str().unwrap().ends_with(".idx"));
+        let idx = idx.map(|idx| repository.pending.join("tree/.git/objects/pack").join(idx));
+        repository.land();
+        if case == "index" {
+            let idx = fs::OpenOptions::new()
+                .write(true)
+                .open(idx.as_ref().unwrap());
+            idx.unwrap().set_len(LARGER).unwrap();
+        }
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply_within(2);
+
+        let why = match case {
+            "loose" => format!("{blob} is larger than the limit"),
+            "packed" => {
+                let idx = idx.unwrap().display().to_string();
+                format!("{idx} has an entry at 12 larger than the limit")
+            }
+            _ => format!("{} is larger than the limit", idx.unwrap().display()),
+        };
+        let error = format!("{why}, so everything stays pending");
+        repository.stays_pending(&output, &error, &before);
+    }
+}
+
 /// From #714: the agent's `HEAD` holds a file 1024 bytes long beneath
 /// `deep`, or one a byte longer beneath `deep1`. Beneath a directory the
 /// agent deleted, `ap apply` reads the first, and refuses the second.

@@ -749,6 +749,30 @@ fn a_head_with_a_name_git_refuses_is_said_first() {
     );
 }
 
+/// From #694: the agent commits `big`, a byte more than 512 MiB of zeros,
+/// which its git compresses to about half a MiB, loose or packed. `ap diff`
+/// says why on the first line, before it inflates, within a fixed time.
+// spec(SHARE): `ap diff` and `ap apply` read none of the agent's objects or pack indexes larger than 512 MiB.
+// spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn an_object_larger_than_the_limit_is_said_first() {
+    for loose in [true, false] {
+        let blob = std::cell::RefCell::new(String::new());
+        let commit = |guest: &Path| {
+            *blob.borrow_mut() = repo::commit_zeros(guest, "big", (512 << 20) + 1, loose);
+        };
+        let first = first_line(&format!("too-large-{loose}"), commit, "gone", None);
+        let blob = blob.borrow();
+        let why = match loose {
+            true => format!("{blob} is larger than the limit"),
+            false => "has an entry at 12 larger than the limit".to_owned(),
+        };
+        let expected = "branch ap/notes/<run>: its commits can't be counted: ";
+        assert!(first.starts_with(expected), "{first}");
+        assert!(first.ends_with(&why), "{first}");
+    }
+}
+
 /// What the agent named, such as a pack, reaches your terminal only with
 /// its control characters escaped.
 #[test]

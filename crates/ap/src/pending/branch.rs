@@ -44,6 +44,11 @@ const MAX_READ: usize = 64 << 20;
 /// then cheap to read, and a walk of the tree goes no more than 512 deep,
 /// which the stack holds.
 const MAX_PATH: usize = 1024;
+/// How large an object of the agent's, or a pack index, may be, in bytes,
+/// at most. Zlib inflates about 1000 to 1, so a small file can say it holds
+/// far more than this. It is git's `core.bigFileThreshold`, above which git
+/// stores a blob whole.
+const MAX_OBJECT: usize = 512 << 20;
 /// The author and committer of the last commit.
 const IDENTITY: &str = "Agent+ <ap@localhost>";
 
@@ -81,7 +86,7 @@ impl<'a> Agent<'a> {
         Agent {
             records,
             dir: share.dir,
-            written: Repository::at(share.dir.join("tree").join(".git")),
+            written: Repository::at(share.dir.join("tree").join(".git")).with_limit(MAX_OBJECT),
             yours: Repository::at(share.root.join(".git")),
             made: RefCell::default(),
             replacing: BTreeSet::new(),

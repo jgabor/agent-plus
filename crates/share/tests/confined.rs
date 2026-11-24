@@ -162,7 +162,7 @@ fn serve_and_turn(root: &Path, call: &str, path: &str, raise: bool) -> ExitStatu
 /// Returns the process, and the other end of its socket.
 fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd) {
     // `ap` starts a server of `rw` shares alone in a user namespace.
-    let namespace = roots.iter().all(|(words, _)| *words == "rw");
+    let namespace = roots.iter().all(|(words, _)| words.ends_with("rw"));
     launch(roots, aim, namespace)
 }
 

@@ -33,10 +33,13 @@ struct Header {
     pid: i32,
 }
 
-static HEADER: Header = Header {
-    version: VERSION_3,
-    pid: 0,
-};
+/// A header of its own for each call, which the kernel may write to.
+fn header() -> Header {
+    Header {
+        version: VERSION_3,
+        pid: 0,
+    }
+}
 
 /// `struct __user_cap_data_struct`.
 #[repr(C)]
@@ -48,19 +51,21 @@ struct Data {
 }
 
 fn get() -> io::Result<[Data; 2]> {
+    let mut header = header();
     let mut data = [Data::default(); 2];
     // SAFETY: the kernel reads the header and writes two `Data`s, which
     // outlive the call.
-    match unsafe { libc::syscall(libc::SYS_capget, &raw const HEADER, data.as_mut_ptr()) } {
+    match unsafe { libc::syscall(libc::SYS_capget, &raw mut header, data.as_mut_ptr()) } {
         0 => Ok(data),
         _ => Err(io::Error::last_os_error()),
     }
 }
 
 fn set(data: &[Data; 2]) -> io::Result<()> {
+    let mut header = header();
     // SAFETY: the kernel reads the header and two `Data`s, which outlive
     // the call.
-    match unsafe { libc::syscall(libc::SYS_capset, &raw const HEADER, data.as_ptr()) } {
+    match unsafe { libc::syscall(libc::SYS_capset, &raw mut header, data.as_ptr()) } {
         0 => Ok(()),
         _ => Err(io::Error::last_os_error()),
     }
@@ -120,8 +125,9 @@ fn enter_namespace(uid_line: &[u8], gid_line: &[u8]) -> io::Result<()> {
     set(&[kept, Data::default()])?;
     let raise = libc::PR_CAP_AMBIENT_RAISE as libc::c_ulong;
     let capability = libc::c_ulong::from(CAP_DAC_READ_SEARCH.trailing_zeros());
-    // SAFETY: this call takes plain integers.
-    match unsafe { libc::prctl(libc::PR_CAP_AMBIENT, raise, capability, 0, 0) } {
+    // SAFETY: this call takes plain integers. The kernel refuses it unless
+    // the last two are zero in all their bits.
+    match unsafe { libc::prctl(libc::PR_CAP_AMBIENT, raise, capability, 0_u64, 0_u64) } {
         0 => Ok(()),
         _ => Err(io::Error::last_os_error()),
     }
@@ -140,7 +146,8 @@ fn write_proc(path: &CStr, line: &[u8]) -> io::Result<()> {
         libc::close(fd);
         match usize::try_from(written) {
             Ok(written) if written == line.len() => Ok(()),
-            _ => Err(error),
+            Ok(_) => Err(io::Error::from_raw_os_error(libc::EIO)),
+            Err(_) => Err(error),
         }
     }
 }
@@ -149,6 +156,11 @@ fn write_proc(path: &CStr, line: &[u8]) -> io::Result<()> {
 /// [`past_modes`], and lets no program it might start do so.
 pub fn lower() -> io::Result<()> {
     let mut data = get()?;
+    // A server outside the namespace holds nothing to lower, and may run
+    // where it can't set its capabilities at all.
+    if (data[0].effective | data[0].inheritable) & CAP_DAC_READ_SEARCH == 0 {
+        return Ok(());
+    }
     data[0].effective &= !CAP_DAC_READ_SEARCH;
     data[0].inheritable &= !CAP_DAC_READ_SEARCH;
     set(&data)

@@ -73,10 +73,10 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
     reaches_its_prompt(Interactive::start(scratch.run("claude")));
 }
 
-// spec(AUTH): With Claude Code, the run's `~/.claude.json` approves the placeholder, so an interactive run doesn't ask whether to use the key.
 // Claude Code asks whether to use a key from its environment that its state
 // doesn't approve. The key isn't a real one, and nothing sends it anywhere
 // it could be used.
+// spec(AUTH): With Claude Code, the run's `~/.claude.json` approves the placeholder, so an interactive run doesn't ask whether to use the key.
 #[test]
 fn an_interactive_run_with_auth_key_doesnt_ask_whether_to_use_it() {
     let scratch = Scratch::new("key-dialog");

@@ -82,7 +82,6 @@ const FSTATFS: u32 = 138;
 const GETDENTS64: u32 = 217;
 const READLINKAT: u32 = 267;
 const OPENAT: u32 = 257;
-const OPENAT2: u32 = 437;
 const PWRITE64: u32 = 18;
 const FLOCK: u32 = 73;
 const FSYNC: u32 = 74;
@@ -488,6 +487,7 @@ mod tests {
     const PID: u32 = 4000;
     const TID: u32 = 4001;
     const TIOCSTI: u32 = 0x5412;
+    const OPENAT2: u32 = 437;
     const FORK: u32 = 57;
     const VFORK: u32 = 58;
     const EXECVE: u32 = 59;

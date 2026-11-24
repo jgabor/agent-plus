@@ -435,6 +435,8 @@ fn a_file_apply_would_skip_gets_a_line_that_says_why() {
         b"ref: refs/heads/main\n",
     );
     write(&pending, "vendor/lib/.GIT/config", 0o644, b"[core]\n");
+    write(&pending, "bare/HEAD", 0o644, b"ref: refs/heads/main\n");
+    write(&pending, "bare/commondir", 0o644, b"..\n");
     fs::write(pending.join("tree/pipe"), "").unwrap();
     record(&pending, "FIFO \"pipe\" 644");
     fs::write(pending.join("tree/escape"), "").unwrap();
@@ -449,6 +451,8 @@ fn a_file_apply_would_skip_gets_a_line_that_says_why() {
     assert_eq!(
         stdout(&output),
         concat!(
+            "skipped bare/HEAD: it is in a bare repository\n",
+            "skipped bare/commondir: it is in a bare repository\n",
             "skipped escape: it is a symlink whose target leaves the share\n",
             "skipped mine.txt: it changed on your side after the agent first changed it\n",
             "skipped pipe: it is a fifo, and special files are never applied\n",

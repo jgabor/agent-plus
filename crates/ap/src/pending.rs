@@ -292,6 +292,109 @@ fn beneath(path: &[u8], dir: &[u8]) -> bool {
     path.len() > dir.len() && path.starts_with(dir) && path[dir.len()] == b'/'
 }
 
+/// The entries git finds a bare repository by, as your filesystem names
+/// them, and folded.
+const BARE: [&[u8]; 4] = [b"HEAD", b"objects", b"refs", b"commondir"];
+
+/// Finds the directories of a share that are bare repositories, as git
+/// finds one: a directory that holds `HEAD`, and either `commondir` or both
+/// `objects` and `refs`. It counts each of yours, and each entry the agent
+/// made, matched folded, so that nothing the agent wrote completes one.
+struct Bare<'a> {
+    /// Which of `BARE` the agent made in each directory it made one in,
+    /// with each directory its records put a path beneath.
+    made: BTreeMap<&'a [u8], [bool; 4]>,
+    /// Whether a directory above the share's root is one.
+    above: bool,
+    /// Each directory looked at so far, and whether it is one.
+    found: std::cell::RefCell<BTreeMap<Vec<u8>, bool>>,
+}
+
+impl<'a> Bare<'a> {
+    fn new(root: &Path, records: &'a Records) -> Bare<'a> {
+        let mut made = BTreeMap::new();
+        for (path, entry) in &records.entries {
+            if let Entry::Deleted = entry {
+                continue;
+            }
+            for made_here in parents(path).chain([path.as_slice()]) {
+                let (dir, name) = split(made_here);
+                if let Some(at) = BARE.iter().position(|bare| name.eq_ignore_ascii_case(bare)) {
+                    made.entry(dir).or_insert([false; 4])[at] = true;
+                }
+            }
+        }
+        // The run found the root with no symlink on the way. An entry that
+        // can't be looked up counts as there.
+        let above = root.ancestors().skip(1).any(|dir| {
+            bare_by(|at| {
+                let found = fs::symlink_metadata(dir.join(bytes_path(BARE[at])));
+                !matches!(found, Err(error) if error.kind() == io::ErrorKind::NotFound)
+            })
+        });
+        Bare {
+            made,
+            above,
+            found: Default::default(),
+        }
+    }
+
+    /// Whether `dir`, where the share's root is empty, is a bare repository.
+    fn is(&self, host: &Host, dir: &[u8]) -> io::Result<bool> {
+        if let Some(&found) = self.found.borrow().get(dir) {
+            return Ok(found);
+        }
+        let made = self.made.get(dir).copied().unwrap_or_default();
+        let mut failed = None;
+        let found = bare_by(|at| {
+            if made[at] || failed.is_some() {
+                return true;
+            }
+            let path = match dir.is_empty() {
+                true => BARE[at].to_vec(),
+                false => [dir, b"/", BARE[at]].concat(),
+            };
+            match host.stat(&path) {
+                Ok(found) => found.is_some(),
+                Err(error) => {
+                    failed = Some(error);
+                    true
+                }
+            }
+        });
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        self.found.borrow_mut().insert(dir.to_vec(), found);
+        Ok(found)
+    }
+
+    /// Whether `path` is a bare repository or beneath one, the share's root
+    /// included.
+    fn holds(&self, host: &Host, path: &[u8]) -> io::Result<bool> {
+        if self.above {
+            return Ok(true);
+        }
+        for dir in std::iter::once(&b""[..]).chain(parents(path)) {
+            if self.is(host, dir)? {
+                return Ok(true);
+            }
+        }
+        // Only a directory can be one.
+        if self.made.contains_key(path) || host.stat(path)?.is_some_and(|m| m.is_dir()) {
+            return self.is(host, path);
+        }
+        Ok(false)
+    }
+}
+
+/// Whether a directory is a bare repository, by `holds`, which says whether
+/// it holds the entry of `BARE` at an index. It asks in the order git needs
+/// them, and no more than it needs.
+fn bare_by(mut holds: impl FnMut(usize) -> bool) -> bool {
+    holds(0) && (holds(3) || holds(1) && holds(2))
+}
+
 /// How long `ap diff` keeps reading a share again when a file its records
 /// name has gone from the tree, or is no longer a file, as happens while
 /// the agent moves it, and how long it waits between reads. The share
@@ -541,22 +644,23 @@ impl Host {
     /// Removes each empty directory of yours at or beneath `path` that the
     /// agent's view doesn't have, deepest first. One that isn't empty
     /// stays, holding files that weren't applied, such as git-ignored ones.
-    fn prune(&self, records: &Records, path: &[u8]) {
+    fn prune(&self, records: &Records, bare: &Bare, path: &[u8]) {
         // Beneath a directory the agent sees as yours, only paths it has
         // records of differ, and each of those is pruned on its own.
-        // Nothing is ever applied under `.git`, and that includes removing
-        // a repository's empty directories.
+        // Nothing is ever applied under `.git` or in a bare repository, and
+        // that includes removing a repository's empty directories.
         let view = records.view(path);
         let git = (path.split(|&byte| byte == b'/')).any(|name| name.eq_ignore_ascii_case(b".git"));
         if path.is_empty()
             || git
             || matches!(view, View::Yours)
             || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
+            || !matches!(bare.holds(self, path), Ok(false))
         {
             return;
         }
         for name in self.names(path).unwrap_or_default() {
-            self.prune(records, &[path, b"/", &name].concat());
+            self.prune(records, bare, &[path, b"/", &name].concat());
         }
         if let View::Agent(Entry::Dir { .. }) = view {
             return;
@@ -888,8 +992,17 @@ impl Share<'_> {
             ignored: 0,
             commits,
         };
+        let bare = replacing.is_none().then(|| Bare::new(self.root, &records));
         for path in changed(&records, &host)? {
-            match verdict(&records, &landed, &host, &ignore, replacing.as_ref(), &path)? {
+            match verdict(
+                &records,
+                &landed,
+                &host,
+                &ignore,
+                replacing.as_ref(),
+                bare.as_ref(),
+                &path,
+            )? {
                 Verdict::History | Verdict::Landed => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
@@ -957,8 +1070,9 @@ impl Share<'_> {
         // Each path that stays pending, and the `BASE` record it keeps.
         let mut kept = BTreeMap::new();
         let mut changes = Vec::new();
+        let bare = Bare::new(self.root, &records);
         for path in changed(&records, &host)? {
-            match verdict(&records, &landed, &host, &ignore, None, &path)? {
+            match verdict(&records, &landed, &host, &ignore, None, Some(&bare), &path)? {
                 Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
@@ -992,7 +1106,7 @@ impl Share<'_> {
             }
         }
         for path in records.entries.keys().rev() {
-            host.prune(&records, path);
+            host.prune(&records, &bare, path);
         }
         for path in &changes {
             if failed.contains_key(path) {
@@ -1146,13 +1260,16 @@ enum Verdict {
 
 /// What becomes of the agent's change at `path`. For a branch import,
 /// `branch` holds each file and symlink of the agent's that would replace a
-/// directory its `HEAD` holds with a git-ignored file in it.
+/// directory its `HEAD` holds with a git-ignored file in it. When the
+/// change is applied to your files, `bare` finds the bare repositories it
+/// stays out of.
 fn verdict(
     records: &Records,
     landed: &BTreeMap<Vec<u8>, Option<Base>>,
     host: &Host,
     ignore: &Gitignore,
     branch: Option<&BTreeSet<Vec<u8>>>,
+    bare: Option<&Bare>,
     path: &[u8],
 ) -> io::Result<Verdict> {
     let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
@@ -1170,6 +1287,11 @@ fn verdict(
     };
     if names.iter().any(|name| name.eq_ignore_ascii_case(b".git")) {
         return skipped("it is under .git");
+    }
+    if let Some(bare) = bare
+        && bare.holds(host, path)?
+    {
+        return skipped("it is in a bare repository");
     }
     match records.view(path) {
         View::Agent(Entry::Special { kind }) => {

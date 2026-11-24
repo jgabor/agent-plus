@@ -421,6 +421,7 @@ impl<'a> Agent<'a> {
                         host,
                         ignore,
                         Some(&self.replacing),
+                        None,
                         path,
                     )? {
                         Verdict::Change => true,
@@ -798,6 +799,7 @@ impl Share<'_> {
                 &host,
                 &ignore,
                 Some(&agent.replacing),
+                None,
                 &path,
             )? {
                 Verdict::History | Verdict::Landed => {}

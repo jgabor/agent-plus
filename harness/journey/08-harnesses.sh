@@ -8,7 +8,8 @@ set -eu
 
 # Builds the agent `$1` from the harness and channel `$2`, and fails unless
 # the lockfile pins that harness by an exact version and a digest, which for
-# Codex the code-mode host's digest, or `-`, follows. Each agent is named for
+# Codex the digests of the code-mode host and of bubblewrap, each or `-`,
+# follow. Each agent is named for
 # its harness, which its grants name under `NETWORK -`.
 build() {
   mkdir -p "$1"
@@ -24,7 +25,7 @@ build() {
     exit 1
   fi
   case $1 in
-    codex) host=' ([0-9a-f]{64}|-)' ;;
+    codex) host=' ([0-9a-f]{64}|-) ([0-9a-f]{64}|-)' ;;
     *) host='' ;;
   esac
   if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}$host\$" "$1/Agentfile.lock" ||

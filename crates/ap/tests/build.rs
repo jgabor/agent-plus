@@ -11,7 +11,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use ap::lock::CodeModeHost;
+use ap::lock::Companion;
 use store::{Agent, Agents, Declared, Layers};
 
 /// A test's own directory, with a home directory and a project in it.
@@ -1496,8 +1496,35 @@ fn release_with_host(sha256: &str, host: &str) -> Vec<u8> {
 /// Serves Codex 0.169.0 as [`openai`] does, with [`host_file`] as its
 /// code-mode host, which the API gives the digest `host`.
 fn openai_with_host(host: &str) -> common::Server {
-    let release = release_with_host(&common::digest(&common::codex_file()), host);
-    let (file, host) = (common::codex_file(), host_file());
+    openai_with_companions(host, None)
+}
+
+/// The path of Codex 0.169.0's bubblewrap, under [`CODEX`].
+const BWRAP_FILE: &str =
+    "/openai/codex/releases/download/rust-v0.169.0/bwrap-x86_64-unknown-linux-musl.zst";
+
+/// The bubblewrap the tests lock, and the file Codex's release ships it in:
+/// one zstd frame.
+const BWRAP: &[u8] = b"#!/bin/sh\necho a bubblewrap\n";
+fn bwrap_file() -> Vec<u8> {
+    store::compress(BWRAP, 3)
+}
+
+/// Serves Codex 0.169.0 as [`openai_with_host`] does, and if `bwrap` names
+/// a digest, with [`bwrap_file`] as its bubblewrap, which the API gives that
+/// digest.
+fn openai_with_companions(host: &str, bwrap: Option<&str>) -> common::Server {
+    let mut release = release_with_host(&common::digest(&common::codex_file()), host);
+    if let Some(bwrap) = bwrap {
+        let asset = format!(
+            r#"{{"name":"bwrap-x86_64-unknown-linux-musl.zst","size":1,"digest":"sha256:{bwrap}"}},"#
+        );
+        release = String::from_utf8(release)
+            .unwrap()
+            .replacen("\"assets\":[\n", &format!("\"assets\":[\n{asset}\n"), 1)
+            .into_bytes();
+    }
+    let (file, host, bwrap) = (common::codex_file(), host_file(), bwrap_file());
     common::Server::start(move |_| {
         vec![
             ("/repos/openai/codex/releases/latest", common::ok(&release)),
@@ -1507,8 +1534,95 @@ fn openai_with_host(host: &str) -> common::Server {
             ),
             (CODEX_FILE, common::ok(&file)),
             (HOST_FILE, common::ok(&host)),
+            (BWRAP_FILE, common::ok(&bwrap)),
         ]
     })
+}
+
+// spec(AGENT): A Codex release that publishes bubblewrap, which Codex's sandbox runs commands in, has it installed where Codex looks for its own, and the lockfile records its digest.
+#[test]
+fn a_codex_release_with_bubblewrap_locks_downloads_and_installs_it() {
+    let digest = common::digest(&common::codex_file());
+    let (host, bwrap) = (common::digest(&host_file()), common::digest(&bwrap_file()));
+    let server = openai_with_companions(&host, Some(&bwrap));
+    let settling = Settling::new("settle-codex-bwrap", "AGENT codex\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS codex 0.169.0 {digest} {host} {bwrap}\n")
+    );
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/repos/openai/codex/releases/latest",
+            CODEX_FILE,
+            HOST_FILE,
+            BWRAP_FILE
+        ]
+    );
+    let out = settling.scratch.build(&settling.dir, &[]);
+    assert!(out.contains("built AGENT codex:0.169.0\n"), "{out}");
+    let layers = settling.scratch.agent("notes").layers;
+    let image = Layers::new(settling.scratch.store())
+        .get(&layers[1].digest)
+        .unwrap();
+    assert!(holds(&image, std::str::from_utf8(BWRAP).unwrap()));
+    assert!(holds(&image, "codex-resources"));
+    assert!(holds(&image, "bwrap"));
+    assert_eq!(
+        ap::adapter::codex::BWRAP,
+        "/usr/local/bin/codex-resources/bwrap"
+    );
+}
+
+#[test]
+fn bubblewrap_with_the_wrong_digest_is_not_stored_and_writes_no_lock() {
+    let host = common::digest(&host_file());
+    let server = openai_with_companions(&host, Some(&common::digest(b"another bwrap")));
+    let settling = Settling::new("settle-codex-bwrap-digest", "AGENT codex\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&common::digest(&bwrap_file())), "{error}");
+    assert!(
+        error.contains("bubblewrap of `AGENT codex:0.169.0`"),
+        "{error}"
+    );
+    assert_eq!(settling.lockfile(), None);
+    let mut cached = [common::digest(&common::codex_file()), host];
+    cached.sort();
+    assert_eq!(settling.cached(), cached);
+}
+
+// spec(AGENT): A lockfile from before `ap` recorded bubblewrap resolves the Codex version it locks again.
+#[test]
+fn a_codex_lock_from_before_bubblewrap_resolves_its_version_again_and_gets_it() {
+    let digest = common::digest(&common::codex_file());
+    let (host, bwrap) = (common::digest(&host_file()), common::digest(&bwrap_file()));
+    let server = openai_with_companions(&host, Some(&bwrap));
+    let settling = Settling::new("settle-codex-old-bwrap", "AGENT codex\nOS minimal\n");
+    let old = format!("HARNESS codex 0.169.0 {digest} {host}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        settling.lockfile().unwrap(),
+        format!("HARNESS codex 0.169.0 {digest} {host} {bwrap}\n")
+    );
+    assert_eq!(
+        Settling::paths(&server)[0],
+        "/repos/openai/codex/releases/tags/rust-v0.169.0"
+    );
+    // A lock whose Codex digest GitHub no longer gives fails, and says
+    // what the lock lacks.
+    let settling = Settling::new("settle-codex-old-bwrap-digest", "AGENT codex\nOS minimal\n");
+    let locked = common::digest(b"another codex");
+    let old = format!("HARNESS codex 0.169.0 {locked} {host}\n");
+    fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert!(error.contains(&locked), "{error}");
+    assert!(
+        error.contains("doesn't record bubblewrap of `AGENT codex:0.169.0`"),
+        "{error}"
+    );
+    assert_eq!(settling.lockfile().unwrap(), old);
 }
 
 // spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
@@ -1521,7 +1635,7 @@ fn a_codex_release_with_a_code_mode_host_locks_downloads_and_installs_it() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} {host}\n")
+        format!("HARNESS codex 0.169.0 {digest} {host} -\n")
     );
     assert_eq!(
         Settling::paths(&server),
@@ -1591,7 +1705,7 @@ fn an_old_codex_lock_resolves_its_version_again_and_gets_the_host() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} {host}\n")
+        format!("HARNESS codex 0.169.0 {digest} {host} -\n")
     );
     assert_eq!(
         Settling::paths(&server),
@@ -1604,7 +1718,7 @@ fn an_old_codex_lock_resolves_its_version_again_and_gets_the_host() {
     // A lock that records the release publishes no host resolves nothing
     // again.
     let settling = Settling::new("settle-codex-none", "AGENT codex\nOS minimal\n");
-    let none = format!("HARNESS codex 0.169.0 {digest} -\n");
+    let none = format!("HARNESS codex 0.169.0 {digest} - -\n");
     fs::write(settling.dir.join("Agentfile.lock"), &none).unwrap();
     let requests = server.requests();
     assert!(!settling.settle(&server).unwrap());
@@ -1653,18 +1767,27 @@ fn a_lock_reads_a_code_mode_host_only_for_codex() {
     let text = format!("HARNESS codex 0.169.0 {digest} {host}\n");
     let lock = ap::lock::Lock::read(&text).unwrap();
     let locked = lock.harness.as_ref().unwrap();
-    assert_eq!(locked.code_mode_host, CodeModeHost::Digest(host.clone()));
+    assert_eq!(locked.code_mode_host, Companion::Digest(host.clone()));
     assert_eq!(lock.text(), text);
-    let none = format!("HARNESS codex 0.169.0 {digest} -\n");
+    assert_eq!(locked.bwrap, Companion::Unrecorded);
+    let none = format!("HARNESS codex 0.169.0 {digest} - -\n");
     let lock = ap::lock::Lock::read(&none).unwrap();
     let locked = lock.harness.as_ref().unwrap();
-    assert_eq!(locked.code_mode_host, CodeModeHost::Unpublished);
+    assert_eq!(locked.code_mode_host, Companion::Unpublished);
+    assert_eq!(locked.bwrap, Companion::Unpublished);
     assert_eq!(lock.text(), none);
+    let both = format!("HARNESS codex 0.169.0 {digest} - {host}\n");
+    let lock = ap::lock::Lock::read(&both).unwrap();
+    let locked = lock.harness.as_ref().unwrap();
+    assert_eq!(locked.bwrap, Companion::Digest(host.clone()));
+    assert_eq!(lock.text(), both);
     for text in [
         format!("HARNESS claude 2.1.3 {digest} {host}\n"),
         format!("HARNESS claude 2.1.3 {digest} -\n"),
         format!("HARNESS codex 0.169.0 {digest} 00ff\n"),
-        format!("HARNESS codex 0.169.0 {digest} {host} {host}\n"),
+        format!("HARNESS codex 0.169.0 {digest} {host} 00ff\n"),
+        format!("HARNESS codex 0.169.0 {digest} {host} {host} {host}\n"),
+        format!("HARNESS claude 2.1.3 {digest} - -\n"),
     ] {
         let error = ap::lock::Lock::read(&text).unwrap_err();
         assert_eq!(error.line, 1, "{text}");
@@ -1682,7 +1805,7 @@ fn codex_latest_resolves_downloads_and_writes_the_lock() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} -\n")
+        format!("HARNESS codex 0.169.0 {digest} - -\n")
     );
     assert_eq!(
         Settling::paths(&server),
@@ -1716,7 +1839,7 @@ fn codex_without_a_version_resolves_latest() {
     );
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} -\n")
+        format!("HARNESS codex 0.169.0 {digest} - -\n")
     );
 }
 
@@ -1782,7 +1905,7 @@ fn a_codex_file_in_the_cache_or_store_is_not_downloaded_again() {
     );
     assert_eq!(
         fs::read_to_string(path).unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} -\n")
+        format!("HARNESS codex 0.169.0 {digest} - -\n")
     );
 }
 
@@ -1805,7 +1928,7 @@ fn a_codex_download_that_does_not_match_the_lock_stores_nothing() {
     let server = openai_with(b"another file".to_vec(), Vec::new());
     let settling = Settling::new("settle-codex-locked", "AGENT codex:latest\nOS minimal\n");
     let digest = common::digest(&common::codex_file());
-    let lock = format!("HARNESS codex 0.169.0 {digest} -\n");
+    let lock = format!("HARNESS codex 0.169.0 {digest} - -\n");
     fs::write(settling.dir.join("Agentfile.lock"), &lock).unwrap();
     let error = settling.settle(&server).unwrap_err().to_string();
     assert!(error.contains(&common::digest(b"another file")), "{error}");
@@ -1845,7 +1968,7 @@ fn an_exact_codex_version_resolves_its_own_release() {
     );
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} -\n")
+        format!("HARNESS codex 0.169.0 {digest} - -\n")
     );
 }
 
@@ -1878,7 +2001,7 @@ fn a_chunked_codex_release_resolves() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         settling.lockfile().unwrap(),
-        format!("HARNESS codex 0.169.0 {digest} -\n")
+        format!("HARNESS codex 0.169.0 {digest} - -\n")
     );
 }
 
@@ -1952,7 +2075,7 @@ fn a_cached_codex_file_that_is_not_zstd_fails_the_build() {
     fs::write(common::cached(&scratch.home, &digest), "not zstd\n").unwrap();
     fs::write(
         dir.join("Agentfile.lock"),
-        format!("HARNESS codex 0.169.0 {digest} -\n"),
+        format!("HARNESS codex 0.169.0 {digest} - -\n"),
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build"]);

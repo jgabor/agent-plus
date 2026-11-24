@@ -7,9 +7,10 @@
 //!
 //! `HARNESS` holds the harness, its exact version, and the SHA-256 digest of
 //! the file it is installed from. For Codex, it then holds the digest of the
-//! file its code-mode host is installed from, or `-` for a release that
-//! publishes none. A Codex line without it was written before `ap` installed
-//! the host. It holds nothing else yet, so any other line is an error.
+//! file its code-mode host is installed from, and then of the file its
+//! bubblewrap is installed from, each `-` for a release that publishes none.
+//! A Codex line that ends before either was written before `ap` installed
+//! it. It holds nothing else yet, so any other line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
 //! download cache, and writes the lockfile, from the [`ORIGINS`] each
@@ -58,6 +59,11 @@ pub const CODEX_ASSET: &str = "codex-x86_64-unknown-linux-musl.zst";
 /// from 0.143.0.
 pub const CODEX_HOST_ASSET: &str = "codex-code-mode-host-x86_64-unknown-linux-musl.zst";
 
+/// The asset the guest runs bubblewrap from, in one zstd frame. Codex
+/// 0.171.0's sandbox runs each command in it, and releases publish it from
+/// 0.129.0.
+pub const CODEX_BWRAP_ASSET: &str = "bwrap-x86_64-unknown-linux-musl.zst";
+
 /// The prefix of a Codex release's tag, before its version.
 const CODEX_TAG: &str = "rust-v";
 
@@ -99,18 +105,22 @@ pub struct Locked {
     pub version: String,
     /// The SHA-256 digest of the file the harness is installed from.
     pub sha256: String,
-    pub code_mode_host: CodeModeHost,
+    /// Codex's code-mode host.
+    pub code_mode_host: Companion,
+    /// The bubblewrap that Codex's sandbox runs commands in.
+    pub bwrap: Companion,
 }
 
-/// What a lock records of Codex's code-mode host.
+/// What a lock records of a file that Codex's release publishes, which `ap`
+/// installs beside Codex.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CodeModeHost {
-    /// The SHA-256 digest of the file the host is installed from.
+pub enum Companion {
+    /// The SHA-256 digest of the file it is installed from.
     Digest(String),
-    /// The release publishes no host, or the harness isn't Codex.
+    /// The release publishes none, or the harness isn't Codex.
     Unpublished,
-    /// The lock is a Codex lock from before `ap` installed the host, so it
-    /// doesn't say.
+    /// The lock is a Codex lock from before `ap` installed it, so it doesn't
+    /// say.
     Unrecorded,
 }
 
@@ -143,19 +153,25 @@ impl Lock {
                     return Err(fail("a second `HARNESS`".to_string()));
                 }
                 "HARNESS" => {
-                    let code_mode_host = match arguments.as_slice() {
-                        [harness, _, _] if harness == "codex" => Some(CodeModeHost::Unrecorded),
-                        [_, _, _] => Some(CodeModeHost::Unpublished),
-                        [harness, _, _, host] if harness == "codex" && host == "-" => {
-                            Some(CodeModeHost::Unpublished)
+                    let companion = |field: Option<&String>| match field.map(String::as_str) {
+                        None => Some(Companion::Unrecorded),
+                        Some("-") => Some(Companion::Unpublished),
+                        Some(digest) if is_digest(digest) => {
+                            Some(Companion::Digest(digest.to_string()))
                         }
-                        [harness, _, _, host] if harness == "codex" && is_digest(host) => {
-                            Some(CodeModeHost::Digest(host.clone()))
+                        Some(_) => None,
+                    };
+                    let companions = match arguments.as_slice() {
+                        [harness, _, _] if harness != "codex" => {
+                            Some((Companion::Unpublished, Companion::Unpublished))
+                        }
+                        [harness, _, _, rest @ ..] if harness == "codex" && rest.len() <= 2 => {
+                            companion(rest.first()).zip(companion(rest.get(1)))
                         }
                         _ => None,
                     };
-                    match (arguments.as_slice(), code_mode_host) {
-                        ([harness, version, sha256, ..], Some(code_mode_host))
+                    match (arguments.as_slice(), companions) {
+                        ([harness, version, sha256, ..], Some((code_mode_host, bwrap)))
                             if is_digest(sha256) && !version.is_empty() =>
                         {
                             let harness = match harness.as_str() {
@@ -168,12 +184,14 @@ impl Lock {
                                 version: version.clone(),
                                 sha256: sha256.clone(),
                                 code_mode_host,
+                                bwrap,
                             });
                         }
                         _ => {
                             return Err(fail(
                                 "`HARNESS` takes a harness, a version, and a SHA-256 digest, \
-                                 and for Codex then its code-mode host's digest, or `-`"
+                                 and for Codex then the digests of its code-mode host and its \
+                                 bubblewrap, each or `-`"
                                     .to_string(),
                             ));
                         }
@@ -189,13 +207,20 @@ impl Lock {
     pub fn text(&self) -> String {
         match &self.harness {
             Some(locked) => {
-                let host = match (&locked.harness, &locked.code_mode_host) {
-                    (_, CodeModeHost::Digest(host)) => format!(" {host}"),
-                    (Harness::Codex, CodeModeHost::Unpublished) => " -".to_string(),
-                    _ => String::new(),
+                // A field that a lock doesn't record ends the line.
+                let companions: String = match locked.harness {
+                    Harness::Claude => String::new(),
+                    Harness::Codex => [&locked.code_mode_host, &locked.bwrap]
+                        .into_iter()
+                        .map_while(|companion| match companion {
+                            Companion::Digest(digest) => Some(format!(" {digest}")),
+                            Companion::Unpublished => Some(" -".to_string()),
+                            Companion::Unrecorded => None,
+                        })
+                        .collect(),
                 };
                 format!(
-                    "HARNESS {} {} {}{host}\n",
+                    "HARNESS {} {} {}{companions}\n",
                     name(locked.harness),
                     locked.version,
                     locked.sha256
@@ -208,12 +233,13 @@ impl Lock {
 
 /// Settles the harness that `agent` names, and returns whether `lock`
 /// changed. A lock that resolves `agent` is kept. A Codex lock that would,
-/// but doesn't record the code-mode host, resolves the version it locks
-/// again, and a digest for Codex's file that isn't the lock's is an error.
-/// Any other resolves again:
+/// but doesn't record the code-mode host or bubblewrap, resolves the version
+/// it locks again, and a digest for Codex's file that isn't the lock's is an
+/// error. Any other resolves again:
 /// a channel resolves to the exact version the harness's publisher
 /// publishes for it, and the lock gets that version and the digest the
-/// publisher publishes for its file, and for Codex's code-mode host. Each
+/// publisher publishes for its file, and for Codex's code-mode host and
+/// bubblewrap. Each
 /// file is downloaded from `origins` into `cache`, unless `cache` holds it or
 /// `stored` says the store has the harness layer. A file whose digest
 /// isn't the lock's is an error, and isn't stored. A changed lock checks a
@@ -230,11 +256,15 @@ pub fn settle(
     let locked = match &lock.harness {
         Some(locked) if locked.resolves(agent) => locked.clone(),
         Some(locked) if locked.pins(agent) => {
+            let missing = match locked.code_mode_host {
+                Companion::Unrecorded => "the code-mode host",
+                _ => "bubblewrap",
+            };
             let again = |error: io::Error| {
                 io::Error::new(
                     error.kind(),
                     format!(
-                        "Agentfile.lock doesn't record the code-mode host of `{}`, \
+                        "Agentfile.lock doesn't record {missing} of `{}`, \
                          so `ap` resolves it again: {error}",
                         locked.label()
                     ),
@@ -303,11 +333,18 @@ fn files<'a>(locked: &'a Locked, origins: &Origins) -> Vec<(String, &'a str, Str
                 )
             };
             let mut files = vec![(format!("`{label}`"), &*locked.sha256, url(CODEX_ASSET))];
-            if let CodeModeHost::Digest(host) = &locked.code_mode_host {
+            if let Companion::Digest(host) = &locked.code_mode_host {
                 files.push((
                     format!("the code-mode host of `{label}`"),
                     host,
                     url(CODEX_HOST_ASSET),
+                ));
+            }
+            if let Companion::Digest(bwrap) = &locked.bwrap {
+                files.push((
+                    format!("bubblewrap of `{label}`"),
+                    bwrap,
+                    url(CODEX_BWRAP_ASSET),
                 ));
             }
             files
@@ -387,7 +424,8 @@ fn resolve(agent: &Agent, client: &Client, base: &str) -> io::Result<Locked> {
         harness: Harness::Claude,
         version,
         sha256,
-        code_mode_host: CodeModeHost::Unpublished,
+        code_mode_host: Companion::Unpublished,
+        bwrap: Companion::Unpublished,
     })
 }
 
@@ -436,15 +474,17 @@ fn resolve_codex(asked: &str, client: &Client, api: &str) -> io::Result<Locked> 
             .ok_or_else(|| invalid(format!("Codex {version} has no SHA-256 digest for {name}")))
     };
     let sha256 = digest(CODEX_ASSET)?;
-    let code_mode_host = match asset(CODEX_HOST_ASSET) {
-        Some(_) => CodeModeHost::Digest(digest(CODEX_HOST_ASSET)?),
-        None => CodeModeHost::Unpublished,
+    let companion = |name: &str| match asset(name) {
+        Some(_) => digest(name).map(Companion::Digest),
+        None => Ok(Companion::Unpublished),
     };
+    let (code_mode_host, bwrap) = (companion(CODEX_HOST_ASSET)?, companion(CODEX_BWRAP_ASSET)?);
     Ok(Locked {
         harness: Harness::Codex,
         version,
         sha256,
         code_mode_host,
+        bwrap,
     })
 }
 
@@ -516,14 +556,17 @@ impl Locked {
     /// Whether this is a resolution of what `AGENT` names: the same harness,
     /// and the same version unless `AGENT` names a channel. A version that
     /// starts with a digit is exact, and any other is a channel.
-    /// A Codex lock that doesn't record the code-mode host resolves
-    /// nothing.
+    /// A Codex lock that doesn't record the code-mode host or bubblewrap
+    /// resolves nothing.
     pub fn resolves(&self, agent: &Agent) -> bool {
-        self.pins(agent) && self.code_mode_host != CodeModeHost::Unrecorded
+        self.pins(agent)
+            && self.code_mode_host != Companion::Unrecorded
+            && self.bwrap != Companion::Unrecorded
     }
 
     /// Whether this locks the harness and version that `AGENT` names, as
-    /// [`Locked::resolves`] says, whatever it records of the code-mode host.
+    /// [`Locked::resolves`] says, whatever it records of the code-mode host
+    /// and bubblewrap.
     fn pins(&self, agent: &Agent) -> bool {
         self.harness == agent.harness
             && (!is_exact(&agent.version) || agent.version == self.version)

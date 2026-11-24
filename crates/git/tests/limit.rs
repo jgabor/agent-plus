@@ -270,14 +270,21 @@ fn sparse_refs_are_refused_before_they_are_read() {
     assert!(held < LIMIT, "held {held} bytes");
     fs::remove_file(git.join("packed-refs")).unwrap();
     // Git would read this ref: it ends at the first NUL.
-    sparse(
-        &git.join("refs/heads/loose"),
-        format!("{}\n", id(1)).as_bytes(),
-    );
+    let loose = git.join("refs/heads/loose");
+    sparse(&loose, format!("{}\n", id(1)).as_bytes());
     let (result, held) = peak(|| repo().find_ref("refs/heads/loose"));
     assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
     assert!(held < LIMIT, "held {held} bytes");
-    // Without a limit, the same ref reads.
+    // A ref as long as the limit reads, and holds about that much.
+    let file = fs::OpenOptions::new().write(true).open(&loose).unwrap();
+    file.set_len(LIMIT as u64).unwrap();
+    let (result, held) = peak(|| repo().find_ref("refs/heads/loose"));
+    assert_eq!(result.unwrap(), Some(Target::Object(id(1))));
+    assert!(held < LIMIT * 3 / 2, "held {held} bytes");
+    // One byte longer is refused, and reads without a limit.
+    file.set_len(LIMIT as u64 + 1).unwrap();
+    let result = repo().find_ref("refs/heads/loose");
+    assert!(matches!(result, Err(Error::Corrupt(_))), "{result:?}");
     let read = Repository::at(&git).find_ref("refs/heads/loose").unwrap();
     assert_eq!(read, Some(Target::Object(id(1))));
 }

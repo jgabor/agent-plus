@@ -238,8 +238,8 @@ pub enum Target {
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// The repository holds something git wouldn't read, or an object
-    /// larger than the limit.
+    /// The repository holds something git wouldn't read, or an object or a
+    /// file larger than the limit.
     Corrupt(String),
 }
 
@@ -265,7 +265,8 @@ pub struct Repository {
     git_dir: PathBuf,
     /// The packs, found when an object is first looked for in one.
     packs: OnceLock<Vec<Pack>>,
-    /// The most bytes of contents an object may hold.
+    /// The most bytes of contents an object may hold, and the longest file
+    /// read whole.
     limit: usize,
 }
 

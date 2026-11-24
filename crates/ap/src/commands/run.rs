@@ -390,27 +390,25 @@ pub(super) struct RawMode(Option<libc::termios>);
 
 impl RawMode {
     pub(super) fn start() -> io::Result<RawMode> {
-        while !foreground() {
-            if runs::stopping() {
-                return Ok(RawMode(None));
-            }
+        while !foreground() && !runs::stopping() {
             // From the background, this waits as setting the modes would:
             // job control suspends `ap run` until it is in the foreground,
             // or until it ignores job control, and it changes nothing.
             // SAFETY: `tcdrain` takes and returns plain integers.
             if unsafe { libc::tcdrain(libc::STDIN_FILENO) } == 0 {
-                if runs::stopping() {
-                    return Ok(RawMode(None));
-                }
-                // Either `ap run` is in the foreground now, or job control
-                // doesn't hold it, as when it started with `SIGTTOU`
-                // ignored, and waiting again would never end.
+                // `ap run` is in the foreground now, or ignores job control
+                // for a stop, or job control doesn't hold it, as when it
+                // started with `SIGTTOU` ignored, and waiting again would
+                // never end.
                 break;
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {
                 return Err(error);
             }
+        }
+        if runs::stopping() {
+            return Ok(RawMode(None));
         }
         let mut saved = MaybeUninit::uninit();
         // SAFETY: `tcgetattr` fills the whole struct when it returns 0.

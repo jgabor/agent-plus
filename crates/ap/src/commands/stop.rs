@@ -116,10 +116,18 @@ fn server(stream: &UnixStream) -> Option<(libc::pid_t, Option<OwnedFd>)> {
     }
     // SAFETY: `pidfd_open` takes and returns plain integers.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) };
+    if fd < 0 {
+        // One that has exited already has nothing to resume. Otherwise the
+        // kernel has no pidfds, and the process id has to do.
+        let gone = io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        return (!gone).then_some((credentials.pid, None));
+    }
     // SAFETY: the kernel just returned this descriptor, and nothing else
     // owns it.
-    let pidfd = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) });
-    Some((credentials.pid, pidfd))
+    Some((
+        credentials.pid,
+        Some(unsafe { OwnedFd::from_raw_fd(fd as i32) }),
+    ))
 }
 
 /// Resumes this `ap run`, in case it is suspended. `SIGCONT` does nothing

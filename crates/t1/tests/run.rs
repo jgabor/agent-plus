@@ -1054,7 +1054,9 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
 #[test]
 fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let scratch = Scratch::new("background");
-    scratch.build("open", &fake(""));
+    // The harness ignores `SIGTERM`, so the run takes 10 seconds to end once
+    // `ap stop` reaches it, while `ap run` must leave the modes alone.
+    scratch.build("open", &fake("ENV FAKE_HARNESS_IGNORE_TERM 1\n"));
     let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
     // Raw mode can't be set from the background, so `ap run` stops on
     // `SIGTTOU`, and again each time it resumes.
@@ -1099,6 +1101,13 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
             .spawn()
             .unwrap(),
     );
+    let watched = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < watched {
+        assert_eq!(stty(&terminal, &["-g"]), modes);
+        thread::sleep(Duration::from_millis(50));
+    }
+    // It has taken the stop, and job control no longer suspends it.
+    assert!(!stopped(run), "ap run is still suspended");
     let status = wait_within(&mut stop, Duration::from_secs(30));
     let (mut stdout, mut stderr) = (stop.0.stdout.take().unwrap(), stop.0.stderr.take().unwrap());
     let mut printed = String::new();
@@ -1109,7 +1118,7 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     assert!(!running(vm), "the VM outlived ap stop");
     assert!(!running(run), "ap run outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
-    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 143"));
+    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
     assert_eq!(stty(&terminal, &["-g"]), modes);
 }
 

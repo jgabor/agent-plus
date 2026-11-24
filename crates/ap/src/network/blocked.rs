@@ -30,16 +30,16 @@ pub const MOST_BLOCKED: usize = 100;
 #[derive(Debug, Default)]
 pub struct Reports {
     pub blocked: Vec<Blocked>,
-    /// The hosts of `blocked` where only requests that no rule for the host
-    /// alone would allow were blocked.
+    /// The hosts of `blocked` where no rule for the host alone would allow
+    /// anything that was blocked.
     pub alone: HashSet<String>,
     /// Whether the network process blocked more hosts than it reported.
     pub more: bool,
 }
 
 impl Reports {
-    /// Takes one report. A host it has already is taken once, unless only
-    /// requests that no rule for it would allow were blocked there before.
+    /// Takes one report. A host it has already is taken once, unless no
+    /// rule for it alone would allow what was blocked there before.
     pub(super) fn take(&mut self, message: &[u8]) {
         match read(message) {
             Some(Read::More) => self.more = true,
@@ -64,8 +64,8 @@ impl Reports {
 }
 
 enum Read {
-    /// A host it blocked, and whether only requests there that no rule for
-    /// the host alone would allow.
+    /// A host it blocked, and whether no rule for the host alone would
+    /// allow anything blocked there.
     Blocked(Blocked, bool),
     More,
 }
@@ -135,8 +135,8 @@ fn host_name(name: &str) -> Option<String> {
 /// [`super::decisions`] says, and each host it blocks once.
 pub(super) struct Reporter {
     fd: i32,
-    /// The hosts reported, and whether only requests there that no rule for
-    /// the host alone would allow were blocked.
+    /// The hosts reported, and whether no rule for the host alone would
+    /// allow anything blocked there.
     hosts: RefCell<HashMap<String, bool>>,
     /// The rules and the harness's hosts, which name what decided.
     network: Network,

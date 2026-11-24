@@ -740,6 +740,9 @@ fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
     }) {
         return Err("its path has a `.` or `..` segment".to_string());
     }
+    if path.contains("//") {
+        return Err("its path has an empty segment".to_string());
+    }
     let (host, port) = match authority.split_once(':') {
         Some((host, port)) => (host, Some(port_of(port)?)),
         None => (authority, None),

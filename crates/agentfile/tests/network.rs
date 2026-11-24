@@ -371,8 +371,23 @@ fn a_url_rule_is_a_host_and_a_plain_path() {
         "NETWORK +https://github.com/jgabor%2fagent-plus\n",
         "NETWORK +https://1.1.1.1/dns-query\n",
         "NETWORK +https://github.com:0/jgabor\n",
+        "NETWORK +https://github.com/a//b\n",
     ] {
         error_of(line);
+    }
+}
+
+// spec(NETWORK): A URL rule's path can't have an empty segment, as in `/a//b`, because a request path with one is denied, but it may end with one `/`.
+#[test]
+fn a_url_rule_path_has_no_empty_segment() {
+    for path in ["//", "//a", "/a//", "/a//b", "/a///b", "/a/b//"] {
+        error_of(&format!("NETWORK +https://a.com{path}\n"));
+    }
+    for path in ["/", "/a/", "/a/b/"] {
+        assert_eq!(
+            destination_of(&format!("NETWORK +https://a.com{path}\n")),
+            url(Scheme::Https, "a.com", None, path)
+        );
     }
 }
 

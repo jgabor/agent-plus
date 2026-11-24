@@ -682,6 +682,23 @@ impl Share {
         Ok(())
     }
 
+    /// A node's attributes, while it is beneath the root. A file is where
+    /// its directory is. A directory with no search permission can't be
+    /// walked up from, so its name shows where it is.
+    fn getattr(&self, node: u64) -> Answer {
+        let found = self.node(node)?;
+        if !is(found.mode, libc::S_IFDIR) {
+            self.served(&found.parent)?;
+        } else if let Err(error) = self.served(&found.fd) {
+            if error != libc::EACCES {
+                return Err(error);
+            }
+            self.reopen(found, libc::O_PATH | libc::O_NOFOLLOW)?;
+        }
+        let stat = sys::fstat(found.fd.as_fd()).map_err(errno)?;
+        Ok(attr_out(&stat, self.owner))
+    }
+
     fn handle(&self, body: &[u8]) -> Result<&Handle, i32> {
         let handle = u64_at(body, 0).ok_or(libc::EINVAL)?;
         self.handles.get(&handle).ok_or(libc::EBADF)
@@ -1504,10 +1521,7 @@ fn dispatch(share: &mut Share, request: &Request) -> Option<Answer> {
     Some(match request.opcode {
         INIT => init(body),
         LOOKUP => share.lookup(node, body),
-        GETATTR => share
-            .node(node)
-            .and_then(|found| sys::fstat(found.fd.as_fd()).map_err(errno))
-            .map(|stat| attr_out(&stat, share.owner)),
+        GETATTR => share.getattr(node),
         SETATTR => share.setattr(node, body),
         READLINK => share.readlink(node),
         SYMLINK => share.symlink(node, body),

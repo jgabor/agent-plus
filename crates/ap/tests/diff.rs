@@ -650,8 +650,18 @@ fn a_history_that_can_t_be_read_still_shows_the_files() {
 #[test]
 fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
     let cases = [
-        ("big", 40, true, "more than the million paths that `ap` reads"),
-        ("deep1", 509, false, "a path longer than the 1024 bytes that `ap` reads"),
+        (
+            "big",
+            40,
+            true,
+            "more than the million paths that `ap` reads",
+        ),
+        (
+            "deep1",
+            509,
+            false,
+            "a path longer than the 1024 bytes that `ap` reads",
+        ),
     ];
     for (name, depth, twice, why) in cases {
         let scratch = Scratch::new(&format!("too-many-{name}"));
@@ -682,7 +692,9 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
         let first = shown.lines().next().unwrap();
         assert_eq!(
             first,
-            format!("branch ap/notes/{run}: its commits can't be counted: the agent's HEAD holds {why}")
+            format!(
+                "branch ap/notes/{run}: its commits can't be counted: the agent's HEAD holds {why}"
+            )
         );
     }
 }

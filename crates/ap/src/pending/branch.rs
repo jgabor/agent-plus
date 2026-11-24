@@ -70,9 +70,8 @@ struct Agent<'a> {
     /// The trees and blobs of the last commit, and the commit, which are
     /// nowhere else until they go in quarantine.
     made: RefCell<HashMap<Id, Object>>,
-    /// Each file and symlink of the agent's that would replace a directory
-    /// its `HEAD` holds with a git-ignored file in it.
-    replacing: BTreeSet<Vec<u8>>,
+    /// What the last commit leaves out where git-ignored files stay.
+    replacing: Replacing,
     /// How many paths of the tree of its `HEAD` have been read, and how
     /// many bytes of them.
     read: Cell<(usize, usize)>,
@@ -89,7 +88,7 @@ impl<'a> Agent<'a> {
             written: Repository::at(share.dir.join("tree").join(".git")).with_limit(MAX_OBJECT),
             yours: Repository::at(share.root.join(".git")),
             made: RefCell::default(),
-            replacing: BTreeSet::new(),
+            replacing: Replacing::default(),
             read: Cell::new((0, 0)),
             trees: RefCell::default(),
         }
@@ -280,23 +279,30 @@ impl<'a> Agent<'a> {
 
     /// Puts in `found` each file and symlink of the agent's beneath `path`,
     /// where its `HEAD` holds `tree`, that would replace a directory with a
-    /// git-ignored file in it. Git can't hold both, and that file stays.
+    /// git-ignored file in it, and each directory of the agent's that would
+    /// replace a git-ignored file. Git can't hold both, and that file stays.
     fn replacing(
         &self,
         ignore: &Gitignore,
         path: &[u8],
         tree: Id,
-        found: &mut BTreeSet<Vec<u8>>,
+        found: &mut Replacing,
     ) -> Result<(), git::Error> {
         for entry in self.entries(path, &tree)?.iter() {
+            let inner = beneath(path, &entry.name);
             if entry.mode != TREE {
+                // A submodule is as that `HEAD` holds it already, whatever
+                // the agent made in its place.
+                let dir = matches!(self.records.view(&inner), View::Agent(Entry::Dir { .. }));
+                if dir && entry.mode != GITLINK && ignore.is_ignored(bytes_path(&inner), false) {
+                    found.dirs.insert(inner);
+                }
                 continue;
             }
-            let inner = beneath(path, &entry.name);
             match self.records.view(&inner) {
                 View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => {
                     if self.holds_ignored(ignore, &inner, entry.id, true)? {
-                        found.insert(inner);
+                        found.files.insert(inner);
                     }
                 }
                 _ if self.recorded_beneath(&inner).next().is_some() => {
@@ -334,15 +340,10 @@ impl<'a> Agent<'a> {
         Ok(false)
     }
 
-    /// Each file and symlink of the agent's that would replace a directory
-    /// that `tree`, the tree of its `HEAD`, holds with a git-ignored file in
-    /// it.
-    fn replacing_in(
-        &self,
-        ignore: &Gitignore,
-        tree: Option<Id>,
-    ) -> Result<BTreeSet<Vec<u8>>, git::Error> {
-        let mut found = BTreeSet::new();
+    /// What the last commit leaves out where `tree`, the tree of its
+    /// `HEAD`, holds git-ignored files.
+    fn replacing_in(&self, ignore: &Gitignore, tree: Option<Id>) -> Result<Replacing, git::Error> {
+        let mut found = Replacing::default();
         if let Some(tree) = tree {
             self.replacing(ignore, b"", tree, &mut found)?;
         }
@@ -392,6 +393,11 @@ impl<'a> Agent<'a> {
         let recorded = yours && self.recorded_beneath(path).next().is_some();
         // Something the agent deleted beneath it may be one of `head`'s.
         let swept = yours && self.records.deleted.range(below(path)).next().is_some();
+        // The agent's directory doesn't land where it would replace a
+        // git-ignored file, so that file is as `head` holds it.
+        if self.replacing.dirs.contains(path) {
+            return Ok(head);
+        }
         let head_tree = matches!(head, Some((TREE, _)));
         let dir = root
             || match view {
@@ -401,7 +407,7 @@ impl<'a> Agent<'a> {
                 // The agent's file doesn't land where it would replace a
                 // directory with a git-ignored file in it, so the directory
                 // is as if the agent deleted it.
-                View::Agent(_) => self.replacing.contains(path),
+                View::Agent(_) => self.replacing.files.contains(path),
             };
         if !dir {
             let there = match view {
@@ -711,13 +717,13 @@ impl Share<'_> {
         }
     }
 
-    /// Each file and symlink of the agent's that would replace a directory
-    /// its `HEAD` holds with a git-ignored file in it.
+    /// What a branch import leaves out where the agent's `HEAD` holds
+    /// git-ignored files.
     pub(super) fn replacing(
         &self,
         records: &Records,
         ignore: &Gitignore,
-    ) -> Result<BTreeSet<Vec<u8>>, git::Error> {
+    ) -> Result<Replacing, git::Error> {
         let agent = Agent::new(self, records);
         let tree = match agent.head()? {
             Some(head) => Some(agent.object(&head)?.commit()?.tree),

@@ -982,7 +982,7 @@ impl Share<'_> {
                     if let Some(Ok(_)) = commits {
                         commits = Some(Err(branch::printable(&why)));
                     }
-                    Some(BTreeSet::new())
+                    Some(Replacing::default())
                 }
             },
             false => None,
@@ -1258,17 +1258,36 @@ enum Verdict {
     Change,
 }
 
+/// What of the agent's a branch import leaves out, because git can't hold
+/// a file and a directory at one path, and a git-ignored file stays as the
+/// agent's `HEAD` holds it.
+#[derive(Default)]
+struct Replacing {
+    /// Each file and symlink of the agent's that would replace a directory
+    /// its `HEAD` holds with a git-ignored file in it.
+    files: BTreeSet<Vec<u8>>,
+    /// Each directory of the agent's that would replace a git-ignored file
+    /// its `HEAD` holds.
+    dirs: BTreeSet<Vec<u8>>,
+}
+
+impl Replacing {
+    /// Whether a directory above `path` is one of `dirs`.
+    fn beneath_dir(&self, path: &[u8]) -> bool {
+        parents(path).any(|parent| self.dirs.contains(parent))
+    }
+}
+
 /// What becomes of the agent's change at `path`. For a branch import,
-/// `branch` holds each file and symlink of the agent's that would replace a
-/// directory its `HEAD` holds with a git-ignored file in it. When the
-/// change is applied to your files, `bare` finds the bare repositories it
-/// stays out of.
+/// `branch` holds what the import leaves out where git-ignored files stay.
+/// When the change is applied to your files, `bare` finds the bare
+/// repositories it stays out of.
 fn verdict(
     records: &Records,
     landed: &BTreeMap<Vec<u8>, Option<Base>>,
     host: &Host,
     ignore: &Gitignore,
-    branch: Option<&BTreeSet<Vec<u8>>>,
+    branch: Option<&Replacing>,
     bare: Option<&Bare>,
     path: &[u8],
 ) -> io::Result<Verdict> {
@@ -1309,8 +1328,17 @@ fn verdict(
     }
     // Git can't hold a file and a directory at one path, and a git-ignored
     // file stays as the agent's `HEAD` holds it.
-    if branch.is_some_and(|replacing| replacing.contains(path)) {
-        return skipped("it would replace a directory that holds a git-ignored file");
+    if let Some(replacing) = branch {
+        if replacing.files.contains(path) {
+            return skipped("it would replace a directory that holds a git-ignored file");
+        }
+        let written = matches!(
+            records.view(path),
+            View::Agent(Entry::File { .. } | Entry::Symlink { .. })
+        );
+        if written && replacing.beneath_dir(path) {
+            return skipped("it is in a directory that would replace a git-ignored file");
+        }
     }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.

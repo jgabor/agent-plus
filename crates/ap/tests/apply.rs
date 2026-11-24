@@ -2532,3 +2532,63 @@ fn a_file_in_place_of_an_ignored_directory_is_skipped() {
     );
     assert!(!repository.has_branch());
 }
+
+/// From #713: your `.gitignore` ignores `*.log` files, but no directory,
+/// and the agent's `HEAD` tracks `foo.log` and `docs/old.log`. The agent
+/// replaced each with a directory of files git doesn't ignore. Git can't
+/// hold a file and a directory at one path, so each git-ignored file stays
+/// as that `HEAD` holds it, and `ap apply` skips the files and symlinks in
+/// the agent's directories and says why. A file the agent wrote elsewhere
+/// lands.
+// spec(SHARE): Where the agent's `HEAD` holds a git-ignored file, and the agent made a directory in its place, `ap apply` skips each file and symlink the agent wrote in that directory, and says why.
+// spec(SHARE): The last commit holds the git-ignored file as that `HEAD` holds it.
+#[test]
+fn a_directory_in_place_of_an_ignored_file_is_skipped() {
+    let ignored = |share: &Path| {
+        fs::write(share.join(".gitignore"), "*.log\n!*/\n").unwrap();
+        fs::write(share.join("foo.log"), "kept\n").unwrap();
+        fs::create_dir(share.join("docs")).unwrap();
+        fs::write(share.join("docs/old.log"), "kept\n").unwrap();
+        repo::run(
+            share,
+            &["add", "-f", ".gitignore", "foo.log", "docs/old.log"],
+        );
+        repo::run(share, &["commit", "-q", "-m", "ignored"]);
+    };
+    let repository = Repository::with(
+        "directory-for-ignored",
+        true,
+        Setup {
+            before: Some(&ignored),
+            ..Setup::default()
+        },
+    );
+    let (share, pending) = (repository.share(), &repository.pending);
+    for path in ["foo.log", "docs/old.log"] {
+        delete(share, pending, path);
+        dir(pending, path, 0o755);
+    }
+    write(pending, "foo.log/bar", 0o644, b"bar\n");
+    dir(pending, "docs/old.log/a", 0o755);
+    write(pending, "docs/old.log/a/b", 0o644, b"b\n");
+    link(pending, "docs/old.log/a/c", "b");
+    write(pending, "notes", 0o644, b"notes\n");
+    let guest = &repository.guest;
+    fs::write(guest.join("notes"), "notes\n").unwrap();
+    let tree = repository.tree_after(&[&["add", "notes"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it is in a directory that would replace a git-ignored file";
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "skipped docs/old.log/a/b: {why}\nskipped docs/old.log/a/c: {why}\n\
+             skipped foo.log/bar: {why}\nskipped 2 git-ignored files\n"
+        )
+    );
+    repository.assert_last_commit(&tree, during);
+    let kept = format!("{}:docs/old.log", repository.branch());
+    assert_eq!(repo::run(share, &["cat-file", "-p", &kept]), "kept");
+}

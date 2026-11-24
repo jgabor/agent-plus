@@ -639,6 +639,54 @@ fn a_history_that_can_t_be_read_still_shows_the_files() {
     assert!(shown.ends_with("+++ b/a\n@@ -0,0 +1 @@\n+a\n"), "{shown}");
 }
 
+/// From #714: the agent's `HEAD` holds `big`, whose 41 trees each name the
+/// one below twice, so that it holds 2^40 files, or a file 1025 bytes long
+/// beneath `deep1`. Beneath a directory the agent replaced with a file,
+/// `ap diff` reads at most a million paths, and none that long, then says
+/// why on the first line, within a fixed time.
+// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
+// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
+// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
+    let cases = [
+        ("big", 40, true, "more than the million paths that `ap` reads"),
+        ("deep1", 509, false, "a path longer than the 1024 bytes that `ap` reads"),
+    ];
+    for (name, depth, twice, why) in cases {
+        let scratch = Scratch::new(&format!("too-many-{name}"));
+        let share = &scratch.share;
+        repo::run(share, &["init", "-q"]);
+        repo::commit(share, "README", "hello\n", "start");
+        let (run, pending) = scratch.run("notes", 1);
+        repo::capture(share, &pending);
+        let guest = scratch.root.join("guest");
+        repo::guest(share, &guest);
+        repo::commit_stacked(&guest, name, depth, twice);
+        repo::land(&guest, share, &pending);
+        record(&pending, &format!("DELETE \"{name}\""));
+        write(&pending, name, 0o644, b"a file\n");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ap"));
+        command
+            .args(["diff", &run])
+            .current_dir(&scratch.root)
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .stdin(Stdio::null());
+        repo::limit_cpu(&mut command, 20);
+
+        let output = command.output().unwrap();
+
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let shown = stdout(&output);
+        let first = shown.lines().next().unwrap();
+        assert_eq!(
+            first,
+            format!("branch ap/notes/{run}: its commits can't be counted: the agent's HEAD holds {why}")
+        );
+    }
+}
+
 /// What the agent named, such as a pack, reaches your terminal only with
 /// its control characters escaped.
 #[test]

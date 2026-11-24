@@ -794,6 +794,14 @@ impl Repository {
         command.env("PATH", path).output().unwrap()
     }
 
+    /// Runs `ap apply` as `apply` does, with at most `seconds` of CPU time.
+    fn apply_within(&self, seconds: u64) -> Output {
+        let path = std::env::var_os("PATH").unwrap();
+        let mut command = self.scratch.command(&["apply", &self.run]);
+        repo::limit_cpu(command.env("PATH", path), seconds);
+        command.output().unwrap()
+    }
+
     fn records(&self) -> Vec<u8> {
         fs::read(self.pending.join("records")).unwrap()
     }
@@ -2079,4 +2087,65 @@ fn a_file_in_place_of_a_directory_with_a_submodule_lands() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(stdout(&output), "");
     repository.assert_last_commit(&tree, during);
+}
+
+/// From #714: the agent's `HEAD` holds `big`, whose 41 trees each name the
+/// one below twice, so that it holds 2^40 files. Beneath a directory the
+/// agent deleted, or replaced with a file, `ap apply` reads at most a
+/// million paths, then refuses, within a fixed time.
+// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
+// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
+// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
+    for replaced in [false, true] {
+        let repository = Repository::new(&format!("too-many-{replaced}"), true, &[]);
+        repo::commit_stacked(&repository.guest, "big", 40, true);
+        repository.land();
+        let pending = &repository.pending;
+        record(pending, "DIR \"big\" 755");
+        record(pending, "DELETE \"big\"");
+        if replaced {
+            write(pending, "big", 0o644, b"big\n");
+        }
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply_within(20);
+
+        let why = "the agent's HEAD holds more than the million paths that `ap` reads";
+        let error = format!("{why}, so everything stays pending");
+        repository.stays_pending(&output, &error, &before);
+    }
+}
+
+/// From #714: the agent's `HEAD` holds a file 1024 bytes long beneath
+/// `deep`, or one a byte longer beneath `deep1`. Beneath a directory the
+/// agent deleted, `ap apply` reads the first, and refuses the second.
+// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
+// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
+// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_head_with_a_path_too_deep_beneath_what_the_agent_removed_stays_pending() {
+    for (name, depth) in [("deep", 509), ("deep1", 509)] {
+        let repository = Repository::new(&format!("too-deep-{name}"), true, &[]);
+        let guest = &repository.guest;
+        repo::commit_stacked(guest, name, depth, false);
+        repository.land();
+        record(&repository.pending, &format!("DIR \"{name}\" 755"));
+        record(&repository.pending, &format!("DELETE \"{name}\""));
+        let before = repository.objects_and_refs();
+        // The agent's index never held it.
+        let tree = repository.tree_after(&[]);
+
+        let (output, during) = repository.apply_timed();
+
+        if name == "deep" {
+            assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+            repository.assert_last_commit(&tree, during);
+            continue;
+        }
+        let why = "the agent's HEAD holds a path longer than the 1024 bytes that `ap` reads";
+        let error = format!("{why}, so everything stays pending");
+        repository.stays_pending(&output, &error, &before);
+    }
 }

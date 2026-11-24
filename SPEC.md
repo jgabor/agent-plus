@@ -1626,6 +1626,12 @@ attributes, because those can run commands.
     so, and everything stays pending.
   - `ap apply` refuses a branch import into a repository whose object
     format isn't SHA-1, says so, and everything stays pending.
+  - `ap diff` and `ap apply` read at most a million paths of the tree of
+    the agent's `HEAD`, and none longer than 1024 bytes. They read it in
+    each directory that holds a path the agent changed, and beneath each
+    directory the agent deleted or replaced. Past either limit, `ap diff`'s
+    first line says why, and `ap apply` refuses the branch import, says
+    why, and everything stays pending.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and

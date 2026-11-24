@@ -697,19 +697,14 @@ fn a_runs_state_trusts_its_working_directory_and_every_directory_above_it() {
     // The path is made normal, and written as a JSON string.
     let state = claude::state("/home//agent/./x/../a \"b\" \\c\u{1}/", None);
     let state = String::from_utf8(state).unwrap();
-    let trusted: Vec<&str> = (state.lines())
-        .filter_map(|line| line.strip_suffix(": {"))
-        .map(str::trim)
-        .collect();
+    let parsed = ap::json::parse(&state).expect(&state);
+    let Some(ap::json::Value::Object(projects)) = parsed.get("projects") else {
+        panic!("{state}");
+    };
+    let trusted: Vec<&str> = projects.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(
         trusted,
-        [
-            "\"projects\"",
-            "\"/\"",
-            "\"/home\"",
-            "\"/home/agent\"",
-            "\"/home/agent/a \\\"b\\\" \\\\c\\u0001\""
-        ],
+        ["/", "/home", "/home/agent", "/home/agent/a \"b\" \\c\u{1}"],
         "{state}"
     );
     assert!(ap::adapter::run_files(agentfile::Harness::Codex, "/home/agent", None).is_empty());

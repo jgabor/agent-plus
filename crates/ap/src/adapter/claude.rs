@@ -128,8 +128,8 @@ const APPROVED_CHARACTERS: usize = 20;
 /// when its working directory, or a directory above it up to the root of the
 /// git repository it is in, has a record, and records the root when you
 /// accept the dialog. A run passes its working directory, so the root of any
-/// repository the run starts in has one. `directory` is a guest path, made
-/// normal here.
+/// repository the run starts in has one. `directory` is an absolute guest
+/// path, made normal here.
 ///
 /// With `AUTH key`, it also approves the run's placeholder, so an
 /// interactive run doesn't ask whether to use the key. Claude Code 2.1.330

@@ -29,11 +29,14 @@
 //!
 //! A trusted project's `[auto_review]` text reaches the reviewer's prompt,
 //! and can change its verdict. In `auto`, the adapter sets each of those
-//! keys the version takes to an empty string, which Codex reads as its
-//! built-in text. A project's `features.guardian_approval = false` also
-//! applies. Codex 0.169.0 still sends sandbox escalations and MCP tool calls
-//! to the reviewer then, but its source skips the reviewer on other paths,
-//! so in `auto` the adapter turns the feature on, as it is by default.
+//! keys the version takes to an empty string, which Codex reads as unset.
+//! A trusted project's `model_catalog_json` can still give the reviewer its
+//! policy on 0.169.0, because an unset `policy` falls back to the catalog's.
+//!
+//! A project's `features.guardian_approval = false` also applies. Codex
+//! 0.169.0 still sends sandbox escalations and MCP tool calls to the reviewer
+//! then, but its source skips the reviewer on other paths, so in `auto` the
+//! adapter turns the feature on, as it is by default.
 //!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
@@ -226,7 +229,7 @@ pub fn arguments(
             "features.guardian_approval=true".to_owned(),
         ]);
         for (key, from, until) in REVIEWER_TEXT {
-            if at_least(&from) && !until.is_some_and(|until| at_least(&until)) {
+            if at_least(&from) && until.is_none_or(|until| !at_least(&until)) {
                 arguments.extend(["-c".to_owned(), format!("auto_review.{key}=\"\"")]);
             }
         }

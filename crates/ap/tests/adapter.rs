@@ -380,7 +380,7 @@ fn a_codex_project_cant_add_writable_roots() {
     }
 }
 
-// spec(MODE): With `auto`, the Codex adapter also keeps `features.guardian_approval` on, and blanks the instructions a project can give the reviewer in `[auto_review]`, such as `policy`, so a project's settings can't turn the reviewer off or give it other instructions.
+// spec(MODE): With `auto`, the Codex adapter also keeps `features.guardian_approval` on, and blanks the instructions a project can give the reviewer in `[auto_review]`, such as `policy`, so a project can't turn the reviewer off or give it instructions with those keys.
 #[test]
 fn a_codex_project_cant_change_the_reviewer() {
     let on = "features.guardian_approval=true";

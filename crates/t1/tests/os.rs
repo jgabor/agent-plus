@@ -1,5 +1,7 @@
 //! An agent built with `OS minimal` boots on the pinned OS layer, which `ap
-//! build` downloads from its release once.
+//! build` downloads from its release once. The gate's test starts from the
+//! layer the tree keeps, so it makes no request. Only the nightly job runs the
+//! test that downloads it from the real release.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +12,7 @@ use ap::boot::{self, Guest, Layer, Report};
 use ap::fetch;
 use guest::protocol::ToGuest;
 use store::{Agents, Layers};
-use t1::{guest_binary, kernel};
+use t1::{guest_binary, kernel, os};
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 const AGENTFILE: &str = "AGENT claude\nOS minimal\nNETWORK -\nPOLICY -\n";
@@ -67,34 +69,60 @@ fn project(root: &Path, home: &Path, name: &str) -> PathBuf {
     dir
 }
 
-// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
-// spec(OS): | `minimal` | The harness, a shell, git, and coreutils |
-// spec(OS): `minimal` holds Debian's CA certificates, in `/etc/ssl/certs/ca-certificates.crt`, so programs in the guest can verify HTTPS servers.
-#[test]
-fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
-    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("os-{}", process::id()));
+/// A new directory for one test's home and agents, with the grants file
+/// that approves them.
+fn scratch(test: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("os-{test}-{}", process::id()));
     let _ = fs::remove_dir_all(&root);
     let home = root.join("home");
     fs::create_dir_all(&home).unwrap();
     let grants = root.join("grants");
     fs::write(&grants, GRANTS).unwrap();
+    (root, home, grants)
+}
+
+/// The layers of the agent `name` in the store under `home`, after checking
+/// that the pinned OS layer is the first.
+fn layers(home: &Path, name: &str) -> Vec<store::Layer> {
+    let layers = Agents::new(home.join(".local/share/ap"))
+        .get(name)
+        .unwrap()
+        .unwrap()
+        .layers;
+    assert_eq!(layers[0].digest, fetch::os().sha256);
+    layers
+}
+
+// spec(Build): A kernel, OS, or harness layer is downloaded once, however many agents use it.
+#[test]
+#[ignore = "downloads from the real release, which only the nightly job does"]
+fn ap_build_downloads_the_pinned_os_layer_once_for_two_agents() {
+    let (root, home, grants) = scratch("fetch");
     let (one, two) = (project(&root, &home, "one"), project(&root, &home, "two"));
 
     let first = build(&home, &one, &grants);
     assert!(first.starts_with("fetched OS minimal\n"), "{first}");
     let second = build(&home, &two, &grants);
     assert!(second.starts_with("hit OS minimal\n"), "{second}");
+    layers(&home, "one");
+    layers(&home, "two");
+    fs::remove_dir_all(&root).unwrap();
+}
 
+// spec(OS): | `minimal` | The harness, a shell, git, and coreutils |
+// spec(OS): `minimal` holds Debian's CA certificates, in `/etc/ssl/certs/ca-certificates.crt`, so programs in the guest can verify HTTPS servers.
+#[test]
+fn an_os_minimal_agent_boots_with_a_shell_git_and_coreutils() {
+    let (root, home, grants) = scratch("boot");
     let store = home.join(".local/share/ap");
-    let agents = Agents::new(&store);
-    let layers: Vec<_> = ["one", "two"]
-        .map(|name| agents.get(name).unwrap().unwrap().layers)
-        .into();
-    let pin = fetch::os();
-    assert_eq!(layers[0][0].digest, pin.sha256);
-    assert_eq!(layers[1][0].digest, pin.sha256);
+    os::put(&store);
+    let dir = project(&root, &home, "one");
+
+    let out = build(&home, &dir, &grants);
+    assert!(out.starts_with("hit OS minimal\n"), "{out}");
+
     let stored = Layers::new(&store);
-    let disks: Vec<Layer> = layers[0]
+    let disks: Vec<Layer> = layers(&home, "one")
         .iter()
         .map(|layer| Layer {
             digest: layer.digest.clone(),

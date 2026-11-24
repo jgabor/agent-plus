@@ -15,7 +15,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// The share server's arguments, one to a line, for the process the test
 /// starts.
@@ -148,6 +148,41 @@ fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
     server.wait().unwrap()
 }
 
+/// Starts the share server's process as `share::start` does, with each
+/// root a descriptor it inherits, numbered in its arguments after the
+/// words that come before it. With `aim`, once it has served, it turns
+/// from the descriptor of root `index` as the rest of the aim says.
+/// Returns the process, and the other end of its socket.
+fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd) {
+    let (mine, theirs) = UnixStream::pair().unwrap();
+    let inherited: Vec<OwnedFd> = (roots.iter())
+        .map(|(_, root)| share::inheritable(File::open(root).unwrap().as_fd()).unwrap())
+        .collect();
+    let mut args = Vec::new();
+    for ((words, _), fd) in roots.iter().zip(&inherited) {
+        if !words.is_empty() {
+            args.push(words.to_string());
+        }
+        args.push(fd.as_raw_fd().to_string());
+    }
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
+        .env(ARGS, args.join("\n"))
+        .env(ARENAS, "1")
+        .stdin(OwnedFd::from(theirs))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some((index, rest)) = aim {
+        command.env(AIM, format!("{}\n{rest}", inherited[index].as_raw_fd()));
+    }
+    let server = command.spawn().unwrap();
+    // The command holds the server's end of the socket.
+    drop(command);
+    drop(inherited);
+    (server, OwnedFd::from(mine))
+}
+
 /// The mode and modification time of the file at `path`.
 fn mode_and_time(path: &Path) -> (u32, i64) {
     let metadata = fs::metadata(path).unwrap();
@@ -172,6 +207,30 @@ fn a_confined_rw_server_can_t_change_the_mode_or_times_of_a_file_outside_it() {
     serve_and_turn(&tree.root, "openat", "hello.txt");
     let hello = tree.root.join("hello.txt");
     assert_eq!(mode_and_time(&hello), (0o100_777, 0));
+}
+
+// #440: Landlock doesn't cover a file's mode or times, and a server with
+// an `rw` share may change those, so it holds no other share's root.
+#[test]
+fn a_server_that_changes_modes_and_times_serves_only_rw_shares() {
+    for mode in ["ro", "cow"] {
+        let tree = Tree::new(&format!("confined-mixed-{mode}-rw"));
+        let other = Tree::new(&format!("confined-mixed-{mode}"));
+        let pending = other.base.join("pending");
+        fs::create_dir(&pending).unwrap();
+        let hello = other.root.join("hello.txt");
+        let before = mode_and_time(&hello);
+        let mut roots = vec![("rw", tree.root.as_path()), (mode, &other.root)];
+        if mode == "cow" {
+            roots.push(("", &pending));
+        }
+        let aim = "openat\nhello.txt\nfchmod futimens";
+        let (mut server, socket) = start(&roots, Some((1, aim)));
+        drop(socket);
+        let status = server.wait().unwrap();
+        assert_eq!(mode_and_time(&hello), before, "{mode}");
+        assert!(!status.success(), "{mode} {status}");
+    }
 }
 
 #[test]

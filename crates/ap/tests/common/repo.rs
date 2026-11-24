@@ -97,6 +97,28 @@ pub fn commit_stacked(dir: &Path, path: &str, twice: impl IntoIterator<Item = bo
     commit_tree(dir, &root, path);
 }
 
+/// Commits `path` in the repository `dir`, without writing it, as a tree
+/// for each of `widths`, from the bottom up, that names the one below it
+/// that many times, each with a name one byte long. The bottom one holds
+/// `README` from `HEAD` as many times as the first width says.
+pub fn commit_wide(dir: &Path, path: &str, widths: &[usize]) {
+    let names = (b'0'..=b'9').chain(b'A'..=b'Z').chain(b'a'..=b'z');
+    let names: Vec<char> = names.map(char::from).collect();
+    let mut kind = "100644 blob";
+    let mut id = run(dir, &["rev-parse", "HEAD:README"]);
+    for &width in widths {
+        let text: String = (names[..width].iter())
+            .map(|name| format!("{kind} {id}\t{name}\n"))
+            .collect();
+        id = run_with(dir, &["mktree"], text.as_bytes());
+        kind = "040000 tree";
+    }
+    let listing = run(dir, &["ls-tree", "HEAD"]);
+    let root = format!("{listing}\n040000 tree {id}\t{path}\n");
+    let root = run_with(dir, &["mktree"], root.as_bytes());
+    commit_tree(dir, &root, path);
+}
+
 /// Commits a tree in the repository `dir` that holds `README` from `HEAD`,
 /// and the tree of `HEAD` named `name`, which may be one that `git mktree`
 /// refuses, such as an empty one. Host `git` writes it.

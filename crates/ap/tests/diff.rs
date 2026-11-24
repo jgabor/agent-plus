@@ -673,15 +673,16 @@ fn first_line(name: &str, commit: impl Fn(&Path), deleted: &str, written: Option
 }
 
 /// From #714: the agent's `HEAD` holds `big`, whose 41 trees each name the
-/// one below twice, so that it holds 2^40 files, a file 1024 bytes long
-/// beneath `deep`, or one a byte longer beneath `deep1`. Beneath a
-/// directory the agent replaced with a file, `ap diff` reads at most 64 MiB
-/// of paths, and none longer than 1024 bytes, then says why on the first
+/// one below twice, so that it holds 2^40 files, `wide`, which holds about
+/// 7 million files of 12 bytes, a file 1024 bytes long beneath `deep`, or
+/// one a byte longer beneath `deep1`. Beneath a directory the agent
+/// replaced with a file, `ap diff` reads at most 64 MiB of paths, at most
+/// a million, and none longer than 1024 bytes, then says why on the first
 /// line, within a fixed time. Beneath one it only deleted, it reads
 /// nothing.
 // spec(SHARE): `ap diff` reads the tree of the agent's `HEAD` in each directory that holds a path the agent changed, and beneath each directory the agent replaced with a file or symlink.
-// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
-// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+// spec(SHARE): Each time, it reads at most a million paths, and at most 64 MiB of paths in all, and none longer than 1024 bytes.
+// spec(SHARE): Past any of these limits, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
     let cases = [
@@ -692,6 +693,12 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
             "more than the 64 MiB of paths that `ap` reads",
         ),
         ("big", vec![true; 40], false, ""),
+        (
+            "wide",
+            Vec::new(),
+            true,
+            "more than the million paths that `ap` reads",
+        ),
         ("deep", vec![false; 509], true, ""),
         (
             "deep1",
@@ -701,7 +708,10 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
         ),
     ];
     for (name, twice, replaced, why) in cases {
-        let commit = |guest: &Path| repo::commit_stacked(guest, name, twice.iter().copied());
+        let commit = |guest: &Path| match name {
+            "wide" => repo::commit_wide(guest, name, &[60, 60, 60, 32]),
+            _ => repo::commit_stacked(guest, name, twice.iter().copied()),
+        };
         let written = replaced.then_some(name);
         let first = first_line(
             &format!("too-many-{name}-{replaced}"),
@@ -723,8 +733,8 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
 /// name, which `git fsck --strict` refuses, and `ap diff` says why on the
 /// first line.
 // spec(SHARE): `ap diff` reads the tree of the agent's `HEAD` in each directory that holds a path the agent changed, and beneath each directory the agent replaced with a file or symlink.
-// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
-// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+// spec(SHARE): It reads no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past any of these limits, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_head_with_a_name_git_refuses_is_said_first() {
     let commit = |guest: &Path| repo::commit_named(guest, b"");

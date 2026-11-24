@@ -1630,10 +1630,11 @@ attributes, because those can run commands.
     holds a path the agent changed, and beneath each directory the agent
     replaced with a file or symlink. `ap apply` reads it there, and then
     reads it again, there and beneath each directory the agent deleted.
-    Each time, it reads at most 64 MiB of paths, and none longer than 1024
-    bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a
-    `/`, which `git fsck --strict` refuses. Past either limit, or at such
-    an entry, `ap diff`'s first line says why, and `ap apply` refuses the
+    Each time, it reads at most a million paths, and at most 64 MiB of
+    paths in all, and none longer than 1024 bytes. It reads no tree entry
+    whose name is empty, `.`, or `..`, or holds a `/`, which
+    `git fsck --strict` refuses. Past any of these limits, or at such an
+    entry, `ap diff`'s first line says why, and `ap apply` refuses the
     branch import, says why, and everything stays pending.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed

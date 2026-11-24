@@ -475,13 +475,16 @@ fn copy_contents(from: BorrowedFd, to: BorrowedFd) -> io::Result<()> {
     }
 }
 
+/// What a test runs before a copy opens a file it moves, which can fail it.
+type Moving = Box<dyn FnMut() -> Result<(), i32>>;
+
 thread_local! {
     /// What runs each time a capture on this thread has listed `.git`.
     static LISTED: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
         const { std::cell::RefCell::new(None) };
     /// What runs on this thread before a copy opens the agent's copy for
     /// a reader or a lock owner it moves there.
-    static MOVING: std::cell::RefCell<Option<Box<dyn FnMut() -> Result<(), i32>>>> =
+    static MOVING: std::cell::RefCell<Option<Moving>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -496,7 +499,7 @@ pub fn when_git_is_listed(hook: Option<Box<dyn FnMut()>>) {
 /// copy, for a reader or a lock owner it moves there, until it is set
 /// again. An error from `hook` fails that open. A test fails a move with it.
 #[doc(hidden)]
-pub fn when_a_copy_moves(hook: Option<Box<dyn FnMut() -> Result<(), i32>>>) {
+pub fn when_a_copy_moves(hook: Option<Moving>) {
     MOVING.with(|moving| *moving.borrow_mut() = hook);
 }
 
@@ -1025,6 +1028,9 @@ impl Cow {
                     self.times.set(path, &times_of(&stat))?;
                     Ok((entry, self.ready_moves(path)?))
                 })();
+                // Removing the copy may need the descriptor it holds, as
+                // when the move failed with `EMFILE`.
+                drop(copy);
                 match made {
                     Ok(made) => made,
                     Err(error) => {

@@ -985,19 +985,25 @@ does the following on `main`:
    a verdict that names each failed check, the three scores, what regressed
    and why, commits not in the ledger, and what waits on the owner. Then come
    each sentence of SPEC.md added, changed, or removed since the last report,
-   under its heading, with its PR, and each heading of AGENTS.md and
-   HARNESS.md whose text changed, with its PRs. Under one heading, a commit's
-   removed sentences and its added ones pair up in order, and each pair is a
-   change. A marked sentence counts, whitespace doesn't, and a commit with no
-   record is named by its commit. Then comes a link to each earlier unread
-   report. What merged and the checks fold below that, each with its count in
-   the summary. A section with nothing in it is left out. A report with a
-   change to SPEC.md or the rules ends, after the folds, with "Mark this
-   report read by reacting with :eyes:." Until the owner's account reacts to
-   it with :eyes:, it is unread. A reaction from anyone else doesn't count. A
-   report with neither change has no such line, and needs no mark. `cargo
-   xtask report` prints the same report without the line, because nothing can
-   react to it.
+   under its heading and then its PR, and the changes to AGENTS.md and
+   HARNESS.md, under each PR, with a line for each file that names the
+   headings whose text changed. A sentence with no mark was added, a changed
+   one shows what it was and what it is now, and a removed one says so.
+   Under one heading, a commit's removed sentences and its added ones pair up
+   in order, and each pair is a change. A marked sentence counts, whitespace
+   doesn't, and a commit with no record is named by its commit. Then comes a
+   link to each earlier unread report. What merged folds below that, leaving
+   out the PRs named above, with both counts in its summary, as in `Merged:
+   41, 17 of them above`. When it leaves out every PR, the summary is a line
+   of its own. Last comes a line with the count of checks in each state,
+   which names each check that didn't pass. A section with nothing in it is
+   left out. A PR or an issue is named as a link whose text is its title, at
+   most once under a heading. A report with a change to SPEC.md or the rules
+   ends with "Mark this report read by reacting with :eyes:." Until the
+   owner's account reacts to it with :eyes:, it is unread. A reaction from
+   anyone else doesn't count. A report with neither change has no such line,
+   and needs no mark. `cargo xtask report` prints the same report without
+   the line, because nothing can react to it.
 4. Post status `xtask/nightly` on the tested commit.
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad

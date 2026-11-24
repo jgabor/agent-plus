@@ -16,7 +16,8 @@ const REPORT_ISSUE: &str =
     "[{\"number\":12,\"title\":\"Nightly report\",\"labels\":[],\"isPinned\":true}]";
 const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
 const WAITING_FOR_EITHER: &str = "[{\"number\":30,\"title\":\"Ready\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":32,\"title\":\"Stuck\",\"labels\":[{\"name\":\"answer-needed\"}],\"isPinned\":false}]";
-const CHECKS_PASSED: &str = "<details>\n<summary>Checks: 3 passed, 5 skipped</summary>\n\n- pass bench\n- pass gate\n- skip t2\n- skip release\n- skip t3\n- pass journey\n- skip fuzz\n- skip mutation\n\n</details>\n";
+const CHECKS_PASSED: &str =
+    "\nChecks: 3 passed, 5 skipped (`t2`, `release`, `t3`, `fuzz`, `mutation`)\n";
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
@@ -30,7 +31,7 @@ case "$1 $2" in
     if [ -e "$(dirname "$0")/no-edits" ]; then echo "edits are off" >&2; exit 1; fi
     cat > "$(dirname "$0")/edited-$3" ;;
   "issue view") cat "$(dirname "$0")/issue.json" ;;
-  "repo view") echo '{"owner":{"login":"o"}}' ;;
+  "repo view") echo '{"owner":{"login":"o"},"url":"https://github.com/o/r"}' ;;
   "issue create") echo "https://github.com/o/r/issues/77" ;;
   "api "*"/reactions?content=eyes")
     id="${2%/reactions*}"; id="${id##*/}"
@@ -47,6 +48,34 @@ case "$1 $2" in
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 "#;
+
+/// What a posted report's checks line says of one check: `fail` or `skip`
+/// when it names the check there, and `pass` when it names it in neither.
+/// The line counts every check the nightly runs, so none was left out.
+#[track_caller]
+fn check_state(comment: &str, name: &str) -> &'static str {
+    let Some(line) = comment.lines().find_map(|l| l.strip_prefix("Checks: ")) else {
+        panic!("no checks line: {comment}");
+    };
+    let words: Vec<&str> = line.split(' ').collect();
+    let counted: usize = words
+        .windows(2)
+        .filter(|w| ["passed", "failed", "skipped"].contains(&w[1].trim_end_matches(',')))
+        .filter_map(|w| w[0].parse::<usize>().ok())
+        .sum();
+    assert_eq!(counted, 8, "{comment}");
+    let name = format!("`{name}`");
+    for (word, state) in [("failed", "fail"), ("skipped", "skip")] {
+        let names = line
+            .split_once(&format!(" {word} ("))
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map_or("", |(names, _)| names);
+        if names.split(", ").any(|n| n == name) {
+            return state;
+        }
+    }
+    "pass"
+}
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -431,7 +460,6 @@ fn the_report_covers_the_last_day_of_main() {
         },
     );
     repo.merge("Add a thing (#9)", 23, &CLEAN);
-    let merged = repo.short("HEAD");
     repo.commit("Push straight to main", 1);
     let unrecorded = repo.short("HEAD");
     repo.set_issues(WAITING);
@@ -439,12 +467,15 @@ fn the_report_covers_the_last_day_of_main() {
     assert_eq!(
         repo.report(),
         format!(
-            "# Nightly report for `{unrecorded}`\n\nspec 1 of 7, journey 1 of 4, budgets 1 of 1\n\nJourney steps that spend money, and weren't run: 2\n\n## Not in the ledger\n\n- `{unrecorded}` Push straight to main\n\n## Waiting on the owner\n\n- #30 Promises that end in a colon\n\n<details>\n<summary>Merged: 1</summary>\n\n- `{merged}` Add a thing (#9), issue #5\n\n</details>\n"
+            "# Nightly report for `{unrecorded}`\n\nspec 1 of 7, journey 1 of 4, budgets 1 of 1\n\nJourney steps that spend money, and weren't run: 2\n\n## Not in the ledger\n\n- `{unrecorded}` Push straight to main\n\n## Waiting on the owner\n\n- [Promises that end in a colon](https://github.com/o/r/issues/30)\n\n<details>\n<summary>Merged: 1</summary>\n\n- [Add a thing](https://github.com/o/r/pull/9)\n\n</details>\n"
         )
     );
     assert_eq!(
         repo.calls(),
-        ["issue list --state open --limit 2000 --json number,title,labels,isPinned"]
+        [
+            "issue list --state open --limit 2000 --json number,title,labels,isPinned",
+            "repo view --json url",
+        ]
     );
 }
 
@@ -561,7 +592,7 @@ fn the_first_commit_can_carry_a_record() {
     repo.commit("Everything at once (#9)", 2);
     let report = repo.report();
     assert!(
-        report.contains("Everything at once (#9), issue #5"),
+        report.contains("[Everything at once](https://github.com/o/r/pull/9)"),
         "{report}"
     );
     assert!(!report.contains("## Regressed"), "{report}");
@@ -602,8 +633,14 @@ fn the_report_lists_an_issue_waiting_for_a_landing_or_an_answer() {
     let output = repo.xtask(&["report"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let report = stdout(&output);
-    assert!(report.contains("#30 Ready"), "{report}");
-    assert!(report.contains("#32 Stuck"), "{report}");
+    assert!(
+        report.contains("[Ready](https://github.com/o/r/issues/30)"),
+        "{report}"
+    );
+    assert!(
+        report.contains("[Stuck](https://github.com/o/r/issues/32)"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -897,7 +934,8 @@ fn a_failing_gate_still_posts_the_report() {
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let comment = repo.comment();
-    assert!(comment.contains("- pass bench\n- fail gate\n"), "{comment}");
+    assert_eq!(check_state(&comment, "bench"), "pass", "{comment}");
+    assert_eq!(check_state(&comment, "gate"), "fail", "{comment}");
     assert!(comment.contains("`\n\n**Failed: gate.** "), "{comment}");
     let status = format!("statuses/{head} -f state=failure -f context=xtask/nightly");
     assert!(
@@ -918,8 +956,9 @@ fn a_step_that_cant_run_counts_as_failed() {
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let comment = repo.comment();
-    assert!(comment.contains("- fail bench\n- fail gate\n"), "{comment}");
-    assert!(comment.contains("- fail journey\n"), "{comment}");
+    assert_eq!(check_state(&comment, "bench"), "fail", "{comment}");
+    assert_eq!(check_state(&comment, "gate"), "fail", "{comment}");
+    assert_eq!(check_state(&comment, "journey"), "fail", "{comment}");
     assert!(
         comment.contains("**Failed: bench, gate, journey."),
         "{comment}"
@@ -941,13 +980,15 @@ fn a_journey_below_the_ledger_fails() {
     repo.sync();
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- pass gate\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "gate"),
+        "pass",
         "{}",
         repo.comment()
     );
-    assert!(
-        repo.comment().contains("- fail journey\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "fail",
         "{}",
         repo.comment()
     );
@@ -960,8 +1001,9 @@ fn a_journey_level_with_the_ledger_passes() {
     repo.sync();
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- pass journey\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "pass",
         "{}",
         repo.comment()
     );
@@ -1131,8 +1173,9 @@ fn a_passing_spend_step_does_not_hide_a_fall() {
         "{}",
         stdout(&output)
     );
-    assert!(
-        repo.comment().contains("- fail journey\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "fail",
         "{}",
         repo.comment()
     );
@@ -1154,7 +1197,12 @@ fn a_t2_package_runs_and_can_fail() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(repo.comment().contains("- fail t2\n"), "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -1170,7 +1218,12 @@ fn a_passing_t2_package_is_reported() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(repo.comment().contains("- pass t2\n"), "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
 }
 
 /// The gate's run of `t2` is the nightly job's T2 check, so `t2` runs once.
@@ -1199,7 +1252,12 @@ fn counts() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(repo.comment().contains("- pass t2\n"), "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
     let runs = fs::read_to_string(repo.root.join("target/t2-runs")).unwrap();
     assert_eq!(runs, "ran\n");
 }
@@ -1220,8 +1278,9 @@ fn a_t1_package_s_ignored_tests_run_and_can_fail() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- fail release\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "release"),
+        "fail",
         "{}",
         repo.comment()
     );
@@ -1243,8 +1302,9 @@ fn a_passing_t1_release_test_is_reported() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- pass release\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "release"),
+        "pass",
         "{}",
         repo.comment()
     );
@@ -1296,10 +1356,10 @@ fn a_night_that_never_ran_loses_nothing() {
     repo.set_last_report(&reported);
     let report = repo.report();
     assert!(
-        report.contains("Landed the night it was off (#9), issue #5"),
+        report.contains("[Landed the night it was off](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1318,8 +1378,11 @@ fn a_commit_already_reported_isnt_repeated() {
     repo.merge("New (#9)", 1, &CLEAN);
     repo.set_last_report(&reported);
     let report = repo.report();
-    assert!(report.contains("New (#9), issue #5"), "{report}");
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(
+        report.contains("[New](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 /// A report as `report` prints it today, folds and all, still marks its commit.
@@ -1341,8 +1404,11 @@ fn a_folded_report_marks_its_commit() {
     repo.set_issues(REPORT_ISSUE);
     repo.set_report_comments(&[("o", &posted)]);
     let report = repo.report();
-    assert!(report.contains("New (#9), issue #5"), "{report}");
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(
+        report.contains("[New](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1366,8 +1432,11 @@ fn a_last_report_that_cant_be_used_falls_back_to_a_day() {
         repo.merge("Today (#9)", 1, &CLEAN);
         repo.set_last_report(commit);
         let report = repo.report();
-        assert!(report.contains("Today (#9), issue #5"), "{name}: {report}");
-        assert!(!report.contains("Too old (#2)"), "{name}: {report}");
+        assert!(
+            report.contains("[Today](https://github.com/o/r/pull/9)"),
+            "{name}: {report}"
+        );
+        assert!(!report.contains("/pull/2)"), "{name}: {report}");
     }
 }
 
@@ -1390,8 +1459,11 @@ fn a_last_report_off_this_history_falls_back_to_a_day() {
     repo.merge("Today (#9)", 1, &CLEAN);
     repo.set_last_report(&elsewhere);
     let report = repo.report();
-    assert!(report.contains("Today (#9), issue #5"), "{report}");
-    assert!(!report.contains("Too old (#2)"), "{report}");
+    assert!(
+        report.contains("[Today](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1453,8 +1525,11 @@ fn a_report_heading_from_someone_else_is_ignored() {
         ("someone", &format!("# Nightly report for `{head}`\n")),
     ]);
     let report = repo.report();
-    assert!(report.contains("Landed since (#9), issue #5"), "{report}");
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(
+        report.contains("[Landed since](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1508,7 +1583,7 @@ fn a_commit_with_no_budget_file_compares_no_budgets() {
     repo.commit("Add the file", 1);
     let report = repo.report();
     assert!(
-        report.contains("Without the file (#9), issue #5"),
+        report.contains("[Without the file](https://github.com/o/r/pull/9)"),
         "{report}"
     );
     assert!(!report.contains("## Regressed"), "{report}");
@@ -1570,10 +1645,7 @@ fn manifest(name: &str) -> String {
 fn assert_mutation_ran(repo: &Repo, output: &Output, code: i32, state: &str) {
     assert_eq!(output.status.code(), Some(code), "{}", stderr(output));
     let comment = repo.comment();
-    assert!(
-        comment.contains(&format!("- {state} mutation\n")),
-        "{comment}"
-    );
+    assert_eq!(check_state(&comment, "mutation"), state, "{comment}");
 }
 
 #[test]
@@ -2157,8 +2229,9 @@ fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- pass fuzz\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "pass",
         "{}",
         repo.comment()
     );
@@ -2207,8 +2280,8 @@ fn a_step_gets_only_the_time_the_night_has_left() {
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let comment = repo.comment();
-    assert!(comment.contains("- pass fuzz\n"), "{comment}");
-    assert!(comment.contains("- pass mutation\n"), "{comment}");
+    assert_eq!(check_state(&comment, "fuzz"), "pass", "{comment}");
+    assert_eq!(check_state(&comment, "mutation"), "pass", "{comment}");
     let calls = repo.read_bin("systemd-calls");
     let line = |job: &str| {
         calls
@@ -2248,8 +2321,8 @@ fn a_step_with_no_time_left_fails_and_the_report_goes_out() {
         stderr(&output)
     );
     let comment = repo.comment();
-    assert!(comment.contains("- fail fuzz\n"), "{comment}");
-    assert!(comment.contains("- fail mutation\n"), "{comment}");
+    assert_eq!(check_state(&comment, "fuzz"), "fail", "{comment}");
+    assert_eq!(check_state(&comment, "mutation"), "fail", "{comment}");
     let calls = repo.read_bin("systemd-calls");
     assert!(!calls.contains("RuntimeMaxSec="), "{calls}");
     assert!(!repo.bin.join("mutants-calls").exists());
@@ -2260,8 +2333,9 @@ fn a_fuzz_failure_fails_the_step() {
     let repo = with_fuzz("fuzz-fails", "fn main() {\n    panic!(\"found one\");\n}\n");
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- fail fuzz\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "fail",
         "{}",
         repo.comment()
     );
@@ -2286,8 +2360,9 @@ fn a_hung_fuzz_target_is_killed_and_fails() {
         started.elapsed()
     );
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- fail fuzz\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "fail",
         "{}",
         repo.comment()
     );
@@ -2338,8 +2413,9 @@ fn the_fuzzer_is_built_to_panic_on_overflow() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(
-        repo.comment().contains("- pass fuzz\n"),
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "pass",
         "{}",
         repo.comment()
     );
@@ -2404,6 +2480,36 @@ fn a_night_mutation_failed_is_tried_again_from_a_folded_report() {
     assert!(repo.bin.join("mutants-calls").exists());
 }
 
+/// The same, when the report puts its checks on one line.
+#[test]
+fn a_night_mutation_failed_is_tried_again_from_a_checks_line() {
+    let repo = Repo::new("mutation-retried-line");
+    repo.set_mutants("exit 0\n");
+    let start = repo.short("HEAD");
+    repo.write("crates/ap/note.txt", "changed\n");
+    repo.commit("Touch ap", 48);
+    repo.sync();
+    let failed = repo.short("HEAD");
+    let posted = |commit: &str, verdict: &str, checks: &str| {
+        format!("# Nightly report for `{commit}`\n\n{verdict} spec 1 of 7\n\nChecks: {checks}\n")
+    };
+    repo.set_issues(REPORT_ISSUE);
+    repo.set_report_comments(&[
+        ("o", &posted(&start, "**All checks passed.**", "2 passed")),
+        (
+            "o",
+            &posted(
+                &failed,
+                "**Failed: mutation.**",
+                "1 passed, 1 failed (`mutation`), 1 skipped (`t3`)",
+            ),
+        ),
+    ]);
+    let output = repo.xtask(&["nightly"]);
+    assert_mutation_ran(&repo, &output, 0, "pass");
+    assert!(repo.bin.join("mutants-calls").exists());
+}
+
 #[test]
 fn the_job_itself_keeps_the_activity_lock() {
     let repo = Repo::new("mutation-lock-passed");
@@ -2449,20 +2555,27 @@ fn a_record_merged_after_main_moved_is_listed_as_not_in_the_ledger() {
     repo.merge("First (#9)", 3, &CLEAN);
     let text = fs::read_to_string(repo.root.join("harness/ledger/5.toml"))
         .unwrap()
+        .replace("pr = 9", "pr = 10")
         .replace("proven = 1", "proven = 6")
         .replace("date =", &format!("base = \"{}\"\ndate =", "0".repeat(40)));
     repo.write("harness/ledger/6.toml", &text);
-    repo.commit("Late (#10)", 2);
+    // The record names its PR, so the subject needn't.
+    repo.commit("Late", 2);
     let head = repo.short("HEAD");
     let report = repo.report();
     assert!(report.starts_with(&format!("# Nightly report for `{head}`\n\nspec 1 of 7")));
     assert!(
         report.contains(&format!(
-            "## Not in the ledger\n\n- `{head}` Late (#10), merged after `main` moved\n"
+            "## Not in the ledger\n\n- `{head}` [Late](https://github.com/o/r/pull/10), merged after `main` moved\n"
         )),
         "{report}"
     );
-    assert!(!report.contains("issue #5\n- `"), "{report}");
+    assert!(
+        report.contains(
+            "<summary>Merged: 1</summary>\n\n- [First](https://github.com/o/r/pull/9)\n\n</details>\n"
+        ),
+        "{report}"
+    );
 }
 
 const MARK: &str = "Mark this report read by reacting with :eyes:.";
@@ -2479,8 +2592,8 @@ fn with_rules(name: &str) -> Repo {
     repo
 }
 
-/// Under its heading, with its PR, a sentence is added, changed, or removed.
-/// A heading of the rules whose text changed is listed once, with each PR.
+/// Under its heading and its PR, a sentence is added, changed, or removed.
+/// Under each PR, each file of the rules names the headings it changed.
 #[test]
 fn the_report_lists_spec_and_rule_changes() {
     let repo = with_rules("spec-changes");
@@ -2508,7 +2621,7 @@ fn the_report_lists_spec_and_rule_changes() {
     let report = repo.report();
     assert!(
         report.contains(
-            "\n## SPEC.md\n\n### A\n\n- Changed in #9:\n  - Was: One.\n  - Now: Uno.\n- Removed in #10: Gone.\n\n### B\n\n- Added in #9: New.\n\n## Rules\n\n- `AGENTS.md`, Ways: #9, #10\n- `HARNESS.md`, Harness: #10\n\n<details>"
+            "\n## SPEC.md\n\n### A\n\n- [Change things](https://github.com/o/r/pull/9)\n  - Changed:\n    - Was: One.\n    - Now: Uno.\n- [Change more](https://github.com/o/r/pull/10)\n  - Removed: Gone.\n\n### B\n\n- [Change things](https://github.com/o/r/pull/9)\n  - New.\n\n## Rules\n\n- [Change things](https://github.com/o/r/pull/9)\n  - `AGENTS.md`: Ways\n- [Change more](https://github.com/o/r/pull/10)\n  - `AGENTS.md`: Ways\n  - `HARNESS.md`: Harness\n\nMerged: 2, 2 of them above\n"
         ),
         "{report}"
     );
@@ -2517,9 +2630,42 @@ fn the_report_lists_spec_and_rule_changes() {
     let output = repo.xtask(&["report", "--json"]);
     let json = stdout(&output);
     assert!(
-        json.contains("\"spec_changes\":[{\"heading\":\"A\",\"pr\":\"#9\",\"was\":\"One.\",\"now\":\"Uno.\"},{\"heading\":\"A\",\"pr\":\"#10\",\"was\":\"Gone.\",\"now\":null},{\"heading\":\"B\",\"pr\":\"#9\",\"was\":null,\"now\":\"New.\"}],\"rule_changes\":[{\"file\":\"AGENTS.md\",\"heading\":\"Ways\",\"prs\":[\"#9\",\"#10\"]},{\"file\":\"HARNESS.md\",\"heading\":\"Harness\",\"prs\":[\"#10\"]}],\"unread\":[]"),
+        json.contains("\"spec_changes\":[{\"heading\":\"A\",\"pr\":\"#9\",\"was\":\"One.\",\"now\":\"Uno.\"},{\"heading\":\"A\",\"pr\":\"#10\",\"was\":\"Gone.\",\"now\":null},{\"heading\":\"B\",\"pr\":\"#9\",\"was\":null,\"now\":\"New.\"}],\"rule_changes\":[{\"pr\":\"#9\",\"file\":\"AGENTS.md\",\"headings\":[\"Ways\"]},{\"pr\":\"#10\",\"file\":\"AGENTS.md\",\"headings\":[\"Ways\"]},{\"pr\":\"#10\",\"file\":\"HARNESS.md\",\"headings\":[\"Harness\"]}],\"unread\":[]"),
         "{json}"
     );
+}
+
+/// A PR is named once in each section, as a link whose text is its title.
+/// Under it, SPEC.md lists its sentences, and the rules list each file once
+/// with the headings that changed. What merged leaves out a PR named above.
+#[test]
+fn a_pr_is_named_once_in_each_section() {
+    let repo = with_rules("named-once");
+    repo.write("SPEC.md", "# A\n\nOne.\n\nGone.\n\n# B\n\nNew.\n\nNewer.\n");
+    repo.write(
+        "AGENTS.md",
+        "# Agent+\n\nIntro.\n\n## Ways\n\nNew.\n\n## Other\n\nOther words.\n",
+    );
+    repo.write("HARNESS.md", "# Harness\n\nText.\n");
+    repo.merge("Change things (#9)", 3, &CLEAN);
+    repo.merge(
+        "Quiet (#10)",
+        2,
+        &Recorded {
+            issue: 6,
+            pr: 10,
+            ..CLEAN
+        },
+    );
+    let report = repo.report();
+    assert!(
+        report.contains(
+            "\n## SPEC.md\n\n### B\n\n- [Change things](https://github.com/o/r/pull/9)\n  - New.\n  - Newer.\n\n## Rules\n\n- [Change things](https://github.com/o/r/pull/9)\n  - `AGENTS.md`: Ways, Other\n  - `HARNESS.md`: Harness\n\n<details>\n<summary>Merged: 2, 1 of them above</summary>\n\n- [Quiet](https://github.com/o/r/pull/10)\n\n</details>\n"
+        ),
+        "{report}"
+    );
+    assert_eq!(report.matches("/pull/9)").count(), 2, "{report}");
+    assert!(!report.contains("#9"), "{report}");
 }
 
 /// A commit with no record has no PR to name, so the report names the commit.
@@ -2532,7 +2678,7 @@ fn a_change_with_no_record_names_its_commit() {
     let report = repo.report();
     assert!(
         report.contains(&format!(
-            "\n## SPEC.md\n\n### A\n\n- Removed in `{head}`: Gone.\n"
+            "\n## SPEC.md\n\n### A\n\n- `{head}`\n  - Removed: Gone.\n"
         )),
         "{report}"
     );
@@ -2616,7 +2762,7 @@ fn a_change_to_a_marked_paragraph_is_listed() {
     let report = repo.report();
     assert!(
         report
-            .contains("\n## SPEC.md\n\n### A\n\n- Changed in #9:\n  - Was: One.\n  - Now: Uno.\n"),
+            .contains("\n## SPEC.md\n\n### A\n\n- [Change a marked paragraph](https://github.com/o/r/pull/9)\n  - Changed:\n    - Was: One.\n    - Now: Uno.\n"),
         "{report}"
     );
 }

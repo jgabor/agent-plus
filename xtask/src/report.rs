@@ -15,6 +15,7 @@ pub const ISSUE_TITLE: &str = "Nightly report";
 const HEADING: &str = "# Nightly report for `";
 /// How far back to look when no earlier report can say where to start.
 const WINDOW: &str = "--since=24.hours";
+/// How a report folded its checks before they became one line.
 const MUTATION_FAILED: &str = "\n- fail mutation\n";
 /// The last line of a posted report with a change to SPEC.md or the rules.
 /// It also says, to anyone reading the comment later, that this one is read.
@@ -50,6 +51,10 @@ struct Regression {
 struct Unrecorded {
     commit: String,
     subject: String,
+    /// Its PR: its record's, or the one its subject names when it has none.
+    pr: Option<usize>,
+    /// Whether it has a record, which was measured on an older `main`.
+    late: bool,
 }
 
 struct Waiting {
@@ -57,20 +62,38 @@ struct Waiting {
     title: String,
 }
 
+/// What names a change: its PR, with the PR's title, or its commit when it
+/// has no record.
+#[derive(Clone, PartialEq)]
+enum Source {
+    Pr { number: usize, title: String },
+    Commit(String),
+}
+
+impl Source {
+    /// The source in JSON, as `#n` or as its commit in backticks.
+    fn label(&self) -> String {
+        match self {
+            Source::Pr { number, .. } => format!("#{number}"),
+            Source::Commit(commit) => format!("`{commit}`"),
+        }
+    }
+}
+
 /// A sentence of SPEC.md, as it was and as it is now. One that was added
 /// wasn't, and one that was removed isn't.
 struct SpecChange {
     heading: String,
-    pr: String,
+    source: Source,
     was: Option<String>,
     now: Option<String>,
 }
 
-/// A heading of the rules whose text changed, and each change that did it.
+/// One change's headings of one file of the rules whose text changed.
 struct RuleChange {
+    source: Source,
     file: &'static str,
-    heading: String,
-    prs: Vec<String>,
+    headings: Vec<String>,
 }
 
 /// A posted report that asks to be read, and that the owner hasn't marked.
@@ -81,6 +104,8 @@ pub struct Unread {
 
 pub struct Report {
     commit: String,
+    /// The repository's page, which each link starts with.
+    url: String,
     scores: Option<Scores>,
     left_out: usize,
     merged: Vec<Merge>,
@@ -105,7 +130,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
 /// The `git log` argument that limits it to what no report has covered yet,
 /// where a night when the mutation step failed covered nothing.
 pub fn mutation_start(root: &Path, gh: &Gh, issues: &[OpenIssue]) -> Result<String, Problem> {
-    start_after(root, gh, issues, |report| !report.contains(MUTATION_FAILED))
+    start_after(root, gh, issues, |report| !mutation_failed(report))
 }
 
 fn start_after(
@@ -198,6 +223,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         commit: base::git_text(root, &["rev-parse", "--short", "HEAD"])?
             .trim()
             .to_string(),
+        url: String::new(),
         scores,
         left_out: journey::left_out(root)?,
         merged: Vec::new(),
@@ -210,6 +236,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
     };
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
+    report.url = gh.repo_url()?;
     let number = issues
         .iter()
         .find(|issue| issue.title == ISSUE_TITLE)
@@ -220,7 +247,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
     let log = base::git_text(root, &["log", &start, "--format=%H %h %s", "HEAD"])?;
     // Each commit, and what names it: its PR, or the commit when it has no
     // record.
-    let mut named: Vec<(String, String)> = Vec::new();
+    let mut named: Vec<(String, Source)> = Vec::new();
     for line in log.lines() {
         let mut fields = line.splitn(3, ' ');
         let (Some(full), Some(short), subject) = (fields.next(), fields.next(), fields.next())
@@ -229,14 +256,27 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         };
         let (commit, subject) = (short.to_string(), subject.unwrap_or_default().to_string());
         let Some(record) = ledger::of_commit(root, full)? else {
-            named.push((full.to_string(), format!("`{commit}`")));
-            report.unrecorded.push(Unrecorded { commit, subject });
+            named.push((full.to_string(), Source::Commit(commit.clone())));
+            report.unrecorded.push(Unrecorded {
+                commit,
+                pr: tagged(&subject),
+                subject,
+                late: false,
+            });
             continue;
         };
-        named.push((full.to_string(), format!("#{}", record.pr)));
+        let source = Source::Pr {
+            number: record.pr,
+            title: untagged(&subject, record.pr).to_string(),
+        };
+        named.push((full.to_string(), source));
         if ledger::merged_after_main_moved(root, full, &record)? {
-            let subject = format!("{subject}, merged after `main` moved");
-            report.unrecorded.push(Unrecorded { commit, subject });
+            report.unrecorded.push(Unrecorded {
+                commit,
+                subject,
+                pr: Some(record.pr),
+                late: true,
+            });
             continue;
         }
         for what in regressions(root, full, &record)? {
@@ -268,14 +308,31 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         })
         .collect();
     // Oldest first, so that each heading lists its changes in order.
-    for (commit, pr) in named.iter().rev() {
-        changes(root, commit, pr, &mut report)?;
+    for (commit, source) in named.iter().rev() {
+        changes(root, commit, source, &mut report)?;
     }
     Ok(report)
 }
 
+/// A squashed commit's subject without the ` (#n)` GitHub adds to the PR's
+/// title.
+fn untagged(subject: &str, pr: usize) -> &str {
+    subject
+        .strip_suffix(&format!(" (#{pr})"))
+        .unwrap_or(subject)
+}
+
+/// The PR a subject names at its end, as a squash names its PR.
+fn tagged(subject: &str) -> Option<usize> {
+    let number = subject.strip_suffix(')')?.rsplit_once(" (#")?.1;
+    match number.bytes().all(|b| b.is_ascii_digit()) {
+        true => number.parse().ok(),
+        false => None,
+    }
+}
+
 /// What this commit changed in SPEC.md and in the rules.
-fn changes(root: &Path, commit: &str, pr: &str, report: &mut Report) -> Result<(), Problem> {
+fn changes(root: &Path, commit: &str, source: &Source, report: &mut Report) -> Result<(), Problem> {
     let listing = base::git_text(
         root,
         &[
@@ -303,7 +360,7 @@ fn changes(root: &Path, commit: &str, pr: &str, report: &mut Report) -> Result<(
     if touched.contains(&SPEC) {
         let (before, after) = both(SPEC)?;
         // Each heading's changes stay together, in the order it first changed.
-        for change in spec_edits(&before, &after, commit, pr)? {
+        for change in spec_edits(&before, &after, commit, source)? {
             let changes = &mut report.spec_changes;
             let at = match changes.iter().rposition(|c| c.heading == change.heading) {
                 Some(last) => last + 1,
@@ -317,16 +374,13 @@ fn changes(root: &Path, commit: &str, pr: &str, report: &mut Report) -> Result<(
             continue;
         }
         let (before, after) = both(file)?;
-        for heading in changed_sections(&before, &after) {
-            let same = |change: &&mut RuleChange| change.file == file && change.heading == heading;
-            match report.rule_changes.iter_mut().find(same) {
-                Some(change) => change.prs.push(pr.to_string()),
-                None => report.rule_changes.push(RuleChange {
-                    file,
-                    heading,
-                    prs: vec![pr.to_string()],
-                }),
-            }
+        let headings = changed_sections(&before, &after);
+        if !headings.is_empty() {
+            report.rule_changes.push(RuleChange {
+                source: source.clone(),
+                file,
+                headings,
+            });
         }
     }
     Ok(())
@@ -341,7 +395,7 @@ fn spec_edits(
     before: &str,
     after: &str,
     commit: &str,
-    pr: &str,
+    source: &Source,
 ) -> Result<Vec<SpecChange>, Problem> {
     let units = |text: &str| {
         spec::extract_all(text).map_err(|e| Problem(format!("SPEC.md at {commit}: {e}")))
@@ -380,7 +434,7 @@ fn spec_edits(
                 (None, None) => break,
                 (was, now) => edits.push(SpecChange {
                     heading: heading.to_string(),
-                    pr: pr.to_string(),
+                    source: source.clone(),
                     was,
                     now,
                 }),
@@ -494,6 +548,29 @@ fn regressions(root: &Path, commit: &str, record: &Record) -> Result<Vec<String>
     Ok(found)
 }
 
+/// The items of each source, in the order each source first comes.
+fn by_source<'a, T>(
+    items: impl Iterator<Item = &'a T>,
+    source: fn(&T) -> &Source,
+) -> Vec<(&'a Source, Vec<&'a T>)> {
+    let mut groups: Vec<(&Source, Vec<&T>)> = Vec::new();
+    for item in items {
+        match groups.iter_mut().find(|(s, _)| *s == source(item)) {
+            Some((_, group)) => group.push(item),
+            None => groups.push((source(item), vec![item])),
+        }
+    }
+    groups
+}
+
+/// The PR a source names, if it names one.
+fn number(source: &Source) -> Option<usize> {
+    match source {
+        Source::Pr { number, .. } => Some(*number),
+        Source::Commit(_) => None,
+    }
+}
+
 /// An open section, left out when it has nothing in it.
 fn section(text: &mut String, heading: &str, lines: Vec<String>) {
     if lines.is_empty() {
@@ -532,16 +609,36 @@ fn verdict(checks: &[(&str, &str)]) -> String {
     }
 }
 
-/// The checks fold's summary, such as `Checks: 4 passed, 1 failed`.
+/// The checks in one line, such as `Checks: 4 passed, 1 failed (`gate`)`,
+/// which names only the checks that didn't pass.
 fn tally(checks: &[(&str, &str)]) -> String {
     let counts: Vec<String> = [("pass", "passed"), ("fail", "failed"), ("skip", "skipped")]
         .iter()
         .filter_map(|(state, word)| {
-            let n = checks.iter().filter(|(_, s)| s == state).count();
-            (n > 0).then(|| format!("{n} {word}"))
+            let names: Vec<String> = checks
+                .iter()
+                .filter(|(_, s)| s == state)
+                .map(|(name, _)| format!("`{name}`"))
+                .collect();
+            match (names.len(), *state) {
+                (0, _) => None,
+                (n, "pass") => Some(format!("{n} {word}")),
+                (n, _) => Some(format!("{n} {word} ({})", names.join(", "))),
+            }
         })
         .collect();
     format!("Checks: {}", counts.join(", "))
+}
+
+/// Whether this posted report failed its mutation check, in its checks line
+/// or in the fold of checks it had before.
+fn mutation_failed(report: &str) -> bool {
+    report.contains(MUTATION_FAILED)
+        || report.lines().any(|line| {
+            line.strip_prefix("Checks: ")
+                .and_then(|counts| counts.split_once(" failed (")?.1.split_once(')'))
+                .is_some_and(|(names, _)| names.split(", ").any(|name| name == "`mutation`"))
+        })
 }
 
 impl Report {
@@ -576,43 +673,66 @@ impl Report {
         let unrecorded = self
             .unrecorded
             .iter()
-            .map(|u| format!("`{}` {}", u.commit, u.subject))
+            .map(|u| {
+                let subject = match u.pr {
+                    Some(pr) => self.link(untagged(&u.subject, pr), "pull", pr),
+                    None => u.subject.clone(),
+                };
+                match u.late {
+                    true => format!("`{}` {subject}, merged after `main` moved", u.commit),
+                    false => format!("`{}` {subject}", u.commit),
+                }
+            })
             .collect();
         section(&mut text, "Not in the ledger", unrecorded);
         let waiting = self
             .waiting
             .iter()
-            .map(|w| format!("#{} {}", w.issue, w.title))
+            .map(|w| self.link(&w.title, "issues", w.issue))
             .collect();
         section(&mut text, "Waiting on the owner", waiting);
-        self.spec_section(&mut text);
-        let rules = self
-            .rule_changes
-            .iter()
-            .map(|r| match r.heading.as_str() {
-                "" => format!("`{}`: {}", r.file, r.prs.join(", ")),
-                heading => format!("`{}`, {heading}: {}", r.file, r.prs.join(", ")),
-            })
-            .collect();
-        section(&mut text, "Rules", rules);
+        let mut above = Vec::new();
+        self.spec_section(&mut text, &mut above);
+        self.rules_section(&mut text, &mut above);
         let unread = self
             .unread
             .iter()
             .map(|u| format!("[Nightly report for `{}`]({})", u.commit, u.url))
             .collect();
         section(&mut text, "Unread reports", unread);
-        let merged = self
+        let rest: Vec<String> = self
             .merged
             .iter()
-            .map(|m| format!("`{}` {}, issue #{}", m.commit, m.subject, m.issue))
+            .filter(|m| !above.contains(&m.pr))
+            .map(|m| self.link(untagged(&m.subject, m.pr), "pull", m.pr))
             .collect();
-        fold(&mut text, &format!("Merged: {}", self.merged.len()), merged);
-        let lines = checks
-            .iter()
-            .map(|(name, state)| format!("{state} {name}"))
-            .collect();
-        fold(&mut text, &tally(checks), lines);
+        let summary = match self.merged.len() - rest.len() {
+            0 => format!("Merged: {}", self.merged.len()),
+            named => format!("Merged: {}, {named} of them above", self.merged.len()),
+        };
+        match (self.merged.is_empty(), rest.is_empty()) {
+            (true, _) => {}
+            (false, true) => text.push_str(&format!("\n{summary}\n")),
+            (false, false) => fold(&mut text, &summary, rest),
+        }
+        if !checks.is_empty() {
+            text.push_str(&format!("\n{}\n", tally(checks)));
+        }
         text
+    }
+
+    /// A link to an issue or a PR, whose text is its title, so that a reader
+    /// sees the title once.
+    fn link(&self, title: &str, kind: &str, number: impl std::fmt::Display) -> String {
+        format!("[{title}]({}/{kind}/{number})", self.url)
+    }
+
+    /// A PR as a link, or a commit with no record.
+    fn name(&self, source: &Source) -> String {
+        match source {
+            Source::Pr { number, title } => self.link(title, "pull", *number),
+            Source::Commit(commit) => format!("`{commit}`"),
+        }
     }
 
     /// The report as the nightly job posts it. One with a change to SPEC.md
@@ -625,28 +745,62 @@ impl Report {
         text
     }
 
-    /// Each changed sentence of SPEC.md, under its heading.
-    fn spec_section(&self, text: &mut String) {
+    /// Each changed sentence of SPEC.md, under its heading and then its
+    /// change. A sentence with no mark was added. Each PR it names goes in
+    /// `named`.
+    fn spec_section(&self, text: &mut String, named: &mut Vec<usize>) {
         if self.spec_changes.is_empty() {
             return;
         }
         text.push_str(&format!("\n## {SPEC}\n"));
-        let mut heading = None;
+        let mut headings: Vec<&str> = Vec::new();
         for change in &self.spec_changes {
-            if heading != Some(&change.heading) {
-                heading = Some(&change.heading);
-                text.push_str(&format!("\n### {}\n\n", change.heading));
+            if !headings.contains(&change.heading.as_str()) {
+                headings.push(&change.heading);
             }
-            let pr = &change.pr;
-            text.push_str(&match (&change.was, &change.now) {
-                (Some(was), Some(now)) => {
-                    format!("- Changed in {pr}:\n  - Was: {was}\n  - Now: {now}\n")
-                }
-                (Some(was), None) => format!("- Removed in {pr}: {was}\n"),
-                (None, Some(now)) => format!("- Added in {pr}: {now}\n"),
-                (None, None) => String::new(),
-            });
         }
+        for heading in headings {
+            text.push_str(&format!("\n### {heading}\n\n"));
+            let under = self.spec_changes.iter().filter(|c| c.heading == heading);
+            for (source, changes) in by_source(under, |c| &c.source) {
+                text.push_str(&format!("- {}\n", self.name(source)));
+                named.extend(number(source));
+                for change in changes {
+                    text.push_str(&match (&change.was, &change.now) {
+                        (Some(was), Some(now)) => {
+                            format!("  - Changed:\n    - Was: {was}\n    - Now: {now}\n")
+                        }
+                        (Some(was), None) => format!("  - Removed: {was}\n"),
+                        (None, Some(now)) => format!("  - {now}\n"),
+                        (None, None) => String::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Each change to the rules, with a line for each file it changed that
+    /// names the headings whose text changed. Each PR it names goes in
+    /// `named`.
+    fn rules_section(&self, text: &mut String, named: &mut Vec<usize>) {
+        let mut lines = Vec::new();
+        for (source, changes) in by_source(self.rule_changes.iter(), |c| &c.source) {
+            named.extend(number(source));
+            let mut line = self.name(source);
+            for change in changes {
+                let headings: Vec<&str> = change
+                    .headings
+                    .iter()
+                    .map(|heading| match heading.as_str() {
+                        "" => "before any heading",
+                        heading => heading,
+                    })
+                    .collect();
+                line.push_str(&format!("\n  - `{}`: {}", change.file, headings.join(", ")));
+            }
+            lines.push(line);
+        }
+        section(text, "Rules", lines);
     }
 
     fn json(&self) -> String {
@@ -686,10 +840,14 @@ impl Report {
             .unrecorded
             .iter()
             .map(|u| {
+                let subject = match u.late {
+                    true => format!("{}, merged after `main` moved", u.subject),
+                    false => u.subject.clone(),
+                };
                 format!(
                     "{{\"commit\":{},\"subject\":{}}}",
                     quoted(&u.commit),
-                    quoted(&u.subject)
+                    quoted(&subject)
                 )
             })
             .collect();
@@ -706,7 +864,7 @@ impl Report {
                 format!(
                     "{{\"heading\":{},\"pr\":{},\"was\":{},\"now\":{}}}",
                     quoted(&c.heading),
-                    quoted(&c.pr),
+                    quoted(&c.source.label()),
                     maybe(&c.was),
                     maybe(&c.now)
                 )
@@ -716,12 +874,12 @@ impl Report {
             .rule_changes
             .iter()
             .map(|r| {
-                let prs: Vec<String> = r.prs.iter().map(|pr| quoted(pr)).collect();
+                let headings: Vec<String> = r.headings.iter().map(|h| quoted(h)).collect();
                 format!(
-                    "{{\"file\":{},\"heading\":{},\"prs\":[{}]}}",
+                    "{{\"pr\":{},\"file\":{},\"headings\":[{}]}}",
+                    quoted(&r.source.label()),
                     quoted(r.file),
-                    quoted(&r.heading),
-                    prs.join(",")
+                    headings.join(",")
                 )
             })
             .collect();

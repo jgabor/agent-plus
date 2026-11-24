@@ -393,6 +393,16 @@ impl Gh {
         Ok(())
     }
 
+    /// The repository's page, such as `https://github.com/o/r`.
+    pub fn repo_url(&self) -> Result<String, Problem> {
+        let value = self.json(&["repo", "view", "--json", "url"])?;
+        value
+            .get("url")
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| unexpected("gh repo view"))
+    }
+
     pub fn open_issues(&self) -> Result<Vec<OpenIssue>, Problem> {
         self.listed("open", "number,title,labels,isPinned")?
             .iter()

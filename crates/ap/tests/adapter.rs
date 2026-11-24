@@ -31,8 +31,9 @@ const VERSIONS: [&str; 11] = [
 
 /// The current version, and the versions on either side of each change in
 /// what Codex accepts.
-const CODEX_VERSIONS: [&str; 7] = [
-    "0.137.0", "0.138.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0", "0.169.0",
+const CODEX_VERSIONS: [&str; 11] = [
+    "0.137.0", "0.138.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0", "0.157.0", "0.159.3",
+    "0.160.0", "0.168.0", "0.169.0",
 ];
 
 /// Fails unless `actual` is what the Claude Code golden file `name` holds.
@@ -379,6 +380,31 @@ fn a_codex_project_cant_add_writable_roots() {
     }
 }
 
+// spec(MODE): With `auto`, the Codex adapter also blanks the instructions a project can give the reviewer in `[auto_review]`, such as `policy`, so a project's settings can't change what the reviewer checks.
+#[test]
+fn a_codex_project_cant_change_the_reviewer() {
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                let arguments = codex::arguments(version, None, None, mode, interactive);
+                let overrides: Vec<&str> = (arguments.windows(2))
+                    .filter(|pair| pair[0] == "-c" && pair[1].starts_with("auto_review."))
+                    .map(|pair| pair[1].as_str())
+                    .collect();
+                let blanked = overrides.contains(&"auto_review.policy=\"\"");
+                assert_eq!(
+                    blanked,
+                    mode == Mode::Auto,
+                    "{version} {mode:?} {interactive}"
+                );
+                for key in overrides {
+                    assert!(key.ends_with("=\"\""), "{version} {key}");
+                }
+            }
+        }
+    }
+}
+
 // spec(WORKDIR): A headless Codex run can start in a directory that isn't a git repository, such as `/home/agent`, because the adapter passes `codex exec --skip-git-repo-check`.
 #[test]
 fn a_headless_codex_run_skips_the_git_repository_check() {
@@ -411,7 +437,11 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
             "-c",
             "sandbox_workspace_write.network_access=true",
             "-c",
-            "sandbox_workspace_write.writable_roots=[]"
+            "sandbox_workspace_write.writable_roots=[]",
+            "-c",
+            "auto_review.policy=\"\"",
+            "-c",
+            "auto_review.experimental_conversation_history_prompt=\"\""
         ]
     );
 }

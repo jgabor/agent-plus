@@ -16,13 +16,23 @@
 //! | 0.137.0 | `model_reasoning_effort` takes `low` to `xhigh`, and `approvals_reviewer` takes `auto_review` |
 //! | 0.138.0 | `model_reasoning_effort` takes `max` |
 //! | 0.147.0 | `codex exec` has `--approve-for-me` |
-//! | 0.156.0 | the interactive `codex` has `--no-daemon` |
+//! | 0.156.0 | the interactive `codex` has `--no-daemon`, and `[auto_review]` takes `experimental_policy_template` |
+//! | 0.157.0 | `[auto_review]` takes `extra_policy` |
+//! | 0.160.0 | `[auto_review]` takes `experimental_conversation_history_prompt` |
+//! | 0.169.0 | `[auto_review]` no longer takes `extra_policy` or `experimental_policy_template` |
 //!
 //! A trusted project's `.codex/config.toml` can't select a profile: Codex
 //! 0.137.0, 0.147.0, 0.156.0, and 0.169.0 ignore its `profile` and
 //! `profiles` keys. Each still applies its
 //! `sandbox_workspace_write.writable_roots` despite the other overrides, so
 //! the adapter empties that list too.
+//!
+//! A trusted project's `[auto_review]` text reaches the reviewer's prompt,
+//! and can change its verdict. In `auto`, the adapter sets each of those
+//! keys the version takes to an empty string, which Codex reads as its
+//! built-in text. A project's
+//! `features.guardian_approval = false` is applied, but Codex 0.169.0 still
+//! sends sandbox escalations and MCP tool calls to the reviewer.
 //!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
@@ -78,6 +88,23 @@ const APPROVE_FOR_ME_FROM: [u64; 3] = [0, 147, 0];
 /// The first version whose interactive `codex` has `--no-daemon`.
 const NO_DAEMON_FROM: [u64; 3] = [0, 156, 0];
 
+/// The `[auto_review]` keys that give the reviewer instructions, each with
+/// the first version that takes it and the first that no longer does.
+const REVIEWER_TEXT: [(&str, [u64; 3], Option<[u64; 3]>); 4] = [
+    ("policy", [0, 137, 0], None),
+    (
+        "experimental_policy_template",
+        [0, 156, 0],
+        Some([0, 169, 0]),
+    ),
+    ("extra_policy", [0, 157, 0], Some([0, 169, 0])),
+    (
+        "experimental_conversation_history_prompt",
+        [0, 160, 0],
+        None,
+    ),
+];
+
 /// The user configuration: the update check off, so Codex never offers to
 /// install another version, and the screen reader probe done, so a new VM
 /// doesn't repeat it.
@@ -132,7 +159,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// the `workspace-write` sandbox its network access and an empty list of
 /// extra writable roots, each set every time. A
 /// headless run in `auto` uses `--approve-for-me`, which sets the same
-/// sandbox, approval policy, and reviewer, where the version has it.
+/// sandbox, approval policy, and reviewer, where the version has it. In
+/// `auto`, each [`REVIEWER_TEXT`] key the version takes is set empty.
 pub fn arguments(
     version_text: &str,
     model: Option<&str>,
@@ -186,6 +214,13 @@ pub fn arguments(
             "-c".to_owned(),
             "sandbox_workspace_write.writable_roots=[]".to_owned(),
         ]);
+    }
+    if mode == Mode::Auto {
+        for (key, from, until) in REVIEWER_TEXT {
+            if at_least(&from) && !until.is_some_and(|until| at_least(&until)) {
+                arguments.extend(["-c".to_owned(), format!("auto_review.{key}=\"\"")]);
+            }
+        }
     }
     if let Some(model) = model {
         arguments.extend(["--model".to_owned(), model.to_owned()]);

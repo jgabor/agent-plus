@@ -435,7 +435,7 @@ fn nothing_is_applied_under_git() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
-// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+// spec(SHARE): Nothing is applied to your files at or beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
 // spec(SHARE): That counts what you have there and what the agent made there, with the agent's names matched case-insensitively, so nothing the agent wrote becomes a bare repository.
 #[test]
 fn nothing_is_applied_in_a_bare_repository() {
@@ -503,7 +503,7 @@ fn nothing_is_applied_in_a_bare_repository() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
-// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+// spec(SHARE): Nothing is applied to your files at or beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
 #[test]
 fn nothing_is_applied_in_a_share_that_is_a_bare_repository() {
     let scratch = Scratch::sharing("bare-root", "repo.git");
@@ -524,7 +524,7 @@ fn nothing_is_applied_in_a_share_that_is_a_bare_repository() {
     assert!(!scratch.exists("config"));
 }
 
-// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+// spec(SHARE): Nothing is applied to your files at or beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
 #[test]
 fn nothing_is_applied_in_a_share_beneath_a_bare_repository() {
     let scratch = Scratch::sharing("bare-above", "repo.git/hooks");
@@ -545,7 +545,7 @@ fn nothing_is_applied_in_a_share_beneath_a_bare_repository() {
     assert!(!scratch.exists("pre-commit"));
 }
 
-// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+// spec(SHARE): Nothing is applied to your files at or beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
 // spec(SHARE): That counts what you have there and what the agent made there, with the agent's names matched case-insensitively, so nothing the agent wrote becomes a bare repository.
 #[test]
 fn a_bare_repository_and_a_file_don_t_replace_each_other() {

@@ -68,7 +68,6 @@ fn start_upstream(directory: &Path) -> (Started, u16) {
     assert_eq!(words.get(2), Some(&"tls"), "{line}");
     (upstream, words[3].parse().unwrap())
 }
-
 // spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
 #[test]
 fn codex_runs_a_tool_in_the_guest() {
@@ -81,15 +80,10 @@ fn codex_edits_its_workspace_in_its_sandbox() {
     runs_the_tool("codex-sandbox", "edit", Mode::Edit);
 }
 
-/// Builds a Codex agent with `MODE <word>`, and has a headless Codex in its
-/// run, with the adapter's arguments for `mode`, run the tool the fake
-/// upstream, as its model, asks for. Fails unless the tool wrote `tool-ran`
-/// in Codex's working directory, which is in its workspace, and the model
-/// got the tool's output.
-fn runs_the_tool(test: &str, word: &str, mode: Mode) {
-    let scratch = Scratch::new(test);
-    let upstream = scratch.root.join("upstream");
-    let (_upstream, port) = start_upstream(&upstream);
+/// Builds a Codex agent with `MODE <word>`, and starts it with `ap run` in a
+/// terminal, with the fake upstream in `upstream` reachable at
+/// `host.ap.internal`. Returns the run, and its name, once `ap ps` lists it.
+fn start_codex(scratch: &Scratch, upstream: &Path, word: &str) -> (Interactive, String) {
     scratch.build(
         "codex",
         &format!(
@@ -121,41 +115,112 @@ fn runs_the_tool(test: &str, word: &str, mode: Mode) {
         assert!(Instant::now() < deadline, "the run never started");
         thread::sleep(Duration::from_millis(100));
     };
+    (run, name)
+}
 
-    // A headless Codex in the run, with the adapter's arguments for `mode`,
-    // and the fake upstream as its model's provider, which needs no sign-in.
+/// Runs a headless Codex in the run `name`, with `arguments` from the
+/// adapter, and the fake upstream at `port` as its model's provider, which
+/// needs no sign-in. Returns what it wrote to standard output and error,
+/// once it exits 0.
+fn exec_codex(scratch: &Scratch, name: &str, port: u16, arguments: Vec<String>) -> String {
     let provider = format!(
         "model_providers.fake={{name=\"fake\",base_url=\"https://host.ap.internal:{port}/v1\",\
          wire_api=\"responses\"}}"
     );
     let mut args = vec![
         "exec".to_owned(),
-        name.clone(),
+        name.to_owned(),
         "/usr/local/bin/codex".to_owned(),
     ];
-    args.extend(ap::adapter::codex::arguments(
-        VERSION, None, None, mode, false,
-    ));
+    args.extend(arguments);
     args.extend(["--json", "-c", "model_provider=\"fake\"", "-c", &provider].map(str::to_owned));
     args.push("Run the tool.".to_owned());
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let ran = scratch.ap(&args);
-    let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
-    assert_eq!(ran.status.code(), Some(0), "{stdout}{stderr}");
-    // The model got the tool's output, which says why a tool failed.
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(ran.status.code(), Some(0), "{shown}");
+    shown
+}
+
+/// The tool's outputs that requests to the fake upstream in `upstream`
+/// gave the model, which say why a tool failed.
+fn tool_outputs(upstream: &Path) -> Vec<String> {
     let requests = fs::read_dir(upstream.join("requests")).unwrap();
-    let answers: Vec<String> = requests
+    requests
         .flatten()
         .filter_map(|request| fs::read_to_string(request.path()).ok())
         .filter(|text| text.contains("\"custom_tool_call_output\""))
-        .collect();
-    assert!(!answers.is_empty(), "{stdout}{stderr}");
+        .collect()
+}
+
+/// Builds a Codex agent with `MODE <word>`, and has a headless Codex in its
+/// run, with the adapter's arguments for `mode`, run the tool the fake
+/// upstream, as its model, asks for. Fails unless the tool wrote `tool-ran`
+/// in Codex's working directory, which is in its workspace, and the model
+/// got the tool's output.
+fn runs_the_tool(test: &str, word: &str, mode: Mode) {
+    let scratch = Scratch::new(test);
+    let upstream = scratch.root.join("upstream");
+    let (_upstream, port) = start_upstream(&upstream);
+    let (_run, name) = start_codex(&scratch, &upstream, word);
+    let arguments = ap::adapter::codex::arguments(VERSION, None, None, mode, false);
+    let shown = exec_codex(&scratch, &name, port, arguments);
+    let answers = tool_outputs(&upstream);
+    assert!(!answers.is_empty(), "{shown}");
     let wrote = scratch.ap(&["exec", &name, "cat", "tool-ran"]);
     assert_eq!(
         String::from_utf8_lossy(&wrote.stdout),
         "the tool ran\n",
-        "{stdout}{stderr}{}",
+        "{shown}{}",
         answers.concat()
     );
+}
+
+/// A rule that allows every command Codex runs through its shell.
+const ALLOW_RULE: &str = r#"prefix_rule(pattern = ["/bin/sh", "-lc"], decision = "allow")"#;
+
+// spec(MODE): With `read`, `ask`, `edit`, or `auto`, when the working directory is a share, a rule in its `.codex/rules` that allows a command lets Codex run that command outside its sandbox without asking.
+#[test]
+fn a_trusted_codex_projects_rule_runs_a_command_outside_the_sandbox() {
+    let scratch = Scratch::new("codex-rules");
+    let upstream = scratch.root.join("upstream");
+    let (_upstream, port) = start_upstream(&upstream);
+    let (_run, name) = start_codex(&scratch, &upstream, "full");
+    let mut runs = 0;
+    for mode in [Mode::Read, Mode::Ask, Mode::Edit, Mode::Auto] {
+        for rule in [false, true] {
+            // The project is the working directory, and the command writes
+            // outside it, where no mode's sandbox lets it.
+            let project = format!("/home/agent/{mode:?}-{rule}");
+            let wrote = format!("{project}-ran");
+            fs::write(upstream.join("command"), format!("echo ran > {wrote}")).unwrap();
+            let mut set_up = format!("mkdir -p {project}/.codex/rules");
+            if rule {
+                set_up.push_str(&format!(
+                    " && echo '{ALLOW_RULE}' > {project}/.codex/rules/allow.rules"
+                ));
+            }
+            let made = scratch.ap(&["exec", &name, "sh", "-c", &set_up]);
+            assert_eq!(made.status.code(), Some(0), "{made:?}");
+            let mut arguments = ap::adapter::codex::arguments(VERSION, None, None, mode, false);
+            arguments.extend(["--cd".to_owned(), project.clone()]);
+            arguments.extend(ap::adapter::codex::workspace(&[&project]));
+            let shown = exec_codex(&scratch, &name, port, arguments);
+            // The model asked for the command, and got the tool's output.
+            runs += 1;
+            let answers = tool_outputs(&upstream);
+            assert_eq!(answers.len(), runs, "{shown}");
+            let ran = scratch.ap(&["exec", &name, "test", "-e", &wrote]);
+            assert_eq!(
+                ran.status.code(),
+                Some(if rule { 0 } else { 1 }),
+                "{mode:?} with the rule {rule}: {shown}{}",
+                answers.concat()
+            );
+        }
+    }
 }

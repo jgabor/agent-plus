@@ -1004,6 +1004,9 @@ default is `auto`.
   on, and blanks the instructions a project can give the reviewer in
   `[auto_review]`, such as `policy`, so a project can't turn the reviewer
   off or give it instructions with those keys.
+- With `read`, `ask`, `edit`, or `auto`, when the working directory is a
+  share, a rule in its `.codex/rules` that allows a command lets Codex run
+  that command outside its sandbox without asking.
 - `MODE` overrides any permission settings a plugin sets.
 - `auto` depends on the harness. With Claude Code, it needs a recent model,
   an administrator can turn it off, and its classifier calls count toward

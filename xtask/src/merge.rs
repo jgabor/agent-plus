@@ -1069,7 +1069,7 @@ fn prove(
     telling(SLOT)?;
     let hold = place.share()?;
     let merging = Merging { prepare, starting };
-    let (failed, score) = gate::check(tree, &hold, Some(&merging), gate::T2::ForAdapterChanges)?;
+    let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
     if !failed.is_empty() {
         return Ok(Err(failed));
     }

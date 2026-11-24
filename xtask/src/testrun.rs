@@ -30,11 +30,6 @@ pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
 
 /// Runs every package's tests but those of `left_out`.
 pub fn run_except(root: &Path, hold: &Hold, left_out: Option<&str>) -> Result<Results, Problem> {
-    if !hold.has_place() {
-        return Err(Problem(
-            "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
-        ));
-    }
     let mut results = Results {
         by_test: HashMap::new(),
         all_passed: true,
@@ -59,6 +54,11 @@ pub fn run_package(
     hold: &Hold,
     results: &mut Results,
 ) -> Result<bool, Problem> {
+    if !hold.has_place() {
+        return Err(Problem(
+            "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
+        ));
+    }
     let arguments = ["test", "--package", package, "--locked", "--no-fail-fast"];
     let mut command = limit::scope("cargo", &arguments, None)?;
     command

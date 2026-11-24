@@ -40,7 +40,7 @@ pub fn run() -> Result<Verdict, Problem> {
     // on the quietest machine.
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""), &|_| Ok(()))))];
     let hold = lock::testing(&root)?;
-    let (gated, t2, score) = match gate::check(&root, &hold, None, gate::T2::Always) {
+    let (gated, t2, score) = match gate::check(&root, &hold, None) {
         Ok((failed, score)) => (
             state(Ok(gate::verdict(&failed))),
             t2(&root, Some(&failed)),
@@ -162,8 +162,8 @@ fn state(result: Result<Verdict, Problem>) -> &'static str {
     }
 }
 
-/// The gate runs T2 here, so this is that run, which a gate that couldn't run
-/// didn't make.
+/// The gate runs T2 on `main` as it is, so this is that run, which a gate that
+/// couldn't run didn't make.
 fn t2(root: &Path, failed: Option<&gate::Failed>) -> &'static str {
     match workspace::packages(root) {
         Err(problem) => state(Err(problem)),

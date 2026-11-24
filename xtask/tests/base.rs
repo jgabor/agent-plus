@@ -455,6 +455,8 @@ fn an_unreadable_base_record_is_a_problem() {
 const T2_MANIFEST: &str = "[package]\nname = \"t2\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
 const T2_FAILS: &str = "#[test]\nfn planted_in_t2() {\n    panic!(\"planted\");\n}\n";
 const AP_MANIFEST: &str = "[package]\nname = \"ap\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+const UPSTREAM_MANIFEST: &str =
+    "[package]\nname = \"fake-upstream\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
 
 /// A workspace whose `t2` package has a test that fails, so that a gate that
 /// runs it fails `t2`.
@@ -467,6 +469,8 @@ fn with_failing_t2(name: &str) -> Repo {
             ("crates/t2/src/lib.rs", T2_FAILS),
             ("crates/ap/Cargo.toml", AP_MANIFEST),
             ("crates/ap/src/lib.rs", NO_CHECK),
+            ("crates/fake-upstream/Cargo.toml", UPSTREAM_MANIFEST),
+            ("crates/fake-upstream/src/lib.rs", NO_CHECK),
         ],
     )
 }
@@ -496,8 +500,11 @@ fn a_change_outside_the_adapter_paths_leaves_t2_out() {
 fn a_change_to_an_adapter_path_runs_t2() {
     let paths: Vec<(usize, &str)> = [
         "crates/ap/src/adapter/mod.rs",
+        "crates/ap/src/lock.rs",
         "crates/t2/tests/probe.rs",
+        "crates/fake-upstream/src/main.rs",
         "guest/os/pin.toml",
+        "guest/kernel/config",
     ]
     .into_iter()
     .enumerate()
@@ -514,6 +521,36 @@ fn a_change_to_an_adapter_path_runs_t2() {
 fn an_untracked_file_on_an_adapter_path_runs_t2() {
     let repo = with_failing_t2("t2-untracked");
     repo.write("crates/t2/tests/new.rs", "#[test]\nfn new() {}\n");
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn an_uncommitted_edit_on_an_adapter_path_runs_t2() {
+    let repo = with_failing_t2("t2-uncommitted");
+    repo.write("crates/t2/src/lib.rs", &format!("{T2_FAILS}// edited\n"));
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+/// A tree with no change from its base is `main` as it is, as the nightly job,
+/// the runner gate, and the refresh's proof of `main` test it.
+#[test]
+fn a_tree_like_its_base_runs_t2() {
+    let repo = with_failing_t2("t2-unchanged");
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn without_origin_main_t2_runs() {
+    let repo = Repo::files(
+        "t2-no-origin",
+        CHECK_ONE,
+        &[
+            ("crates/t2/Cargo.toml", T2_MANIFEST),
+            ("crates/t2/src/lib.rs", T2_FAILS),
+        ],
+    );
+    repo.git(&["init", "-q", "-b", "main"]);
+    repo.commit();
     assert_fails(&repo.gate(), "t2", "planted_in_t2");
 }
 

@@ -12,6 +12,8 @@
 //! one the agent was built with. Before any share is mounted, the run's
 //! certificate authority joins the end of the root's [`BUNDLE`], and each of
 //! [`BUNDLE_VARIABLES`] names the bundle, in place of any value `ENV` gave.
+//! Each file the host gives is written in the root then too, once `agent`
+//! has its home, in place of what was there, and belongs to `agent`.
 //!
 //! A start with a terminal runs the harness in a new one, which it gets as
 //! its controlling terminal, and owns. What the terminal shows goes to the
@@ -38,7 +40,7 @@
 
 use crate::linux::{self, bytes_waiting, program_has_ended, readable_within};
 use crate::protocol::{
-    EXEC_PORT, Exec, KEYS_PORT, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
+    EXEC_PORT, Exec, GuestFile, KEYS_PORT, MAX_OUTPUT, ProtocolError, Size, Start, ToGuest, ToHost,
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -302,6 +304,24 @@ pub fn trust(root: &Path, authority: &[u8]) -> io::Result<()> {
     (&bundle).write_all(&[newline, authority].concat())
 }
 
+/// Writes `file` in the root at `root`, in place of what its path held, and
+/// returns it open. A new file has mode 644. A path that is a symlink is
+/// refused.
+pub fn place(root: &Path, file: &GuestFile) -> io::Result<File> {
+    let slashes = file.path.iter().take_while(|byte| **byte == b'/').count();
+    let relative = &file.path[slashes..];
+    let path = root.join(OsStr::from_bytes(relative));
+    let mut written = File::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o644)
+        .custom_flags(O_NOFOLLOW)
+        .open(&path)?;
+    written.write_all(&file.contents)?;
+    Ok(written)
+}
+
 /// Sets each of [`BUNDLE_VARIABLES`] in `env` to [`BUNDLE`], in place of
 /// any value it had.
 pub fn name_bundle(env: &mut Vec<(Vec<u8>, Vec<u8>)>) {
@@ -314,6 +334,14 @@ pub fn name_bundle(env: &mut Vec<(Vec<u8>, Vec<u8>)>) {
 /// The harness's command, as `agent`, or why it can't start.
 fn harness(start: &Start) -> Result<Command, String> {
     add_account(Path::new("/")).map_err(|error| format!("can't add the user agent: {error}"))?;
+    // After the account, which makes the home, and before the shares, so a
+    // file can only be in the run's own root.
+    for file in &start.files {
+        let path = OsStr::from_bytes(&file.path).to_string_lossy();
+        place(Path::new("/"), file)
+            .and_then(|written| fchown(&written, Some(ID), Some(ID)))
+            .map_err(|error| format!("can't write {path}: {error}"))?;
+    }
     // After the account, which would try to give the agent a share's root.
     for (index, share) in start.shares.iter().enumerate() {
         let path = Path::new(OsStr::from_bytes(&share.path));

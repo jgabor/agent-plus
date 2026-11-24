@@ -1,7 +1,7 @@
 //! The frames, and what the guest and the host refuse to read.
 
 use guest::protocol::{
-    Exec, MAX_BODY, MAX_OUTPUT, ProtocolError, Share, Size, Start, ToGuest, ToHost,
+    Exec, GuestFile, MAX_BODY, MAX_OUTPUT, ProtocolError, Share, Size, Start, ToGuest, ToHost,
 };
 use std::io::{self, Cursor, Read};
 
@@ -58,6 +58,10 @@ fn start(prompt: Option<&[u8]>) -> ToGuest {
                 file: Some(b"notes.txt".to_vec()),
             },
         ],
+        files: vec![
+            guest_file(b"/home/agent/.claude.json", b"{}\n"),
+            guest_file(b"/etc/empty", b""),
+        ],
         authority: b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n".to_vec(),
         prompt: prompt.map(<[u8]>::to_vec),
         terminal: None,
@@ -72,6 +76,23 @@ fn without_authority(message: ToGuest) -> ToGuest {
         authority: Vec::new(),
         ..start
     })
+}
+
+fn without_files(message: ToGuest) -> ToGuest {
+    let ToGuest::Start(start) = message else {
+        panic!("not a start");
+    };
+    ToGuest::Start(Start {
+        files: Vec::new(),
+        ..start
+    })
+}
+
+fn guest_file(path: &[u8], contents: &[u8]) -> GuestFile {
+    GuestFile {
+        path: path.to_vec(),
+        contents: contents.to_vec(),
+    }
 }
 
 fn directory_share(path: &[u8]) -> Share {
@@ -108,6 +129,7 @@ fn every_message_survives_the_wire() {
         start(Some(b"Say what you can see.")),
         start(Some(b"")),
         without_authority(start(Some(b"Hi"))),
+        without_files(start(Some(b"Hi"))),
         in_terminal(start(None), 24, 80),
         in_terminal(start(Some(b"Hi")), u16::MAX, 0),
         ToGuest::Input(b"\x03q\r".to_vec()),
@@ -212,13 +234,14 @@ fn the_format_is_a_little_endian_length_a_tag_and_a_payload() {
 }
 
 #[test]
-fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a_nul() {
+fn a_start_counts_its_arguments_variables_shares_and_files_and_ends_each_string_with_a_nul() {
     let mut wire = Vec::new();
     ToGuest::Start(Start {
         argv: vec![b"h".to_vec()],
         env: vec![(b"K".to_vec(), b"v".to_vec())],
         directory: b"/d".to_vec(),
         shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
+        files: vec![guest_file(b"/w", b"c")],
         authority: b"a".to_vec(),
         prompt: Some(b"p".to_vec()),
         terminal: None,
@@ -226,12 +249,13 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
     .write(&mut wire)
     .unwrap();
     // Each share's guest path, then its file's name, empty for a directory,
-    // and the authority after the directory.
+    // each file's path and contents, and the authority after the directory.
     let payload = [
         &1u32.to_le_bytes()[..],
         &1u32.to_le_bytes(),
         &2u32.to_le_bytes(),
-        b"h\0K=v\0/s\0\0/f\0n\0/d\0a\0p\0",
+        &1u32.to_le_bytes(),
+        b"h\0K=v\0/s\0\0/f\0n\0/w\0c\0/d\0a\0p\0",
     ]
     .concat();
     assert_eq!(wire, frame(&[&[START][..], &payload].concat()));
@@ -244,6 +268,7 @@ fn a_start_counts_its_arguments_variables_and_shares_and_ends_each_string_with_a
             env: vec![(b"K".to_vec(), b"v".to_vec())],
             directory: b"/d".to_vec(),
             shares: vec![directory_share(b"/s"), file_share(b"/f", b"n")],
+            files: vec![guest_file(b"/w", b"c")],
             authority: b"a".to_vec(),
             prompt: Some(b"p".to_vec()),
             terminal: None,
@@ -275,6 +300,7 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
         env: Vec::new(),
         directory: b"/".to_vec(),
         shares: Vec::new(),
+        files: Vec::new(),
         authority: Vec::new(),
         prompt: None,
         terminal: None,
@@ -329,6 +355,20 @@ fn a_start_that_execve_or_chdir_would_refuse_is_never_written() {
             shares: vec![file_share(b"/f", b"n\0")],
             ..base.clone()
         },
+        // A file's path is absolute, and neither it nor the contents hold a
+        // NUL.
+        Start {
+            files: vec![guest_file(b"w", b"c")],
+            ..base.clone()
+        },
+        Start {
+            files: vec![guest_file(b"/w\0", b"c")],
+            ..base.clone()
+        },
+        Start {
+            files: vec![guest_file(b"/w", b"c\0")],
+            ..base.clone()
+        },
         Start {
             authority: b"a\0".to_vec(),
             ..base.clone()
@@ -379,6 +419,34 @@ fn a_start_whose_counts_dont_match_its_strings_is_refused() {
         );
     }
     assert!(to_guest(frame(&body(1, 0, b"h\0/d"))).is_err());
+    // A file whose path isn't absolute.
+    let relative = [
+        &[START][..],
+        &1u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &1u32.to_le_bytes(),
+        b"h\0w\0c\0/d\0\0",
+    ]
+    .concat();
+    assert!(matches!(
+        to_guest(frame(&relative)),
+        Err(ProtocolError::Malformed)
+    ));
+    // A file with a path and no contents, which leaves no directory.
+    let cut = [
+        &[START][..],
+        &1u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &0u32.to_le_bytes(),
+        &1u32.to_le_bytes(),
+        b"h\0/w\0",
+    ]
+    .concat();
+    assert!(matches!(
+        to_guest(frame(&cut)),
+        Err(ProtocolError::Malformed)
+    ));
     // A size that is cut short.
     for body in [
         &[START_IN_TERMINAL, 1, 0, 0][..],

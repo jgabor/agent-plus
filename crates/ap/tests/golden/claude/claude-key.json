@@ -1,0 +1,11 @@
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/": {
+      "hasTrustDialogAccepted": true
+    }
+  },
+  "customApiKeyResponses": {
+    "approved": ["cdef0123456789abcdef"]
+  }
+}

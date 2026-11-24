@@ -118,6 +118,9 @@ pub struct Start {
     /// share at index `i` is the device that [`crate::share::tag`] names
     /// for `i`.
     pub shares: Vec<Share>,
+    /// The files the guest writes in the run's root before it mounts any
+    /// share, as [`crate::agent`] says.
+    pub files: Vec<GuestFile>,
     /// The run's certificate authority, in PEM, which the guest trusts as
     /// [`crate::agent`] says. Empty when there is none.
     pub authority: Vec<u8>,
@@ -148,6 +151,14 @@ impl Share {
         };
         self.path.starts_with(b"/") && self.file.as_ref().is_none_or(one_name)
     }
+}
+
+/// A file the guest writes in the run's root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestFile {
+    /// The guest path, which is absolute.
+    pub path: Vec<u8>,
+    pub contents: Vec<u8>,
 }
 
 /// What the guest tells the host.
@@ -252,16 +263,19 @@ fn read_argv(payload: &[u8]) -> Result<Vec<Vec<u8>>, ProtocolError> {
     Ok(args.split(|byte| *byte == 0).map(<[u8]>::to_vec).collect())
 }
 
-/// A start's payload: the number of arguments, of variables, and of shares,
-/// each a little-endian `u32`, then the arguments, the variables as
-/// `key=value`, each share's guest path and its file's name, which is empty
-/// for a directory, the directory, the run's certificate authority, and the
-/// prompt if there is one. Every string ends with a NUL. A start in a terminal has its own tag, and the terminal's
-/// rows and columns, each a little-endian `u16`, before the payload.
+/// A start's payload: the number of arguments, of variables, of shares, and
+/// of files, each a little-endian `u32`, then the arguments, the variables
+/// as `key=value`, each share's guest path and its file's name, which is
+/// empty for a directory, each file's guest path and contents, the
+/// directory, the run's certificate authority, and the prompt if there is
+/// one. Every string ends with a NUL. A start in a terminal has its own tag,
+/// and the terminal's rows and columns, each a little-endian `u16`, before
+/// the payload.
 fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
     if start.argv.is_empty()
         || start.env.iter().any(|(key, _)| !is_key(key))
         || !start.shares.iter().all(Share::is_valid)
+        || !start.files.iter().all(|file| file.path.starts_with(b"/"))
     {
         return Err(ProtocolError::Malformed);
     }
@@ -270,6 +284,7 @@ fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
     payload.extend_from_slice(&count(start.argv.len())?.to_le_bytes());
     payload.extend_from_slice(&count(start.env.len())?.to_le_bytes());
     payload.extend_from_slice(&count(start.shares.len())?.to_le_bytes());
+    payload.extend_from_slice(&count(start.files.len())?.to_le_bytes());
     let variables = start
         .env
         .iter()
@@ -282,6 +297,7 @@ fn start_payload(start: &Start) -> Result<Vec<u8>, ProtocolError> {
                 .iter()
                 .flat_map(|share| [share.path.clone(), share.file.clone().unwrap_or_default()]),
         )
+        .chain((start.files.iter()).flat_map(|file| [file.path.clone(), file.contents.clone()]))
         .chain([start.directory.clone(), start.authority.clone()])
         .chain(start.prompt.clone());
     for text in strings {
@@ -305,7 +321,11 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         .split_first_chunk::<4>()
         .ok_or(ProtocolError::Malformed)?;
     let (argc, envc) = (u32::from_le_bytes(*argc), u32::from_le_bytes(*envc));
+    let (filec, rest) = rest
+        .split_first_chunk::<4>()
+        .ok_or(ProtocolError::Malformed)?;
     let sharec = u32::from_le_bytes(*sharec);
+    let filec = u32::from_le_bytes(*filec);
     let strings = rest.strip_suffix(&[0]).ok_or(ProtocolError::Malformed)?;
     let mut strings = strings.split(|byte| *byte == 0).map(<[u8]>::to_vec);
     // The counts come from the other side, so nothing is reserved for them.
@@ -324,6 +344,16 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         let file = (!file.is_empty()).then_some(file);
         shares.push(Share { path, file });
     }
+    let mut files = Vec::new();
+    for _ in 0..filec {
+        let (Some(path), Some(contents)) = (strings.next(), strings.next()) else {
+            return Err(ProtocolError::Malformed);
+        };
+        if !path.starts_with(b"/") {
+            return Err(ProtocolError::Malformed);
+        }
+        files.push(GuestFile { path, contents });
+    }
     let directory = strings.next().ok_or(ProtocolError::Malformed)?;
     let authority = strings.next().ok_or(ProtocolError::Malformed)?;
     let prompt = strings.next();
@@ -341,6 +371,7 @@ fn read_start(payload: &[u8], terminal: Option<Size>) -> Result<Start, ProtocolE
         env,
         directory,
         shares,
+        files,
         authority,
         prompt,
         terminal,

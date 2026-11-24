@@ -1,7 +1,7 @@
 //! The guest agent against a fake channel, running real programs.
 
 use guest::agent::{self, Split};
-use guest::protocol::{MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
+use guest::protocol::{GuestFile, MAX_OUTPUT, ProtocolError, ToGuest, ToHost};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -409,4 +409,51 @@ fn the_bundle_variables_name_the_bundle_and_win_over_env() {
             _ => assert_eq!(value, agent::BUNDLE.as_bytes()),
         }
     }
+}
+
+fn guest_file(path: &str, contents: &[u8]) -> GuestFile {
+    GuestFile {
+        path: path.as_bytes().to_vec(),
+        contents: contents.to_vec(),
+    }
+}
+
+#[test]
+fn a_file_the_host_gives_is_written_in_the_root() {
+    let root = fresh_root("place-new");
+    fs::create_dir_all(root.join("home/agent")).unwrap();
+    agent::place(&root, &guest_file("/home/agent/.claude.json", b"{}\n")).unwrap();
+    let path = root.join("home/agent/.claude.json");
+    assert_eq!(fs::read(&path).unwrap(), b"{}\n");
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o644);
+}
+
+#[test]
+fn a_file_the_host_gives_replaces_what_the_root_held() {
+    let root = fresh_root("place-replaces");
+    fs::create_dir_all(root.join("home/agent")).unwrap();
+    let path = root.join("home/agent/.claude.json");
+    fs::write(&path, b"a longer file that the new one replaces").unwrap();
+    agent::place(&root, &guest_file("/home/agent/.claude.json", b"{}\n")).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"{}\n");
+}
+
+#[test]
+fn a_file_the_host_gives_stays_in_the_root_whatever_its_slashes() {
+    let root = fresh_root("place-slashes");
+    fs::create_dir_all(root.join("etc")).unwrap();
+    agent::place(&root, &guest_file("//etc/placed", b"in")).unwrap();
+    assert_eq!(fs::read(root.join("etc/placed")).unwrap(), b"in");
+}
+
+#[test]
+fn a_file_the_host_gives_isnt_written_through_a_symlink() {
+    let root = fresh_root("place-symlink");
+    fs::create_dir_all(root.join("home/agent")).unwrap();
+    let target = root.join("elsewhere");
+    fs::write(&target, b"kept").unwrap();
+    std::os::unix::fs::symlink(&target, root.join("home/agent/.claude.json")).unwrap();
+    assert!(agent::place(&root, &guest_file("/home/agent/.claude.json", b"{}\n")).is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"kept");
 }

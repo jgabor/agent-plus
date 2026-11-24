@@ -114,12 +114,28 @@ pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     }
     settings.push_str("\n}\n");
     files.push((SETTINGS, settings.into_bytes()));
-    files.push((
-        STATE,
-        b"{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"/\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}\n"
-            .to_vec(),
-    ));
+    files.push((STATE, state(None)));
     files
+}
+
+/// How many of a key's last characters Claude Code keeps to approve it.
+const APPROVED_CHARACTERS: usize = 20;
+
+/// What [`STATE`] holds. With `AUTH key`, it also approves the run's
+/// placeholder, so an interactive run doesn't ask whether to use the key.
+/// Claude Code 2.1.330 uses a key from its environment without asking only
+/// when its state lists the key's last 20 characters in
+/// `customApiKeyResponses.approved`.
+pub fn state(placeholder: Option<&[u8]>) -> Vec<u8> {
+    let mut state = b"{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"/\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }".to_vec();
+    if let Some(placeholder) = placeholder {
+        let kept = &placeholder[placeholder.len().saturating_sub(APPROVED_CHARACTERS)..];
+        state.extend_from_slice(b",\n  \"customApiKeyResponses\": {\n    \"approved\": [\"");
+        state.extend_from_slice(kept);
+        state.extend_from_slice(b"\"]\n  }");
+    }
+    state.extend_from_slice(b"\n}\n");
+    state
 }
 
 /// The level this version of Claude Code gets for `effort`, and a warning

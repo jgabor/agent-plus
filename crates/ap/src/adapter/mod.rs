@@ -83,6 +83,16 @@ pub fn sign_in(harness: Harness, auth: Auth) -> Option<SignIn> {
     }
 }
 
+/// The files a run writes in the guest for `harness` when `AUTH key` gives
+/// it `placeholder`, by guest path: Claude Code's [`claude::STATE`], which
+/// approves the placeholder. The placeholder is hex, so it needs no escape.
+pub fn key_files(harness: Harness, placeholder: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    match harness {
+        Harness::Claude => vec![(claude::STATE, claude::state(Some(placeholder)))],
+        Harness::Codex => Vec::new(),
+    }
+}
+
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
 pub fn system(values: &[Vec<u8>]) -> Vec<u8> {

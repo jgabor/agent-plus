@@ -604,3 +604,15 @@ fn another_providers_names_are_not_claude_codes_sign_in() {
         assert!(parsed.is_ok(), "codex {line}: {parsed:?}");
     }
 }
+
+// Claude Code approves a key from its environment by the key's last 20
+// characters, in `customApiKeyResponses.approved`.
+#[test]
+fn a_keyed_runs_state_approves_its_placeholder_alone() {
+    let placeholder = b"0123456789abcdef0123456789abcdef";
+    let files = ap::adapter::key_files(agentfile::Harness::Claude, placeholder);
+    let paths: Vec<&str> = files.iter().map(|(path, _)| *path).collect();
+    assert_eq!(paths, [claude::STATE]);
+    golden("claude-key.json", &files[0].1);
+    assert!(ap::adapter::key_files(agentfile::Harness::Codex, placeholder).is_empty());
+}

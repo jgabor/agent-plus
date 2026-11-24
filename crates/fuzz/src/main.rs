@@ -1,6 +1,9 @@
 //! Feeds generated text to the code that reads untrusted input, and stops at
-//! the first panic. It uses only the standard library, so it builds on stable
-//! and adds no C to the tree. A run is reproduced by passing its seed again.
+//! the first panic. It needs no fuzzing engine, so it builds on stable. Where
+//! httparse, hyper, iri-string, or `git` does the same job, a target compares
+//! the two, and miniz_oxide packs the objects it hands `git`. Those crates are
+//! pure Rust, so the fuzzer adds no C to the tree. A run is reproduced by
+//! passing its seed again.
 
 use std::env;
 use std::fs::{self, File};

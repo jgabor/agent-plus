@@ -333,7 +333,7 @@ fn codex_plan_mode_gets_the_effort() {
     for version in CODEX_VERSIONS {
         for interactive in [false, true] {
             for mode in MODES {
-                for effort in [None, Some(Effort::Low), Some(Effort::High), Some(Effort::Max)] {
+                for effort in [None].into_iter().chain(EFFORTS.map(Some)) {
                     let arguments = codex::arguments(version, None, effort, mode, interactive);
                     let efforts: Vec<&str> = (arguments.windows(2))
                         .filter(|pair| pair[0] == "-c" && pair[1].contains("reasoning_effort="))

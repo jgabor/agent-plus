@@ -1116,7 +1116,8 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
 /// Starts `ap run open` in the background of `terminal`, as `ap run open &`
 /// would from a shell with job control, as yours is, through `wrapper`, a
 /// command that runs the rest. Once the shell gets `SIGTERM`, as from its
-/// guard, it kills the run's process group, and waits for it.
+/// guard, or `SIGHUP`, as when the terminal closes, it kills the run's
+/// process group, and waits for it.
 fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
     let mut command = Command::new("sh");
     command
@@ -1127,7 +1128,7 @@ fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
             run=$!
             sleep {TIMEOUT} &
             sleeper=$!
-            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM
+            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM HUP
             wait $sleeper"
         ))
         .arg(&shared().0)

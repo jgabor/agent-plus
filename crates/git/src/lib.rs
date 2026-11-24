@@ -3,6 +3,7 @@
 //! SHA-1 repositories.
 
 mod pack;
+mod stream;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,9 +15,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use miniz_oxide::deflate;
-use miniz_oxide::inflate::{self, TINFLStatus};
 
 use pack::Pack;
+use stream::{CHUNK, Stream, Why};
 
 /// An object's SHA-1 name.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
@@ -237,8 +238,8 @@ pub enum Target {
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// The repository holds something git wouldn't read, or an object
-    /// larger than the limit.
+    /// The repository holds something git wouldn't read, or an object or a
+    /// file larger than the limit.
     Corrupt(String),
 }
 
@@ -264,7 +265,8 @@ pub struct Repository {
     git_dir: PathBuf,
     /// The packs, found when an object is first looked for in one.
     packs: OnceLock<Vec<Pack>>,
-    /// The most bytes of contents an object may hold.
+    /// The most bytes of contents an object may hold, and the longest file
+    /// read whole.
     limit: usize,
 }
 
@@ -286,45 +288,121 @@ fn is_missing(error: &io::Error) -> bool {
     )
 }
 
-/// The type of the loose object at `path`, named `hex`, or `None` if there
-/// is none. Only as much of the file as holds the header is read, a little
-/// more each time, so a large object is never read whole.
-fn loose_kind(path: &Path, hex: &str) -> Result<Option<Kind>, Error> {
-    let mut file = match fs::File::open(path) {
+/// The file at `path` and its length, or `None` if there is none.
+fn open(path: &Path) -> Result<Option<(fs::File, u64)>, Error> {
+    // A directory where a ref would be, such as `refs/heads/a` beside
+    // `refs/heads/a/b`, or a file above one, means there is no such ref.
+    let file = match fs::File::open(path) {
         Ok(file) => file,
         Err(e) if is_missing(&e) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let mut compressed = Vec::new();
-    let mut chunk = 256;
-    loop {
-        let len = match (&mut file).take(chunk).read_to_end(&mut compressed) {
-            Ok(len) => len,
-            Err(e) if is_missing(&e) => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
-            Ok(all) => all,
-            Err(e) => e.output,
-        };
-        if let Some((kind, _, _)) = parse_header(&prefix) {
-            return Ok(Some(kind));
-        }
-        if len == 0 {
-            return Err(corrupt(format!("{hex} has a bad header")));
-        }
-        chunk *= 2;
+    let metadata = file.metadata()?;
+    if metadata.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some((file, metadata.len())))
+}
+
+/// The file at `path`, or `None` if there is none. A file longer than
+/// `limit` is refused before it is read, since a sparse file can say it is
+/// any length.
+fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Error> {
+    let Some((file, len)) = open(path)? else {
+        return Ok(None);
+    };
+    let larger = || corrupt(format!("{} is larger than the limit", path.display()));
+    if len > limit as u64 {
+        return Err(larger());
+    }
+    // It may have grown since.
+    let mut bytes = Vec::with_capacity(len as usize);
+    match file
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+    {
+        Ok(_) if bytes.len() > limit => Err(larger()),
+        Ok(_) => Ok(Some(bytes)),
+        Err(e) if is_missing(&e) => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
-/// The file at `path`, or `None` if there is none.
-fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
-        // A directory where a ref would be, such as `refs/heads/a` beside
-        // `refs/heads/a/b`, or a file above one, means there is no such ref.
-        Err(e) if is_missing(&e) => Ok(None),
-        Err(e) => Err(e.into()),
+/// A loose object's zlib stream, inflated as far as its header. It is
+/// inflated a piece at a time, so it holds one piece of the file, and never
+/// more of the object than its header says.
+struct Loose<'a> {
+    stream: Stream<'a>,
+    kind: Kind,
+    size: usize,
+    /// What was inflated past the header.
+    rest: Vec<u8>,
+    ended: bool,
+}
+
+impl<'a> Loose<'a> {
+    /// Inflates `file`, `len` bytes long, which holds the object named
+    /// `hex`, as far as its header.
+    fn header(file: &'a fs::File, len: u64, hex: &str) -> Result<Loose<'a>, Error> {
+        let mut stream = Stream::new(file, 0, len, len.min(CHUNK) as usize);
+        let mut head = [0; MAX_HEADER];
+        let mut filled = 0;
+        loop {
+            let (written, ended) = stream.next(&mut head[filled..]).map_err(|why| match why {
+                Why::Io(error) => Error::Io(error),
+                Why::Short => corrupt(format!("{hex} has a bad header")),
+                Why::NotZlib => corrupt(format!("{hex} isn't zlib")),
+            })?;
+            filled += written;
+            if let Some((kind, size, header)) = parse_header(&head[..filled]) {
+                return Ok(Loose {
+                    stream,
+                    kind,
+                    size,
+                    rest: head[header..filled].to_vec(),
+                    ended,
+                });
+            }
+            if ended || filled == MAX_HEADER {
+                return Err(corrupt(format!("{hex} has a bad header")));
+            }
+        }
+    }
+
+    /// The contents, which must be as long as the header says.
+    fn contents(self, hex: &str) -> Result<Vec<u8>, Error> {
+        let Loose {
+            mut stream,
+            size,
+            rest,
+            mut ended,
+            ..
+        } = self;
+        let longer = || corrupt(format!("{hex} is longer than its header says"));
+        if rest.len() > size {
+            return Err(longer());
+        }
+        // The size bounds the output, but isn't trusted with an allocation.
+        let mut data = Vec::with_capacity(size.min(1 << 20));
+        data.extend_from_slice(&rest);
+        let mut output = vec![0; (size as u64).saturating_add(64).min(CHUNK) as usize];
+        while !ended {
+            let written;
+            (written, ended) = stream.next(&mut output).map_err(|why| match why {
+                Why::Io(error) => Error::Io(error),
+                Why::Short => corrupt(format!("{hex} is shorter than its header says")),
+                Why::NotZlib => corrupt(format!("{hex} isn't zlib")),
+            })?;
+            // Checked before the contents grow, so they never hold more.
+            if written > size - data.len() {
+                return Err(longer());
+            }
+            data.extend_from_slice(&output[..written]);
+        }
+        if data.len() != size {
+            return Err(corrupt(format!("{hex} is shorter than its header says")));
+        }
+        Ok(data)
     }
 }
 
@@ -343,8 +421,11 @@ impl Repository {
     /// that is refused before it is inflated past its header, and a delta
     /// whose result is larger is refused before it is applied. A chain of
     /// deltas is applied one delta at a time, so reading an object holds no
-    /// more than its file or pack entry, its base, one delta, and itself.
-    /// Without a limit, an object can be as large as its header says.
+    /// more than a piece of its file, its base, one delta, and itself. A
+    /// file read whole, a pack index, `packed-refs`, or a loose ref, is
+    /// refused as corrupt when it is longer than `limit` too. Without a
+    /// limit, an object can be as large as its header says, and a file as
+    /// long as it says.
     pub fn with_limit(self, limit: usize) -> Repository {
         Repository { limit, ..self }
     }
@@ -376,8 +457,8 @@ impl Repository {
     pub fn kind(&self, id: &Id) -> Result<Option<Kind>, Error> {
         let hex = id.to_string();
         let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
-        if let Some(kind) = loose_kind(&path, &hex)? {
-            return Ok(Some(kind));
+        if let Some((file, len)) = open(&path)? {
+            return Loose::header(&file, len, &hex).map(|loose| Some(loose.kind));
         }
         for pack in self.packs()? {
             if let Some(offset) = pack.find(id)? {
@@ -430,7 +511,7 @@ impl Repository {
         indexes.sort();
         let mut packs = Vec::new();
         for index in indexes {
-            packs.extend(Pack::open(&index)?);
+            packs.extend(Pack::open(&index, self.limit)?);
         }
         Ok(self.packs.get_or_init(|| packs))
     }
@@ -439,35 +520,15 @@ impl Repository {
     pub fn loose_object(&self, id: &Id) -> Result<Option<Object>, Error> {
         let hex = id.to_string();
         let path = self.git_dir.join("objects").join(&hex[..2]).join(&hex[2..]);
-        let Some(compressed) = read(&path)? else {
+        let Some((file, len)) = open(&path)? else {
             return Ok(None);
         };
-        // Inflate only the header first, so the size it declares bounds the
-        // rest, and a small file can't inflate without limit.
-        let prefix = match inflate::decompress_to_vec_zlib_with_limit(&compressed, MAX_HEADER) {
-            Ok(all) => all,
-            Err(e) if e.status == TINFLStatus::HasMoreOutput => e.output,
-            Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
-        };
-        let (kind, size, header) =
-            parse_header(&prefix).ok_or_else(|| corrupt(format!("{hex} has a bad header")))?;
-        if size > self.limit {
+        let loose = Loose::header(&file, len, &hex)?;
+        if loose.size > self.limit {
             return Err(corrupt(format!("{hex} is larger than the limit")));
         }
-        let total = header
-            .checked_add(size)
-            .ok_or_else(|| corrupt(format!("{hex} is too large")))?;
-        let mut data = match inflate::decompress_to_vec_zlib_with_limit(&compressed, total) {
-            Ok(all) => all,
-            Err(e) if e.status == TINFLStatus::HasMoreOutput => {
-                return Err(corrupt(format!("{hex} is longer than its header says")));
-            }
-            Err(_) => return Err(corrupt(format!("{hex} isn't zlib"))),
-        };
-        if data.len() != total {
-            return Err(corrupt(format!("{hex} is shorter than its header says")));
-        }
-        data.drain(..header);
+        let kind = loose.kind;
+        let data = loose.contents(&hex)?;
         Ok(Some(Object { kind, data }))
     }
 
@@ -587,7 +648,7 @@ impl Repository {
                 .ok_or_else(|| corrupt(format!("{name} links outside refs/")))?;
             return Ok(Some(Target::Symbolic(target.to_string())));
         }
-        match read(&path)? {
+        match read(&path, self.limit)? {
             Some(contents) => parse_loose_ref(name, &contents).map(Some),
             None => Ok(None),
         }
@@ -620,7 +681,7 @@ impl Repository {
     /// The refs in `packed-refs` under `refs/`, by name, as
     /// [`parse_packed_refs`] reads them.
     fn packed_refs(&self) -> Result<BTreeMap<String, Id>, Error> {
-        match read(&self.git_dir.join("packed-refs"))? {
+        match read(&self.git_dir.join("packed-refs"), self.limit)? {
             Some(contents) => parse_packed_refs(&contents),
             None => Ok(BTreeMap::new()),
         }

@@ -5,9 +5,7 @@ use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
-use miniz_oxide::inflate::stream::{InflateState, inflate};
-use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
-
+use crate::stream::{CHUNK, Stream, Why};
 use crate::{Error, Id, Kind, Object, corrupt};
 
 /// The start of a version 2 index: a magic number, then the version.
@@ -21,9 +19,6 @@ const TRAILER: usize = 40;
 
 /// The length of a pack's header: `PACK`, a version, and a count.
 const PACK_HEADER: u64 = 12;
-
-/// How much of a pack to read at a time while inflating.
-const CHUNK: u64 = 1 << 16;
 
 /// The shortest delta git applies, as `DELTA_SIZE_MIN`.
 const MIN_DELTA: usize = 4;
@@ -46,14 +41,14 @@ enum Entry {
 
 impl Pack {
     /// The pack beside the index at `idx`, or `None` if there is no pack.
-    pub(crate) fn open(idx: &Path) -> Result<Option<Pack>, Error> {
+    pub(crate) fn open(idx: &Path, limit: usize) -> Result<Option<Pack>, Error> {
         let name = idx.display().to_string();
         let file = match File::open(idx.with_extension("pack")) {
             Ok(file) => file,
             Err(e) if crate::is_missing(&e) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
-        let Some(index) = crate::read(idx)? else {
+        let Some(index) = crate::read(idx, limit)? else {
             return Ok(None);
         };
         let bad = |why: &str| corrupt(format!("{name} {why}"));
@@ -266,43 +261,31 @@ impl Pack {
     }
 
     /// Inflates the zlib stream at `at`, which must hold `size` bytes.
-    fn inflate(&self, mut at: u64, size: usize) -> Result<Vec<u8>, Error> {
-        let mut state = InflateState::new_boxed(DataFormat::Zlib);
+    fn inflate(&self, at: u64, size: usize) -> Result<Vec<u8>, Error> {
         // The size bounds the output, but isn't trusted with an allocation.
         let mut out = Vec::with_capacity(size.min(1 << 20));
         // A small object needs small buffers. Zlib adds a few bytes to data
         // it can't compress, and one byte more than the size is enough to
         // find an entry that is too long.
         let small = (size as u64).saturating_add(64).min(CHUNK) as usize;
-        let mut input = vec![0; small];
+        let mut stream = Stream::new(&self.file, at, self.end, small);
         let mut output = vec![0; small];
         loop {
-            let len = (self.end - at).min(input.len() as u64) as usize;
-            if len == 0 {
-                return Err(self.bad("ends inside an entry"));
+            let (written, ended) = stream.next(&mut output).map_err(|why| match why {
+                Why::Io(error) => Error::Io(error),
+                Why::Short => self.bad("ends inside an entry"),
+                Why::NotZlib => self.bad("has an entry that isn't zlib"),
+            })?;
+            // Checked before the output grows, so it never holds more.
+            if written > size - out.len() {
+                return Err(self.bad("has an entry longer than its header says"));
             }
-            self.file.read_exact_at(&mut input[..len], at)?;
-            at += len as u64;
-            let mut rest = &input[..len];
-            loop {
-                let result = inflate(&mut state, rest, &mut output, MZFlush::None);
-                rest = &rest[result.bytes_consumed..];
-                // Checked before the output grows, so it never holds more.
-                if result.bytes_written > size - out.len() {
-                    return Err(self.bad("has an entry longer than its header says"));
-                }
-                out.extend_from_slice(&output[..result.bytes_written]);
-                match result.status {
-                    Ok(MZStatus::StreamEnd) if out.len() == size => return Ok(out),
-                    Ok(MZStatus::StreamEnd) => {
-                        return Err(self.bad("has an entry shorter than its header says"));
-                    }
-                    Ok(_) | Err(MZError::Buf) => {}
-                    Err(_) => return Err(self.bad("has an entry that isn't zlib")),
-                }
-                if result.bytes_consumed == 0 && result.bytes_written == 0 {
-                    break;
-                }
+            out.extend_from_slice(&output[..written]);
+            if ended && out.len() == size {
+                return Ok(out);
+            }
+            if ended {
+                return Err(self.bad("has an entry shorter than its header says"));
             }
         }
     }

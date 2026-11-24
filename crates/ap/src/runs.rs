@@ -605,9 +605,9 @@ fn wait_for_hang_up(stream: &UnixStream) {
 /// process holds until it exits. A run with shares has one more for each
 /// share, in share order: the number of another, the VMM's end of the
 /// socket of the share server that serves it. Shares that one server
-/// serves name the same descriptor. It returns the
-/// status to exit with, which nobody reads, because it reports how the run
-/// ended over the socket.
+/// serves name the same descriptor. It returns the status to exit with,
+/// which nobody reads, because it reports how the run ended over the
+/// socket.
 pub fn run_process(args: &[OsString]) -> u8 {
     let parent = args
         .first()

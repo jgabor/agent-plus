@@ -519,6 +519,37 @@ fn a_directory_the_host_moves_outside_the_root_is_no_longer_served() {
     assert!(guest.open(nested, 0).is_ok());
 }
 
+// spec(SHARE): The agent sees only what is under the share's root.
+#[test]
+fn a_known_node_the_host_moves_outside_the_root_shows_no_attributes() {
+    let tree = Tree::new("attributes-moved-out");
+    fs::create_dir(tree.root.join("dir/locked")).unwrap();
+    let mut guest = Guest::new(&tree.root);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    let locked = guest.walk("dir/locked").unwrap();
+    // A directory with no search permission still shows where it is, by
+    // its name.
+    let path = tree.root.join("dir/locked");
+    fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+    let getattr = |guest: &mut Guest, node| guest.call(GETATTR, node, &[0; 16]).0;
+    assert_eq!(getattr(&mut guest, locked), 0);
+    let away = tree.base.join("outside/dir");
+    fs::rename(tree.root.join("dir"), &away).unwrap();
+    fs::create_dir(away.join("new")).unwrap();
+    fs::write(away.join("nested.txt"), CANARY).unwrap();
+    for node in [dir, nested, locked] {
+        assert_eq!(getattr(&mut guest, node), ENOENT, "{node}");
+    }
+    // Moved back beneath the root, each shows its attributes again.
+    fs::rename(&away, tree.root.join("back")).unwrap();
+    for node in [dir, nested, locked] {
+        assert_eq!(getattr(&mut guest, node), 0, "{node}");
+    }
+    let path = tree.root.join("back/locked");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn a_write_never_reaches_a_directory_the_host_moves_outside_the_root() {
     let tree = Tree::new("rw-moved-out");

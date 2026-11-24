@@ -734,3 +734,34 @@ fn a_flock_lost_to_a_failed_change_is_not_taken_on_the_agent_s_copy() {
     guest.overwrite("hello.txt", b"agent").unwrap();
     assert_eq!(guest.lock(SETLK, first, 7, F_RDLCK, LK_FLOCK).0, EAGAIN);
 }
+
+#[test]
+fn a_copy_that_fails_to_move_what_the_guest_holds_leaves_nothing_half_moved() {
+    let tree = Tree::new("cow-failed-move");
+    let pending = pending(&tree);
+    let root = cow_root(&tree.root, &pending);
+    let mut guest = Guest::made(move || {
+        // The second file the move opens fails, as with `EMFILE`.
+        let mut opens = 0;
+        share::when_a_copy_moves(Some(Box::new(move || {
+            opens += 1;
+            match opens {
+                2 => Err(libc::EMFILE),
+                _ => Ok(()),
+            }
+        })));
+        Server::new(vec![root]).unwrap()
+    });
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, 0).0, 0);
+    assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, LK_FLOCK).0, 0);
+    assert_eq!(guest.open(hello, O_RDWR), Err(libc::EMFILE));
+    assert!(!pending.join("tree/hello.txt").exists());
+    // The next write makes the copy, and moves the reader and its locks.
+    let writer = guest.open(hello, O_RDWR).unwrap();
+    assert_eq!(guest.write(writer, 0, b"agent"), Ok(5));
+    assert_eq!(guest.read(READ, reader, 0, 5), (0, b"agent".to_vec()));
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, 0).0, EAGAIN);
+    assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, LK_FLOCK).0, EAGAIN);
+}

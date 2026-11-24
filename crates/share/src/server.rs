@@ -37,7 +37,7 @@ use crate::sys;
 mod cow;
 
 #[doc(hidden)]
-pub use cow::when_git_is_listed;
+pub use cow::{when_a_copy_moves, when_git_is_listed};
 
 const IN_HEADER: usize = 40;
 const OUT_HEADER: usize = 16;

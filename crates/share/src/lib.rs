@@ -35,9 +35,9 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 pub use namespace::spawn as spawn_read_write;
-#[doc(hidden)]
-pub use server::when_git_is_listed;
 pub use server::{Mode, Root, Server};
+#[doc(hidden)]
+pub use server::{when_a_copy_moves, when_git_is_listed};
 
 /// The `argv[0]` that `ap` starts the share server with.
 pub const PROGRAM: &str = "ap-share-server";

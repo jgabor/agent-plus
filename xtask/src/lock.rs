@@ -144,6 +144,33 @@ pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
     take_exclusive(&directory)
 }
 
+/// Whether a bench waits for holders that share the activity lock: something
+/// keeps the turnstile, and the lock is held, but only shared. So a process
+/// that is only told a bench waits can see for itself that it does. A bench
+/// that holds the lock, or waits behind another bench, doesn't count. Each
+/// try lets go once this returns.
+pub fn bench_waits(root: &Path) -> Result<bool, Problem> {
+    let directory = directory(root)?;
+    let free = |file: &File, shared: bool| {
+        let tried = if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+        match tried {
+            Ok(()) => Ok(true),
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(TryLockError::Error(e)) => Err(failed(e)),
+        }
+    };
+    let turnstile = open(&directory, "turnstile.lock")?;
+    if free(&turnstile, false)? {
+        return Ok(false);
+    }
+    let activity = open(&directory, "activity.lock")?;
+    Ok(!free(&activity, false)? && free(&activity, true)?)
+}
+
 /// Held while a claim reads and writes GitHub, so that two claims on this
 /// machine can't interleave. Rules on the comments cover anything else.
 pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {

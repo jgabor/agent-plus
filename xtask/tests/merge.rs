@@ -174,6 +174,7 @@ fn stand_in_build() -> String {
   built='{own}'
   if grep -qs 'variant: unprotected' xtask/src/base.rs; then built='{unprotected}'; fi
   if grep -qs 'variant: failing' xtask/src/journey.rs; then built='{failing}'; fi
+  if grep -qs 'variant: lying' xtask/src/bench.rs; then built='{lying}'; fi
   mkdir -p "$6/debug" && rm -f "$6/debug/xtask" && cp "$built" "$6/debug/xtask"
   code=$?
   maybe_kill after
@@ -183,6 +184,7 @@ fi
         own = env!("CARGO_BIN_EXE_xtask"),
         unprotected = variant_binary("unprotected").display(),
         failing = variant_binary("failing").display(),
+        lying = variant_binary("lying").display(),
     )
 }
 
@@ -244,6 +246,20 @@ fn unprotected() -> &'static Path {
             "waits.rs",
             "const WORKFLOWS: &str = \".github/\";",
             "const WORKFLOWS: &str = \".nothing/\";",
+        )
+    })
+}
+
+/// An xtask whose bench says that it waits for the activity lock once it holds
+/// it, writes the file that `LIED` names, and then keeps it for two minutes.
+fn lying() -> &'static Path {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        variant(
+            "lying",
+            "bench.rs",
+            "    waiting(true)?;\n    let measuring = lock::exclusive(root);\n    waiting(false)?;\n",
+            "    let measuring = lock::exclusive(root);\n    waiting(true)?;\n    let _ = std::fs::write(std::env::var_os(\"LIED\").unwrap_or_default(), \"\");\n    std::thread::sleep(std::time::Duration::from_secs(120));\n",
         )
     })
 }
@@ -1869,6 +1885,71 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
         &[("harness/ledger/3.toml", base.as_str())],
         &[("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n")],
     );
+    let output = outwait_the_timeout(&repo, None, "Proving: bench");
+    assert_merged(&repo, &output);
+    assert!(stdout(&output).contains("bench: pass"), "{output:?}");
+}
+
+/// The bench of a PR's own xtask waits for the lock too. Its first proof has
+/// benched by the time it starts, so the lock is taken then, and only the
+/// second bench waits.
+#[test]
+fn a_benchs_wait_for_the_activity_lock_in_its_own_xtask_does_not_count_either() {
+    let repo = changing(
+        "own-bench-wait",
+        &[],
+        &[
+            ("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n"),
+            ("xtask/src/bench.rs", "// a better measurer\n"),
+        ],
+    );
+    let own = "Proving: its own xtask";
+    let output = outwait_the_timeout(&repo, Some(own), own);
+    assert_merged(&repo, &output);
+    assert_eq!(
+        stdout(&output).matches("bench: pass").count(),
+        2,
+        "{output:?}"
+    );
+}
+
+/// A PR's own xtask can say that its bench waits for the lock when it holds
+/// the lock itself. The xtask of `main` sees that the bench doesn't wait, so
+/// the timeout runs on, and stops the merge long before the bench would end.
+#[test]
+fn a_benchs_wait_that_its_own_xtask_only_claims_counts_against_the_timeout() {
+    lying();
+    let repo = changing(
+        "own-bench-lies",
+        &[],
+        &[
+            ("crates/ap/src/main.rs", "fn main() {\n    println!();\n}\n"),
+            ("xtask/src/bench.rs", "// variant: lying\n"),
+        ],
+    );
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("LIED", repo.bin.join("lied"))
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .output()
+        .unwrap();
+    assert!(
+        repo.bin.join("lied").exists(),
+        "its own bench never said it waits:\n{}\n{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
+    assert!(!repo.bin.join("merged").exists());
+}
+
+/// Runs a merge with a 60 second timeout, and holds the activity lock shared
+/// from when the calls hold `holding_from`, or from before the merge, until a
+/// bench that starts after `bench_from` has waited for it longer than that.
+/// Returns how the merge ended.
+fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str) -> Output {
     let directory = repo.root.join(".git/xtask");
     fs::create_dir_all(&directory).unwrap();
     let lock = |name: &str| {
@@ -1880,7 +1961,9 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
             .unwrap()
     };
     let activity = lock("activity.lock");
-    activity.lock_shared().unwrap();
+    if holding_from.is_none() {
+        activity.lock_shared().unwrap();
+    }
     // To files, because nothing reads a pipe while this waits.
     let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
     let mut merge = repo
@@ -1908,13 +1991,18 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
         Ok(()) => turnstile.unlock().is_err(),
         Err(_) => true,
     };
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let mut holding = holding_from.is_none();
     loop {
         if merge.try_wait().unwrap().is_some() || Instant::now() > deadline {
             ended(&mut merge, "the merge's bench never waited for the lock");
         }
         thread::sleep(Duration::from_millis(100));
-        if repo.calls().contains("Proving: bench") && held() {
+        if !holding && holding_from.is_some_and(|from| repo.calls().contains(from)) {
+            activity.lock_shared().unwrap();
+            holding = true;
+        }
+        if holding && repo.calls().contains(bench_from) && held() {
             thread::sleep(Duration::from_millis(200));
             if held() {
                 break;
@@ -1939,13 +2027,11 @@ fn a_benchs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
         }
         thread::sleep(Duration::from_millis(100));
     };
-    let output = Output {
+    Output {
         status,
         stdout: fs::read(repo.temp.join("merge.out")).unwrap(),
         stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
-    };
-    assert_merged(&repo, &output);
-    assert!(stdout(&output).contains("bench: pass"), "{output:?}");
+    }
 }
 
 /// A command that a merge starts, and that outlives its parent: it ignores

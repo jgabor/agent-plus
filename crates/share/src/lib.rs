@@ -1,17 +1,20 @@
-//! The share server: a process of its own for each run with a share, which
-//! reaches the host's files for the guest.
+//! The share server: a process of its own, which reaches the host's files
+//! for the guest. A run's `rw` shares have one, and its other shares have
+//! another.
 //!
 //! The process that runs the guest can't open a host file, so it relays the
 //! guest's FUSE requests here, over a socket made before either process is
 //! confined. This process inherits each share's root, opened by the process
-//! that starts it, then confines itself: it reaches files only beneath those roots, follows no symlink,
-//! can't start a process, refuses every write to an `ro` share, and in an
-//! `rw` share refuses the writes [`server`] protects against. It writes a
-//! copy-on-write share's changes beneath that share's pending directory,
-//! and reads the share's root alone. A server with no `rw` share can't
-//! change a file's mode or times, and a process of its own, in [`times`],
-//! sets the times of a copy-on-write share's copies. The frames on the
-//! socket are the ones [`vmm::fs`] describes.
+//! that starts it, then confines itself: it reaches files only beneath
+//! those roots, follows no symlink, can't start a process, refuses every
+//! write to an `ro` share, and in an `rw` share refuses the writes
+//! [`server`] protects against. It writes a copy-on-write share's changes
+//! beneath that share's pending directory, and reads the share's root
+//! alone. Landlock doesn't cover a file's mode or times. A server with an
+//! `rw` share changes those, so it holds no other share. A server with none
+//! can't change them, and a process of its own, in [`times`], sets the
+//! times of a copy-on-write share's copies. The frames on the socket are
+//! the ones [`vmm::fs`] describes.
 
 mod landlock;
 mod server;
@@ -48,12 +51,46 @@ pub struct Started {
     pub socket: OwnedFd,
 }
 
-/// Starts `program`, a build of `ap`, as the share server for `roots`, in
+/// The share servers for a run's shares, once they have started.
+pub struct Servers {
+    /// Each server: one for the `rw` shares, then one for the others, if
+    /// there are any of each.
+    pub started: Vec<Started>,
+    /// For each share, in share order, the index in `started` of the server
+    /// that serves it. A server numbers its shares in the same order.
+    pub serving: Vec<usize>,
+}
+
+/// Starts `program`, a build of `ap`, as the share servers for `roots`, in
 /// share order. Each root's directory is one the caller opened, and so is
-/// a copy-on-write share's pending directory, which must be empty. The
-/// server serves what the caller checked, and never opens a path itself.
-/// It starts without the environment variables named in `hidden`.
-pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> io::Result<Started> {
+/// a copy-on-write share's pending directory, which must be empty. A server
+/// serves what the caller checked, and never opens a path itself. Each one
+/// starts without the environment variables named in `hidden`.
+pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> io::Result<Servers> {
+    let mut started = Vec::new();
+    let mut serving = vec![0; roots.len()];
+    for read_write in [true, false] {
+        let mut served = Vec::new();
+        for (index, root) in roots.iter().enumerate() {
+            if matches!(root.mode, Mode::ReadWrite) == read_write {
+                serving[index] = started.len();
+                served.push(root);
+            }
+        }
+        if !served.is_empty() {
+            started.push(start_one(program, &served, hidden)?);
+        }
+    }
+    Ok(Servers { started, serving })
+}
+
+/// Starts one share server for `roots`, which are all `rw` shares, or none
+/// of them.
+fn start_one(
+    program: &Path,
+    roots: &[&Root<BorrowedFd>],
+    hidden: &[String],
+) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     // Each root reaches the server as a descriptor it inherits, numbered in
     // its arguments. The copies are made just for it, and closed once it
@@ -123,7 +160,14 @@ pub fn main(args: &[OsString]) -> u8 {
 }
 
 fn run(args: &[OsString]) -> io::Result<()> {
-    let mut server = Server::new(open_roots(args)?)?;
+    let roots = open_roots(args)?;
+    let read_write = |root: &Root| matches!(root.mode, Mode::ReadWrite);
+    if roots.iter().any(read_write) && !roots.iter().all(read_write) {
+        return Err(io::Error::other(
+            "an `rw` share needs a share server of its own",
+        ));
+    }
+    let mut server = Server::new(roots)?;
     raise_descriptor_limit();
     let access = server.access();
     landlock::restrict(&access)?;

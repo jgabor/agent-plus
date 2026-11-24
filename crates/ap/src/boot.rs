@@ -104,14 +104,15 @@ pub struct Guest<'a> {
     pub input: Option<&'a Input>,
 }
 
-/// The shares a machine gets, served by a share server this socket
-/// reaches. The guest finds each one by the tag that [`share::tag`] gives
+/// The shares a machine gets, served by the share servers these sockets
+/// reach. The guest finds each one by the tag that [`share::tag`] gives
 /// its place.
 pub struct Shares {
-    /// The VMM's end of the share server's socket.
-    pub socket: OwnedFd,
-    /// How many shares the server serves.
-    pub count: usize,
+    /// The VMM's end of each share server's socket.
+    pub sockets: Vec<OwnedFd>,
+    /// For each share, in share order, the index in `sockets` of the server
+    /// that serves it. A server numbers its shares in the same order.
+    pub serving: Vec<usize>,
 }
 
 /// What a run gets while it runs, sent from a thread other than the vCPU's.
@@ -557,7 +558,12 @@ pub fn boot_linked(
     link: Option<OwnedFd>,
     on_report: impl FnMut(Report),
 ) -> Result<Option<u8>, Error> {
-    let share_count = shares.as_ref().map_or(0, |shares| shares.count);
+    let (sockets, serving) =
+        shares.map_or_else(Default::default, |shares| (shares.sockets, shares.serving));
+    if serving.iter().any(|server| *server >= sockets.len()) {
+        return Err(Error::Failed("a share has no share server".to_owned()));
+    }
+    let share_count = serving.len();
     let command_line = command_line(&guest.layers, share_count, link.is_some())?;
     let run_frame = guest.request.as_ref().map(request_frame).transpose()?;
     let wants_status = run_frame.is_some();
@@ -597,15 +603,15 @@ pub fn boot_linked(
         .map(|link| Net::new(link, net::MAC))
         .transpose()
         .map_err(|error| failed("can't attach the network", error))?;
-    let relay = shares
-        .map(|shares| ShareRelay::new(shares.socket, Instant::now() + guest.timeout))
-        .transpose()
+    let relays = (sockets.into_iter())
+        .map(|socket| ShareRelay::new(socket, Instant::now() + guest.timeout))
+        .collect::<io::Result<_>>()
         .map_err(|error| failed("can't reach the share server", error))?;
     let parts = Parts {
         disks,
-        shares: share_count,
+        shares: serving,
         net,
-        relay,
+        relays,
     };
     let lines = |line| vm.interrupt(line);
     let mut machine = Machine::new(vm.memory(), lines, parts, run_frame, guest.input, on_report);
@@ -619,14 +625,14 @@ pub fn boot_linked(
     }
     if guest.confine {
         let input = guest.input.into_iter().flat_map(|input| input.sources);
-        let share_server = machine.relay.as_ref().map(ShareRelay::descriptor);
+        let share_servers = machine.relays.iter().map(ShareRelay::descriptor);
         let link = machine.net.as_ref().map(|(device, _)| device.descriptor());
         let layers = machine
             .disks
             .iter()
             .filter_map(|(disk, _)| disk.descriptor());
         let readable: Vec<RawFd> = input
-            .chain(share_server)
+            .chain(share_servers)
             .chain(link)
             .chain(layers)
             .collect();
@@ -695,12 +701,13 @@ struct Machine<'vm, F, I> {
     vsock: Vsock,
     /// Each layer's disk, bottom first, and its interrupt.
     disks: Vec<(Block, I)>,
-    /// Each share's device, in share order, and its interrupt.
-    shares: Vec<(Fs, I)>,
+    /// Each share's device, in share order, its interrupt, and the index in
+    /// `relays` of its server.
+    shares: Vec<(Fs, I, usize)>,
     /// The network device and its interrupt, when the guest has a link.
     net: Option<(Net, I)>,
-    /// The share server's socket, when there are shares.
-    relay: Option<ShareRelay>,
+    /// Each share server's socket.
+    relays: Vec<ShareRelay>,
     memory: &'vm GuestMemory,
     interrupt: I,
     connection: Option<Connection>,
@@ -734,9 +741,10 @@ enum ExecReport {
 /// interrupt line.
 struct Parts {
     disks: Vec<Block>,
-    shares: usize,
+    /// For each share, the index in `relays` of the server that serves it.
+    shares: Vec<usize>,
     net: Option<Net>,
-    relay: Option<ShareRelay>,
+    relays: Vec<ShareRelay>,
 }
 
 /// An interrupt line that a device raises.
@@ -766,9 +774,14 @@ impl<'vm, F: FnMut(Report), I: Line> Machine<'vm, F, I> {
     ) -> Self {
         let mut lines = (LINE + 1..).map(&line);
         let disks = parts.disks.into_iter().zip(&mut lines).collect();
-        let shares = (0..parts.shares)
-            .map(|index| Fs::new(index as u32, share::tag(index).as_bytes()))
+        let serving = &parts.shares;
+        let shares = (serving.iter().enumerate())
             .zip(&mut lines)
+            .map(|((index, server), line)| {
+                let before = serving[..index].iter().filter(|other| *other == server);
+                let device = Fs::new(before.count() as u32, share::tag(index).as_bytes());
+                (device, line, *server)
+            })
             .collect();
         let net = parts.net.zip(lines.next());
         // Only a run has keys for its harness, and commands beside it.
@@ -782,7 +795,7 @@ impl<'vm, F: FnMut(Report), I: Line> Machine<'vm, F, I> {
             disks,
             shares,
             net,
-            relay: parts.relay,
+            relays: parts.relays,
             memory,
             interrupt: line(LINE),
             connection: None,
@@ -1085,10 +1098,9 @@ impl<F: FnMut(Report), I: Line> Ports for Machine<'_, F, I> {
             return;
         }
         let share = slot.checked_sub(1 + self.disks.len());
-        if let (Some((device, interrupt)), Some(relay)) = (
-            share.and_then(|at| self.shares.get_mut(at)),
-            self.relay.as_mut(),
-        ) {
+        if let Some((device, interrupt, server)) = share.and_then(|at| self.shares.get_mut(at))
+            && let Some(relay) = self.relays.get_mut(*server)
+        {
             if device.write(self.memory, offset, data, relay) {
                 interrupt.pulse();
             }
@@ -1556,9 +1568,9 @@ mod tests {
     fn no_parts() -> Parts {
         Parts {
             disks: Vec::new(),
-            shares: 0,
+            shares: Vec::new(),
             net: None,
-            relay: None,
+            relays: Vec::new(),
         }
     }
 
@@ -2122,15 +2134,18 @@ mod tests {
     fn each_device_has_its_slot_and_the_line_after_the_one_before() {
         let memory = memory();
         let (share_server, _) = UnixStream::pair().unwrap();
+        let (other_server, _) = UnixStream::pair().unwrap();
         let (link, _peer) = UnixDatagram::pair().unwrap();
         let parts = Parts {
             disks: vec![
                 Block::new(vec![0; 512], b"a").unwrap(),
                 Block::new(vec![0; 1024], b"b").unwrap(),
             ],
-            shares: 3,
+            shares: vec![0, 1, 0],
             net: Some(Net::new(link.into(), net::MAC).unwrap()),
-            relay: Some(ShareRelay::new(share_server.into(), Instant::now()).unwrap()),
+            relays: [share_server, other_server]
+                .map(|server| ShareRelay::new(server.into(), Instant::now()).unwrap())
+                .into(),
         };
         let mut driver = Driver::new(&memory, parts, None, None);
         let machine = &driver.machine;
@@ -2139,7 +2154,9 @@ mod tests {
             devices.iter().map(|(_, line)| line.0).collect()
         }
         assert_eq!(lines(&machine.disks), [6, 7]);
-        assert_eq!(lines(&machine.shares), [8, 9, 10]);
+        let shares = machine.shares.iter();
+        let shares: Vec<_> = shares.map(|(_, line, server)| (line.0, *server)).collect();
+        assert_eq!(shares, [(8, 0), (9, 1), (10, 0)]);
         assert_eq!(machine.net.as_ref().map(|(_, line)| line.0), Some(11));
 
         // Each slot reads and writes its own device.

@@ -908,15 +908,20 @@ fn network_process(ap_run: u32) -> u32 {
 
 /// The one process that `ap run` started with this `argv[0]`.
 fn started_as(ap_run: u32, program: &[u8]) -> u32 {
-    let found: Vec<u32> = descendants(ap_run)
+    let found = all_started_as(ap_run, program);
+    assert_eq!(found.len(), 1, "{found:?}");
+    found[0]
+}
+
+/// Each process `ap_run` started whose command line starts with `program`.
+fn all_started_as(ap_run: u32, program: &[u8]) -> Vec<u32> {
+    descendants(ap_run)
         .into_iter()
         .filter(|pid| {
             fs::read(format!("/proc/{pid}/cmdline"))
                 .is_ok_and(|cmdline| cmdline.starts_with(program))
         })
-        .collect();
-    assert_eq!(found.len(), 1, "{found:?}");
-    found[0]
+        .collect()
 }
 
 // spec(ap stop): `ap stop <run>` stops an active run.
@@ -2054,13 +2059,16 @@ fn holds_hidden_value(pid: u32) -> bool {
     (environment.windows(HIDDEN_VALUE.len())).any(|window| window == HIDDEN_VALUE.as_bytes())
 }
 
-// #608: the share server, the cleanup process, and the network process,
+// #608: the share servers, the cleanup process, and the network process,
 // like the run process, start without a hidden secret's variable.
 #[test]
-fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable() {
+fn a_run_starts_its_share_servers_and_cleanup_without_a_hidden_secret_s_variable() {
     let scratch = Scratch::new("secret-share");
-    fs::create_dir_all(scratch.root.join("shared").join("notes")).unwrap();
-    scratch.build("shared", &fake(&format!("{SECRETS}SHARE ./notes rw\n")));
+    for dir in ["notes", "refs", "work"] {
+        fs::create_dir_all(scratch.root.join("shared").join(dir)).unwrap();
+    }
+    let shares = "SHARE ./notes rw\nSHARE ./refs ro\nSHARE ./work\n";
+    scratch.build("shared", &fake(&format!("{SECRETS}{shares}")));
     let (run, _, _) = start_reporting(
         &scratch,
         "shared",
@@ -2069,9 +2077,19 @@ fn a_run_starts_its_share_server_and_cleanup_without_a_hidden_secret_s_variable(
     let ap_run = run.0.id();
     // `ap run` itself reads the value from its environment.
     assert!(holds_hidden_value(ap_run), "the test passed no value");
-    for program in ["ap-share-server", "ap-run-cleanup", "ap-network"] {
+    for program in ["ap-run-cleanup", "ap-network"] {
         let pid = started_as(ap_run, format!("{program}\0").as_bytes());
         assert!(!holds_hidden_value(pid), "{program} holds the hidden value");
+    }
+    // #440: the `rw` share has a share server of its own, and the `ro` and
+    // copy-on-write shares have another.
+    let servers = all_started_as(ap_run, b"ap-share-server\0");
+    assert_eq!(servers.len(), 2, "{servers:?}");
+    for pid in servers {
+        assert!(
+            !holds_hidden_value(pid),
+            "a share server holds the hidden value"
+        );
     }
     drop(run);
 }

@@ -524,6 +524,64 @@ fn nothing_is_applied_in_a_share_that_is_a_bare_repository() {
     assert!(!scratch.exists("config"));
 }
 
+// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+#[test]
+fn nothing_is_applied_in_a_share_beneath_a_bare_repository() {
+    let scratch = Scratch::sharing("bare-above", "repo.git/hooks");
+    let repo = scratch.root.join("repo.git");
+    fs::create_dir(repo.join("objects")).unwrap();
+    fs::create_dir(repo.join("refs")).unwrap();
+    fs::write(repo.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "pre-commit", 0o755, b"#!/bin/sh\n");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "skipped pre-commit: it is in a bare repository\n"
+    );
+    assert!(!scratch.exists("pre-commit"));
+}
+
+// spec(SHARE): Nothing is applied to your files beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
+// spec(SHARE): That counts what you have there and what the agent made there, with the agent's names matched case-insensitively, so nothing the agent wrote becomes a bare repository.
+#[test]
+fn a_bare_repository_and_a_file_don_t_replace_each_other() {
+    let scratch = Scratch::new("bare-replace");
+    let share = &scratch.share;
+    fs::create_dir_all(share.join("repo.git/objects")).unwrap();
+    fs::create_dir_all(share.join("repo.git/refs")).unwrap();
+    fs::write(share.join("repo.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(share.join("notes"), "yours\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    // The agent puts a file in place of your bare repository.
+    change(share, &pending, "repo.git", 0o644, b"a file\n");
+    // And a bare repository in place of your file.
+    record(&pending, &base(share, "notes"));
+    dir(&pending, "notes", 0o755);
+    write(&pending, "notes/HEAD", 0o644, b"0000\n");
+    write(&pending, "notes/commondir", 0o644, b"..\n");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped notes: it is in a bare repository\n",
+            "skipped notes/HEAD: it is in a bare repository\n",
+            "skipped notes/commondir: it is in a bare repository\n",
+            "skipped repo.git: it is in a bare repository\n",
+            "skipped repo.git/HEAD: it is in a bare repository\n",
+        )
+    );
+    assert_eq!(scratch.names("repo.git"), ["HEAD", "objects", "refs"]);
+    assert_eq!(scratch.read("notes"), "yours\n");
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
 // spec(SHARE): Symlinks are never followed.
 // spec(SHARE): A symlink is applied only if its target stays inside the share.
 // spec(SHARE): Special files are never applied.

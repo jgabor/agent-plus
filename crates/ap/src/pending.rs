@@ -304,12 +304,14 @@ struct Bare<'a> {
     /// Which of `BARE` the agent made in each directory it made one in,
     /// with each directory its records put a path beneath.
     made: BTreeMap<&'a [u8], [bool; 4]>,
+    /// Whether a directory above the share's root is one.
+    above: bool,
     /// Each directory looked at so far, and whether it is one.
     found: std::cell::RefCell<BTreeMap<Vec<u8>, bool>>,
 }
 
 impl<'a> Bare<'a> {
-    fn new(records: &'a Records) -> Bare<'a> {
+    fn new(root: &Path, records: &'a Records) -> Bare<'a> {
         let mut made = BTreeMap::new();
         for (path, entry) in &records.entries {
             if let Entry::Deleted = entry {
@@ -322,8 +324,17 @@ impl<'a> Bare<'a> {
                 }
             }
         }
+        // The run found the root with no symlink on the way. An entry that
+        // can't be looked up counts as there.
+        let above = root.ancestors().skip(1).any(|dir| {
+            bare_by(|at| {
+                let found = fs::symlink_metadata(dir.join(bytes_path(BARE[at])));
+                !matches!(found, Err(error) if error.kind() == io::ErrorKind::NotFound)
+            })
+        });
         Bare {
             made,
+            above,
             found: Default::default(),
         }
     }
@@ -333,32 +344,55 @@ impl<'a> Bare<'a> {
         if let Some(&found) = self.found.borrow().get(dir) {
             return Ok(found);
         }
-        let mut holds = self.made.get(dir).copied().unwrap_or_default();
-        for (at, name) in BARE.iter().enumerate() {
-            if !holds[at] {
-                let path = match dir.is_empty() {
-                    true => name.to_vec(),
-                    false => [dir, b"/", name].concat(),
-                };
-                holds[at] = host.stat(&path)?.is_some();
+        let made = self.made.get(dir).copied().unwrap_or_default();
+        let mut failed = None;
+        let found = bare_by(|at| {
+            if made[at] || failed.is_some() {
+                return true;
             }
+            let path = match dir.is_empty() {
+                true => BARE[at].to_vec(),
+                false => [dir, b"/", BARE[at]].concat(),
+            };
+            match host.stat(&path) {
+                Ok(found) => found.is_some(),
+                Err(error) => {
+                    failed = Some(error);
+                    true
+                }
+            }
+        });
+        if let Some(error) = failed {
+            return Err(error);
         }
-        let [head, objects, refs, commondir] = holds;
-        let found = head && (commondir || objects && refs);
         self.found.borrow_mut().insert(dir.to_vec(), found);
         Ok(found)
     }
 
-    /// Whether `path` is beneath a bare repository, the share's root
+    /// Whether `path` is a bare repository or beneath one, the share's root
     /// included.
     fn holds(&self, host: &Host, path: &[u8]) -> io::Result<bool> {
+        if self.above {
+            return Ok(true);
+        }
         for dir in std::iter::once(&b""[..]).chain(parents(path)) {
             if self.is(host, dir)? {
                 return Ok(true);
             }
         }
+        // Only a directory can be one.
+        if self.made.contains_key(path) || host.stat(path)?.is_some_and(|m| m.is_dir()) {
+            return self.is(host, path);
+        }
         Ok(false)
     }
+}
+
+/// Whether a directory is a bare repository, by `holds`, which says whether
+/// it holds the entry of `BARE` at an index. It asks in the order git needs
+/// them, and no more than it needs.
+fn bare_by(mut holds: impl FnMut(usize) -> bool) -> bool {
+    holds(0) && (holds(3) || holds(1) && holds(2))
 }
 
 /// How long `ap diff` keeps reading a share again when a file its records
@@ -619,12 +653,9 @@ impl Host {
         let git = (path.split(|&byte| byte == b'/')).any(|name| name.eq_ignore_ascii_case(b".git"));
         if path.is_empty()
             || git
-            || !matches!(
-                (bare.holds(self, path), bare.is(self, path)),
-                (Ok(false), Ok(false))
-            )
             || matches!(view, View::Yours)
             || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
+            || !matches!(bare.holds(self, path), Ok(false))
         {
             return;
         }
@@ -961,8 +992,7 @@ impl Share<'_> {
             ignored: 0,
             commits,
         };
-        let bare = Bare::new(&records);
-        let bare = replacing.is_none().then_some(&bare);
+        let bare = replacing.is_none().then(|| Bare::new(self.root, &records));
         for path in changed(&records, &host)? {
             match verdict(
                 &records,
@@ -970,7 +1000,7 @@ impl Share<'_> {
                 &host,
                 &ignore,
                 replacing.as_ref(),
-                bare,
+                bare.as_ref(),
                 &path,
             )? {
                 Verdict::History | Verdict::Landed => continue,
@@ -1040,7 +1070,7 @@ impl Share<'_> {
         // Each path that stays pending, and the `BASE` record it keeps.
         let mut kept = BTreeMap::new();
         let mut changes = Vec::new();
-        let bare = Bare::new(&records);
+        let bare = Bare::new(self.root, &records);
         for path in changed(&records, &host)? {
             match verdict(&records, &landed, &host, &ignore, None, Some(&bare), &path)? {
                 Verdict::History | Verdict::Landed => {}

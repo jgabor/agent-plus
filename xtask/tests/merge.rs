@@ -137,14 +137,15 @@ fn pr_json(pr: &Pr, state: &str) -> String {
     )
 }
 
-/// Where these tests keep their repositories and variants. Each test deletes
-/// its own directory first, so a second run of them in this checkout would
-/// delete what the first is using. The first use takes a lock that the
+/// Where these tests keep their repositories, variants, and tools. Each test
+/// deletes its own directory first, so a second run of them in this checkout
+/// would delete what the first is using. The first use takes a lock that the
 /// process holds until it ends, and a second run waits for it.
 fn held_tmp() -> &'static Path {
     static HELD: OnceLock<fs::File> = OnceLock::new();
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     HELD.get_or_init(|| {
+        fs::create_dir_all(tmp).unwrap();
         let lock = fs::OpenOptions::new()
             .create(true)
             .truncate(false)

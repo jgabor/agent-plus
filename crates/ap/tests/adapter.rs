@@ -380,25 +380,31 @@ fn a_codex_project_cant_add_writable_roots() {
     }
 }
 
-// spec(MODE): With `auto`, the Codex adapter also blanks the instructions a project can give the reviewer in `[auto_review]`, such as `policy`, so a project's settings can't change what the reviewer checks.
+// spec(MODE): With `auto`, the Codex adapter also keeps `features.guardian_approval` on, and blanks the instructions a project can give the reviewer in `[auto_review]`, such as `policy`, so a project's settings can't turn the reviewer off or give it other instructions.
 #[test]
 fn a_codex_project_cant_change_the_reviewer() {
+    let on = "features.guardian_approval=true";
     for version in CODEX_VERSIONS {
         for interactive in [false, true] {
             for mode in MODES {
                 let arguments = codex::arguments(version, None, None, mode, interactive);
                 let overrides: Vec<&str> = (arguments.windows(2))
-                    .filter(|pair| pair[0] == "-c" && pair[1].starts_with("auto_review."))
+                    .filter(|pair| pair[0] == "-c")
                     .map(|pair| pair[1].as_str())
+                    .filter(|value| {
+                        value.starts_with("auto_review.") || value.starts_with("features.")
+                    })
                     .collect();
-                let blanked = overrides.contains(&"auto_review.policy=\"\"");
-                assert_eq!(
-                    blanked,
-                    mode == Mode::Auto,
-                    "{version} {mode:?} {interactive}"
-                );
-                for key in overrides {
-                    assert!(key.ends_with("=\"\""), "{version} {key}");
+                let run = format!("{version} {mode:?} {interactive}");
+                if mode != Mode::Auto {
+                    assert!(overrides.is_empty(), "{run} {overrides:?}");
+                    continue;
+                }
+                assert!(overrides.contains(&on), "{run}");
+                assert!(overrides.contains(&"auto_review.policy=\"\""), "{run}");
+                for value in overrides {
+                    let blank = value.starts_with("auto_review.") && value.ends_with("=\"\"");
+                    assert!(blank || value == on, "{run} {value}");
                 }
             }
         }
@@ -438,6 +444,8 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
             "sandbox_workspace_write.network_access=true",
             "-c",
             "sandbox_workspace_write.writable_roots=[]",
+            "-c",
+            "features.guardian_approval=true",
             "-c",
             "auto_review.policy=\"\"",
             "-c",

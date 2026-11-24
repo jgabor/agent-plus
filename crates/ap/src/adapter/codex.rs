@@ -30,9 +30,10 @@
 //! A trusted project's `[auto_review]` text reaches the reviewer's prompt,
 //! and can change its verdict. In `auto`, the adapter sets each of those
 //! keys the version takes to an empty string, which Codex reads as its
-//! built-in text. A project's
-//! `features.guardian_approval = false` is applied, but Codex 0.169.0 still
-//! sends sandbox escalations and MCP tool calls to the reviewer.
+//! built-in text. A project's `features.guardian_approval = false` also
+//! applies. Codex 0.169.0 still sends sandbox escalations and MCP tool calls
+//! to the reviewer then, but its source skips the reviewer on other paths,
+//! so in `auto` the adapter turns the feature on, as it is by default.
 //!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
@@ -160,7 +161,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// extra writable roots, each set every time. A
 /// headless run in `auto` uses `--approve-for-me`, which sets the same
 /// sandbox, approval policy, and reviewer, where the version has it. In
-/// `auto`, each [`REVIEWER_TEXT`] key the version takes is set empty.
+/// `auto`, the reviewer's feature is on, and each [`REVIEWER_TEXT`] key the
+/// version takes is set empty.
 pub fn arguments(
     version_text: &str,
     model: Option<&str>,
@@ -216,6 +218,10 @@ pub fn arguments(
         ]);
     }
     if mode == Mode::Auto {
+        arguments.extend([
+            "-c".to_owned(),
+            "features.guardian_approval=true".to_owned(),
+        ]);
         for (key, from, until) in REVIEWER_TEXT {
             if at_least(&from) && !until.is_some_and(|until| at_least(&until)) {
                 arguments.extend(["-c".to_owned(), format!("auto_review.{key}=\"\"")]);

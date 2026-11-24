@@ -417,7 +417,8 @@ fn an_rw_share_gives_back_a_mode_it_took_away() {
     assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0), 0);
     assert_eq!(guest.setattr(hello, FATTR_SIZE, 0, 0), EACCES);
     // Once given back, a mode the host takes away stays taken, and so does
-    // one the agent took from a file its kernel then forgot.
+    // one the agent took from a file its kernel then forgot, for a server
+    // outside the user namespace `ap` starts one in.
     assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), 0);
     assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
     fs::set_permissions(tree.root.join("hello.txt"), fs::Permissions::from_mode(0o0)).unwrap();

@@ -1518,6 +1518,10 @@ How it works:
 - In an `rw` share, the agent can give back a mode it took away from a
   file or a directory, while the agent's kernel still holds the file in its
   cache.
+- In an `rw` share, the agent can change the mode and times of a file or a
+  directory it can't read, if you own it and its group is your primary
+  group, as you can on your host. On a host that doesn't let you make a
+  user namespace, it can't.
 
 In `rw` shares, the files your host acts on are read-only to the agent.
 

@@ -31,6 +31,7 @@ use std::rc::Rc;
 use vmm::confine::Changes;
 
 use crate::landlock::Access;
+use crate::namespace;
 use crate::sys;
 
 mod cow;
@@ -1014,17 +1015,30 @@ impl Share {
             }
             handle.fd.as_fd()
         } else {
-            let opened = if directory {
-                let flags = libc::O_RDONLY | libc::O_DIRECTORY;
-                self.served(&found.fd)
-                    .and_then(|()| sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno))
-            } else {
-                let access = match valid & FATTR_SIZE {
-                    0 => libc::O_RDONLY,
-                    _ => libc::O_WRONLY,
-                };
-                self.reopen(found, access | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            let open = || {
+                if directory {
+                    let flags = libc::O_RDONLY | libc::O_DIRECTORY;
+                    self.served(&found.fd).and_then(|()| {
+                        sys::open_beneath(found.fd.as_fd(), c".", flags).map_err(errno)
+                    })
+                } else {
+                    let access = match valid & FATTR_SIZE {
+                        0 => libc::O_RDONLY,
+                        _ => libc::O_WRONLY,
+                    };
+                    self.reopen(found, access | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                }
             };
+            let mut opened = open();
+            // A mode or times change only reads, so a file of the user's
+            // that has lost a permission the host's user could give back
+            // opens past its mode, still beneath the roots.
+            if matches!(opened, Err(libc::EACCES))
+                && found.kept.is_none()
+                && valid & FATTR_SIZE == 0
+            {
+                opened = namespace::past_modes(open).unwrap_or(opened);
+            }
             match (opened, &found.kept) {
                 // Only the file the node is, still at its name beneath the
                 // root, changes through what was kept. A directory with no

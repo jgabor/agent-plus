@@ -90,6 +90,8 @@ const FSYNC: u32 = 74;
 const FDATASYNC: u32 = 75;
 const FTRUNCATE: u32 = 77;
 const FCHMOD: u32 = 91;
+const CAPGET: u32 = 125;
+const CAPSET: u32 = 126;
 const MKDIRAT: u32 = 258;
 const UNLINKAT: u32 = 263;
 const LINKAT: u32 = 265;
@@ -247,7 +249,10 @@ pub enum Changes {
 /// Landlock holds to the roots it may change. Landlock doesn't cover a
 /// file's mode or times, so only a server with an `rw` share changes those
 /// itself, and it holds no other share. Changing a file's times takes no
-/// name at all.
+/// name at all. That server reads and sets its own capabilities, to open a
+/// file past its mode just to change the mode or times, and the user
+/// namespace it runs in grants that only on the user's own files. Landlock
+/// still holds those opens to the roots.
 /// Only an `rw` share's server makes links, because a copy-on-write share
 /// keeps a symlink as a record, and makes no hard link. It asks the
 /// processes at `times` to set the times of a copy-on-write share's
@@ -308,6 +313,8 @@ fn share_server_rules(socket: RawFd, changes: Changes, times: &[RawFd]) -> Vec<R
             AllowUnlessEither(LINKAT, [0, 2], AT_FDCWD),
             Allow(FCHMOD),
             AllowIfNull(UTIMENSAT, 1),
+            Allow(CAPGET),
+            Allow(CAPSET),
         ]);
     }
     rules
@@ -736,9 +743,9 @@ mod tests {
         run_wide(&rules, AUDIT_ARCH_X86_64, number, args)
     }
 
-    const WRITING: [u32; 12] = [
+    const WRITING: [u32; 14] = [
         PWRITE64, FTRUNCATE, FALLOCATE, FSYNC, FDATASYNC, FCHMOD, UTIMENSAT, MKDIRAT, UNLINKAT,
-        SYMLINKAT, LINKAT, RENAMEAT2,
+        SYMLINKAT, LINKAT, RENAMEAT2, CAPGET, CAPSET,
     ];
 
     #[test]
@@ -810,7 +817,7 @@ mod tests {
     fn a_copy_on_write_server_changes_files_but_no_mode_time_or_link() {
         for number in WRITING {
             let expected = match number {
-                FCHMOD | UTIMENSAT | SYMLINKAT | LINKAT => RET_KILL_PROCESS,
+                FCHMOD | UTIMENSAT | SYMLINKAT | LINKAT | CAPGET | CAPSET => RET_KILL_PROCESS,
                 _ => RET_ALLOW,
             };
             assert_eq!(

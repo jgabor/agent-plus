@@ -980,6 +980,10 @@ default is `auto`.
 - With `edit` and `auto`, the Codex adapter also empties
   `sandbox_workspace_write.writable_roots`, so a project's settings can't add
   directories the sandbox lets the agent write.
+- With `auto`, the Codex adapter also keeps `features.guardian_approval`
+  on, and blanks the instructions a project can give the reviewer in
+  `[auto_review]`, such as `policy`, so a project can't turn the reviewer
+  off or give it instructions with those keys.
 - `MODE` overrides any permission settings a plugin sets.
 - `auto` depends on the harness. With Claude Code, it needs a recent model,
   an administrator can turn it off, and its classifier calls count toward

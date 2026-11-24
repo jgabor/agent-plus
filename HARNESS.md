@@ -823,7 +823,10 @@ start it again. It stops while a proof waits for a place, and starts again once
 the proof has one. It also stops while the proof's bench waits to hold the
 activity lock alone, because other work holds that lock for as long as it runs,
 and then goes on from where it stopped. A PR's own xtask can't stop the timeout
-either, so the wait of its bench counts.
+either. It tells `main`'s xtask when its bench waits, and the timeout stops only
+while `main`'s xtask also sees, by trying the locks, that a bench waits for
+work that shares the activity lock. So its bench's wait behind another bench
+counts, and so does any wait it only claims.
 A `gh pr merge` that is still running keeps the slot until it finishes, so the
 next merge can't start on a `main` that is about to move.
 

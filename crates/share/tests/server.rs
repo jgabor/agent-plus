@@ -552,8 +552,18 @@ fn a_known_node_the_host_moves_outside_the_root_shows_no_attributes() {
     for node in known {
         assert_eq!(getattr(&mut guest, node), 0, "{node}");
     }
+    // Moved out on its own, with another directory at its name, it shows
+    // nothing, and nor does a node beneath it.
+    let away = tree.base.join("outside/locked");
     let path = tree.root.join("back/locked");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&path, &away).unwrap();
+    fs::set_permissions(&away, fs::Permissions::from_mode(0o0)).unwrap();
+    fs::create_dir(&path).unwrap();
+    for node in [locked, inner, sub] {
+        assert_eq!(getattr(&mut guest, node), ENOENT, "{node}");
+    }
+    fs::set_permissions(away, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]

@@ -328,12 +328,7 @@ fn tagged(subject: &str) -> Option<usize> {
 }
 
 /// What this commit changed in SPEC.md and in the rules.
-fn changes(
-    root: &Path,
-    commit: &str,
-    source: &Source,
-    report: &mut Report,
-) -> Result<(), Problem> {
+fn changes(root: &Path, commit: &str, source: &Source, report: &mut Report) -> Result<(), Problem> {
     let listing = base::git_text(
         root,
         &[

@@ -625,8 +625,14 @@ fn the_report_lists_an_issue_waiting_for_a_landing_or_an_answer() {
     let output = repo.xtask(&["report"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let report = stdout(&output);
-    assert!(report.contains("[Ready](https://github.com/o/r/issues/30)"), "{report}");
-    assert!(report.contains("[Stuck](https://github.com/o/r/issues/32)"), "{report}");
+    assert!(
+        report.contains("[Ready](https://github.com/o/r/issues/30)"),
+        "{report}"
+    );
+    assert!(
+        report.contains("[Stuck](https://github.com/o/r/issues/32)"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -966,10 +972,18 @@ fn a_journey_below_the_ledger_fails() {
     repo.sync();
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "gate"), "pass", "{}",
-        repo.comment());
-    assert_eq!(check_state(&repo.comment(), "journey"), "fail", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "gate"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -979,8 +993,12 @@ fn a_journey_level_with_the_ledger_passes() {
     repo.sync();
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "journey"), "pass", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
 }
 
 /// The fixture's step 2 spends. With the key, it runs and counts like any
@@ -1147,8 +1165,12 @@ fn a_passing_spend_step_does_not_hide_a_fall() {
         "{}",
         stdout(&output)
     );
-    assert_eq!(check_state(&repo.comment(), "journey"), "fail", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "journey"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -1167,7 +1189,12 @@ fn a_t2_package_runs_and_can_fail() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "t2"), "fail", "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -1183,7 +1210,12 @@ fn a_passing_t2_package_is_reported() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "t2"), "pass", "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
 }
 
 /// The gate's run of `t2` is the nightly job's T2 check, so `t2` runs once.
@@ -1212,7 +1244,12 @@ fn counts() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "t2"), "pass", "{}", repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "t2"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
     let runs = fs::read_to_string(repo.root.join("target/t2-runs")).unwrap();
     assert_eq!(runs, "ran\n");
 }
@@ -1233,8 +1270,12 @@ fn a_t1_package_s_ignored_tests_run_and_can_fail() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "release"), "fail", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "release"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -1253,8 +1294,12 @@ fn a_passing_t1_release_test_is_reported() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "release"), "pass", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "release"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -1325,7 +1370,10 @@ fn a_commit_already_reported_isnt_repeated() {
     repo.merge("New (#9)", 1, &CLEAN);
     repo.set_last_report(&reported);
     let report = repo.report();
-    assert!(report.contains("[New](https://github.com/o/r/pull/9)"), "{report}");
+    assert!(
+        report.contains("[New](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
     assert!(!report.contains("Reported (#2)"), "{report}");
 }
 
@@ -1348,7 +1396,10 @@ fn a_folded_report_marks_its_commit() {
     repo.set_issues(REPORT_ISSUE);
     repo.set_report_comments(&[("o", &posted)]);
     let report = repo.report();
-    assert!(report.contains("[New](https://github.com/o/r/pull/9)"), "{report}");
+    assert!(
+        report.contains("[New](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
     assert!(!report.contains("Reported (#2)"), "{report}");
 }
 
@@ -1373,7 +1424,10 @@ fn a_last_report_that_cant_be_used_falls_back_to_a_day() {
         repo.merge("Today (#9)", 1, &CLEAN);
         repo.set_last_report(commit);
         let report = repo.report();
-        assert!(report.contains("[Today](https://github.com/o/r/pull/9)"), "{name}: {report}");
+        assert!(
+            report.contains("[Today](https://github.com/o/r/pull/9)"),
+            "{name}: {report}"
+        );
         assert!(!report.contains("Too old (#2)"), "{name}: {report}");
     }
 }
@@ -1397,7 +1451,10 @@ fn a_last_report_off_this_history_falls_back_to_a_day() {
     repo.merge("Today (#9)", 1, &CLEAN);
     repo.set_last_report(&elsewhere);
     let report = repo.report();
-    assert!(report.contains("[Today](https://github.com/o/r/pull/9)"), "{report}");
+    assert!(
+        report.contains("[Today](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
     assert!(!report.contains("Too old (#2)"), "{report}");
 }
 
@@ -1460,7 +1517,10 @@ fn a_report_heading_from_someone_else_is_ignored() {
         ("someone", &format!("# Nightly report for `{head}`\n")),
     ]);
     let report = repo.report();
-    assert!(report.contains("[Landed since](https://github.com/o/r/pull/9)"), "{report}");
+    assert!(
+        report.contains("[Landed since](https://github.com/o/r/pull/9)"),
+        "{report}"
+    );
     assert!(!report.contains("Reported (#2)"), "{report}");
 }
 
@@ -2161,8 +2221,12 @@ fn fuzzing_runs_for_an_hour_within_the_memory_limit() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "fuzz"), "pass", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
     let calls = repo.read_bin("systemd-calls");
     assert!(
         calls.lines().all(|line| line.contains("MemoryMax=8G")),
@@ -2261,8 +2325,12 @@ fn a_fuzz_failure_fails_the_step() {
     let repo = with_fuzz("fuzz-fails", "fn main() {\n    panic!(\"found one\");\n}\n");
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "fuzz"), "fail", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -2284,8 +2352,12 @@ fn a_hung_fuzz_target_is_killed_and_fails() {
         started.elapsed()
     );
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "fuzz"), "fail", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "fail",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]
@@ -2333,8 +2405,12 @@ fn the_fuzzer_is_built_to_panic_on_overflow() {
     );
     let output = repo.xtask(&["nightly"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert_eq!(check_state(&repo.comment(), "fuzz"), "pass", "{}",
-        repo.comment());
+    assert_eq!(
+        check_state(&repo.comment(), "fuzz"),
+        "pass",
+        "{}",
+        repo.comment()
+    );
 }
 
 #[test]

@@ -160,7 +160,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 
 /// The arguments after `codex` for this version: `exec` for a headless run,
 /// which skips the git repository check, then the mode, the model, and the effort. `model` is passed unchanged.
-/// Without a model or an effort, Codex uses its own default.
+/// Without a model or an effort, Codex uses its own default. The effort is
+/// set for plan mode too.
 ///
 /// The mode is the sandbox, the approval policy, and the reviewer, and for
 /// the `workspace-write` sandbox its network access and an empty list of
@@ -239,10 +240,11 @@ pub fn arguments(
     }
     if let Some(effort) = effort {
         let (level, _) = self::effort(version_text, effort);
-        arguments.extend([
-            "-c".to_owned(),
-            format!("model_reasoning_effort=\"{level}\""),
-        ]);
+        // Plan mode takes its own effort, from a trusted project or else
+        // its preset's `medium`.
+        for key in ["model_reasoning_effort", "plan_mode_reasoning_effort"] {
+            arguments.extend(["-c".to_owned(), format!("{key}=\"{level}\"")]);
+        }
     }
     arguments
 }

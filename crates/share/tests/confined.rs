@@ -7,15 +7,22 @@ mod guest;
 
 use guest::*;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{CStr, CString, OsString};
 use std::fs::{self, File};
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// The share server's arguments, one to a line, for the process the test
 /// starts.
 const ARGS: &str = "AP_SHARE_CONFINED_ARGS";
+/// What the server's process does once it has served, as if its own code
+/// were turned against it: the number of a descriptor it inherited, the
+/// call it opens with, and a path from the descriptor to a file whose mode
+/// and times it tries to change.
+const AIM: &str = "AP_SHARE_CONFINED_AIM";
 const SERVER: &str = "confined_server_process";
 /// The server runs on a test's thread here, and `ap` runs it on its main
 /// thread. One malloc arena keeps the test's like `ap`'s, which grows with
@@ -33,11 +40,128 @@ fn confined_server_process() {
         return;
     };
     let args: Vec<OsString> = args.to_str().unwrap().lines().map(OsString::from).collect();
+    // A copy of the aim's descriptor, which the server doesn't close.
+    let aim = env::var(AIM).ok().map(|aim| {
+        let mut lines = aim.lines();
+        let fd = lines.next().unwrap().parse().unwrap();
+        // SAFETY: the test passed this descriptor, and it is open.
+        let fd = unsafe { BorrowedFd::borrow_raw(fd) };
+        let call = lines.next().unwrap() == "openat2";
+        let path = CString::new(lines.next().unwrap()).unwrap();
+        (share::inheritable(fd).unwrap(), call, path)
+    });
     let status = share::main(&args);
+    if let (0, Some((directory, openat2, path))) = (status, aim) {
+        turn(&directory, openat2, &path);
+    }
     // The filter allows nothing the test harness does after a test, so
     // the process ends here.
     // SAFETY: `_exit` ends the process at once.
     unsafe { libc::_exit(i32::from(status)) };
+}
+
+/// What a server's code could do if it were turned against its rules: open
+/// the file at `path` from `directory`, with `openat2` or `openat` and no
+/// rule to stay beneath it, and change its mode and times through what it
+/// opened. Access mode 3 asks for neither reading nor writing.
+fn turn(directory: &OwnedFd, openat2: bool, path: &CStr) {
+    #[repr(C)]
+    struct How {
+        flags: u64,
+        mode: u64,
+        resolve: u64,
+    }
+    for flags in [libc::O_RDONLY, libc::O_PATH, libc::O_ACCMODE] {
+        let flags = flags | libc::O_CLOEXEC;
+        let how = How {
+            flags: flags as u64,
+            mode: 0,
+            resolve: 0,
+        };
+        // SAFETY: `path` and `how` outlive each call, which returns a new
+        // descriptor or -1.
+        let fd = unsafe {
+            match openat2 {
+                true => libc::syscall(
+                    libc::SYS_openat2,
+                    directory.as_raw_fd(),
+                    path.as_ptr(),
+                    &raw const how,
+                    size_of::<How>(),
+                ),
+                false => libc::syscall(
+                    libc::SYS_openat,
+                    directory.as_raw_fd(),
+                    path.as_ptr(),
+                    flags,
+                ),
+            }
+        };
+        let Ok(fd) = i32::try_from(fd) else {
+            continue;
+        };
+        if fd < 0 {
+            continue;
+        }
+        let times = [libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }; 2];
+        // SAFETY: both calls take a descriptor and plain values, and
+        // `times` outlives the call.
+        unsafe {
+            libc::syscall(libc::SYS_fchmod, fd, 0o777);
+            let null = std::ptr::null::<libc::c_char>();
+            libc::syscall(libc::SYS_utimensat, fd, null, times.as_ptr(), 0);
+        }
+    }
+}
+
+/// Starts a confined server with one `rw` share at `root`, which, once it
+/// has served, turns on `path` from the root with `call`, and waits for it
+/// to end.
+fn serve_and_turn(root: &Path, call: &str, path: &str) {
+    let (mine, theirs) = UnixStream::pair().unwrap();
+    let inherited = share::inheritable(File::open(root).unwrap().as_fd()).unwrap();
+    let fd = inherited.as_raw_fd();
+    let mut server = Command::new(env::current_exe().unwrap())
+        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
+        .env(ARGS, format!("rw\n{fd}"))
+        .env(AIM, format!("{fd}\n{call}\n{path}"))
+        .env(ARENAS, "1")
+        .stdin(OwnedFd::from(theirs))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(inherited);
+    drop(mine);
+    // The filter may kill it on the way, which is the point.
+    server.wait().unwrap();
+}
+
+/// The mode and modification time of the file at `path`.
+fn mode_and_time(path: &Path) -> (u32, i64) {
+    let metadata = fs::metadata(path).unwrap();
+    (metadata.permissions().mode(), metadata.mtime())
+}
+
+#[test]
+fn a_confined_rw_server_can_t_change_the_mode_or_times_of_a_file_outside_it() {
+    let tree = Tree::new("confined-turned");
+    let before = mode_and_time(&tree.secret);
+    let absolute = tree.secret.to_str().unwrap();
+    for call in ["openat", "openat2"] {
+        for path in ["../outside/secret", absolute] {
+            serve_and_turn(&tree.root, call, path);
+            assert_eq!(mode_and_time(&tree.secret), before, "{call} {path}");
+        }
+    }
+
+    // The same server changes a file of its own share that way.
+    serve_and_turn(&tree.root, "openat", "hello.txt");
+    let hello = tree.root.join("hello.txt");
+    assert_eq!(mode_and_time(&hello), (0o100_777, 0));
 }
 
 #[test]

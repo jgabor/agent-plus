@@ -15,7 +15,9 @@
 //! directory that holds it, by its name. A copy-on-write share's changes go
 //! to a directory of its own in the run's pending directory, which the run
 //! makes in the store and leaves there when it ends. The guest mounts each
-//! share at the place SPEC.md's Paths section gives it.
+//! share at the place SPEC.md's Paths section gives it. The share from
+//! `--share` needs no approval. It is copy-on-write, and the guest mounts it
+//! at `~/<directory name>`.
 //!
 //! The guest's network follows the agent's rules in `NETWORK`, merged with
 //! the ones from `--network`. A host with URL rules has each request to it

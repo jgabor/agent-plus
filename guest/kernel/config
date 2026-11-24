@@ -2,7 +2,7 @@
 # over allnoconfig, then fails if Kconfig dropped any line.
 
 CONFIG_64BIT=y
-CONFIG_LOCALVERSION="-ap.6"
+CONFIG_LOCALVERSION="-ap.7"
 # CONFIG_LOCALVERSION_AUTO is not set
 # CONFIG_MODULES is not set
 # CONFIG_ACPI is not set
@@ -78,6 +78,19 @@ CONFIG_IPV6=y
 CONFIG_NETDEVICES=y
 CONFIG_NET_CORE=y
 CONFIG_VIRTIO_NET=y
+
+# Codex's sandbox, which every Codex mode but `full` runs commands in.
+# Bubblewrap puts a command in new user, PID, IPC, and network namespaces, and
+# Codex filters its system calls with seccomp. An IPC namespace needs System V
+# IPC or POSIX message queues.
+CONFIG_NAMESPACES=y
+CONFIG_USER_NS=y
+CONFIG_PID_NS=y
+CONFIG_SYSVIPC=y
+CONFIG_IPC_NS=y
+CONFIG_NET_NS=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
 
 # The diagnostic log.
 CONFIG_TTY=y

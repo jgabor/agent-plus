@@ -58,6 +58,10 @@ pub const CONFIGURATION: &str = "/home/agent/.codex/config.toml";
 /// Where the harness layer puts Codex's code-mode host, which Codex runs
 /// its tools through: beside Codex, where Codex 0.171.0 looks for it.
 pub const CODE_MODE_HOST: &str = "/usr/local/bin/codex-code-mode-host";
+/// Where the harness layer puts the bubblewrap that Codex's sandbox runs
+/// commands in: where Codex 0.171.0 looks for the one bundled with it, when
+/// no `bwrap` is on `PATH`.
+pub const BWRAP: &str = "/usr/local/bin/codex-resources/bwrap";
 
 /// The variables the adapter sets, besides the certificate variables.
 pub const SET: &[&str] = &[];

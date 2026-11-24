@@ -27,7 +27,7 @@ use agentfile::{
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
-use ap::lock::{self, CodeModeHost, Lock, Locked};
+use ap::lock::{self, Companion, Lock, Locked};
 use ap::paths::HostPath;
 use graviola::hashing::sha2::Sha256Context;
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
@@ -790,8 +790,9 @@ pub fn harness_path(harness: Harness) -> String {
 
 /// The harness layer, as an uncompressed EROFS image: the binary in the
 /// locked file in the download cache `cache`, as an executable at
-/// [`harness_path`], and for Codex its code-mode host, if it has one, at
-/// [`ap::adapter::codex::CODE_MODE_HOST`]. Claude Code's file is the binary, and each of
+/// [`harness_path`], and for Codex its code-mode host and bubblewrap, if it
+/// has them, at [`ap::adapter::codex::CODE_MODE_HOST`] and
+/// [`ap::adapter::codex::BWRAP`]. Claude Code's file is the binary, and each of
 /// Codex's holds one in one zstd frame. Each file is hashed as it is read,
 /// and a digest that isn't the locked one is an error.
 fn harness(locked: &Locked, cache: &Path) -> io::Result<Vec<u8>> {
@@ -824,14 +825,20 @@ fn harness(locked: &Locked, cache: &Path) -> io::Result<Vec<u8>> {
                 &harness_path(locked.harness),
                 executable(size, content),
             );
-            if let CodeModeHost::Digest(host) = &locked.code_mode_host {
-                let what = format!("the code-mode host of {label}");
-                let (size, content) = unpacked(&what, &cache.join(host), host)?;
-                insert(
-                    &mut root,
+            let companions = [
+                (
+                    "the code-mode host",
+                    &locked.code_mode_host,
                     ap::adapter::codex::CODE_MODE_HOST,
-                    executable(size, content),
-                );
+                ),
+                ("bubblewrap", &locked.bwrap, ap::adapter::codex::BWRAP),
+            ];
+            for (what, companion, at) in companions {
+                if let Companion::Digest(digest) = companion {
+                    let what = format!("{what} of {label}");
+                    let (size, content) = unpacked(&what, &cache.join(digest), digest)?;
+                    insert(&mut root, at, executable(size, content));
+                }
             }
         }
     }
@@ -958,9 +965,13 @@ fn harness_key(locked: &Locked) -> String {
     hash.update(lock::name(locked.harness).as_bytes());
     hash.update(b"\0");
     hash.update(locked.sha256.as_bytes());
-    if let CodeModeHost::Digest(host) = &locked.code_mode_host {
+    if let Companion::Digest(host) = &locked.code_mode_host {
         hash.update(b"\0");
         hash.update(host.as_bytes());
+    }
+    if let Companion::Digest(bwrap) = &locked.bwrap {
+        hash.update(b"\0bwrap\0");
+        hash.update(bwrap.as_bytes());
     }
     hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }

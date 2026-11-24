@@ -770,6 +770,11 @@ through, has it installed beside Codex, and the lockfile records its digest.
 A lockfile from before `ap` recorded the host resolves the Codex version it
 locks again.
 
+A Codex release that publishes bubblewrap, which Codex's sandbox runs
+commands in, has it installed where Codex looks for its own, and the lockfile
+records its digest. A lockfile from before `ap` recorded bubblewrap resolves
+the Codex version it locks again.
+
 ### OS
 
 ```

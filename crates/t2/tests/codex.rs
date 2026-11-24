@@ -16,12 +16,13 @@ mod common;
 use common::{Interactive, Scratch};
 
 /// The version that runs every tool through its code-mode host, and the
-/// SHA-256 digests of its Linux x86_64 release and of its code-mode host. A
-/// pinned one keeps a new release from changing what this check sees, and a
-/// cached download needs no network.
+/// SHA-256 digests of its Linux x86_64 release, of its code-mode host, and
+/// of its bubblewrap. A pinned one keeps a new release from changing what
+/// this check sees, and a cached download needs no network.
 const VERSION: &str = "0.171.0";
 const DIGEST: &str = "0fd9ae1125788932131a29e296c4fef9995fc4f0c2a2ef6161221786e45ffa8c";
 const HOST: &str = "8db4b4899dd36d24defa4a0c4f431e9db527fb689e017c88be9f54ea2949e674";
+const BWRAP: &str = "6f122933bd4cb7113d11aec2db1b8ba2977ff11b961b26fec65950057aafe28c";
 /// How long the VM may take to start.
 const STARTS_WITHIN: Duration = Duration::from_secs(600);
 /// How long the fake upstream may run, in seconds.
@@ -71,16 +72,31 @@ fn start_upstream(directory: &Path) -> (Started, u16) {
 // spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
 #[test]
 fn codex_runs_a_tool_in_the_guest() {
-    let scratch = Scratch::new("codex-tool");
+    runs_the_tool("codex-tool", "full", Mode::Full);
+}
+
+// spec(MODE): Every Codex mode except `full` relies on Codex's own sandbox, so the guest kernel has to support that sandbox.
+#[test]
+fn codex_edits_its_workspace_in_its_sandbox() {
+    runs_the_tool("codex-sandbox", "edit", Mode::Edit);
+}
+
+/// Builds a Codex agent with `MODE <word>`, and has a headless Codex in its
+/// run, with the adapter's arguments for `mode`, run the tool the fake
+/// upstream, as its model, asks for. Fails unless the tool wrote `tool-ran`
+/// in Codex's working directory, which is in its workspace, and the model
+/// got the tool's output.
+fn runs_the_tool(test: &str, word: &str, mode: Mode) {
+    let scratch = Scratch::new(test);
     let upstream = scratch.root.join("upstream");
     let (_upstream, port) = start_upstream(&upstream);
     scratch.build(
         "codex",
         &format!(
-            "AGENT codex:{VERSION}\nOS minimal\nMODE full\nNETWORK -\nNETWORK +host.ap.internal\n\
+            "AGENT codex:{VERSION}\nOS minimal\nMODE {word}\nNETWORK -\nNETWORK +host.ap.internal\n\
              SECRET UPSTREAM @host.ap.internal\n"
         ),
-        &format!("HARNESS codex {VERSION} {DIGEST} {HOST}\n"),
+        &format!("HARNESS codex {VERSION} {DIGEST} {HOST} {BWRAP}\n"),
     );
     // The hidden secret makes the proxy decrypt TLS to the fake upstream,
     // with the run's authority, which the guest trusts. The proxy trusts
@@ -106,9 +122,8 @@ fn codex_runs_a_tool_in_the_guest() {
         thread::sleep(Duration::from_millis(100));
     };
 
-    // A headless Codex in the run, with the adapter's arguments for
-    // `MODE full`, and the fake upstream as its model's provider, which
-    // needs no sign-in.
+    // A headless Codex in the run, with the adapter's arguments for `mode`,
+    // and the fake upstream as its model's provider, which needs no sign-in.
     let provider = format!(
         "model_providers.fake={{name=\"fake\",base_url=\"https://host.ap.internal:{port}/v1\",\
          wire_api=\"responses\"}}"
@@ -119,11 +134,7 @@ fn codex_runs_a_tool_in_the_guest() {
         "/usr/local/bin/codex".to_owned(),
     ];
     args.extend(ap::adapter::codex::arguments(
-        VERSION,
-        None,
-        None,
-        Mode::Full,
-        false,
+        VERSION, None, None, mode, false,
     ));
     args.extend(["--json", "-c", "model_provider=\"fake\"", "-c", &provider].map(str::to_owned));
     args.push("Run the tool.".to_owned());
@@ -132,17 +143,19 @@ fn codex_runs_a_tool_in_the_guest() {
     let stdout = String::from_utf8_lossy(&ran.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
     assert_eq!(ran.status.code(), Some(0), "{stdout}{stderr}");
+    // The model got the tool's output, which says why a tool failed.
+    let requests = fs::read_dir(upstream.join("requests")).unwrap();
+    let answers: Vec<String> = requests
+        .flatten()
+        .filter_map(|request| fs::read_to_string(request.path()).ok())
+        .filter(|text| text.contains("\"custom_tool_call_output\""))
+        .collect();
+    assert!(!answers.is_empty(), "{stdout}{stderr}");
     let wrote = scratch.ap(&["exec", &name, "cat", "tool-ran"]);
     assert_eq!(
         String::from_utf8_lossy(&wrote.stdout),
         "the tool ran\n",
-        "{stdout}{stderr}"
+        "{stdout}{stderr}{}",
+        answers.concat()
     );
-    // The model got the tool's output.
-    let requests = fs::read_dir(upstream.join("requests")).unwrap();
-    let answered = requests.flatten().any(|request| {
-        fs::read_to_string(request.path())
-            .is_ok_and(|text| text.contains("\"custom_tool_call_output\""))
-    });
-    assert!(answered, "{stdout}{stderr}");
 }

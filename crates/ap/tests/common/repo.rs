@@ -49,15 +49,15 @@ pub fn run(dir: &Path, args: &[&str]) -> String {
 
 /// Runs `git -C dir` with `args` and `input` on its standard input, which
 /// must succeed, and returns what it printed, trimmed.
-pub fn run_with(dir: &Path, args: &[&str], input: &str) -> String {
+pub fn run_with(dir: &Path, args: &[&str], input: &[u8]) -> String {
     let mut git = git(dir);
     git.args(args).stdin(Stdio::piped()).stdout(Stdio::piped());
     let mut child = git.stderr(Stdio::piped()).spawn().unwrap();
     let mut stdin = child.stdin.take().unwrap();
-    let input = input.to_owned();
+    let input = input.to_vec();
     // Git may print before it reads everything, so its output is read
     // while this writes.
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
     let output = child.wait_with_output().unwrap();
     writer.join().unwrap().unwrap();
     assert!(
@@ -68,41 +68,62 @@ pub fn run_with(dir: &Path, args: &[&str], input: &str) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-/// Commits `path` in the repository `dir`, without writing it, as `depth`
-/// trees above one that holds `README` from `HEAD` as `f`. Each of those
-/// holds the tree below it twice, as `a` and `b`, when `twice` is set, so
-/// that `path` holds `2^depth` files, and once, as `a`, when it isn't. Host
-/// `git` writes the trees, in one `git mktree`.
-pub fn commit_stacked(dir: &Path, path: &str, depth: usize, twice: bool) {
+/// Commits `path` in the repository `dir`, without writing it, as a tree
+/// for each of `twice`, above one that holds `README` from `HEAD` as `f`.
+/// Each holds the tree below it twice, as `a` and `b`, where `twice` says
+/// so, from the bottom up, and once, as `a`, where it doesn't. Host `git`
+/// writes the trees, in one `git mktree`.
+pub fn commit_stacked(dir: &Path, path: &str, twice: impl IntoIterator<Item = bool>) {
     let readme = run(dir, &["rev-parse", "HEAD:README"]);
-    let entry = |mode, name: &str, id| git::TreeEntry {
-        mode,
-        name: name.as_bytes().to_vec(),
-        id,
-    };
-    let mut entries = vec![entry(0o100644, "f", git::Id::from_hex(&readme).unwrap())];
-    let mut text = String::new();
+    let readme = git::Id::from_hex(&readme).unwrap();
+    let mut entries = vec![entry(0o100644, b"f", readme)];
+    let mut text = format!("100644 blob {readme}\tf\n\n");
     let mut tree = git::Object::tree(entries).id();
-    text.push_str(&format!("100644 blob {readme}\tf\n\n"));
-    for _ in 0..depth {
-        entries = vec![entry(0o40000, "a", tree)];
+    for twice in twice {
+        entries = vec![entry(0o40000, b"a", tree)];
         text.push_str(&format!("040000 tree {tree}\ta\n"));
         if twice {
-            entries.push(entry(0o40000, "b", tree));
+            entries.push(entry(0o40000, b"b", tree));
             text.push_str(&format!("040000 tree {tree}\tb\n"));
         }
         text.push('\n');
         tree = git::Object::tree(entries).id();
     }
-    let written = run_with(dir, &["mktree", "--batch"], &text);
+    let written = run_with(dir, &["mktree", "--batch"], text.as_bytes());
     assert_eq!(written.lines().last(), Some(&*tree.to_string()));
     let listing = run(dir, &["ls-tree", "HEAD"]);
-    let root = run_with(
-        dir,
-        &["mktree"],
-        &format!("{listing}\n040000 tree {tree}\t{path}\n"),
-    );
-    let commit = run(dir, &["commit-tree", &root, "-p", "HEAD", "-m", path]);
+    let root = format!("{listing}\n040000 tree {tree}\t{path}\n");
+    let root = run_with(dir, &["mktree"], root.as_bytes());
+    commit_tree(dir, &root, path);
+}
+
+/// Commits a tree in the repository `dir` that holds `README` from `HEAD`,
+/// and the tree of `HEAD` named `name`, which may be one that `git mktree`
+/// refuses, such as an empty one. Host `git` writes it.
+pub fn commit_named(dir: &Path, name: &[u8]) {
+    let id = |rev| git::Id::from_hex(&run(dir, &["rev-parse", rev])).unwrap();
+    let tree = git::Object::tree(vec![
+        entry(0o100644, b"README", id("HEAD:README")),
+        entry(0o40000, name, id("HEAD^{tree}")),
+    ]);
+    let args = ["hash-object", "-t", "tree", "-w", "--literally", "--stdin"];
+    let written = run_with(dir, &args, &tree.data);
+    assert_eq!(written, tree.id().to_string());
+    commit_tree(dir, &written, "named");
+}
+
+fn entry(mode: u32, name: &[u8], id: git::Id) -> git::TreeEntry {
+    git::TreeEntry {
+        mode,
+        name: name.to_vec(),
+        id,
+    }
+}
+
+/// Commits `tree` in the repository `dir` after its `HEAD`, which then
+/// names the commit.
+fn commit_tree(dir: &Path, tree: &str, message: &str) {
+    let commit = run(dir, &["commit-tree", tree, "-p", "HEAD", "-m", message]);
     run(dir, &["update-ref", "HEAD", &commit]);
 }
 

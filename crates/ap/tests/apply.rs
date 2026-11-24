@@ -2091,19 +2091,18 @@ fn a_file_in_place_of_a_directory_with_a_submodule_lands() {
 
 /// From #714: the agent's `HEAD` holds `big`, whose 41 trees each name the
 /// one below twice, so that it holds 2^40 files. Beneath a directory the
-/// agent deleted, or replaced with a file, `ap apply` reads at most a
-/// million paths, then refuses, within a fixed time.
-// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
-// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
-// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+/// agent deleted, or replaced with a file, `ap apply` reads at most 64 MiB
+/// of paths, then refuses, within a fixed time.
+// spec(SHARE): `ap apply` reads it there, and then reads it again, there and beneath each directory the agent deleted.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
     for replaced in [false, true] {
         let repository = Repository::new(&format!("too-many-{replaced}"), true, &[]);
-        repo::commit_stacked(&repository.guest, "big", 40, true);
+        repo::commit_stacked(&repository.guest, "big", [true; 40]);
         repository.land();
         let pending = &repository.pending;
-        record(pending, "DIR \"big\" 755");
         record(pending, "DELETE \"big\"");
         if replaced {
             write(pending, "big", 0o644, b"big\n");
@@ -2112,7 +2111,7 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
 
         let output = repository.apply_within(20);
 
-        let why = "the agent's HEAD holds more than the million paths that `ap` reads";
+        let why = "the agent's HEAD holds more than the 64 MiB of paths that `ap` reads";
         let error = format!("{why}, so everything stays pending");
         repository.stays_pending(&output, &error, &before);
     }
@@ -2121,17 +2120,15 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
 /// From #714: the agent's `HEAD` holds a file 1024 bytes long beneath
 /// `deep`, or one a byte longer beneath `deep1`. Beneath a directory the
 /// agent deleted, `ap apply` reads the first, and refuses the second.
-// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
-// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
-// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+// spec(SHARE): `ap apply` reads it there, and then reads it again, there and beneath each directory the agent deleted.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
-fn a_head_with_a_path_too_deep_beneath_what_the_agent_removed_stays_pending() {
-    for (name, depth) in [("deep", 509), ("deep1", 509)] {
-        let repository = Repository::new(&format!("too-deep-{name}"), true, &[]);
-        let guest = &repository.guest;
-        repo::commit_stacked(guest, name, depth, false);
+fn a_head_with_a_path_too_long_beneath_what_the_agent_removed_stays_pending() {
+    for name in ["deep", "deep1"] {
+        let repository = Repository::new(&format!("too-long-{name}"), true, &[]);
+        repo::commit_stacked(&repository.guest, name, [false; 509]);
         repository.land();
-        record(&repository.pending, &format!("DIR \"{name}\" 755"));
         record(&repository.pending, &format!("DELETE \"{name}\""));
         let before = repository.objects_and_refs();
         // The agent's index never held it.
@@ -2148,4 +2145,140 @@ fn a_head_with_a_path_too_deep_beneath_what_the_agent_removed_stays_pending() {
         let error = format!("{why}, so everything stays pending");
         repository.stays_pending(&output, &error, &before);
     }
+}
+
+/// From #714: the root of the agent's `HEAD`, which holds the paths it
+/// changed, holds a tree entry with a name that `git fsck --strict`
+/// refuses, which `ap apply` refuses before it runs `git fsck`.
+// spec(SHARE): `ap apply` reads it there, and then reads it again, there and beneath each directory the agent deleted.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_head_with_a_name_git_refuses_stays_pending() {
+    for (case, name) in [
+        ("empty", ""),
+        ("dot", "."),
+        ("dots", ".."),
+        ("slash", "a/b"),
+    ] {
+        let repository = Repository::new(&format!("named-{case}"), true, &[]);
+        repo::commit_named(&repository.guest, name.as_bytes());
+        repository.land();
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply();
+
+        let why = "the agent's HEAD holds a tree entry with a name that git refuses";
+        let error = format!("{why}, so everything stays pending");
+        repository.stays_pending(&output, &error, &before);
+    }
+}
+
+/// From #714, from review: the agent's `HEAD` holds `d`, a chain of 400
+/// trees above 13 that each name the one below twice, so that it holds
+/// 2^13 files, each path 829 bytes long, with about 20 MiB of paths in all,
+/// within both limits. Your `.gitignore` has 30 patterns, none of which
+/// matches. A path costs time in its length, not its depth squared, so a
+/// directory the agent deleted, or replaced with a file, lands within a
+/// fixed time.
+// spec(SHARE): `ap apply` reads it there, and then reads it again, there and beneath each directory the agent deleted.
+#[test]
+fn a_deep_tree_within_the_limits_lands_within_a_fixed_time() {
+    let mut patterns: Vec<String> = (0..10).map(|n| format!("*.tmp{n}\n")).collect();
+    patterns.extend((0..10).map(|n| format!("/build{n}/\n")));
+    patterns.extend((0..10).map(|n| format!("**/cache{n}/**\n")));
+    let gitignore = patterns.concat();
+    for replaced in [false, true] {
+        let ignored = |share: &Path| {
+            fs::write(share.join(".gitignore"), &gitignore).unwrap();
+            repo::run(share, &["add", ".gitignore"]);
+            repo::run(share, &["commit", "-q", "-m", "ignore"]);
+        };
+        let repository = Repository::with(
+            &format!("deep-within-{replaced}"),
+            true,
+            Setup {
+                before: Some(&ignored),
+                ..Setup::default()
+            },
+        );
+        let guest = &repository.guest;
+        let twice = std::iter::repeat_n(true, 13).chain(std::iter::repeat_n(false, 400));
+        repo::commit_stacked(guest, "d", twice);
+        repository.land();
+        let pending = &repository.pending;
+        record(pending, "DELETE \"d\"");
+        let mut change: Vec<&[&str]> = Vec::new();
+        if replaced {
+            write(pending, "d", 0o644, b"d\n");
+            fs::write(guest.join("d"), "d\n").unwrap();
+            change.push(&["add", "d"]);
+        }
+        let tree = repository.tree_after(&change);
+
+        let from = std::time::SystemTime::now();
+        let output = repository.apply_within(20);
+        let to = std::time::SystemTime::now();
+
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        assert_eq!(stdout(&output), "");
+        let seconds = |time: std::time::SystemTime| {
+            time.duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        repository.assert_last_commit(&tree, (seconds(from), seconds(to)));
+    }
+}
+
+/// From #714, from review: the agent's `HEAD` holds `d`, as in
+/// `a_deep_tree_within_the_limits_lands_within_a_fixed_time` but with 2^14
+/// files and about 40 MiB of paths, and the agent replaced it with a file.
+/// Only the last file `ap apply` reads beneath it is git-ignored, so it
+/// reads all of `d` to find it, and then all of it again for the last
+/// commit. Each read has the limit to itself, so it lands.
+// spec(SHARE): `ap apply` reads it there, and then reads it again, there and beneath each directory the agent deleted.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+#[test]
+fn each_read_of_the_head_has_the_limit_to_itself() {
+    let last = format!("d/{}{}f", "a/".repeat(400), "b/".repeat(14));
+    let ignored = |share: &Path| {
+        fs::write(share.join(".gitignore"), format!("/{last}\n")).unwrap();
+        repo::run(share, &["add", ".gitignore"]);
+        repo::run(share, &["commit", "-q", "-m", "ignore"]);
+    };
+    let repository = Repository::with(
+        "read-twice",
+        true,
+        Setup {
+            before: Some(&ignored),
+            ..Setup::default()
+        },
+    );
+    let guest = &repository.guest;
+    let twice = std::iter::repeat_n(true, 14).chain(std::iter::repeat_n(false, 400));
+    repo::commit_stacked(guest, "d", twice);
+    repository.land();
+    let pending = &repository.pending;
+    record(pending, "DELETE \"d\"");
+    write(pending, "d", 0o644, b"d\n");
+    // The last commit holds `d` as if the agent had deleted it, so only its
+    // git-ignored file is left.
+    let readme = repo::run(guest, &["rev-parse", "HEAD:README"]);
+    let kept = format!("100644,{readme},{last}");
+    let tree = repository.tree_after(&[&["update-index", "--add", "--cacheinfo", &kept]]);
+
+    let from = std::time::SystemTime::now();
+    let output = repository.apply_within(20);
+    let to = std::time::SystemTime::now();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it would replace a directory that holds a git-ignored file";
+    assert_eq!(stdout(&output), format!("skipped d: {why}\n"));
+    let seconds = |time: std::time::SystemTime| {
+        time.duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    repository.assert_last_commit(&tree, (seconds(from), seconds(to)));
 }

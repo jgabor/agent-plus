@@ -639,64 +639,100 @@ fn a_history_that_can_t_be_read_still_shows_the_files() {
     assert!(shown.ends_with("+++ b/a\n@@ -0,0 +1 @@\n+a\n"), "{shown}");
 }
 
+/// The first line `ap diff` prints, within 20 seconds of CPU time, once the
+/// agent's git has run `commit` on a clone of your repository, and the
+/// agent has deleted `deleted`, and written a file at `written`.
+fn first_line(name: &str, commit: impl Fn(&Path), deleted: &str, written: Option<&str>) -> String {
+    let scratch = Scratch::new(name);
+    let share = &scratch.share;
+    repo::run(share, &["init", "-q"]);
+    repo::commit(share, "README", "hello\n", "start");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::capture(share, &pending);
+    let guest = scratch.root.join("guest");
+    repo::guest(share, &guest);
+    commit(&guest);
+    repo::land(&guest, share, &pending);
+    record(&pending, &format!("DELETE \"{deleted}\""));
+    if let Some(written) = written {
+        write(&pending, written, 0o644, b"a file\n");
+    }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ap"));
+    command
+        .args(["diff", &run])
+        .current_dir(&scratch.root)
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .stdin(Stdio::null());
+    repo::limit_cpu(&mut command, 20);
+    let output = command.output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let shown = stdout(&output);
+    let first = shown.lines().next().unwrap();
+    first.replace(&run, "<run>")
+}
+
 /// From #714: the agent's `HEAD` holds `big`, whose 41 trees each name the
-/// one below twice, so that it holds 2^40 files, or a file 1025 bytes long
-/// beneath `deep1`. Beneath a directory the agent replaced with a file,
-/// `ap diff` reads at most a million paths, and none that long, then says
-/// why on the first line, within a fixed time.
-// spec(SHARE): `ap diff` and `ap apply` read at most a million paths of the tree of the agent's `HEAD`, and none longer than 1024 bytes.
-// spec(SHARE): They read it in each directory that holds a path the agent changed, and beneath each directory the agent deleted or replaced.
-// spec(SHARE): Past either limit, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+/// one below twice, so that it holds 2^40 files, a file 1024 bytes long
+/// beneath `deep`, or one a byte longer beneath `deep1`. Beneath a
+/// directory the agent replaced with a file, `ap diff` reads at most 64 MiB
+/// of paths, and none longer than 1024 bytes, then says why on the first
+/// line, within a fixed time. Beneath one it only deleted, it reads
+/// nothing.
+// spec(SHARE): `ap diff` reads the tree of the agent's `HEAD` in each directory that holds a path the agent changed, and beneath each directory the agent replaced with a file or symlink.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
     let cases = [
         (
             "big",
-            40,
+            vec![true; 40],
             true,
-            "more than the million paths that `ap` reads",
+            "more than the 64 MiB of paths that `ap` reads",
         ),
+        ("big", vec![true; 40], false, ""),
+        ("deep", vec![false; 509], true, ""),
         (
             "deep1",
-            509,
-            false,
+            vec![false; 509],
+            true,
             "a path longer than the 1024 bytes that `ap` reads",
         ),
     ];
-    for (name, depth, twice, why) in cases {
-        let scratch = Scratch::new(&format!("too-many-{name}"));
-        let share = &scratch.share;
-        repo::run(share, &["init", "-q"]);
-        repo::commit(share, "README", "hello\n", "start");
-        let (run, pending) = scratch.run("notes", 1);
-        repo::capture(share, &pending);
-        let guest = scratch.root.join("guest");
-        repo::guest(share, &guest);
-        repo::commit_stacked(&guest, name, depth, twice);
-        repo::land(&guest, share, &pending);
-        record(&pending, &format!("DELETE \"{name}\""));
-        write(&pending, name, 0o644, b"a file\n");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_ap"));
-        command
-            .args(["diff", &run])
-            .current_dir(&scratch.root)
-            .env_clear()
-            .env("HOME", &scratch.home)
-            .stdin(Stdio::null());
-        repo::limit_cpu(&mut command, 20);
-
-        let output = command.output().unwrap();
-
-        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-        let shown = stdout(&output);
-        let first = shown.lines().next().unwrap();
-        assert_eq!(
-            first,
-            format!(
-                "branch ap/notes/{run}: its commits can't be counted: the agent's HEAD holds {why}"
-            )
+    for (name, twice, replaced, why) in cases {
+        let commit = |guest: &Path| repo::commit_stacked(guest, name, twice.iter().copied());
+        let written = replaced.then_some(name);
+        let first = first_line(
+            &format!("too-many-{name}-{replaced}"),
+            commit,
+            name,
+            written,
         );
+        let expected = match why {
+            "" => "branch ap/notes/<run> would carry 1 commit".to_owned(),
+            why => format!(
+                "branch ap/notes/<run>: its commits can't be counted: the agent's HEAD holds {why}"
+            ),
+        };
+        assert_eq!(first, expected, "{name}, replaced {replaced}");
     }
+}
+
+/// From #714: the root of the agent's `HEAD` holds a tree entry with no
+/// name, which `git fsck --strict` refuses, and `ap diff` says why on the
+/// first line.
+// spec(SHARE): `ap diff` reads the tree of the agent's `HEAD` in each directory that holds a path the agent changed, and beneath each directory the agent replaced with a file or symlink.
+// spec(SHARE): Each time, it reads at most 64 MiB of paths, and none longer than 1024 bytes, and no tree entry whose name is empty, `.`, or `..`, or holds a `/`, which `git fsck --strict` refuses.
+// spec(SHARE): Past either limit, or at such an entry, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_head_with_a_name_git_refuses_is_said_first() {
+    let commit = |guest: &Path| repo::commit_named(guest, b"");
+    let first = first_line("named-empty", commit, "gone", Some("notes"));
+    assert_eq!(
+        first,
+        "branch ap/notes/<run>: its commits can't be counted: the agent's HEAD holds a tree entry with a name that git refuses"
+    );
 }
 
 /// What the agent named, such as a pack, reaches your terminal only with

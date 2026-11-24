@@ -97,6 +97,13 @@ impl Gitignore {
         self.matches(&rel, is_dir)
     }
 
+    /// Whether git ignores `path`, as `is_ignored` says, for a caller that
+    /// walks down from the root and found none of its parents ignored.
+    /// `path` holds no `.` or `..` and no empty name.
+    pub fn is_ignored_below(&self, path: &[u8], is_dir: bool) -> bool {
+        self.matches(path, is_dir)
+    }
+
     /// Whether the patterns alone ignore `path`, without its parents. The
     /// deepest `.gitignore` with a matching pattern decides, and within one
     /// file the last matching pattern does.

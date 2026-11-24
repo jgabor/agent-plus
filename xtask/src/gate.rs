@@ -31,6 +31,23 @@ const CHECKS: &[Check] = &[
     },
 ];
 
+/// The package that holds the T2 checks.
+pub const T2_PACKAGE: &str = "t2";
+
+/// What an adapter change touches, as HARNESS.md lists it: the adapters, their
+/// T2 checks, and the guest OS that a harness runs on.
+const ADAPTER_PATHS: [&str; 3] = ["crates/ap/src/adapter/", "crates/t2/", "guest/os/"];
+
+/// When the gate runs T2.
+#[derive(Clone, Copy)]
+pub enum T2 {
+    /// For a change that touches an adapter path, or one with no base to
+    /// compare with.
+    ForAdapterChanges,
+    /// Every time, as the nightly job does.
+    Always,
+}
+
 /// What a merge already knows, which changes two of the checks.
 pub struct Merging<'a> {
     /// `prepare` leaves these to the owner, who decides by merging.
@@ -53,16 +70,17 @@ pub fn verdict(failed: &Failed) -> Verdict {
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::testing(&root)?;
-    let (failed, _) = check(&root, &hold, None)?;
+    let (failed, _) = check(&root, &hold, None, T2::ForAdapterChanges)?;
     Ok(verdict(&failed))
 }
 
 /// Runs every check, and returns those that failed and the spec score that
-/// the tests earned.
+/// the tests earned. A T2 check that didn't run earns nothing.
 pub fn check(
     root: &Path,
     hold: &Hold,
     merging: Option<&Merging>,
+    t2: T2,
 ) -> Result<(Failed, score::Score), Problem> {
     require_tools(root)?;
     let mut failed = Failed::new();
@@ -82,11 +100,24 @@ pub fn check(
     if let Some(kernel) = &kernel {
         kernel.copy(&kernel.store, &kernel.tree);
     }
-    let results = testrun::run(root, hold)?;
+    let mut results = testrun::run_except(root, hold, Some(T2_PACKAGE))?;
+    record("tests", results.all_passed(), &mut failed);
+    let has_t2 = workspace::packages(root)?
+        .iter()
+        .any(|package| package.name == T2_PACKAGE);
+    if has_t2 && (matches!(t2, T2::Always) || touches_an_adapter(root)?) {
+        if let Some(merging) = merging {
+            (merging.starting)(T2_PACKAGE);
+        }
+        let passed = testrun::run_package(root, T2_PACKAGE, hold, &mut results)?;
+        record("t2", passed, &mut failed);
+    } else if has_t2 {
+        println!("skip t2");
+        eprintln!("t2: no change touches an adapter path, so T2 didn't run. HARNESS.md lists them");
+    }
     if let Some(kernel) = &kernel {
         kernel.copy(&kernel.tree, &kernel.store);
     }
-    record("tests", results.all_passed(), &mut failed);
     let score = score::compute(root, &results)?;
     score::report_findings(&score);
     record("spec", score.findings.is_empty(), &mut failed);
@@ -97,6 +128,23 @@ pub fn check(
     };
     println!("gate: {word}");
     Ok((failed, score))
+}
+
+/// Whether the tree, with its untracked files, differs from its base on an
+/// adapter path. With no base, nothing says it doesn't.
+fn touches_an_adapter(root: &Path) -> Result<bool, Problem> {
+    let Some(commit) = base::find(root)? else {
+        return Ok(true);
+    };
+    let changed = base::git_text(
+        root,
+        &["diff", "--name-only", "--no-renames", "-z", &commit, "--"],
+    )?;
+    let untracked = base::git_text(root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    Ok(changed
+        .split('\0')
+        .chain(untracked.split('\0'))
+        .any(|path| ADAPTER_PATHS.iter().any(|prefix| path.starts_with(prefix))))
 }
 
 fn compare_with_base(

@@ -1173,6 +1173,37 @@ fn a_passing_t2_package_is_reported() {
     assert!(repo.comment().contains("- pass t2\n"), "{}", repo.comment());
 }
 
+/// The gate's run of `t2` is the nightly job's T2 check, so `t2` runs once.
+#[test]
+fn t2_runs_once() {
+    let manifest = "[package]\nname = \"t2\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    let counts = r#"#[test]
+fn counts() {
+    use std::io::Write;
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/t2-runs");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    file.write_all(b"ran\n").unwrap();
+}
+"#;
+    let repo = Repo::with(
+        "t2-once",
+        "fn main() {}\n",
+        &[
+            ("crates/t2/Cargo.toml", manifest),
+            ("crates/t2/src/lib.rs", counts),
+        ],
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(repo.comment().contains("- pass t2\n"), "{}", repo.comment());
+    let runs = fs::read_to_string(repo.root.join("target/t2-runs")).unwrap();
+    assert_eq!(runs, "ran\n");
+}
+
 #[test]
 fn a_t1_package_s_ignored_tests_run_and_can_fail() {
     let manifest = "[package]\nname = \"t1\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";

@@ -302,6 +302,14 @@ change can affect a budget that the bench measures when its diff touches
 `crates/`, `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`,
 `rust-toolchain.toml`, `harness/budgets.toml`, or `xtask/src/bench.rs`.
 
+**Adapter changes.** A change is an adapter change when the tree, with its
+untracked files, differs from its base under `crates/ap/src/adapter/`,
+`crates/t2/`, or `guest/os/`. The gate runs `t2` for an adapter change, and
+for a tree with no base to compare with. Otherwise it prints `skip t2` and
+leaves `t2` out. A `t2` check counts toward the spec score only when `t2`
+runs, so a promise needs a check in another tier too. The nightly job's gate
+always runs `t2`, and that run is the nightly T2 check.
+
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps
 a copy at `xtask/kernel/vmlinux` in the shared git directory, and gives it to a
@@ -962,7 +970,7 @@ Runs at the nightly time. The scheduled task runs `cargo xtask nightly`, which
 does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
-2. Run the gate, T2, the ignored t1 tests that download from a real
+2. Run the gate with T2, the ignored t1 tests that download from a real
    release, T3, the journey, fuzzing, and mutation testing.
 3. Post the report to one pinned issue. It leads with what needs the owner:
    a verdict that names each failed check, the three scores, what regressed

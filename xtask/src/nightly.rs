@@ -40,12 +40,16 @@ pub fn run() -> Result<Verdict, Problem> {
     // on the quietest machine.
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""), &|_| Ok(()))))];
     let hold = lock::testing(&root)?;
-    let (gated, score) = match gate::check(&root, &hold, None) {
-        Ok((failed, score)) => (state(Ok(gate::verdict(&failed))), Some(score)),
-        Err(problem) => (state(Err(problem)), None),
+    let (gated, t2, score) = match gate::check(&root, &hold, None, gate::T2::Always) {
+        Ok((failed, score)) => (
+            state(Ok(gate::verdict(&failed))),
+            t2(&root, Some(&failed)),
+            Some(score),
+        ),
+        Err(problem) => (state(Err(problem)), t2(&root, None), None),
     };
     checks.push(("gate", gated));
-    checks.push(("t2", t2(&root)));
+    checks.push(("t2", t2));
     checks.push(("release", release(&root)));
     // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
@@ -158,8 +162,17 @@ fn state(result: Result<Verdict, Problem>) -> &'static str {
     }
 }
 
-fn t2(root: &Path) -> &'static str {
-    tests(root, "t2", &[])
+/// The gate runs T2 here, so this is that run, which a gate that couldn't run
+/// didn't make.
+fn t2(root: &Path, failed: Option<&gate::Failed>) -> &'static str {
+    match workspace::packages(root) {
+        Err(problem) => state(Err(problem)),
+        Ok(packages) if !packages.iter().any(|p| p.name == gate::T2_PACKAGE) => SKIP,
+        Ok(_) => match failed {
+            Some(failed) if !failed.contains(&"t2") => PASS,
+            _ => FAIL,
+        },
+    }
 }
 
 /// The tests in `t1` that the gate leaves out, because they download from a

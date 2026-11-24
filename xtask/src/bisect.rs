@@ -163,13 +163,15 @@ fn first_bad<'a>(tree: &Tree, hold: &Hold, commits: &[&'a str]) -> Result<&'a st
 
 fn passes(tree: &Tree, hold: &Hold, commit: &str) -> Result<bool, Problem> {
     base::git_text(&tree.path, &["checkout", "-q", "-f", "--detach", commit])?;
-    Ok(match gate::check(&tree.path, hold, None) {
-        Ok((failed, _)) => failed.is_empty(),
-        Err(Problem(message)) => {
-            eprintln!("nightly: {commit}: {message}");
-            false
-        }
-    })
+    Ok(
+        match gate::check(&tree.path, hold, None, gate::T2::Always) {
+            Ok((failed, _)) => failed.is_empty(),
+            Err(Problem(message)) => {
+                eprintln!("nightly: {commit}: {message}");
+                false
+            }
+        },
+    )
 }
 
 /// Reverts `bad` on top of `head`, keeping the ledger as it is, because a

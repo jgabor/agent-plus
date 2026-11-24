@@ -8,8 +8,9 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// `git -C dir`, with no config but its defaults, and one identity.
 pub fn git(dir: &Path) -> Command {
@@ -44,6 +45,127 @@ pub fn run(dir: &Path, args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Runs `git -C dir` with `args` and `input` on its standard input, which
+/// must succeed, and returns what it printed, trimmed.
+pub fn run_with(dir: &Path, args: &[&str], input: &[u8]) -> String {
+    let mut git = git(dir);
+    git.args(args).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut child = git.stderr(Stdio::piped()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let input = input.to_vec();
+    // Git may print before it reads everything, so its output is read
+    // while this writes.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output().unwrap();
+    writer.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Commits `path` in the repository `dir`, without writing it, as a tree
+/// for each of `twice`, above one that holds `README` from `HEAD` as `f`.
+/// Each holds the tree below it twice, as `a` and `b`, where `twice` says
+/// so, from the bottom up, and once, as `a`, where it doesn't. Host `git`
+/// writes the trees, in one `git mktree`.
+pub fn commit_stacked(dir: &Path, path: &str, twice: impl IntoIterator<Item = bool>) {
+    let readme = run(dir, &["rev-parse", "HEAD:README"]);
+    let readme = git::Id::from_hex(&readme).unwrap();
+    let mut entries = vec![entry(0o100644, b"f", readme)];
+    let mut text = format!("100644 blob {readme}\tf\n\n");
+    let mut tree = git::Object::tree(entries).id();
+    for twice in twice {
+        entries = vec![entry(0o40000, b"a", tree)];
+        text.push_str(&format!("040000 tree {tree}\ta\n"));
+        if twice {
+            entries.push(entry(0o40000, b"b", tree));
+            text.push_str(&format!("040000 tree {tree}\tb\n"));
+        }
+        text.push('\n');
+        tree = git::Object::tree(entries).id();
+    }
+    let written = run_with(dir, &["mktree", "--batch"], text.as_bytes());
+    assert_eq!(written.lines().last(), Some(&*tree.to_string()));
+    let listing = run(dir, &["ls-tree", "HEAD"]);
+    let root = format!("{listing}\n040000 tree {tree}\t{path}\n");
+    let root = run_with(dir, &["mktree"], root.as_bytes());
+    commit_tree(dir, &root, path);
+}
+
+/// Commits `path` in the repository `dir`, without writing it, as a tree
+/// for each of `widths`, from the bottom up, that names the one below it
+/// that many times, each with a name one byte long. The bottom one holds
+/// `README` from `HEAD` as many times as the first width says.
+pub fn commit_wide(dir: &Path, path: &str, widths: &[usize]) {
+    let names = (b'0'..=b'9').chain(b'A'..=b'Z').chain(b'a'..=b'z');
+    let names: Vec<char> = names.map(char::from).collect();
+    let mut kind = "100644 blob";
+    let mut id = run(dir, &["rev-parse", "HEAD:README"]);
+    for &width in widths {
+        let text: String = (names[..width].iter())
+            .map(|name| format!("{kind} {id}\t{name}\n"))
+            .collect();
+        id = run_with(dir, &["mktree"], text.as_bytes());
+        kind = "040000 tree";
+    }
+    let listing = run(dir, &["ls-tree", "HEAD"]);
+    let root = format!("{listing}\n040000 tree {id}\t{path}\n");
+    let root = run_with(dir, &["mktree"], root.as_bytes());
+    commit_tree(dir, &root, path);
+}
+
+/// Commits a tree in the repository `dir` that holds `README` from `HEAD`,
+/// and the tree of `HEAD` named `name`, which may be one that `git mktree`
+/// refuses, such as an empty one. Host `git` writes it.
+pub fn commit_named(dir: &Path, name: &[u8]) {
+    let id = |rev| git::Id::from_hex(&run(dir, &["rev-parse", rev])).unwrap();
+    let tree = git::Object::tree(vec![
+        entry(0o100644, b"README", id("HEAD:README")),
+        entry(0o40000, name, id("HEAD^{tree}")),
+    ]);
+    let args = ["hash-object", "-t", "tree", "-w", "--literally", "--stdin"];
+    let written = run_with(dir, &args, &tree.data);
+    assert_eq!(written, tree.id().to_string());
+    commit_tree(dir, &written, "named");
+}
+
+fn entry(mode: u32, name: &[u8], id: git::Id) -> git::TreeEntry {
+    git::TreeEntry {
+        mode,
+        name: name.to_vec(),
+        id,
+    }
+}
+
+/// Commits `tree` in the repository `dir` after its `HEAD`, which then
+/// names the commit.
+fn commit_tree(dir: &Path, tree: &str, message: &str) {
+    let commit = run(dir, &["commit-tree", tree, "-p", "HEAD", "-m", message]);
+    run(dir, &["update-ref", "HEAD", &commit]);
+}
+
+/// Limits the CPU time of the process `command` starts to `seconds`, past
+/// which it gets `SIGXCPU` and ends.
+pub fn limit_cpu(command: &mut Command, seconds: u64) {
+    // SAFETY: `setrlimit` is async-signal-safe, and touches nothing but the
+    // child.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: seconds,
+                rlim_max: seconds,
+            };
+            match libc::setrlimit(libc::RLIMIT_CPU, &limit) {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        });
+    }
 }
 
 /// Writes `data` to `path` in the repository `dir`, and commits it.

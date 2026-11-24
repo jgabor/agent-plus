@@ -9,13 +9,14 @@
 //! only on your repository, and on the agent's objects once it has written
 //! them to a quarantine directory.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::io::Read;
 use std::ops::Bound;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use git::{Id, Kind, Object, Repository, Target};
@@ -34,6 +35,15 @@ const MAX_DEPTH: usize = 5;
 const GITLINK: u32 = 0o160000;
 const SYMLINK: u32 = 0o120000;
 const TREE: u32 = 0o40000;
+/// How many paths of the tree of the agent's `HEAD` `ap` reads, at most,
+/// and how many bytes of them. What it does with a path takes time, and
+/// more time the longer it is.
+const MAX_PATHS: usize = 1_000_000;
+const MAX_READ: usize = 64 << 20;
+/// How long a path of that tree may be, in bytes, at most. Each path is
+/// then cheap to read, and a walk of the tree goes no more than 512 deep,
+/// which the stack holds.
+const MAX_PATH: usize = 1024;
 /// The author and committer of the last commit.
 const IDENTITY: &str = "Agent+ <ap@localhost>";
 
@@ -58,6 +68,12 @@ struct Agent<'a> {
     /// Each file and symlink of the agent's that would replace a directory
     /// its `HEAD` holds with a git-ignored file in it.
     replacing: BTreeSet<Vec<u8>>,
+    /// How many paths of the tree of its `HEAD` have been read, and how
+    /// many bytes of them.
+    read: Cell<(usize, usize)>,
+    /// The entries of each tree of its `HEAD` that has been read, so that
+    /// one it names many times is read once.
+    trees: RefCell<HashMap<Id, Rc<[git::TreeEntry]>>>,
 }
 
 impl<'a> Agent<'a> {
@@ -69,6 +85,8 @@ impl<'a> Agent<'a> {
             yours: Repository::at(share.root.join(".git")),
             made: RefCell::default(),
             replacing: BTreeSet::new(),
+            read: Cell::new((0, 0)),
+            trees: RefCell::default(),
         }
     }
 
@@ -152,6 +170,52 @@ impl<'a> Agent<'a> {
         Ok(object)
     }
 
+    /// The entries of the tree `tree`, at `path` in the tree of the agent's
+    /// `HEAD`. Each is a path read, which may be no longer than `MAX_PATH`,
+    /// and its name one that `git fsck` takes.
+    fn entries(&self, path: &[u8], tree: &Id) -> Result<Rc<[git::TreeEntry]>, git::Error> {
+        let cached = self.trees.borrow().get(tree).cloned();
+        let entries = match &cached {
+            Some(entries) => entries.clone(),
+            None => {
+                let entries: Rc<[git::TreeEntry]> = self.object(tree)?.entries()?.into();
+                let named =
+                    |name: &[u8]| !matches!(name, b"" | b"." | b"..") && !name.contains(&b'/');
+                if !entries.iter().all(|entry| named(&entry.name)) {
+                    return Err(git::Error::Corrupt(
+                        "the agent's HEAD holds a tree entry with a name that git refuses"
+                            .to_owned(),
+                    ));
+                }
+                entries
+            }
+        };
+        let above = path.len() + usize::from(!path.is_empty());
+        let bytes: usize = (entries.iter()).map(|entry| above + entry.name.len()).sum();
+        let (paths, read) = self.read.get();
+        let (paths, read) = (paths + entries.len(), read + bytes);
+        if paths > MAX_PATHS {
+            return Err(git::Error::Corrupt(
+                "the agent's HEAD holds more than the million paths that `ap` reads".to_owned(),
+            ));
+        }
+        if read > MAX_READ {
+            return Err(git::Error::Corrupt(
+                "the agent's HEAD holds more than the 64 MiB of paths that `ap` reads".to_owned(),
+            ));
+        }
+        self.read.set((paths, read));
+        if (entries.iter()).any(|entry| above + entry.name.len() > MAX_PATH) {
+            return Err(git::Error::Corrupt(format!(
+                "the agent's HEAD holds a path longer than the {MAX_PATH} bytes that `ap` reads"
+            )));
+        }
+        if cached.is_none() {
+            self.trees.borrow_mut().insert(*tree, entries.clone());
+        }
+        Ok(entries)
+    }
+
     /// Walks from `head` to the objects your repository already has, and
     /// gives each other object to `found`, once. Each object must be of the
     /// type that names it, yours too, because `git fsck` doesn't look at
@@ -219,14 +283,14 @@ impl<'a> Agent<'a> {
         tree: Id,
         found: &mut BTreeSet<Vec<u8>>,
     ) -> Result<(), git::Error> {
-        for entry in self.object(&tree)?.entries()? {
+        for entry in self.entries(path, &tree)?.iter() {
             if entry.mode != TREE {
                 continue;
             }
             let inner = beneath(path, &entry.name);
             match self.records.view(&inner) {
                 View::Agent(Entry::File { .. } | Entry::Symlink { .. }) => {
-                    if self.holds_ignored(ignore, &inner, entry.id)? {
+                    if self.holds_ignored(ignore, &inner, entry.id, true)? {
                         found.insert(inner);
                     }
                 }
@@ -239,15 +303,26 @@ impl<'a> Agent<'a> {
         Ok(())
     }
 
-    /// Whether the tree `tree` at `path` holds a git-ignored file.
-    fn holds_ignored(&self, ignore: &Gitignore, path: &[u8], tree: Id) -> Result<bool, git::Error> {
-        for entry in self.object(&tree)?.entries()? {
+    /// Whether the tree `tree` at `path` holds a git-ignored file. Unless
+    /// `top` is set, git ignores none of the directories above it.
+    fn holds_ignored(
+        &self,
+        ignore: &Gitignore,
+        path: &[u8],
+        tree: Id,
+        top: bool,
+    ) -> Result<bool, git::Error> {
+        let entries = self.entries(path, &tree)?;
+        if top && !entries.is_empty() && ignore.is_ignored(bytes_path(path), true) {
+            return Ok(true);
+        }
+        for entry in entries.iter() {
             let inner = beneath(path, &entry.name);
             // As `verdict` and `left_at` read it, a submodule is a file.
-            if ignore.is_ignored(bytes_path(&inner), entry.mode == TREE) {
+            if ignore.is_ignored_below(&inner, entry.mode == TREE) {
                 return Ok(true);
             }
-            if entry.mode == TREE && self.holds_ignored(ignore, &inner, entry.id)? {
+            if entry.mode == TREE && self.holds_ignored(ignore, &inner, entry.id, false)? {
                 return Ok(true);
             }
         }
@@ -307,9 +382,11 @@ impl<'a> Agent<'a> {
             false => self.records.view(path),
         };
         let removed = removed || self.records.deleted.contains(path);
-        let recorded = self.recorded_beneath(path).next().is_some();
+        let yours = matches!(view, View::Yours);
+        // Only what is yours goes by these, so nothing else looks.
+        let recorded = yours && self.recorded_beneath(path).next().is_some();
         // Something the agent deleted beneath it may be one of `head`'s.
-        let swept = self.records.deleted.range(below(path)).next().is_some();
+        let swept = yours && self.records.deleted.range(below(path)).next().is_some();
         let head_tree = matches!(head, Some((TREE, _)));
         let dir = root
             || match view {
@@ -323,13 +400,19 @@ impl<'a> Agent<'a> {
             };
         if !dir {
             let there = match view {
-                View::Yours if !removed || ignore.is_ignored(bytes_path(path), false) => {
+                // The walk from the root found no directory above `path`
+                // that git ignores.
+                View::Yours if !removed || ignore.is_ignored_below(path, false) => {
                     return Ok(head);
                 }
                 View::Yours => match head {
                     Some((GITLINK, _)) => host.stat(path)?.is_some_and(|m| m.is_dir()),
                     _ => host.stat(path)?.is_some(),
                 },
+                // What `verdict` says of a path the agent removed, which is
+                // under no `.git`, because the walk goes into none.
+                View::Absent if ignore.is_ignored_below(path, false) => return Ok(head),
+                View::Absent => true,
                 _ => {
                     let landed = BTreeMap::new();
                     match verdict(
@@ -366,15 +449,14 @@ impl<'a> Agent<'a> {
         if !root && matches!(head, Some((GITLINK, _))) && !matches!(view, View::Absent) {
             return Ok(head);
         }
-        let yours = matches!(view, View::Yours);
         let untouched = yours && !recorded && !swept && !removed;
-        if !root && (untouched || ignore.is_ignored(bytes_path(path), true)) {
+        if !root && (untouched || ignore.is_ignored_below(path, true)) {
             return Ok(head);
         }
         let mut entries: BTreeMap<Vec<u8>, Option<(u32, Id)>> = BTreeMap::new();
         if let Some((TREE, tree)) = head {
-            for entry in self.object(&tree)?.entries()? {
-                entries.insert(entry.name, Some((entry.mode, entry.id)));
+            for entry in self.entries(path, &tree)?.iter() {
+                entries.insert(entry.name.clone(), Some((entry.mode, entry.id)));
             }
         }
         let start = path.len() + usize::from(!root);
@@ -724,6 +806,9 @@ impl Share<'_> {
                 Verdict::Change => {}
             }
         }
+        // `left` reads what `replacing_in` read again, and has the same
+        // limit to itself.
+        agent.read.set((0, 0));
         let left = agent.left(&host, &ignore, tree).map_err(read_failed)?;
         let empty = Object::tree(Vec::new()).id();
         let last = (tree.unwrap_or(empty) != left).then(|| {

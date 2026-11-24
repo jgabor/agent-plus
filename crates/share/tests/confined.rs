@@ -211,6 +211,9 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     flush.extend(7u64.to_le_bytes());
     assert_eq!(guest.call(FLUSH, file, &flush).0, 0);
     guest.release(handle);
+    // Access mode 3 asks for neither reading nor writing, and opens.
+    let neither = guest.open(file, 3).unwrap();
+    guest.release(neither);
     assert_eq!(guest.setattr(file, FATTR_SIZE, 4, 0), 0);
     assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0), 0);
     assert_eq!(guest.setattr(file, FATTR_MTIME, 0, 0), 0);
@@ -297,6 +300,8 @@ fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
     sync.extend([0; 8]);
     assert_eq!(guest.call(FSYNC, hello, &sync).0, 0);
     guest.release(handle);
+    let neither = guest.open(hello, 3).unwrap();
+    guest.release(neither);
     assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), 0);
     assert_eq!(guest.setattr(hello, FATTR_MTIME, 0, 0), 0);
     let made = guest.mkdir(1, b"made").unwrap();

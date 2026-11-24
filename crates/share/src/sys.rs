@@ -2,26 +2,10 @@
 //! call its filter allows. None takes a path that can leave a descriptor,
 //! but [`parent`], which goes one directory up and reads nothing.
 
-use std::ffi::{CStr, c_long};
+use std::ffi::{CStr, CString, c_long};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
-
-/// Resolution that stays beneath the starting descriptor and follows no
-/// symlink, from `<linux/openat2.h>`.
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-const RESOLVE_BENEATH: u64 = 0x08;
-const NO_SYMLINKS: u64 = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS;
-const BENEATH: u64 = RESOLVE_BENEATH | NO_SYMLINKS;
-
-/// `struct open_how`.
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 
 fn check(result: c_long) -> io::Result<c_long> {
     match result {
@@ -31,37 +15,97 @@ fn check(result: c_long) -> io::Result<c_long> {
 }
 
 /// Opens `name` beneath `directory`, following no symlink on the way. With
-/// `O_PATH | O_NOFOLLOW`, a symlink opens as itself.
+/// `O_PATH`, a symlink at the end opens as itself.
 pub fn open_beneath(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<OwnedFd> {
-    openat2(directory, name, flags, BENEATH)
+    let (above, last) = walk(directory, name)?;
+    let from = above.as_ref().map_or(directory, AsFd::as_fd);
+    openat(from, &last, flags, 0)
+}
+
+/// Opens `name` beneath `directory` as [`open_beneath`] does, and with
+/// `O_CREAT`, makes it with `mode` if it is missing.
+pub fn create_beneath(
+    directory: BorrowedFd,
+    name: &CStr,
+    flags: i32,
+    mode: u32,
+) -> io::Result<OwnedFd> {
+    let (above, last) = walk(directory, name)?;
+    let from = above.as_ref().map_or(directory, AsFd::as_fd);
+    openat(from, &last, flags | libc::O_CREAT, mode)
 }
 
 /// The directory above `directory`, opened with `O_PATH`, so it reads
 /// nothing. Above the top of the tree is the top itself.
 pub fn parent(directory: BorrowedFd) -> io::Result<OwnedFd> {
-    let flags = libc::O_PATH | libc::O_DIRECTORY;
-    openat2(directory, c"..", flags, NO_SYMLINKS)
+    openat(directory, c"..", libc::O_PATH | libc::O_DIRECTORY, 0)
 }
 
-fn openat2(directory: BorrowedFd, name: &CStr, flags: i32, resolve: u64) -> io::Result<OwnedFd> {
-    let how = OpenHow {
-        flags: (flags | libc::O_CLOEXEC) as u64,
-        mode: 0,
-        resolve,
-    };
-    // SAFETY: `name` is NUL-terminated and `how` is a `struct open_how`,
-    // both outliving the call, which returns a new descriptor or -1.
+/// Opens each directory on the way to `name`'s last component, one at a
+/// time, so no component is a symlink, `..`, or a path from the top. Returns
+/// the directory the last component is in, unless it is `directory` itself,
+/// and that component.
+fn walk(directory: BorrowedFd, name: &CStr) -> io::Result<(Option<OwnedFd>, CString)> {
+    let name = name.to_bytes();
+    if name.starts_with(b"/") {
+        return Err(io::Error::from_raw_os_error(libc::EXDEV));
+    }
+    let mut components = name.split(|&byte| byte == b'/').filter(|c| !c.is_empty());
+    let mut last = components.next().unwrap_or_default();
+    let mut above: Option<OwnedFd> = None;
+    for next in components {
+        let from = above.as_ref().map_or(directory, AsFd::as_fd);
+        let step = component(last)?;
+        above = Some(openat(from, &step, libc::O_PATH | libc::O_DIRECTORY, 0)?);
+        last = next;
+    }
+    Ok((above, component(last)?))
+}
+
+fn component(name: &[u8]) -> io::Result<CString> {
+    if name == b".." {
+        return Err(io::Error::from_raw_os_error(libc::EXDEV));
+    }
+    // It came from a `CStr`, so it holds no NUL.
+    CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))
+}
+
+/// Opens the one entry `name` in `directory`, never following it if it is a
+/// symlink. The filter reads these flags, and refuses access mode 3, which
+/// asks for neither reading nor writing, so Landlock would check nothing.
+/// A symlink where a directory is asked for fails with `ELOOP`.
+fn openat(directory: BorrowedFd, name: &CStr, flags: i32, mode: u32) -> io::Result<OwnedFd> {
+    let flags = flags | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `name` is NUL-terminated and outlives the call, which returns
+    // a new descriptor or -1.
     let fd = check(unsafe {
         libc::syscall(
-            libc::SYS_openat2,
+            libc::SYS_openat,
             directory.as_raw_fd(),
             name.as_ptr(),
-            &raw const how,
-            size_of::<OpenHow>(),
+            flags,
+            mode,
         )
-    })?;
-    // SAFETY: the descriptor is new, and nothing else owns it.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    });
+    match fd {
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        Ok(fd) => Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) }),
+        Err(error)
+            if error.raw_os_error() == Some(libc::ENOTDIR)
+                && flags & libc::O_DIRECTORY != 0
+                && is_symlink(directory, name) =>
+        {
+            Err(io::Error::from_raw_os_error(libc::ELOOP))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_symlink(directory: BorrowedFd, name: &CStr) -> bool {
+    let found = openat(directory, name, libc::O_PATH, 0);
+    found
+        .and_then(|fd| fstat(fd.as_fd()))
+        .is_ok_and(|stat| stat.st_mode & libc::S_IFMT == libc::S_IFLNK)
 }
 
 pub fn fstat(fd: BorrowedFd) -> io::Result<libc::stat> {
@@ -127,33 +171,6 @@ pub fn read_directory(fd: BorrowedFd, buffer: &mut [u8], offset: u64) -> io::Res
         )
     })?;
     Ok(len as usize)
-}
-
-/// Opens `name` beneath `directory` as [`open_beneath`] does, and with
-/// `O_CREAT`, makes it with `mode` if it is missing.
-pub fn create_beneath(
-    directory: BorrowedFd,
-    name: &CStr,
-    flags: i32,
-    mode: u32,
-) -> io::Result<OwnedFd> {
-    let how = OpenHow {
-        flags: (flags | libc::O_CREAT | libc::O_CLOEXEC) as u64,
-        mode: u64::from(mode),
-        resolve: BENEATH,
-    };
-    // SAFETY: as in `open_beneath`.
-    let fd = check(unsafe {
-        libc::syscall(
-            libc::SYS_openat2,
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            &raw const how,
-            size_of::<OpenHow>(),
-        )
-    })?;
-    // SAFETY: the descriptor is new, and nothing else owns it.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
 pub fn pwrite(fd: BorrowedFd, data: &[u8], offset: u64) -> io::Result<usize> {

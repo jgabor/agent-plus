@@ -513,9 +513,16 @@ fn two_names(body: &[u8]) -> Result<(CString, CString), i32> {
 }
 
 /// The flags of a guest's open that reach the host. The rest can't apply to
-/// a file that exists, or are the server's to choose.
+/// a file that exists, or are the server's to choose. Access mode 3 asks
+/// for both permissions and grants neither, and the server's filter
+/// refuses it, so the server reads and writes instead. The guest's kernel
+/// still lets that file do neither.
 fn open_flags(flags: i32) -> i32 {
-    flags & (libc::O_ACCMODE | libc::O_APPEND | libc::O_TRUNC) | libc::O_NOFOLLOW | libc::O_NONBLOCK
+    let access = match flags & libc::O_ACCMODE {
+        libc::O_ACCMODE => libc::O_RDWR,
+        access => access,
+    };
+    access | flags & (libc::O_APPEND | libc::O_TRUNC) | libc::O_NOFOLLOW | libc::O_NONBLOCK
 }
 
 fn writes(flags: i32) -> bool {

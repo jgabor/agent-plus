@@ -34,6 +34,7 @@ const LOAD_WORD: u16 = 0x20;
 const JUMP_EQUAL: u16 = 0x15;
 const JUMP_AT_LEAST: u16 = 0x35;
 const JUMP_SET: u16 = 0x45;
+const AND: u16 = 0x54;
 const RETURN: u16 = 0x06;
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 const X32_SYSCALLS: u32 = 0x4000_0000;
@@ -47,6 +48,7 @@ const F_GETFD: u32 = 1;
 const F_OFD_GETLK: u32 = 36;
 const F_OFD_SETLK: u32 = 37;
 const MAP_ANONYMOUS: u32 = 0x20;
+const O_ACCMODE: u32 = 3;
 
 // x86_64 system call numbers.
 const READ: u32 = 0;
@@ -79,6 +81,7 @@ const PREAD64: u32 = 17;
 const FSTATFS: u32 = 138;
 const GETDENTS64: u32 = 217;
 const READLINKAT: u32 = 267;
+const OPENAT: u32 = 257;
 const OPENAT2: u32 = 437;
 const PWRITE64: u32 = 18;
 const FLOCK: u32 = 73;
@@ -158,6 +161,9 @@ enum Rule {
     AllowUnless(u32, u32, u32),
     /// Allowed unless either argument at these indexes is this value.
     AllowUnlessEither(u32, [u32; 2], u32),
+    /// Allowed unless the argument at the first index is this value, or
+    /// the argument at the second has every bit of this mask.
+    AllowUnlessOrAllSet(u32, (u32, u32), (u32, u32)),
     /// Allowed when the pointer at this index is null, in both halves.
     AllowIfNull(u32, u32),
     /// Answered with this error, without running it.
@@ -214,9 +220,12 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
 /// The calls the share server makes once it has opened each share's root.
 /// It has one thread, so it starts none, and it reads requests from
 /// `socket` alone. It opens a file only relative to a descriptor it holds,
-/// and the opening code asks the kernel to stay beneath it and follow no
-/// symlink. A filter can't read those flags, so Landlock holds the server
-/// to the roots too, where the kernel has it. It takes and checks locks on
+/// one name at a time, and the opening code follows no symlink. A filter
+/// can't read a name, so Landlock holds the server to the roots too, where
+/// the kernel has it. Landlock checks an open only for reading or writing,
+/// so the filter refuses access mode 3, which asks for neither, and
+/// `openat2`, whose flags it can't read. A descriptor opened with `O_PATH`
+/// takes neither `fchmod` nor `futimens`. It takes and checks locks on
 /// the files it holds. With `writes`, for an `rw` share, it also changes
 /// files: through a descriptor it holds, or by one name in a directory it
 /// holds, which Landlock holds to the `rw` roots. Changing a file's times
@@ -224,11 +233,14 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
 /// for those, an `ro` share beside an `rw` one rests on the server's own
 /// checks.
 fn share_server_rules(socket: RawFd, writes: bool) -> Vec<Rule> {
-    use Rule::{Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither};
+    use Rule::{
+        Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither,
+        AllowUnlessOrAllSet,
+    };
     let mut rules = vec![
         AllowIf(READ, 0, vec![socket as u32]),
         AllowIf(WRITE, 0, vec![socket as u32, STDERR]),
-        AllowUnless(OPENAT2, 0, AT_FDCWD),
+        AllowUnlessOrAllSet(OPENAT, (0, AT_FDCWD), (2, O_ACCMODE)),
         AllowUnless(READLINKAT, 0, AT_FDCWD),
         Allow(PREAD64),
         Allow(GETDENTS64),
@@ -372,6 +384,18 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
                     kill,
                 ],
             ),
+            Rule::AllowUnlessOrAllSet(number, (at, value), (index, mask)) => (
+                *number,
+                vec![
+                    load(*at),
+                    op(JUMP_EQUAL, 4, 0, *value),
+                    load(*index),
+                    op(AND, 0, 0, *mask),
+                    op(JUMP_EQUAL, 1, 0, *mask),
+                    allow,
+                    kill,
+                ],
+            ),
             Rule::AllowIfNull(number, index) => (
                 *number,
                 vec![
@@ -464,7 +488,6 @@ mod tests {
     const PID: u32 = 4000;
     const TID: u32 = 4001;
     const TIOCSTI: u32 = 0x5412;
-    const OPENAT: u32 = 257;
     const FORK: u32 = 57;
     const VFORK: u32 = 58;
     const EXECVE: u32 = 59;
@@ -525,6 +548,7 @@ mod tests {
                 JUMP_EQUAL => pc += jump(accumulator == instruction.value),
                 JUMP_AT_LEAST => pc += jump(accumulator >= instruction.value),
                 JUMP_SET => pc += jump(accumulator & instruction.value != 0),
+                AND => accumulator &= instruction.value,
                 RETURN => return instruction.value,
                 code => panic!("an unknown instruction {code:#x}"),
             }
@@ -684,10 +708,9 @@ mod tests {
         }
         assert_eq!(writing_call(UTIMENSAT, [4, 0, 1, 0, 0, 0]), RET_ALLOW);
         assert_eq!(writing_call(WRITE, [4, 0, 0, 0, 0, 0]), RET_KILL_PROCESS);
-        assert_eq!(
-            writing_call(OPENAT2, [cwd, 0, 0, 0, 0, 0]),
-            RET_KILL_PROCESS
-        );
+        for args in [[cwd, 0, 1, 0, 0, 0], [4, 0, 3, 0, 0, 0]] {
+            assert_eq!(writing_call(OPENAT, args), RET_KILL_PROCESS);
+        }
     }
 
     #[test]
@@ -700,7 +723,13 @@ mod tests {
             );
         }
         assert_eq!(share_call(FCNTL, [4, F_GETFD, 0, 0, 0, 0]), RET_ALLOW);
-        assert_eq!(share_call(OPENAT2, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
+        // Reading, writing, or `O_PATH`, which Landlock holds to the roots
+        // or which changes nothing, with any other flag.
+        let o_path = 0o1000_0000;
+        for flags in [0, 1, 2, o_path, o_path | 1, 0o2_0000_0000 | 0o404_0000 | 2] {
+            let args = [4, 0, flags, 0, 0, 0];
+            assert_eq!(share_call(OPENAT, args), RET_ALLOW, "{flags:#o}");
+        }
         assert_eq!(share_call(READLINKAT, [4, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(READ, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
         assert_eq!(share_call(WRITE, [SOCKET, 0, 0, 0, 0, 0]), RET_ALLOW);
@@ -709,13 +738,23 @@ mod tests {
 
     #[test]
     fn the_share_server_can_t_open_by_path_start_anything_or_write_a_file() {
-        for number in [OPENAT, 2, FORK, VFORK, EXECVE, EXECVEAT, CLONE, CLONE3] {
-            assert_eq!(share_call(number, [0; 6]), RET_KILL_PROCESS, "{number}");
+        for number in [OPENAT2, 2, FORK, VFORK, EXECVE, EXECVEAT, CLONE, CLONE3] {
+            assert_eq!(
+                share_call(number, [4, 0, 0, 0, 0, 0]),
+                RET_KILL_PROCESS,
+                "{number}"
+            );
         }
         assert_eq!(
-            share_call(OPENAT2, [AT_FDCWD, 0, 0, 0, 0, 0]),
+            share_call(OPENAT, [AT_FDCWD, 0, 0, 0, 0, 0]),
             RET_KILL_PROCESS
         );
+        // Access mode 3 asks for neither reading nor writing, so Landlock
+        // would check nothing, whatever else the flags hold.
+        for flags in [3, 0o1000_0003, 0o2_0000_0003, u32::MAX] {
+            let args = [4, 0, flags, 0, 0, 0];
+            assert_eq!(share_call(OPENAT, args), RET_KILL_PROCESS, "{flags:#o}");
+        }
         assert_eq!(
             share_call(READLINKAT, [AT_FDCWD, 0, 0, 0, 0, 0]),
             RET_KILL_PROCESS

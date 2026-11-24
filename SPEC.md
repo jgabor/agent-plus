@@ -625,6 +625,10 @@ powers the VM off if the harness hasn't exited 10 seconds later.
 
 - `ap stop` returns once the VM has stopped.
 - If the run's `ap run` is suspended, `ap stop` resumes it.
+- Once `ap stop` has reached the run, its `ap run` no longer waits to be in
+  the foreground of its terminal.
+- An interactive run that `ap stop` reaches before its `ap run` has set your
+  terminal's modes leaves them as they are.
 - On success, it prints nothing and exits 0.
 - If the harness exits after `SIGTERM`, the run's `ap run` exits with the
   harness's status. If `ap stop` powers the VM off, `ap run` exits with

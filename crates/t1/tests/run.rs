@@ -1048,6 +1048,161 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
     assert_eq!(scratch.ps(), Vec::<String>::new());
 }
 
+// spec(ap stop): If the run's `ap run` is suspended, `ap stop` resumes it.
+// spec(ap stop): Once `ap stop` has reached the run, its `ap run` no longer waits to be in the foreground of its terminal.
+// spec(ap stop): An interactive run that `ap stop` reaches before its `ap run` has set your terminal's modes leaves them as they are.
+#[test]
+fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
+    let scratch = Scratch::new("background");
+    // The harness ignores `SIGTERM`, so the run takes 10 seconds to end once
+    // `ap stop` reaches it, while `ap run` must leave the modes alone.
+    scratch.build("open", &fake("ENV FAKE_HARNESS_IGNORE_TERM 1\n"));
+    let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
+    // Raw mode can't be set from the background, so `ap run` stops on
+    // `SIGTTOU`, and again each time it resumes.
+    let shell = in_background(&scratch, &terminal, "");
+    let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
+    program.extend_from_slice(b"\0run\0");
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    let (run, rows) = loop {
+        let found: Vec<u32> = descendants(shell.0.id())
+            .into_iter()
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline"))
+                    .is_ok_and(|cmdline| cmdline.starts_with(&program))
+            })
+            .collect();
+        // The run is listed once the run process holds its record.
+        if let [run] = found[..]
+            && stopped(run)
+            && let rows = scratch.ps()
+            && rows.len() == 1
+        {
+            break (run, rows);
+        }
+        assert!(Instant::now() < deadline, "ap run didn't stop: {found:?}");
+        thread::sleep(Duration::from_millis(10));
+    };
+    let vm = run_process(run);
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+    // Modes of the shell's, which `ap run` mustn't change from where it is.
+    stty(&terminal, &["-echo"]);
+    let modes = stty(&terminal, &["-g"]);
+
+    let mut stop = Started(
+        Command::new(&shared().0)
+            .args(["stop", &name])
+            .env_clear()
+            .env("HOME", &scratch.home)
+            .env("XDG_RUNTIME_DIR", &scratch.runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let watched = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < watched {
+        assert_eq!(stty(&terminal, &["-g"]), modes);
+        thread::sleep(Duration::from_millis(50));
+    }
+    // It has taken the stop, and job control no longer suspends it.
+    assert!(!stopped(run), "ap run is still suspended");
+    let status = wait_within(&mut stop, Duration::from_secs(30));
+    let (mut stdout, mut stderr) = (stop.0.stdout.take().unwrap(), stop.0.stderr.take().unwrap());
+    let mut printed = String::new();
+    stdout.read_to_string(&mut printed).unwrap();
+    stderr.read_to_string(&mut printed).unwrap();
+    assert_eq!(status.code(), Some(0), "{printed}");
+    assert_eq!(printed, "", "{status:?}");
+    assert!(!running(vm), "the VM outlived ap stop");
+    assert!(!running(run), "ap run outlived ap stop");
+    assert_eq!(scratch.ps(), Vec::<String>::new());
+    assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
+    assert_eq!(stty(&terminal, &["-g"]), modes);
+}
+
+/// Starts `ap run open` in the background of `terminal`, as `ap run open &`
+/// would from a shell with job control, as yours is, through `wrapper`, a
+/// command that runs the rest. Once the shell gets `SIGTERM`, as from its
+/// guard, or `SIGHUP`, as when the terminal closes, it kills the run's
+/// process group, and waits for it.
+fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "set -m
+            timeout -k 10 {TIMEOUT} {wrapper} \"$0\" run open &
+            run=$!
+            sleep {TIMEOUT} &
+            sleeper=$!
+            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM HUP
+            wait $sleeper"
+        ))
+        .arg(&shared().0)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &scratch.home)
+        .env("XDG_RUNTIME_DIR", &scratch.runtime)
+        .stdin(terminal.try_clone().unwrap())
+        .stdout(terminal.try_clone().unwrap())
+        .stderr(terminal.try_clone().unwrap());
+    // SAFETY: `take_terminal` only makes system calls.
+    unsafe { command.pre_exec(take_terminal) };
+    Started(command.spawn().unwrap())
+}
+
+/// An interactive `ap run` that starts in the background of its terminal
+/// with `SIGTTOU` and `SIGTTIN` ignored isn't held by job control, so it
+/// goes on there, as it did before it waited for the foreground.
+#[test]
+fn an_interactive_run_that_ignores_job_control_goes_on_in_the_background() {
+    let scratch = Scratch::new("ignoring");
+    scratch.build("open", &fake(""));
+    let (controller, terminal) = open_terminal(size(24, 80)).unwrap();
+    // `timeout` gives its command the default actions for both, so they
+    // are ignored after it.
+    let ignoring = "sh -c 'trap \"\" TTOU TTIN; exec \"$@\"' sh";
+    let _shell = in_background(&scratch, &terminal, ignoring);
+    let shown = Arc::new(Mutex::new(Vec::new()));
+    let screen = Arc::clone(&shown);
+    let (stopped, stop_reading) = io::pipe().unwrap();
+    let mut side = controller;
+    let reader = thread::spawn(move || {
+        let mut buffer = [0; 4096];
+        while let Ok(false) = program_has_ended(side.as_fd(), stopped.as_fd()) {
+            match side.read(&mut buffer) {
+                Ok(count @ 1..) => screen.lock().unwrap().extend_from_slice(&buffer[..count]),
+                _ => return,
+            }
+        }
+    });
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    while !String::from_utf8_lossy(&shown.lock().unwrap()).contains("\"user\":") {
+        assert!(
+            Instant::now() < deadline,
+            "the harness never showed: {:?}",
+            String::from_utf8_lossy(&shown.lock().unwrap())
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(stop_reading);
+    reader.join().unwrap();
+}
+
+/// Runs `stty` with `args` on `terminal`, from outside its session, and
+/// returns what it printed.
+fn stty(terminal: &File, args: &[&str]) -> String {
+    let output = Command::new("stty")
+        .args(args)
+        .stdin(terminal.try_clone().unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
 /// Whether the process `pid` is stopped, as by `SIGSTOP`.
 fn stopped(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))

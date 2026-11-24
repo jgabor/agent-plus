@@ -6,9 +6,9 @@
 //! lookups on: `!`, `allow` or `deny`, the rule that decided, then what it
 //! decided, as [`super::blocked`] writes a host it blocked. The rule is the
 //! number of a `NETWORK` rule, from 0 in the order of the run's rules, or
-//! `default`, `harness`, `loopback`, or `path`. `ap run` reads each report
-//! as data, and keeps it in the run's log, with the time it came and the
-//! rule as the Agentfile wrote it.
+//! `default`, `harness`, `loopback`, `path`, or `http`. `ap run` reads each
+//! report as data, and keeps it in the run's log, with the time it came and
+//! the rule as the Agentfile wrote it.
 
 use std::ffi::OsString;
 use std::fs::File;

@@ -292,9 +292,18 @@ impl<'a> Agent<'a> {
             let inner = beneath(path, &entry.name);
             if entry.mode != TREE {
                 // A submodule is as that `HEAD` holds it already, whatever
-                // the agent made in its place.
-                let dir = matches!(self.records.view(&inner), View::Agent(Entry::Dir { .. }));
-                if dir && entry.mode != GITLINK && ignore.is_ignored(bytes_path(&inner), false) {
+                // the agent made in its place. A directory is there, as
+                // `left_at` reads it, where the agent made one, or wrote in
+                // one of yours.
+                if entry.mode == GITLINK {
+                    continue;
+                }
+                let dir = match self.records.view(&inner) {
+                    View::Agent(Entry::Dir { .. }) => true,
+                    View::Yours => self.recorded_beneath(&inner).next().is_some(),
+                    _ => false,
+                };
+                if dir && ignore.is_ignored(bytes_path(&inner), false) {
                     found.dirs.insert(inner);
                 }
                 continue;

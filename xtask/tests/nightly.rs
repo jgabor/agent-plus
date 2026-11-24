@@ -51,11 +51,19 @@ esac
 
 /// What a posted report's checks line says of one check: `fail` or `skip`
 /// when it names the check there, and `pass` when it names it in neither.
+/// The line counts every check the nightly runs, so none was left out.
 #[track_caller]
 fn check_state(comment: &str, name: &str) -> &'static str {
     let Some(line) = comment.lines().find_map(|l| l.strip_prefix("Checks: ")) else {
         panic!("no checks line: {comment}");
     };
+    let words: Vec<&str> = line.split(' ').collect();
+    let counted: usize = words
+        .windows(2)
+        .filter(|w| ["passed", "failed", "skipped"].contains(&w[1].trim_end_matches(',')))
+        .filter_map(|w| w[0].parse::<usize>().ok())
+        .sum();
+    assert_eq!(counted, 8, "{comment}");
     let name = format!("`{name}`");
     for (word, state) in [("failed", "fail"), ("skipped", "skip")] {
         let names = line
@@ -1351,7 +1359,7 @@ fn a_night_that_never_ran_loses_nothing() {
         report.contains("[Landed the night it was off](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1374,7 +1382,7 @@ fn a_commit_already_reported_isnt_repeated() {
         report.contains("[New](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 /// A report as `report` prints it today, folds and all, still marks its commit.
@@ -1400,7 +1408,7 @@ fn a_folded_report_marks_its_commit() {
         report.contains("[New](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1428,7 +1436,7 @@ fn a_last_report_that_cant_be_used_falls_back_to_a_day() {
             report.contains("[Today](https://github.com/o/r/pull/9)"),
             "{name}: {report}"
         );
-        assert!(!report.contains("Too old (#2)"), "{name}: {report}");
+        assert!(!report.contains("/pull/2)"), "{name}: {report}");
     }
 }
 
@@ -1455,7 +1463,7 @@ fn a_last_report_off_this_history_falls_back_to_a_day() {
         report.contains("[Today](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Too old (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -1521,7 +1529,7 @@ fn a_report_heading_from_someone_else_is_ignored() {
         report.contains("[Landed since](https://github.com/o/r/pull/9)"),
         "{report}"
     );
-    assert!(!report.contains("Reported (#2)"), "{report}");
+    assert!(!report.contains("/pull/2)"), "{report}");
 }
 
 #[test]
@@ -2547,10 +2555,12 @@ fn a_record_merged_after_main_moved_is_listed_as_not_in_the_ledger() {
     repo.merge("First (#9)", 3, &CLEAN);
     let text = fs::read_to_string(repo.root.join("harness/ledger/5.toml"))
         .unwrap()
+        .replace("pr = 9", "pr = 10")
         .replace("proven = 1", "proven = 6")
         .replace("date =", &format!("base = \"{}\"\ndate =", "0".repeat(40)));
     repo.write("harness/ledger/6.toml", &text);
-    repo.commit("Late (#10)", 2);
+    // The record names its PR, so the subject needn't.
+    repo.commit("Late", 2);
     let head = repo.short("HEAD");
     let report = repo.report();
     assert!(report.starts_with(&format!("# Nightly report for `{head}`\n\nspec 1 of 7")));

@@ -51,6 +51,8 @@ struct Regression {
 struct Unrecorded {
     commit: String,
     subject: String,
+    /// Its PR: its record's, or the one its subject names when it has none.
+    pr: Option<usize>,
     /// Whether it has a record, which was measured on an older `main`.
     late: bool,
 }
@@ -257,6 +259,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
             named.push((full.to_string(), Source::Commit(commit.clone())));
             report.unrecorded.push(Unrecorded {
                 commit,
+                pr: tagged(&subject),
                 subject,
                 late: false,
             });
@@ -271,6 +274,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
             report.unrecorded.push(Unrecorded {
                 commit,
                 subject,
+                pr: Some(record.pr),
                 late: true,
             });
             continue;
@@ -670,7 +674,7 @@ impl Report {
             .unrecorded
             .iter()
             .map(|u| {
-                let subject = match tagged(&u.subject) {
+                let subject = match u.pr {
                     Some(pr) => self.link(untagged(&u.subject, pr), "pull", pr),
                     None => u.subject.clone(),
                 };

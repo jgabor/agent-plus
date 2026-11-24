@@ -558,7 +558,10 @@ fn a_run_stays_active_while_its_share_server_answers_a_request() {
     // SAFETY: this call takes plain integers, and the process is the
     // server this test started.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
-    wait_until("the share server to stop", || stopped(pid));
+    wait_until("the share server to stop", || {
+        stopped(pid) || process.0.try_wait().unwrap().is_some()
+    });
+    assert!(stopped(pid), "the share server exited");
     let mut socket = File::from(socket);
     socket.write_all(&mkdir_frame(b"made")).unwrap();
     drop(socket);
@@ -566,7 +569,7 @@ fn a_run_stays_active_while_its_share_server_answers_a_request() {
 
     assert!(runs.active(&run).unwrap());
     scratch.ok_in(&scratch.root, &["rm", "notes"]);
-    assert!(runs.pending_shares(&run).unwrap().len() == 1);
+    assert_eq!(runs.pending_shares(&run).unwrap().len(), 1);
 
     // SAFETY: as above.
     assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGCONT) }, 0);
@@ -591,9 +594,9 @@ impl Drop for Killed {
 
 /// Whether the process `pid` is stopped, as `/proc/<pid>/stat` says.
 fn stopped(pid: u32) -> bool {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let state = stat.rsplit_once(") ").unwrap().1;
-    state.starts_with('T')
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    stat.rsplit_once(") ")
+        .is_some_and(|(_, state)| state.starts_with('T'))
 }
 
 /// A frame for the share server's socket: share 0's FUSE request to make

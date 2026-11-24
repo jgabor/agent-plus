@@ -45,7 +45,7 @@ use std::ffi::{CString, OsString};
 use std::fs::{DirBuilder, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentfile::{
     Auth, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share,
@@ -353,8 +353,9 @@ fn run_agent(
     let exited = process.wait();
     // Each share server ends once it has answered what the run process
     // sent, and the run is active until then, so `ap run` exits after it.
+    let deadline = Instant::now() + SERVER_WAIT;
     for server in &mut servers {
-        let _ = server.wait();
+        wait_or_kill(server, deadline);
     }
     drop(held);
     // SPEC.md's Run, under **Blocked hosts**. The network process ends once
@@ -380,6 +381,47 @@ fn run_agent(
 /// How long a run that has ended waits for the network process to end, for
 /// the hosts it blocked.
 const REPORTS_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a run whose run process has exited waits for its share servers
+/// to answer what it sent, before it kills them. A server answers one
+/// request at most by then, so only a hung one takes this long.
+const SERVER_WAIT: Duration = Duration::from_secs(10);
+
+/// Waits for `child` to exit, and kills it if it hasn't by `deadline`.
+/// Without pidfds, it waits as long as `child` takes.
+fn wait_or_kill(child: &mut Child, deadline: Instant) {
+    // SAFETY: `pidfd_open` takes and returns plain integers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    if let Ok(fd) = i32::try_from(fd)
+        && fd >= 0
+    {
+        // SAFETY: the kernel just returned this descriptor, and nothing
+        // else owns it.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let exited = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
+            // SAFETY: `poll` reads and writes `poll` alone, which outlives
+            // the call.
+            match unsafe { libc::poll(&mut poll, 1, timeout) } {
+                0 => break false,
+                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+                // It exited, or `poll` failed and only `wait` is left.
+                _ => break true,
+            }
+        };
+        if !exited {
+            // Nothing has reaped it, so its process id is still its own.
+            let _ = child.kill();
+        }
+    }
+    let _ = child.wait();
+}
 
 /// An error from `ap run`'s own work, in this context.
 fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
@@ -1251,6 +1293,21 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+
+    #[test]
+    fn a_share_server_that_hangs_is_killed_at_the_deadline() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut hung = Command::new("sleep").arg("60").spawn().unwrap();
+        let started = Instant::now();
+        wait_or_kill(&mut hung, started + Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        let status = hung.try_wait().unwrap().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+
+        let mut done = Command::new("true").spawn().unwrap();
+        wait_or_kill(&mut done, Instant::now() + Duration::from_secs(60));
+        assert!(done.try_wait().unwrap().unwrap().success());
+    }
 
     /// A log that a terminal can look at.
     struct Log(Rc<RefCell<Vec<u8>>>);

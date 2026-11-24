@@ -105,8 +105,9 @@ pub fn random_name() -> io::Result<String> {
     }
 }
 
-/// Adds the status the run ended with to its record, which [`Runs::hold`]
-/// opened. It is one write, so a reader sees the whole line or none of it.
+/// Adds the status the run ended with to its record, which
+/// [`Runs::appending`] or [`Runs::hold`] opened. It is one write, so a
+/// reader sees the whole line or none of it.
 pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
     held.write_all(format!("EXITED {status}\n").as_bytes())
 }

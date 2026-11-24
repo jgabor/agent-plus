@@ -322,6 +322,12 @@ makes no request for it. A local server proves `ap`'s downloader on every gate.
 The t1 tests that download from a real release are ignored, and only the
 nightly job runs them.
 
+**OS layer.** T1 fetches the `OS minimal` layer that `guest/os/pin.toml` pins
+into a store in `target/guest` once, and its tests start their stores from it.
+A gate in a tree that holds it makes no request for it. One ignored t1 test
+has `ap build` download the layer from its real release, and only the nightly
+job runs it.
+
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
 

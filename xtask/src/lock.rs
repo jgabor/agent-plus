@@ -148,9 +148,8 @@ pub fn exclusive(root: &Path) -> Result<Hold, Problem> {
 /// keeps the turnstile, and the lock is held, but only shared. So a process
 /// that is only told a bench waits can see for itself that it does. A bench
 /// that holds the lock, or waits behind another bench, doesn't count. Each
-/// try lets go once this returns.
-pub fn bench_waits(root: &Path) -> Result<bool, Problem> {
-    let directory = directory(root)?;
+/// try lets go once this returns. `directory` is the lock directory.
+pub fn bench_waits(directory: &Path) -> Result<bool, Problem> {
     let free = |file: &File, shared: bool| {
         let tried = if shared {
             file.try_lock_shared()
@@ -163,11 +162,11 @@ pub fn bench_waits(root: &Path) -> Result<bool, Problem> {
             Err(TryLockError::Error(e)) => Err(failed(e)),
         }
     };
-    let turnstile = open(&directory, "turnstile.lock")?;
+    let turnstile = open(directory, "turnstile.lock")?;
     if free(&turnstile, false)? {
         return Ok(false);
     }
-    let activity = open(&directory, "activity.lock")?;
+    let activity = open(directory, "activity.lock")?;
     Ok(!free(&activity, false)? && free(&activity, true)?)
 }
 
@@ -368,7 +367,7 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{open, take_exclusive, take_shared};
+    use super::{bench_waits, open, take_exclusive, take_shared};
     use std::fs::{self, TryLockError};
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{Receiver, channel};
@@ -438,6 +437,23 @@ mod tests {
 
         bench_release.send(()).unwrap();
         later.recv().unwrap().send(()).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    #[test]
+    fn a_bench_waits_only_while_the_turnstile_is_kept_and_the_lock_is_shared() {
+        let path = directory("bench-waits");
+        let waits = || bench_waits(&path).map_err(|e| e.0).unwrap();
+        assert!(!waits(), "nothing holds the lock");
+        let shared = take_shared(&path).map_err(|e| e.0).unwrap();
+        assert!(!waits(), "no bench keeps the turnstile");
+        let turnstile = open(&path, "turnstile.lock").map_err(|e| e.0).unwrap();
+        turnstile.lock().unwrap();
+        assert!(waits(), "a bench waits for a holder that shares the lock");
+        drop((shared, turnstile));
+        let bench = take_exclusive(&path).map_err(|e| e.0).unwrap();
+        assert!(!waits(), "the bench holds the lock");
+        drop(bench);
         fs::remove_dir_all(&path).unwrap();
     }
 

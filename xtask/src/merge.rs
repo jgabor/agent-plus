@@ -15,7 +15,7 @@ use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -51,6 +51,9 @@ const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
 /// Set in a merge that runs the xtask of `main`, to that `main`.
 const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
+/// Set in a PR's own xtask, to the id of the xtask of `main` that runs its
+/// `prove` and reads its input.
+const PROVING_FOR: &str = "XTASK_MERGE_PROVING_FOR";
 /// Where a PR's own xtask, run in its rebased tree, finds the record whose
 /// budgets it keeps, and leaves its result.
 const OWN: &str = "target/xtask-own";
@@ -1285,6 +1288,7 @@ fn prove_with_its_own(
     command
         .args(["prove", &scoring.number.to_string(), scoring.mode.command()])
         .current_dir(tree)
+        .env(PROVING_FOR, process::id().to_string())
         .stdin(report);
     place.pass_to(&mut command);
     if let Some(kept) = scoring.kept {
@@ -1322,12 +1326,37 @@ fn prove_with_its_own(
 /// Tells the supervisor that the bench of the PR's own xtask waits for the
 /// activity lock, for as long as the PR's xtask says so and this one sees for
 /// itself that the bench waits for work that shares it. The PR's xtask can
-/// say nothing else to the supervisor. Returns once it exits.
+/// say nothing else to the supervisor. Returns once it exits. On an error, it
+/// stops the PR's xtask, and the timeout runs again.
 fn relay(
     child: &mut process::Child,
     reports: io::PipeReader,
     tree: &Path,
 ) -> Result<process::ExitStatus, Problem> {
+    let mut stopped = false;
+    let ended = listen(child, reports, tree, &mut stopped);
+    if stopped {
+        let told = tell_supervisor(GOING);
+        if ended.is_ok() {
+            told?;
+        }
+    }
+    if ended.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    ended
+}
+
+/// `relay` until the PR's xtask exits. `stopped` says whether the supervisor
+/// last heard that the bench waits.
+fn listen(
+    child: &mut process::Child,
+    reports: io::PipeReader,
+    tree: &Path,
+    stopped: &mut bool,
+) -> Result<process::ExitStatus, Problem> {
+    let directory = lock::directory(tree)?;
     let couldnt = |e: io::Error| Problem(format!("couldn't wait for its own xtask: {e}"));
     let (said, heard) = mpsc::channel();
     thread::spawn(move || {
@@ -1340,44 +1369,42 @@ fn relay(
         }
     });
     let mut claimed = false;
-    let mut stopped = false;
     loop {
         let open = match heard.recv_timeout(Duration::from_secs(1)) {
+            // Only the newest report counts.
             Ok(report) => {
-                claimed = report == WAITING;
+                claimed = heard.try_iter().last().unwrap_or(report) == WAITING;
                 true
             }
             Err(mpsc::RecvTimeoutError::Timeout) => true,
             Err(mpsc::RecvTimeoutError::Disconnected) => false,
         };
-        let waits = open && claimed && lock::bench_waits(tree)?;
-        if waits != stopped {
+        let waits = open && claimed && lock::bench_waits(&directory)?;
+        if waits != *stopped {
             tell_supervisor(if waits { WAITING } else { GOING })?;
-            stopped = waits;
+            *stopped = waits;
         }
         if !open {
             return child.wait().map_err(couldnt);
         }
         if let Some(status) = child.try_wait().map_err(couldnt)? {
-            if stopped {
-                tell_supervisor(GOING)?;
-            }
             return Ok(status);
         }
     }
 }
 
 /// Tells the xtask of `main` that runs this `prove` when its bench starts to
-/// wait for the activity lock, and when it stops. That xtask reads this one's
-/// input through a pipe. Any other input hears nothing.
+/// wait for the activity lock, and when it stops, through this one's input.
+/// A `prove` that another process runs, such as an older xtask of `main`,
+/// says nothing.
 fn tell_main(report: u8) -> Result<(), Problem> {
-    let couldnt = |e: io::Error| Problem(format!("couldn't tell the xtask of `main`: {e}"));
-    let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
-    let mut input = fs::File::from(fd);
-    if !input.metadata().map_err(couldnt)?.file_type().is_fifo() {
+    let parent = std::os::unix::process::parent_id().to_string();
+    if env::var(PROVING_FOR).ok() != Some(parent) {
         return Ok(());
     }
-    input.write_all(&[report]).map_err(couldnt)
+    let couldnt = |e: io::Error| Problem(format!("couldn't tell the xtask of `main`: {e}"));
+    let fd = io::stdin().as_fd().try_clone_to_owned().map_err(couldnt)?;
+    fs::File::from(fd).write_all(&[report]).map_err(couldnt)
 }
 
 /// `prove`, run in a PR's rebased tree by the xtask of `main`: proves the PR

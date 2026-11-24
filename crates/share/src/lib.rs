@@ -13,10 +13,13 @@
 //! alone. Landlock doesn't cover a file's mode or times. A server with an
 //! `rw` share changes those, so it holds no other share. A server with none
 //! can't change them, and a process of its own, in [`times`], sets the
-//! times of a copy-on-write share's copies. The frames on the socket are
-//! the ones [`vmm::fs`] describes.
+//! times of a copy-on-write share's copies. A server of `rw` shares runs in
+//! a user namespace of its own, in [`namespace`], so it can change the mode
+//! of a file it can't read. The frames on the socket are the ones
+//! [`vmm::fs`] describes.
 
 mod landlock;
+mod namespace;
 mod server;
 mod sys;
 mod times;
@@ -31,6 +34,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
+pub use namespace::spawn as spawn_read_write;
 #[doc(hidden)]
 pub use server::when_git_is_listed;
 pub use server::{Mode, Root, Server};
@@ -78,18 +82,19 @@ pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> i
             }
         }
         if !served.is_empty() {
-            started.push(start_one(program, &served, hidden)?);
+            started.push(start_one(program, &served, hidden, read_write)?);
         }
     }
     Ok(Servers { started, serving })
 }
 
-/// Starts one share server for `roots`, which are all `rw` shares, or none
-/// of them.
+/// Starts one share server for `roots`, which are all `rw` shares, as
+/// `read_write` says, or none of them.
 fn start_one(
     program: &Path,
     roots: &[&Root<BorrowedFd>],
     hidden: &[String],
+    read_write: bool,
 ) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
     // Each root reaches the server as a descriptor it inherits, numbered in
@@ -119,10 +124,11 @@ fn start_one(
             Mode::CopyOnWrite(_) => command.arg(COPY_ON_WRITE).arg(next()).arg(next()),
         };
     }
-    let process = command
-        .stdin(OwnedFd::from(theirs))
-        .stdout(Stdio::null())
-        .spawn()?;
+    command.stdin(OwnedFd::from(theirs)).stdout(Stdio::null());
+    let process = match read_write {
+        true => namespace::spawn(&mut command)?,
+        false => command.spawn()?,
+    };
     drop(inherited);
     Ok(Started {
         process,
@@ -167,6 +173,9 @@ fn run(args: &[OsString]) -> io::Result<()> {
         return Err(io::Error::other(
             "an `rw` share needs a share server of its own",
         ));
+    }
+    if roots.iter().all(read_write) {
+        namespace::lower()?;
     }
     let mut server = Server::new(roots)?;
     raise_descriptor_limit();

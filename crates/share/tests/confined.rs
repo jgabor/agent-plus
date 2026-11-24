@@ -24,7 +24,8 @@ const ARGS: &str = "AP_SHARE_CONFINED_ARGS";
 /// What the server's process does once it has served, as if its own code
 /// were turned against it: the number of a descriptor it inherited, the
 /// call it opens with, a path from the descriptor to a file, and the calls
-/// it tries on that file, `fchmod`, `futimens`, or both.
+/// it tries on that file, `fchmod`, `futimens`, or both, and `raise` first
+/// to take up every capability it holds.
 const AIM: &str = "AP_SHARE_CONFINED_AIM";
 const SERVER: &str = "confined_server_process";
 /// The server runs on a test's thread here, and `ap` runs it on its main
@@ -52,7 +53,7 @@ fn confined_server_process() {
         let call = lines.next().unwrap() == "openat2";
         let path = CString::new(lines.next().unwrap()).unwrap();
         let changes: Vec<_> = lines.next().unwrap().split(' ').collect();
-        let changes = ["fchmod", "futimens"].map(|change| changes.contains(&change));
+        let changes = ["fchmod", "futimens", "raise"].map(|change| changes.contains(&change));
         (share::inheritable(fd).unwrap(), call, path, changes)
     });
     let status = share::main(&args);
@@ -65,17 +66,32 @@ fn confined_server_process() {
     unsafe { libc::_exit(i32::from(status)) };
 }
 
-/// What a server's code could do if it were turned against its rules: open
-/// the file at `path` from `directory`, with `openat2` or `openat` and no
-/// rule to stay beneath it, and change its mode, its times, or both, as
-/// `[mode, times]` says, through what it opened. Access mode 3 asks for
-/// neither reading nor writing.
-fn turn(directory: &OwnedFd, openat2: bool, path: &CStr, [mode, times]: [bool; 2]) {
+/// What a server's code could do if it were turned against its rules: take
+/// up every capability it holds if `raise` says so, open the file at `path`
+/// from `directory`, with `openat2` or `openat` and no rule to stay beneath
+/// it, and change its mode, its times, or both, as `mode` and `times` say,
+/// through what it opened. Access mode 3 asks for neither reading nor
+/// writing.
+fn turn(directory: &OwnedFd, openat2: bool, path: &CStr, [mode, times, raise]: [bool; 3]) {
     #[repr(C)]
     struct How {
         flags: u64,
         mode: u64,
         resolve: u64,
+    }
+    // `struct __user_cap_header_struct` and `struct __user_cap_data_struct`,
+    // as version 3 of capabilities reads them.
+    let header = [0x2008_0522_u32, 0];
+    let mut data = [0_u32; 6];
+    if raise {
+        // SAFETY: both calls read `header`, and read or write `data`, which
+        // outlive them.
+        unsafe {
+            libc::syscall(libc::SYS_capget, header.as_ptr(), data.as_mut_ptr());
+            data[0] = data[1];
+            data[3] = data[4];
+            libc::syscall(libc::SYS_capset, header.as_ptr(), data.as_ptr());
+        }
     }
     for flags in [libc::O_RDONLY, libc::O_PATH, libc::O_ACCMODE] {
         let flags = flags | libc::O_CLOEXEC;
@@ -128,10 +144,11 @@ fn turn(directory: &OwnedFd, openat2: bool, path: &CStr, [mode, times]: [bool; 2
 }
 
 /// Starts a confined server with one `rw` share at `root`, which, once it
-/// has served, turns on `path` from the root with `call`. Returns how it
-/// ended.
-fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
-    let aim = format!("{call}\n{path}\nfchmod futimens");
+/// has served, turns on `path` from the root with `call`, and with every
+/// capability it holds if `raise` says so. Returns how it ended.
+fn serve_and_turn(root: &Path, call: &str, path: &str, raise: bool) -> ExitStatus {
+    let raise = if raise { " raise" } else { "" };
+    let aim = format!("{call}\n{path}\nfchmod futimens{raise}");
     let (mut server, socket) = start(&[("rw", root)], Some((0, &aim)));
     drop(socket);
     server.wait().unwrap()
@@ -139,10 +156,23 @@ fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
 
 /// Starts one share server's process for `roots`, which it serves
 /// together, passing each root as `share::start` does: a descriptor it
-/// inherits, numbered in its arguments after the words that come before it. With `aim`, once it has served, it turns
+/// inherits, numbered in its arguments after the words that come before
+/// it. With `aim`, once it has served, it turns
 /// from the descriptor of root `index` as the rest of the aim says.
 /// Returns the process, and the other end of its socket.
 fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd) {
+    // `ap` starts a server of `rw` shares alone in a user namespace.
+    let namespace = roots.iter().all(|(words, _)| words.ends_with("rw"));
+    launch(roots, aim, namespace)
+}
+
+/// Starts a share server as [`start`] does, in a user namespace as
+/// `namespace` says.
+fn launch(
+    roots: &[(&str, &Path)],
+    aim: Option<(usize, &str)>,
+    namespace: bool,
+) -> (Child, OwnedFd) {
     let (mine, theirs) = UnixStream::pair().unwrap();
     let inherited: Vec<OwnedFd> = (roots.iter())
         .map(|(_, root)| share::inheritable(File::open(root).unwrap().as_fd()).unwrap())
@@ -165,7 +195,10 @@ fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd
     if let Some((index, rest)) = aim {
         command.env(AIM, format!("{}\n{rest}", inherited[index].as_raw_fd()));
     }
-    let server = command.spawn().unwrap();
+    let server = match namespace {
+        true => share::spawn_read_write(&mut command).unwrap(),
+        false => command.spawn().unwrap(),
+    };
     // The command holds the server's end of the socket.
     drop(command);
     drop(inherited);
@@ -186,16 +219,86 @@ fn a_confined_rw_server_can_t_change_the_mode_or_times_of_a_file_outside_it() {
     for call in ["openat", "openat2"] {
         for path in ["../outside/secret", absolute] {
             // The filter kills it at `openat2`, or at access mode 3.
-            let status = serve_and_turn(&tree.root, call, path);
+            let status = serve_and_turn(&tree.root, call, path, false);
             assert_eq!(status.signal(), Some(libc::SIGSYS), "{call} {path}");
             assert_eq!(mode_and_time(&tree.secret), before, "{call} {path}");
         }
     }
 
     // The same server changes a file of its own share that way.
-    serve_and_turn(&tree.root, "openat", "hello.txt");
+    serve_and_turn(&tree.root, "openat", "hello.txt", false);
     let hello = tree.root.join("hello.txt");
     assert_eq!(mode_and_time(&hello), (0o100_777, 0));
+}
+
+// #697: a server that may open a file past its mode, to change the mode,
+// still opens nothing outside its roots.
+#[test]
+fn a_confined_rw_server_can_t_change_the_mode_of_an_unreadable_file_outside_it() {
+    let tree = Tree::new("confined-turned-unreadable");
+    fs::set_permissions(&tree.secret, fs::Permissions::from_mode(0o0)).unwrap();
+    let before = mode_and_time(&tree.secret);
+    for path in ["../outside/secret", tree.secret.to_str().unwrap()] {
+        let status = serve_and_turn(&tree.root, "openat", path, true);
+        assert_eq!(status.signal(), Some(libc::SIGSYS), "{path}");
+        assert_eq!(mode_and_time(&tree.secret), before, "{path}");
+    }
+    // The same server changes a file of its own share that way.
+    let hello = tree.root.join("hello.txt");
+    fs::set_permissions(&hello, fs::Permissions::from_mode(0o0)).unwrap();
+    serve_and_turn(&tree.root, "openat", "hello.txt", true);
+    assert_eq!(mode_and_time(&hello), (0o100_777, 0));
+}
+
+// spec(SHARE): In an `rw` share, the agent can change the mode and times of a file or a directory it can't read, if you own it and its group is your primary group, as you can on your host.
+// spec(SHARE): On a host that doesn't let you make a user namespace, it can't.
+#[test]
+fn a_confined_rw_server_changes_the_mode_of_what_it_can_t_read() {
+    let tree = Tree::new("confined-unreadable");
+    fs::create_dir(tree.root.join("shut")).unwrap();
+    for path in ["hello.txt", "shut"] {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(0o0)).unwrap();
+    }
+    let (mut server, socket) = start(&[("rw", &tree.root)], None);
+    let mut guest = Guest::over(socket);
+    for (path, kind, mode) in [("hello.txt", 0o100_000, 0o600), ("shut", 0o040_000, 0o700)] {
+        let node = guest.walk(path).unwrap();
+        assert_eq!(guest.setattr(node, FATTR_MTIME, 0, 0), 0, "{path}");
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, mode), 0, "{path}");
+        assert_eq!(
+            mode_and_time(&tree.root.join(path)),
+            (kind | mode, 0),
+            "{path}"
+        );
+        // And again once the guest has forgotten it.
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0), 0, "{path}");
+        guest.call(FORGET, node, &u64::MAX.to_le_bytes());
+        let node = guest.walk(path).unwrap();
+        assert_eq!(guest.setattr(node, FATTR_MODE, 0, mode), 0, "{path}");
+        assert_eq!(
+            mode_and_time(&tree.root.join(path)).0,
+            kind | mode,
+            "{path}"
+        );
+    }
+    // What it can't write, it still can't truncate.
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o400), 0);
+    assert_eq!(guest.setattr(hello, FATTR_SIZE, 0, 0), EACCES);
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
+    drop(guest);
+    assert!(server.wait().unwrap().success());
+
+    // Where the host makes no user namespace, `ap` starts the server
+    // outside one, as here.
+    fs::set_permissions(tree.root.join("hello.txt"), fs::Permissions::from_mode(0o0)).unwrap();
+    let (mut server, socket) = launch(&[("rw", &tree.root)], None, false);
+    let mut guest = Guest::over(socket);
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.setattr(hello, FATTR_MODE, 0, 0o600), EACCES);
+    assert_eq!(mode_and_time(&tree.root.join("hello.txt")).0, 0o100_000);
+    drop(guest);
+    assert!(server.wait().unwrap().success());
 }
 
 // #440: Landlock doesn't cover a file's mode or times, and a server with

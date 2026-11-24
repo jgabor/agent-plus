@@ -1242,9 +1242,17 @@ fn waiting_to_be_read(pid: u32, text: &[u8]) -> bool {
     let mut buffer = vec![0u8; 64 << 10];
     for entry in fs::read_dir(format!("/proc/{pid}/fd")).unwrap() {
         let entry = entry.unwrap();
-        let socket = fs::read_link(entry.path())
-            .is_ok_and(|target| target.as_os_str().as_encoded_bytes().starts_with(b"socket:"));
-        let Some(theirs) = entry.file_name().to_str().and_then(|n| n.parse::<c_int>().ok()) else {
+        let socket = fs::read_link(entry.path()).is_ok_and(|target| {
+            target
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(b"socket:")
+        });
+        let Some(theirs) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<c_int>().ok())
+        else {
             continue;
         };
         if !socket {
@@ -1271,7 +1279,9 @@ fn waiting_to_be_read(pid: u32, text: &[u8]) -> bool {
             )
         };
         if let Ok(peeked) = usize::try_from(peeked)
-            && buffer[..peeked].windows(text.len()).any(|window| window == text)
+            && buffer[..peeked]
+                .windows(text.len())
+                .any(|window| window == text)
         {
             return true;
         }

@@ -76,7 +76,8 @@ pub trait Channel {
 pub trait System {
     fn mount(&mut self, mount: &Mount) -> io::Result<()>;
     /// Makes the agent's layers the root, if the host attached any, and moves
-    /// the filesystems in [`MOUNTS`] into it.
+    /// the filesystems in [`MOUNTS`] into it, but for `/tmp`, which it makes
+    /// in the same memory as the root's writable layer.
     fn stack_layers(&mut self) -> io::Result<()>;
     /// Sets up the link, if the host attached a network device, as
     /// [`net`] says, and names `ap` as the only resolver. Without the

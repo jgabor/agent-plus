@@ -9,7 +9,7 @@ use std::mem::size_of;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{self as unix_fs, OpenOptionsExt};
+use std::os::unix::fs::{self as unix_fs, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus};
@@ -54,6 +54,9 @@ const COMMAND_LINE: &str = "/proc/cmdline";
 const LAYERS: &str = "/layers";
 const UPPER: &str = "/upper";
 const STACK: &str = "/stack";
+/// The options of the tmpfs that holds the writable layer and `/tmp`.
+const WRITABLE: &str = "mode=0755,size=256m";
+const TMP: &str = "/tmp";
 
 const AF_INET: c_int = 2;
 const AF_INET6: c_int = 10;
@@ -212,11 +215,16 @@ impl System for Linux {
             lower.push(target);
         }
         // The writable layer ends with the machine, so it lives in memory.
+        // `/tmp` lives beside it, so the two share one limit, and what the
+        // agent writes can take only half the machine's memory.
         fs::create_dir_all(UPPER)?;
-        mount_with("tmpfs", UPPER, "tmpfs", 0, "mode=0755")?;
+        mount_with("tmpfs", UPPER, "tmpfs", 0, WRITABLE)?;
         let (upper, work) = (format!("{UPPER}/upper"), format!("{UPPER}/work"));
         fs::create_dir(&upper)?;
         fs::create_dir(&work)?;
+        let tmp = format!("{UPPER}/tmp");
+        fs::create_dir(&tmp)?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o1777))?;
         fs::create_dir_all(STACK)?;
         let options = root::overlay_options(&lower, &upper, &work);
         mount_with("overlay", STACK, "overlay", 0, &options)?;
@@ -226,6 +234,16 @@ impl System for Linux {
             match fs::create_dir(&moved) {
                 Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
                 _ => {}
+            }
+            if target == Path::new(TMP) {
+                // SAFETY: the path is a `&'static CStr`.
+                checked(unsafe { umount2(mount.target.as_ptr(), 0) })?;
+                let moved = moved.to_string_lossy();
+                mount_with(&tmp, &moved, "", MS_BIND, "")?;
+                // A bind ignores the flags given with it, so a remount sets
+                // them.
+                mount_with("", &moved, "", MS_REMOUNT | MS_BIND | mount.flags, "")?;
+                continue;
             }
             mount_with(
                 &target.to_string_lossy(),

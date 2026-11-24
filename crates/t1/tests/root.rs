@@ -206,3 +206,46 @@ fn ten_layers_stack_in_order() {
     lower.pop();
     assert!(seen["root"].contains(&format!("{lower},")), "{seen:?}");
 }
+
+// spec(Run): Files the agent writes outside its shares and its persisted state, `/tmp` included, are kept in that memory, and together they can take up to 256 MiB of it.
+// spec(Run): A write past that fails with a `No space left on device` error.
+#[test]
+fn the_root_and_tmp_share_256_mib() {
+    let store = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("root-fill-{}", process::id()));
+    let _ = fs::remove_dir_all(&store);
+    let probe = fs::read(guest_binary::build("fill-probe")).unwrap();
+    let stored = Layers::new(&store);
+    let attached: Vec<Layer> = layers(probe)
+        .iter()
+        .map(|image| {
+            let digest = stored.put(image, LEVEL).unwrap();
+            let disk = Box::new(stored.get(&digest).unwrap());
+            Layer { digest, disk }
+        })
+        .collect();
+    fs::remove_dir_all(&store).unwrap();
+
+    let kernel = fs::read(kernel::vmlinux()).unwrap();
+    let init = fs::read(guest_binary::ap()).unwrap();
+    let seen = boot_with(&init, &kernel, attached);
+    // The probe writes 192 MiB to `/tmp`, then fills the root, a MiB at a
+    // time, and then finds no room left in `/tmp`. The directories and the
+    // partial last MiB take a little.
+    assert_eq!(seen["tmp"], "192", "{seen:?}");
+    assert_eq!(seen["tmp_error"], "none", "{seen:?}");
+    let root: usize = seen["root"].parse().unwrap();
+    assert!((60..=64).contains(&root), "{seen:?}");
+    assert_eq!(
+        seen["root_error"], "No space left on device (os error 28)",
+        "{seen:?}"
+    );
+    assert_eq!(seen["after"], "0", "{seen:?}");
+    assert_eq!(
+        seen["after_error"], "No space left on device (os error 28)",
+        "{seen:?}"
+    );
+    assert_eq!(seen["tmp_mode"], "1777", "{seen:?}");
+    let options: Vec<&str> = seen["tmp_options"].split(',').collect();
+    assert!(options.contains(&"nosuid"), "{seen:?}");
+    assert!(options.contains(&"nodev"), "{seen:?}");
+}

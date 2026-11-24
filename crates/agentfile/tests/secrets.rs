@@ -1,7 +1,9 @@
 //! The arguments of `ENV`, `SECRET`, `SEAL`, and `AUTH`, the variables in
 //! `ENV` values, and the typed values they parse into.
 
-use agentfile::{Auth, Env, Error, Part, Reserved, Secret, Secrets, Text, parse, reserved};
+use agentfile::{
+    Auth, Env, Error, Harness, Part, Reserved, Secret, Secrets, Text, parse, parse_for, reserved,
+};
 
 /// Parses `lines` after an `AGENT claude` line, and returns their values.
 fn secrets_of(lines: &str) -> Secrets {
@@ -818,4 +820,23 @@ fn names_and_hosts_no_list_holds_pass() {
          SEAL HARNESS_KEY @api.harness.example\n",
     );
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn parse_for_checks_the_agents_own_harness() {
+    let adapter = |harness| match harness {
+        Harness::Codex => Reserved {
+            harness: "Codex",
+            set: vec!["KEPT_BY_CODEX"],
+            ..Reserved::default()
+        },
+        Harness::Claude => Reserved::default(),
+    };
+    let source = "AGENT codex\nOS minimal\nENV KEPT_BY_CODEX 1\n";
+    let errors = parse_for(source, adapter).unwrap_err();
+    assert_eq!(lines_of(&errors), [3], "{errors:?}");
+    assert!(errors[0].message.contains("for Codex"), "{errors:?}");
+    let claude = source.replace("AGENT codex", "AGENT claude");
+    let parsed = parse_for(&claude, adapter);
+    assert!(parsed.is_ok(), "{parsed:?}");
 }

@@ -9,6 +9,8 @@
 mod common;
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -522,6 +524,97 @@ fn rm_force_deletes_the_pending_changes_of_the_agent_s_finished_runs() {
     assert_eq!(runs.get(&active).unwrap(), None);
     assert!(!runs.list_pending().unwrap().contains(&active));
     assert!(runs.has_pending(&other).unwrap());
+}
+
+// spec(SHARE): `ap rm` and `ap reset` delete pending changes too, so they refuse while an agent has any, unless you pass `--force`.
+#[test]
+fn a_run_stays_active_while_its_share_server_answers_a_request() {
+    let scratch = Scratch::new("server-answers");
+    let dir = scratch.project("notes", SIMPLE, "notes");
+    scratch.build(&dir, SIMPLE_GRANTS);
+    let runs = Runs::new(scratch.store());
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    let pending = runs.create_pending_share(&run, &dir).unwrap();
+    runs.create_log(&run).unwrap();
+    // The test is `ap run` and its run process: it locks the record, and
+    // starts the share server with a copy, as `ap run` does.
+    let record = runs.lock(&run).unwrap();
+    let root = File::open(&dir).unwrap();
+    let kept = File::open(&pending).unwrap();
+    let roots = [share::Root::new(
+        root.as_fd(),
+        share::Mode::CopyOnWrite(kept.as_fd()),
+    )];
+    let ap = Path::new(env!("CARGO_BIN_EXE_ap"));
+    let share::Servers { mut started, .. } =
+        share::start(ap, &roots, &[], Some(record.as_fd())).unwrap();
+    let share::Started { process, socket } = started.remove(0);
+    let mut process = Killed(process);
+    drop((root, kept));
+    // The server holds still while the guest's request to make a directory
+    // waits in its socket, and the run process exits.
+    let pid = process.0.id();
+    // SAFETY: this call takes plain integers, and the process is the
+    // server this test started.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
+    wait_until("the share server to stop", || stopped(pid));
+    let mut socket = File::from(socket);
+    socket.write_all(&mkdir_frame(b"made")).unwrap();
+    drop(socket);
+    drop(record);
+
+    assert!(runs.active(&run).unwrap());
+    scratch.ok_in(&scratch.root, &["rm", "notes"]);
+    assert!(runs.pending_shares(&run).unwrap().len() == 1);
+
+    // SAFETY: as above.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGCONT) }, 0);
+    // Its answer finds the run process gone.
+    process.0.wait().unwrap();
+    assert!(!runs.active(&run).unwrap());
+    assert!(runs.has_pending(&run).unwrap());
+    assert!(pending.join("tree/made").is_dir());
+    let output = scratch.ap(&["rm", "notes"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+}
+
+/// A process that is killed if the test fails before it ends.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Whether the process `pid` is stopped, as `/proc/<pid>/stat` says.
+fn stopped(pid: u32) -> bool {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let state = stat.rsplit_once(") ").unwrap().1;
+    state.starts_with('T')
+}
+
+/// A frame for the share server's socket: share 0's FUSE request to make
+/// the directory `name` at the share's root.
+fn mkdir_frame(name: &[u8]) -> Vec<u8> {
+    const MKDIR: u32 = 9;
+    const ROOT: u64 = 1;
+    let mut body = 0o755_u32.to_le_bytes().to_vec();
+    body.extend(0o022_u32.to_le_bytes());
+    body.extend(name);
+    body.push(0);
+    let mut request = ((40 + body.len()) as u32).to_le_bytes().to_vec();
+    request.extend(MKDIR.to_le_bytes());
+    request.extend(2_u64.to_le_bytes());
+    request.extend(ROOT.to_le_bytes());
+    request.extend([0; 16]);
+    request.extend(body);
+    let mut frame = (request.len() as u32).to_le_bytes().to_vec();
+    frame.extend(0_u32.to_le_bytes());
+    frame.extend(request);
+    frame
 }
 
 #[test]

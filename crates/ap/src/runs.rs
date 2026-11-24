@@ -10,9 +10,8 @@
 //!   exists, so no way out of `ap run` leaves the socket behind.
 //! - The run process holds the VM, and is confined as `ap boot` is. Its
 //!   parent's death kills it, so the VM stops when `ap run` exits, for any
-//!   reason. It locks the run's record for as long as it lives, which makes
-//!   the run active. Once confined it can only write, so it can't remove its
-//!   socket itself.
+//!   reason. Once confined it can only write, so it can't remove its socket
+//!   itself.
 //!
 //! Between the two, `ap run` binds the run's socket, `<name>.sock`, in the
 //! runtime directory, and keeps it until it exits. It talks to the run
@@ -22,7 +21,14 @@
 //! A run with shares has a share server too, or two, which `ap run` starts
 //! with the roots it opened: one for the `rw` shares, and one for the
 //! others. The run process inherits the VMM's end of each server's socket,
-//! and the only one, so each server ends with it.
+//! and the only one, so each server ends with it, once it has answered what
+//! the run process sent.
+//!
+//! `ap run` locks the run's record before it starts the share servers, which
+//! makes the run active. The lock belongs to what it opened, and the run
+//! process and each share server hold a copy until they exit, so the run
+//! stays active until the last of them has, and none of its changes is
+//! still to come. `ap run` waits for them all before it exits.
 //!
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes, on
@@ -51,8 +57,8 @@
 //! same messages the run process sends it, and `ap logs` reads them back.
 //! The run's network decisions are a stream of their own in the same log,
 //! each one message, so they are deleted with it.
-//! Before the run process lets go of the run's record, it adds the status
-//! `ap run` exits with, which `ap ps -a` shows.
+//! Before the run process exits, it adds the status `ap run` exits with to
+//! the run's record, which `ap ps -a` shows.
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -593,11 +599,13 @@ fn wait_for_hang_up(stream: &UnixStream) {
 /// its end of a socket pair with `ap run` as its standard input. The third
 /// argument is the number of an inherited descriptor, the VMM's end of the
 /// network process's link, the fourth another's, its end of the pair that
-/// brings your keys, and the fifth another's, the shared lock on the store's
-/// agents that keeps the run's layers until it has opened them. A run with
-/// shares has one more for each share, in share order: the number of
-/// another, the VMM's end of the socket of the share server that serves it.
-/// Shares that one server serves name the same descriptor. It returns the
+/// brings your keys, the fifth another's, the shared lock on the store's
+/// agents that keeps the run's layers until it has opened them, and the
+/// sixth another's, the run's record, which `ap run` locked, and which this
+/// process holds until it exits. A run with shares has one more for each
+/// share, in share order: the number of another, the VMM's end of the
+/// socket of the share server that serves it. Shares that one server
+/// serves name the same descriptor. It returns the
 /// status to exit with, which nobody reads, because it reports how the run
 /// ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
@@ -609,7 +617,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if args.len() < 5 || orphaned {
+    if args.len() < 6 || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
@@ -619,18 +627,26 @@ pub fn run_process(args: &[OsString]) -> u8 {
         fd if fd > 2 => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
         _ => None,
     };
-    let (Some(link), Some(keys), Some(held_layers)) = (
+    // The record stays open until this process exits, so the run stays
+    // active until then.
+    let (Some(link), Some(keys), Some(held_layers), Some(record)) = (
         inherited(&args[2]),
         inherited(&args[3]),
         inherited(&args[4]),
+        inherited(&args[5]),
     ) else {
         return 125;
     };
     // A descriptor that two shares name is owned once.
-    let held = [link.as_raw_fd(), keys.as_raw_fd(), held_layers.as_raw_fd()];
+    let held = [
+        link.as_raw_fd(),
+        keys.as_raw_fd(),
+        held_layers.as_raw_fd(),
+        record.as_raw_fd(),
+    ];
     let mut sockets: Vec<OwnedFd> = Vec::new();
     let mut serving = Vec::new();
-    for arg in &args[5..] {
+    for arg in &args[6..] {
         let Some(fd) = arg.to_str().and_then(|arg| arg.parse::<i32>().ok()) else {
             return 125;
         };
@@ -696,8 +712,8 @@ pub fn run_process(args: &[OsString]) -> u8 {
     status
 }
 
-/// The run's record, which this process holds the lock on until it exits.
-static RECORD: OnceLock<::store::Held> = OnceLock::new();
+/// The run's record, opened to add the status `ap run` exits with.
+static RECORD: OnceLock<File> = OnceLock::new();
 
 /// Adds the status `ap run` exits with to the run's record. Only the one
 /// that claimed the run's end calls this, so it is written at most once.
@@ -708,7 +724,7 @@ fn record_exit(status: u8) {
     }
 }
 
-/// Locks the record of the run named `name` into [`RECORD`], reads the
+/// Opens the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, opens the layers it names, then lets go of
 /// `held_layers`, and boots the agent with its output sent to `output`, its
 /// keys read from `keys`, its network on `link`, and `shares`.
@@ -729,8 +745,8 @@ fn serve(
         Error::Failed("HOME isn't an absolute path, so there's no place for the store".to_owned())
     })?;
     let record = ::store::Runs::new(&root)
-        .hold(name)
-        .map_err(|error| Error::Failed(format!("can't lock the run's record: {error}")))?;
+        .appending(name)
+        .map_err(|error| Error::Failed(format!("can't open the run's record: {error}")))?;
     let _ = RECORD.set(record);
     let lost = |error: io::Error| Error::Failed(format!("can't read the run from ap run: {error}"));
     let mut reader = stream;

@@ -51,7 +51,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -194,9 +194,9 @@ fn run_agent(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     let name = args.agent.to_string_lossy();
-    // Held from before the run is recorded until its run process has locked
-    // the record and opened the layers, so `ap rm` and rebuilds wait, and
-    // never find the run finished or free a layer it is about to read.
+    // Held from before the run is recorded until its record is locked and
+    // its run process has opened the layers, so `ap rm` and rebuilds wait,
+    // and never find the run finished or free a layer it is about to read.
     let digests: Vec<&str> = layers.iter().map(|layer| layer.digest.as_str()).collect();
     let held_layers = ::store::Agents::new(root)
         .hold_layers(&name, &digests)
@@ -258,14 +258,20 @@ fn run_agent(
     start.authority = authority;
     // The values live in the network process alone from here.
     drop(injection);
+    // The run is active from here until the run process and each share
+    // server have exited, because each holds a copy of what this locked.
+    let record = runs
+        .lock(&run.name)
+        .map_err(fail("can't lock the run's record"))?;
     let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
     let share::Servers { started, serving } =
-        share::start(exe, &roots, &names).map_err(fail("can't start the share server"))?;
+        share::start(exe, &roots, &names, Some(record.as_fd()))
+            .map_err(fail("can't start the share server"))?;
     let share_sockets = (started.iter())
         .map(|server| share::inheritable(server.socket.as_fd()))
         .collect::<io::Result<Vec<_>>>()
         .map_err(fail("can't start the share server"))?;
-    drop(started);
+    let mut servers: Vec<Child> = started.into_iter().map(|server| server.process).collect();
     // Made after the share servers start, so that only the run process
     // inherits it.
     let link = share::inheritable(network_link.as_fd())
@@ -279,6 +285,8 @@ fn run_agent(
     let their_layers =
         share::inheritable(held_layers.as_fd()).map_err(fail("can't start the run"))?;
     drop(held_layers);
+    let their_record = share::inheritable(record.as_fd()).map_err(fail("can't start the run"))?;
+    drop(record);
     drop(network_process);
     let mut command = Command::new(exe);
     for secret in &names {
@@ -290,7 +298,8 @@ fn run_agent(
         .arg(&run.name)
         .arg(link.as_raw_fd().to_string())
         .arg(their_keys.as_raw_fd().to_string())
-        .arg(their_layers.as_raw_fd().to_string());
+        .arg(their_layers.as_raw_fd().to_string())
+        .arg(their_record.as_raw_fd().to_string());
     for server in serving {
         command.arg(share_sockets[server].as_raw_fd().to_string());
     }
@@ -306,6 +315,7 @@ fn run_agent(
     drop(link);
     drop(their_keys);
     drop(their_layers);
+    drop(their_record);
     drop(share_sockets);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.
@@ -341,6 +351,11 @@ fn run_agent(
     drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
     let exited = process.wait();
+    // Each share server ends once it has answered what the run process
+    // sent, and the run is active until then, so `ap run` exits after it.
+    for server in &mut servers {
+        let _ = server.wait();
+    }
     drop(held);
     // SPEC.md's Run, under **Blocked hosts**. The network process ends once
     // the run process has, and its reports end with it.

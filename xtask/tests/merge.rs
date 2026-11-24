@@ -420,7 +420,8 @@ maybe_kill before
   "api -X") case "$4" in */labels*) n="${{4%/labels*}}"; n="${{n##*/}}"
       if [ -f "{bin}/refuse-label-$n" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
       exit 0 ;;
-      */issues/*) exit 0 ;; esac
+      */issues/*) if [ -f "{bin}/refuse-close-${{4##*/}}" ]; then echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1; fi
+      exit 0 ;; esac
     if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
@@ -3873,6 +3874,37 @@ fn a_refresh_closes_the_issue_when_gh_fails_after_its_squash() {
     let calls = repo.calls();
     let (unlabel, close) = (calls.find(&unlabeled(7)), calls.find(&closed(7)));
     assert!(unlabel.is_some() && unlabel < close, "{calls}");
+}
+
+/// The next run lists only open PRs, so a step after the squash that fails
+/// can't be retried. The PR merged all the same, and the run names what is
+/// left to do.
+#[test]
+fn a_refresh_that_merges_says_so_when_a_later_step_fails() {
+    let repo = Repo::new("refresh-left-undone");
+    repo.prepared(BRANCH, 7, "");
+    repo.set_green(&repo.head());
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    for name in ["refuse-label-7", "refuse-close-7"] {
+        fs::write(repo.bin.join(name), "").unwrap();
+    }
+
+    let (output, summary) = repo.refresh_summed_up();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(summary.contains("| #9 | merged | "), "{summary}");
+    let said = stderr(&output);
+    assert!(!said.contains("wasn't merged"), "{said}");
+    for left in [
+        "refresh: PR 9 merged, but issue 7 keeps `land-needed`: ",
+        "refresh: PR 9 merged, but issue 7 is still open: ",
+    ] {
+        assert!(said.contains(left), "{said}");
+    }
+    // Each step gets a try, so one that fails stops none of the others.
+    let calls = repo.calls();
+    assert!(calls.contains(&unlabeled(9)), "{calls}");
+    assert!(calls.contains(&closed(7)), "{calls}");
 }
 
 /// Each merge moves `main`, so a PR that was green on the old one is proven

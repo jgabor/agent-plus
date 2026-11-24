@@ -115,15 +115,22 @@ pub fn run() -> Result<Verdict, Problem> {
                 };
                 let merged = match new {
                     Ok(new) if new.is_empty() => merge_if_armed(&root, &gh, pr, &head),
-                    Ok(new) => Ok(Some(format!(
+                    Ok(new) => Ok(Landed::Open(format!(
                         "its proof accepts what the owner didn't approve: {}. Arming its auto-merge again approves it",
                         new.join("; ")
                     ))),
                     Err(problem) => Err(problem),
                 };
                 match merged {
-                    Ok(None) => row.verdict = "merged",
-                    Ok(Some(why)) => {
+                    Ok(Landed::Merged(left)) => {
+                        row.verdict = "merged";
+                        // The next run lists only open PRs, so it can't retry.
+                        for undone in left {
+                            eprintln!("refresh: PR {} merged, but {undone}", pr.number);
+                            verdict = Verdict::Fail;
+                        }
+                    }
+                    Ok(Landed::Open(why)) => {
                         let why = format!("PR {} stays open, because {why}", pr.number);
                         println!("refresh: {why}");
                         row.open = Some(why);
@@ -195,14 +202,17 @@ pub fn run() -> Result<Verdict, Problem> {
     Ok(verdict)
 }
 
+/// What `merge_if_armed` did with a proven PR.
+enum Landed {
+    /// It left the PR open, for this reason.
+    Open(String),
+    /// The PR merged, and each of these steps after the squash failed.
+    Merged(Vec<String>),
+}
+
 /// Squashes a proven PR, if the owner's approval still stands for the head
-/// that was proven. Returns why it left the PR open, if it did.
-fn merge_if_armed(
-    root: &Path,
-    gh: &Gh,
-    pr: &OpenPr,
-    head: &str,
-) -> Result<Option<String>, Problem> {
+/// that was proven.
+fn merge_if_armed(root: &Path, gh: &Gh, pr: &OpenPr, head: &str) -> Result<Landed, Problem> {
     let number = pr.number;
     let slot = lock::merge_slot(root)?;
     let now = gh.armed(number)?;
@@ -211,23 +221,26 @@ fn merge_if_armed(
     let mut close = false;
     if now.state != "MERGED" {
         if now.state != "OPEN" {
-            return Ok(Some(format!("it is {}", now.state)));
+            return Ok(Landed::Open(format!("it is {}", now.state)));
         }
         if !now.auto_merge {
-            return Ok(Some("its auto-merge was turned off".to_string()));
+            return Ok(Landed::Open("its auto-merge was turned off".to_string()));
         }
         if now.head != head {
-            return Ok(Some(format!("its head moved from {head} to {}", now.head)));
+            return Ok(Landed::Open(format!(
+                "its head moved from {head} to {}",
+                now.head
+            )));
         }
         let read = gh.pull_request(number)?;
         // A green from an earlier proof can predate the review.
         if read.changes_requested {
-            return Ok(Some("a review of it requested changes".to_string()));
+            return Ok(Landed::Open("a review of it requested changes".to_string()));
         }
         // The label goes from the issues this run listed, and they are the
         // ones to close.
         if read.closing_issues != pr.closing_issues {
-            return Ok(Some("the issue it closes changed".to_string()));
+            return Ok(Landed::Open("the issue it closes changed".to_string()));
         }
         if let Err(problem) = gh.merge_pr(number, head, &slot)
             && gh.armed(number)?.state != "MERGED"
@@ -241,15 +254,24 @@ fn merge_if_armed(
         // that GitHub closed stays as it is.
         close = true;
     }
+    // Every step gets a try, so this doesn't stop at the first failure.
+    let mut left = Vec::new();
     // A merge with the workflow's token starts no `mirror-labels` run.
-    remove_land_needed(gh, pr)?;
+    let labeled = pr.closing_issues.iter().map(|n| ("issue", *n));
+    for (kind, number) in labeled.chain([("PR", number)]) {
+        if let Err(Problem(message)) = gh.remove_label(number, LAND_NEEDED) {
+            left.push(format!("{kind} {number} keeps `{LAND_NEEDED}`: {message}"));
+        }
+    }
     // Nor does GitHub close the issues of a PR that such a merge lands.
     if close {
         for number in &pr.closing_issues {
-            gh.close_issue(*number)?;
+            if let Err(Problem(message)) = gh.close_issue(*number) {
+                left.push(format!("issue {number} is still open: {message}"));
+            }
         }
     }
-    Ok(None)
+    Ok(Landed::Merged(left))
 }
 
 /// What this head's proof accepted that the comment before its own didn't
@@ -319,15 +341,6 @@ fn hand_back(
     } else {
         Err(Problem(failed.join("\n")))
     }
-}
-
-/// From the PR and every issue it closes, which `remove_label` allows when
-/// one has no such label.
-fn remove_land_needed(gh: &Gh, pr: &OpenPr) -> Result<(), Problem> {
-    for number in pr.closing_issues.iter().chain([&pr.number]) {
-        gh.remove_label(*number, LAND_NEEDED)?;
-    }
-    Ok(())
 }
 
 const NOT_PROVEN: &str = "Not proven";

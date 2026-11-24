@@ -19,9 +19,10 @@
 //! process over a socket pair of its own, and sends your keys over another,
 //! so that a harness that doesn't read them holds back only them.
 //!
-//! A run with shares has a third process, the share server, which `ap run`
-//! starts with the roots it opened. The run process inherits the VMM's end
-//! of the server's socket, and the only one, so the server ends with it.
+//! A run with shares has a share server too, or two, which `ap run` starts
+//! with the roots it opened: one for the `rw` shares, and one for the
+//! others. The run process inherits the VMM's end of each server's socket,
+//! and the only one, so each server ends with it.
 //!
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes, on
@@ -594,10 +595,11 @@ fn wait_for_hang_up(stream: &UnixStream) {
 /// network process's link, the fourth another's, its end of the pair that
 /// brings your keys, and the fifth another's, the shared lock on the store's
 /// agents that keeps the run's layers until it has opened them. A run with
-/// shares has a sixth: the number of another, the VMM's end of the share
-/// server's socket. It returns
-/// the status to exit with, which nobody reads, because it reports how the
-/// run ended over the socket.
+/// shares has one more for each share, in share order: the number of
+/// another, the VMM's end of the socket of the share server that serves it.
+/// Shares that one server serves name the same descriptor. It returns the
+/// status to exit with, which nobody reads, because it reports how the run
+/// ended over the socket.
 pub fn run_process(args: &[OsString]) -> u8 {
     let parent = args
         .first()
@@ -607,7 +609,7 @@ pub fn run_process(args: &[OsString]) -> u8 {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
             || Some(libc::getppid()) != parent
     };
-    if !(5..=6).contains(&args.len()) || orphaned {
+    if args.len() < 5 || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;
     }
@@ -624,11 +626,27 @@ pub fn run_process(args: &[OsString]) -> u8 {
     ) else {
         return 125;
     };
-    let shares = match args.get(5).map(inherited) {
-        None => None,
-        Some(Some(fd)) => Some(fd),
-        Some(None) => return 125,
-    };
+    // A descriptor that two shares name is owned once.
+    let held = [link.as_raw_fd(), keys.as_raw_fd(), held_layers.as_raw_fd()];
+    let mut sockets: Vec<OwnedFd> = Vec::new();
+    let mut serving = Vec::new();
+    for arg in &args[5..] {
+        let Some(fd) = arg.to_str().and_then(|arg| arg.parse::<i32>().ok()) else {
+            return 125;
+        };
+        let server = match sockets.iter().position(|socket| socket.as_raw_fd() == fd) {
+            Some(server) => server,
+            None if fd > 2 && !held.contains(&fd) => {
+                // SAFETY: `ap run` passed this descriptor for this process
+                // alone, and nothing else in it owns it.
+                sockets.push(unsafe { OwnedFd::from_raw_fd(fd) });
+                sockets.len() - 1
+            }
+            None => return 125,
+        };
+        serving.push(server);
+    }
+    let shares = Shares { sockets, serving };
     // SAFETY: `ap run` passes its socket as standard input, and nothing else
     // in this process uses it.
     let stream = UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) });
@@ -693,14 +711,13 @@ fn record_exit(status: u8) {
 /// Locks the record of the run named `name` into [`RECORD`], reads the
 /// request from `stream`, opens the layers it names, then lets go of
 /// `held_layers`, and boots the agent with its output sent to `output`, its
-/// keys read from `keys`, its network on `link`, and the shares the server
-/// at the end of `shares` serves.
+/// keys read from `keys`, its network on `link`, and `shares`.
 fn serve(
     name: &str,
     stream: &UnixStream,
     keys: File,
     link: OwnedFd,
-    shares: Option<OwnedFd>,
+    shares: Shares,
     held_layers: OwnedFd,
     output: &Arc<ToRun>,
 ) -> Result<u8, Error> {
@@ -767,9 +784,9 @@ fn serve(
     if start.terminal.is_some() {
         pass_keys(keys, Arc::clone(&input));
     }
-    let shares = match (shares, start.shares.len()) {
-        (None, 0) => None,
-        (Some(socket), count @ 1..) => Some(Shares { socket, count }),
+    let shares = match (shares.serving.len(), start.shares.len()) {
+        (0, 0) => None,
+        (served, asked) if served == asked => Some(shares),
         _ => return Err(lost(bad_message())),
     };
     let output = Arc::clone(output);

@@ -6,8 +6,8 @@
 //! travels to the server as a frame, and the server's frame is the answer:
 //!
 //! - to the server: the length of what follows as a little-endian `u32`, the
-//!   share's index as a `u32`, and the request's bytes, as the guest wrote
-//!   them.
+//!   share's index among the server's shares as a `u32`, and the request's
+//!   bytes, as the guest wrote them.
 //! - to the device: the length of what follows as a `u32`, and the answer's
 //!   bytes, or none for a request that gets no answer.
 //!
@@ -171,8 +171,8 @@ pub struct Fs {
 }
 
 impl Fs {
-    /// The device for share `share`, which the guest mounts by `tag`, cut to
-    /// 36 bytes.
+    /// The device for the share that its server numbers `share`, which the
+    /// guest mounts by `tag`, cut to 36 bytes.
     pub fn new(share: u32, tag: &[u8]) -> Self {
         let mut config = vec![0; TAG_LEN];
         let len = tag.len().min(TAG_LEN);

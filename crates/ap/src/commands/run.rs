@@ -10,14 +10,14 @@
 //! guest, and your terminal is put in raw mode for as long as the run lasts,
 //! so every key reaches the harness. Its resizes follow.
 //!
-//! An agent's shares are checked again, then opened, and a share server
-//! serves those handles to the run. A file share is served from the
-//! directory that holds it, by its name. A copy-on-write share's changes go
-//! to a directory of its own in the run's pending directory, which the run
-//! makes in the store and leaves there when it ends. The guest mounts each
-//! share at the place SPEC.md's Paths section gives it. The share from
-//! `--share` needs no approval. It is copy-on-write, and the guest mounts it
-//! at `~/<directory name>`.
+//! An agent's shares are checked again, then opened, and share servers
+//! serve those handles to the run: one for its `rw` shares, and one for the
+//! others. A file share is served from the directory that holds it, by its
+//! name. A copy-on-write share's changes go to a directory of its own in the
+//! run's pending directory, which the run makes in the store and leaves
+//! there when it ends. The guest mounts each share at the place SPEC.md's
+//! Paths section gives it. The share from `--share` needs no approval. It
+//! is copy-on-write, and the guest mounts it at `~/<directory name>`.
 //!
 //! The guest's network follows the agent's rules in `NETWORK`, merged with
 //! the ones from `--network`. A host with URL rules has each request to it
@@ -31,7 +31,7 @@
 //! one goes to the network process, which puts it in requests to its bound
 //! hosts, and the harness gets a placeholder made for this run instead.
 //! No process that `ap run` starts, such as the run process, the network
-//! process, the share server, or the cleanup process, starts with a hidden
+//! process, a share server, or the cleanup process, starts with a hidden
 //! secret's variable.
 //!
 //! `AUTH key` and `AUTH token` read the variable that the harness's adapter
@@ -246,7 +246,7 @@ fn run_agent(
         .map_err(fail("can't start the run's cleanup"))?;
     let listener = UnixListener::bind(&socket).map_err(fail("can't create the run's socket"))?;
     let (mut stream, theirs) = UnixStream::pair().map_err(fail("can't start the run"))?;
-    // The network process and the share server end once the run process,
+    // The network process and the share servers end once the run process,
     // which holds the only other end of each one's socket, does.
     let ap::network::Started {
         process: network_process,
@@ -258,18 +258,15 @@ fn run_agent(
     start.authority = authority;
     // The values live in the network process alone from here.
     drop(injection);
-    let share_socket = match shares.is_empty() {
-        true => None,
-        false => {
-            let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
-            let server =
-                share::start(exe, &roots, &names).map_err(fail("can't start the share server"))?;
-            let inherited = share::inheritable(server.socket.as_fd())
-                .map_err(fail("can't start the share server"))?;
-            Some(inherited)
-        }
-    };
-    // Made after the share server starts, so that only the run process
+    let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
+    let share::Servers { started, serving } =
+        share::start(exe, &roots, &names).map_err(fail("can't start the share server"))?;
+    let share_sockets = (started.iter())
+        .map(|server| share::inheritable(server.socket.as_fd()))
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(fail("can't start the share server"))?;
+    drop(started);
+    // Made after the share servers start, so that only the run process
     // inherits it.
     let link = share::inheritable(network_link.as_fd())
         .map_err(fail("can't start the network process"))?;
@@ -294,8 +291,8 @@ fn run_agent(
         .arg(link.as_raw_fd().to_string())
         .arg(their_keys.as_raw_fd().to_string())
         .arg(their_layers.as_raw_fd().to_string());
-    if let Some(socket) = &share_socket {
-        command.arg(socket.as_raw_fd().to_string());
+    for server in serving {
+        command.arg(share_sockets[server].as_raw_fd().to_string());
     }
     let mut process = command
         .stdin(OwnedFd::from(theirs))
@@ -309,7 +306,7 @@ fn run_agent(
     drop(link);
     drop(their_keys);
     drop(their_layers);
-    drop(share_socket);
+    drop(share_sockets);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.
     let mut log = runs

@@ -229,7 +229,7 @@ pub enum Changes {
     /// Files, but never a mode or a time, for copy-on-write shares, whose
     /// copies' times another process sets.
     Files,
-    /// Files, and their modes and times, for an `rw` share.
+    /// Files, and their modes and times, for `rw` shares alone.
     FilesModesAndTimes,
 }
 
@@ -246,8 +246,8 @@ pub enum Changes {
 /// descriptor it holds, or by one name in a directory it holds, which
 /// Landlock holds to the roots it may change. Landlock doesn't cover a
 /// file's mode or times, so only a server with an `rw` share changes those
-/// itself, and an `ro` or copy-on-write share beside an `rw` one rests on
-/// the server's own checks. Changing a file's times takes no name at all.
+/// itself, and it holds no other share. Changing a file's times takes no
+/// name at all.
 /// Only an `rw` share's server makes links, because a copy-on-write share
 /// keeps a symlink as a record, and makes no hard link. It asks the
 /// processes at `times` to set the times of a copy-on-write share's

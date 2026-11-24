@@ -1,8 +1,9 @@
 //! The share server as its own confined process, as `ap` starts it: every
 //! change an agent makes in an `rw` share gets past its Landlock rules and
-//! its filter, which would kill it, and an `ro` share beside it still
-//! refuses every write. A copy-on-write share's server can't change your
-//! files' modes or times, even if its own code were turned against it.
+//! its filter, which would kill it, and an `ro` share, which has a server of
+//! its own, refuses every write. A copy-on-write share's server can't change
+//! your files' modes or times, and a server with an `rw` share holds no
+//! other share, even if its own code were turned against it.
 
 mod guest;
 
@@ -15,7 +16,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 
 /// The share server's arguments, one to a line, for the process the test
 /// starts.
@@ -130,22 +131,45 @@ fn turn(directory: &OwnedFd, openat2: bool, path: &CStr, [mode, times]: [bool; 2
 /// has served, turns on `path` from the root with `call`. Returns how it
 /// ended.
 fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
+    let aim = format!("{call}\n{path}\nfchmod futimens");
+    let (mut server, socket) = start(&[("rw", root)], Some((0, &aim)));
+    drop(socket);
+    server.wait().unwrap()
+}
+
+/// Starts one share server's process for `roots`, which it serves
+/// together, passing each root as `share::start` does: a descriptor it
+/// inherits, numbered in its arguments after the words that come before it. With `aim`, once it has served, it turns
+/// from the descriptor of root `index` as the rest of the aim says.
+/// Returns the process, and the other end of its socket.
+fn start(roots: &[(&str, &Path)], aim: Option<(usize, &str)>) -> (Child, OwnedFd) {
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let inherited = share::inheritable(File::open(root).unwrap().as_fd()).unwrap();
-    let fd = inherited.as_raw_fd();
-    let mut server = Command::new(env::current_exe().unwrap())
+    let inherited: Vec<OwnedFd> = (roots.iter())
+        .map(|(_, root)| share::inheritable(File::open(root).unwrap().as_fd()).unwrap())
+        .collect();
+    let mut args = Vec::new();
+    for ((words, _), fd) in roots.iter().zip(&inherited) {
+        if !words.is_empty() {
+            args.push(words.to_string());
+        }
+        args.push(fd.as_raw_fd().to_string());
+    }
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
         .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
-        .env(ARGS, format!("rw\n{fd}"))
-        .env(AIM, format!("{fd}\n{call}\n{path}\nfchmod futimens"))
+        .env(ARGS, args.join("\n"))
         .env(ARENAS, "1")
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::null());
+    if let Some((index, rest)) = aim {
+        command.env(AIM, format!("{}\n{rest}", inherited[index].as_raw_fd()));
+    }
+    let server = command.spawn().unwrap();
+    // The command holds the server's end of the socket.
+    drop(command);
     drop(inherited);
-    drop(mine);
-    server.wait().unwrap()
+    (server, OwnedFd::from(mine))
 }
 
 /// The mode and modification time of the file at `path`.
@@ -174,32 +198,36 @@ fn a_confined_rw_server_can_t_change_the_mode_or_times_of_a_file_outside_it() {
     assert_eq!(mode_and_time(&hello), (0o100_777, 0));
 }
 
+// #440: Landlock doesn't cover a file's mode or times, and a server with
+// an `rw` share may change those, so it holds no other share's root.
+#[test]
+fn a_server_that_changes_modes_and_times_serves_only_rw_shares() {
+    for mode in ["ro", "cow"] {
+        let tree = Tree::new(&format!("confined-mixed-{mode}-rw"));
+        let other = Tree::new(&format!("confined-mixed-{mode}"));
+        let pending = other.base.join("pending");
+        fs::create_dir(&pending).unwrap();
+        let hello = other.root.join("hello.txt");
+        let before = mode_and_time(&hello);
+        let mut roots = vec![("rw", tree.root.as_path()), (mode, &other.root)];
+        if mode == "cow" {
+            roots.push(("", &pending));
+        }
+        let aim = "openat\nhello.txt\nfchmod futimens";
+        let (mut server, socket) = start(&roots, Some((1, aim)));
+        drop(socket);
+        let status = server.wait().unwrap();
+        assert_eq!(mode_and_time(&hello), before, "{mode}");
+        // It refuses the roots before it serves, and exits with 1.
+        assert_eq!(status.code(), Some(1), "{mode} {status}");
+    }
+}
+
 #[test]
 fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     let tree = Tree::new("confined-rw");
-    let other = Tree::new("confined-ro");
-    let (mine, theirs) = UnixStream::pair().unwrap();
-    // Each root reaches the server as `share::start` passes it: a
-    // descriptor it inherits, numbered in its arguments.
-    let roots = [&tree.root, &other.root].map(|root| File::open(root).unwrap());
-    let inherited = roots
-        .each_ref()
-        .map(|root| share::inheritable(root.as_fd()).unwrap());
-    let args = format!(
-        "rw\n{}\nro\n{}",
-        inherited[0].as_raw_fd(),
-        inherited[1].as_raw_fd()
-    );
-    let mut server = Command::new(env::current_exe().unwrap())
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
-        .env(ARGS, args)
-        .env(ARENAS, "1")
-        .stdin(OwnedFd::from(theirs))
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    drop(inherited);
-    let mut guest = Guest::over(OwnedFd::from(mine));
+    let (mut server, socket) = start(&[("rw", &tree.root)], None);
+    let mut guest = Guest::over(socket);
     let root = tree.root.clone();
 
     let (file, handle) = guest.create(1, b"new.txt", 0).unwrap();
@@ -250,29 +278,6 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     assert_eq!(guest.create(away, b"planted", 0), Err(ENOENT));
     assert!(!tree.base.join("outside/away/planted").exists());
 
-    // The `ro` share, beside it, refuses every write, and still locks.
-    let (error, entry) = guest.call_share(1, LOOKUP, 1, b"hello.txt\0");
-    assert_eq!(error, 0);
-    let node = u64::from_le_bytes(entry[..8].try_into().unwrap());
-    let mut body = O_WRONLY.to_le_bytes().to_vec();
-    body.extend([0; 4]);
-    assert_eq!(guest.call_share(1, OPEN, node, &body).0, EROFS);
-    let mut neither = 3u32.to_le_bytes().to_vec();
-    neither.extend([0; 4]);
-    assert_eq!(guest.call_share(1, OPEN, node, &neither).0, EROFS);
-    assert_eq!(guest.call_share(1, MKDIR, 1, &[0; 16]).0, EROFS);
-    let (error, out) = guest.call_share(1, OPEN, node, &[0; 8]);
-    assert_eq!(error, 0);
-    let handle = u64::from_le_bytes(out[..8].try_into().unwrap());
-    let mut lock = handle.to_le_bytes().to_vec();
-    lock.extend(7u64.to_le_bytes());
-    lock.extend(0u64.to_le_bytes());
-    lock.extend(i64::MAX.to_le_bytes());
-    lock.extend(F_RDLCK.to_le_bytes());
-    lock.extend([0; 12]);
-    assert_eq!(guest.call_share(1, SETLK, 0, &lock).0, 0);
-    assert_eq!(fs::read(other.root.join("hello.txt")).unwrap(), INSIDE);
-
     // Closing the socket ends the server, which lived through all of it.
     drop(guest);
     assert!(server.wait().unwrap().success());
@@ -280,30 +285,30 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
 }
 
 #[test]
+fn a_confined_ro_server_refuses_every_write_and_still_locks() {
+    let tree = Tree::new("confined-ro");
+    let (mut server, socket) = start(&[("ro", &tree.root)], None);
+    let mut guest = Guest::over(socket);
+
+    let node = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.open(node, O_WRONLY), Err(EROFS));
+    assert_eq!(guest.open(node, 3), Err(EROFS));
+    assert_eq!(guest.call(MKDIR, 1, &[0; 16]).0, EROFS);
+    let handle = guest.open(node, 0).unwrap();
+    assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, 0).0, 0);
+
+    drop(guest);
+    assert!(server.wait().unwrap().success());
+    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
+}
+
+#[test]
 fn a_confined_server_keeps_a_copy_on_write_share_s_changes_pending() {
     let tree = Tree::new("confined-cow");
     let pending = tree.base.join("pending");
     fs::create_dir(&pending).unwrap();
-    let (mine, theirs) = UnixStream::pair().unwrap();
-    let dirs = [&tree.root, &pending].map(|dir| File::open(dir).unwrap());
-    let inherited = dirs
-        .each_ref()
-        .map(|dir| share::inheritable(dir.as_fd()).unwrap());
-    let args = format!(
-        "cow\n{}\n{}",
-        inherited[0].as_raw_fd(),
-        inherited[1].as_raw_fd()
-    );
-    let mut server = Command::new(env::current_exe().unwrap())
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
-        .env(ARGS, args)
-        .env(ARENAS, "1")
-        .stdin(OwnedFd::from(theirs))
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    drop(inherited);
-    let mut guest = Guest::over(OwnedFd::from(mine));
+    let (mut server, socket) = start(&[("cow", &tree.root), ("", &pending)], None);
+    let mut guest = Guest::over(socket);
 
     guest.overwrite("hello.txt", b"from the agent").unwrap();
     let hello = guest.walk("hello.txt").unwrap();
@@ -355,29 +360,10 @@ fn a_copy_on_write_server_can_t_change_the_mode_or_times_of_your_file() {
         fs::create_dir(&pending).unwrap();
         let hello = tree.root.join("hello.txt");
         let before = mode_and_time(&hello);
-        let (mine, theirs) = UnixStream::pair().unwrap();
-        let dirs = [&tree.root, &pending].map(|dir| File::open(dir).unwrap());
-        let inherited = dirs
-            .each_ref()
-            .map(|dir| share::inheritable(dir.as_fd()).unwrap());
-        let args = format!(
-            "cow\n{}\n{}",
-            inherited[0].as_raw_fd(),
-            inherited[1].as_raw_fd()
-        );
-        let aim = format!("{}\nopenat\nhello.txt\n{call}", inherited[0].as_raw_fd());
-        let mut server = Command::new(env::current_exe().unwrap())
-            .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
-            .env(ARGS, args)
-            .env(AIM, aim)
-            .env(ARENAS, "1")
-            .stdin(OwnedFd::from(theirs))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        drop(inherited);
-        let mut guest = Guest::over(OwnedFd::from(mine));
+        let roots = [("cow", tree.root.as_path()), ("", &pending)];
+        let aim = format!("openat\nhello.txt\n{call}");
+        let (mut server, socket) = start(&roots, Some((0, &aim)));
+        let mut guest = Guest::over(socket);
         // The agent changes its own copy's mode and times first.
         let file = guest.walk("hello.txt").unwrap();
         assert_eq!(guest.setattr(file, FATTR_MODE, 0, 0o600), 0);
@@ -393,49 +379,25 @@ fn a_copy_on_write_server_can_t_change_the_mode_or_times_of_your_file() {
 #[test]
 fn a_confined_server_serves_a_file_share_s_file_alone() {
     let tree = Tree::new("confined-file");
-    let (mine, theirs) = UnixStream::pair().unwrap();
-    let root = File::open(&tree.root).unwrap();
-    let inherited = [
-        share::inheritable(root.as_fd()).unwrap(),
-        share::inheritable(root.as_fd()).unwrap(),
-    ];
-    let args = format!(
-        "file\nhello.txt\nrw\n{}\nfile\nhello.txt\nro\n{}",
-        inherited[0].as_raw_fd(),
-        inherited[1].as_raw_fd()
-    );
-    let mut server = Command::new(env::current_exe().unwrap())
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
-        .env(ARGS, args)
-        .env(ARENAS, "1")
-        .stdin(OwnedFd::from(theirs))
-        .stdout(Stdio::null())
-        .spawn()
-        .unwrap();
-    drop(inherited);
-    let mut guest = Guest::over(OwnedFd::from(mine));
+    let (mut server, socket) = start(&[("file\nhello.txt\nrw", &tree.root)], None);
+    let mut guest = Guest::over(socket);
 
     guest.overwrite("hello.txt", b"from the agent").unwrap();
     let hello = guest.walk("hello.txt").unwrap();
     assert_eq!(guest.setattr(hello, FATTR_SIZE, 4, 0), 0);
     assert_eq!(guest.read_file("dir/nested.txt"), Err(ENOENT));
     assert_eq!(guest.create(1, b"new.txt", 0), Err(EPERM));
+    drop(guest);
+    assert!(server.wait().unwrap().success());
 
-    // The `ro` share of the same file reads it, and refuses every write.
-    let (error, entry) = guest.call_share(1, LOOKUP, 1, b"hello.txt\0");
-    assert_eq!(error, 0);
-    let node = u64::from_le_bytes(entry[..8].try_into().unwrap());
-    let (error, out) = guest.call_share(1, OPEN, node, &[0; 8]);
-    assert_eq!(error, 0);
-    let mut read = out[..8].to_vec();
-    read.extend(0u64.to_le_bytes());
-    read.extend(4096u32.to_le_bytes());
-    read.extend([0; 20]);
-    assert_eq!(guest.call_share(1, READ, 0, &read), (0, b"from".to_vec()));
-    let mut body = O_WRONLY.to_le_bytes().to_vec();
-    body.extend([0; 4]);
-    assert_eq!(guest.call_share(1, OPEN, node, &body).0, EROFS);
-    assert_eq!(guest.call_share(1, LOOKUP, 1, b"dir\0").0, ENOENT);
+    // An `ro` share of the same file, from a server of its own, reads it,
+    // and refuses every write.
+    let (mut server, socket) = start(&[("file\nhello.txt\nro", &tree.root)], None);
+    let mut guest = Guest::over(socket);
+    assert_eq!(guest.read_file("hello.txt"), Ok(b"from".to_vec()));
+    let node = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.open(node, O_WRONLY), Err(EROFS));
+    assert_eq!(guest.lookup(1, b"dir"), Err(ENOENT));
 
     drop(guest);
     assert!(server.wait().unwrap().success());

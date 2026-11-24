@@ -7,7 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
 
-const DIRECTORY: &str = "harness/ledger";
+pub const DIRECTORY: &str = "harness/ledger";
 const MEASURED: &str = "target/bench/result.toml";
 
 #[derive(Debug, PartialEq)]

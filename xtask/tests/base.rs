@@ -539,6 +539,24 @@ fn a_tree_like_its_base_runs_t2() {
     assert_fails(&repo.gate(), "t2", "planted_in_t2");
 }
 
+/// An earlier attempt at a record may leave one in the ledger, as the nightly
+/// job allows.
+#[test]
+fn a_tree_like_its_base_but_in_the_ledger_runs_t2() {
+    let repo = with_failing_t2("t2-ledger");
+    repo.write("harness/ledger/9.toml", &record_with_proven(0));
+    assert_fails(&repo.gate(), "t2", "planted_in_t2");
+}
+
+#[test]
+fn a_file_beside_an_adapter_file_leaves_t2_out() {
+    let repo = with_failing_t2("t2-beside");
+    repo.write("crates/ap/src/lock.rs.orig", "// beside\n");
+    let output = repo.gate();
+    assert_passes(&output);
+    assert!(stdout(&output).contains("skip t2\n"), "{}", stdout(&output));
+}
+
 #[test]
 fn without_origin_main_t2_runs() {
     let repo = Repo::files(

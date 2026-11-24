@@ -128,8 +128,9 @@ pub fn check(
 }
 
 /// Whether the tree, with its untracked files, differs from its base on an
-/// adapter path. A tree with no base, or one that doesn't differ from it, is
-/// `main` as it is, which T2 checks too.
+/// adapter path, a file or a directory that ends in `/`. A tree with no base,
+/// or one that differs from it only in the ledger, where an earlier attempt at
+/// a record may be, is `main` as it is, which T2 checks too.
 fn needs_t2(root: &Path) -> Result<bool, Problem> {
     let Some(commit) = base::find(root)? else {
         return Ok(true);
@@ -142,10 +143,15 @@ fn needs_t2(root: &Path) -> Result<bool, Problem> {
     let mut paths = changed
         .split('\0')
         .chain(untracked.split('\0'))
-        .filter(|path| !path.is_empty())
+        .filter(|path| !path.is_empty() && !path.starts_with(&format!("{}/", ledger::DIRECTORY)))
         .peekable();
     let unchanged = paths.peek().is_none();
-    Ok(unchanged || paths.any(|path| ADAPTER_PATHS.iter().any(|prefix| path.starts_with(prefix))))
+    Ok(unchanged
+        || paths.any(|path| {
+            ADAPTER_PATHS
+                .iter()
+                .any(|entry| path == *entry || (entry.ends_with('/') && path.starts_with(entry)))
+        }))
 }
 
 fn compare_with_base(

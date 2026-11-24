@@ -306,11 +306,12 @@ change can affect a budget that the bench measures when its diff touches
 untracked files, differs from its base under `crates/ap/src/adapter/`,
 `crates/ap/src/lock.rs`, `crates/t2/`, `crates/fake-upstream/`, `guest/os/`,
 or `guest/kernel/`. The gate runs `t2` for an adapter change, and for a tree
-that is `main` as it is: one with no base, or no change from it. It prints
-`pass t2` or `fail t2` on a line of its own. Otherwise it prints `skip t2`
-and leaves `t2` out. A `t2` check counts toward the spec score only when
-`t2` runs, so a promise needs a check in another tier too. The nightly job
-tests `main` as it is, so its gate runs `t2`, and that run is its T2 check.
+that is `main` as it is: one with no base, or no change from it but in
+`harness/ledger/`. It prints `pass t2` or `fail t2` on a line of its own.
+Otherwise it prints `skip t2` and leaves `t2` out. A `t2` check counts toward
+the spec score only when `t2` runs, so a promise needs a check in another
+tier too. The nightly job tests `main` as it is, so its gate runs `t2`, and
+that run is its T2 check.
 
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps

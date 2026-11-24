@@ -1,6 +1,6 @@
 //! Landlock, which holds the share server to the shares' roots even if its
-//! own code were turned against it. A filter can't read the flags of
-//! `openat2`, so this is what keeps a file outside every root closed.
+//! own code were turned against it. A filter can't read the name an open
+//! takes, so this is what keeps a file outside every root closed.
 
 use std::ffi::c_long;
 use std::io;

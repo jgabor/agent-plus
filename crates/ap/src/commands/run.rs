@@ -1,9 +1,9 @@
-//! `ap run <agent> [-i] [-p <prompt>] [--network=<rule>]...`, from SPEC.md's
-//! Run section. It names the run, and starts a run process that boots the
-//! agent's layers in a new microVM and starts the harness there as the user
-//! `agent`, as [`ap::runs`] says. It streams the harness's output and exits
-//! with its status, or with 125 if the harness never started. What it shows
-//! of the output, it also writes to the run's log.
+//! `ap run <agent> [-i] [-p <prompt>] [--share <path>] [--network=<rule>]...`,
+//! from SPEC.md's Run section. It names the run, and starts a run process
+//! that boots the agent's layers in a new microVM and starts the harness
+//! there as the user `agent`, as [`ap::runs`] says. It streams the harness's
+//! output and exits with its status, or with 125 if the harness never
+//! started. What it shows of the output, it also writes to the run's log.
 //!
 //! A run with a prompt is headless, and the harness gets pipes. Any other
 //! run, or one with `-i`, is interactive: the harness gets a terminal in the
@@ -17,10 +17,11 @@
 //! makes in the store and leaves there when it ends. The guest mounts each
 //! share at the place SPEC.md's Paths section gives it.
 //!
-//! The guest's network follows the agent's host and IP rules in `NETWORK`,
-//! merged with the ones from `--network`.
-//! A URL rule, and everything else on #297's list of what isn't built yet,
-//! fails with 125 and says so, before any VM starts.
+//! The guest's network follows the agent's rules in `NETWORK`, merged with
+//! the ones from `--network`. A host with URL rules has each request to it
+//! decided, as [`ap::network`] says. An instruction in [`NOT_BUILT`], or a
+//! flag in [`FLAGS_NOT_BUILT`], fails with 125 and says so, before any VM
+//! starts.
 //!
 //! Each `SECRET`'s value comes from the variable of its name in this
 //! process's environment, and a run without one fails with 125, before any

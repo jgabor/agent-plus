@@ -327,6 +327,38 @@ fn each_codex_effort_maps_to_a_level_the_version_accepts() {
     golden_in("codex", "effort.txt", lines.as_bytes());
 }
 
+// spec(EFFORT): With Codex, the adapter also sets the effort of plan mode (`plan_mode_reasoning_effort`), so plan mode uses the same level, and a project's settings can't pick another.
+#[test]
+fn codex_plan_mode_gets_the_effort() {
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                for effort in [None, Some(Effort::Low), Some(Effort::High), Some(Effort::Max)] {
+                    let arguments = codex::arguments(version, None, effort, mode, interactive);
+                    let efforts: Vec<&str> = (arguments.windows(2))
+                        .filter(|pair| pair[0] == "-c" && pair[1].contains("reasoning_effort="))
+                        .map(|pair| pair[1].as_str())
+                        .collect();
+                    let run = format!("{version} {mode:?} {interactive} {effort:?}");
+                    let Some(effort) = effort else {
+                        assert!(efforts.is_empty(), "{run} {efforts:?}");
+                        continue;
+                    };
+                    let (level, _) = codex::effort(version, effort);
+                    assert_eq!(
+                        efforts,
+                        [
+                            format!("model_reasoning_effort=\"{level}\""),
+                            format!("plan_mode_reasoning_effort=\"{level}\""),
+                        ],
+                        "{run}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // spec(MODE): | `read` | reads and explores, and doesn't edit. In an interactive Claude Code run, approving its plan lets it start editing | `plan` | `read-only` sandbox, approval `never` |
 // spec(MODE): | `ask` | reads, and asks before anything else | `default` | `read-only` sandbox, approval `on-request` |
 // spec(MODE): | `edit` | also edits files in its workspace. Claude Code asks before commands other than common file operations. Codex runs commands inside its sandbox and asks before leaving it | `acceptEdits` | `workspace-write` sandbox, approval `on-request` |

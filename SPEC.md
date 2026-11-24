@@ -942,6 +942,9 @@ EFFORT high
 - `ap` doesn't know which levels each model supports, because `MODEL` is
   passed through unchecked. A level the model doesn't support is left to
   the harness, at run time.
+- With Codex, the adapter also sets the effort of plan mode
+  (`plan_mode_reasoning_effort`), so plan mode uses the same level, and a
+  project's settings can't pick another.
 - `EFFORT` overrides any effort a plugin sets.
 
 ### MODE

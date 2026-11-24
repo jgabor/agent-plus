@@ -3,10 +3,10 @@
 //!
 //! The network process reports each host the first time it blocks it, as
 //! one message on the socket it asks for lookups on: `!`, then `lookup
-//! <name>`, or `connect <name or -> <address> <port>`. Before a connection,
-//! `alone ` says that it blocked a request there that no rule for the host
-//! alone would allow, and it reports the host again, without it, once it
-//! blocks one that such a rule would. Past [`MOST_BLOCKED`] hosts, it
+//! <name>`, or `connect <name or -> <address> <port>`. Before either,
+//! `alone ` says that no rule for the host alone would allow what it
+//! blocked, and it reports the host again, without it, once it blocks
+//! something that such a rule would. Past [`MOST_BLOCKED`] hosts, it
 //! reports `more` once, and nothing after. `ap run` reads each report as
 //! data, and works out each host's rule itself, from the run's rules.
 
@@ -101,10 +101,7 @@ fn read(message: &[u8]) -> Option<Read> {
         Some(text) => (text, true),
         None => (text, false),
     };
-    match parse(text)? {
-        Blocked::Lookup(_) if alone => None,
-        blocked => Some(Read::Blocked(blocked, alone)),
-    }
+    Some(Read::Blocked(parse(text)?, alone))
 }
 
 /// What [`text`] wrote, if it reads as a host the network process could
@@ -257,7 +254,9 @@ impl Reporter {
                 port,
             } => self.decided(false, name.as_deref(), *address, *port),
         }
-        self.note(&blocked, false);
+        let harness: Vec<&str> = self.harness.iter().map(String::as_str).collect();
+        let alone = net::allowing(&self.network, &harness, &blocked).is_none();
+        self.note(&blocked, alone);
     }
 
     /// Reports a request on a connection to `name` at `address` on
@@ -297,17 +296,18 @@ impl Reporter {
     fn note(&self, blocked: &Blocked, alone: bool) {
         let mut hosts = self.hosts.borrow_mut();
         let host = blocked.host();
+        let more = hosts.len() == MOST_BLOCKED && !hosts.contains_key(&host);
         let message = match hosts.get(&host) {
             Some(&known) if alone || !known => return,
             Some(_) => write(blocked, alone),
             None if hosts.len() > MOST_BLOCKED => return,
-            None if hosts.len() == MOST_BLOCKED => [&[TAG][..], b"more"].concat(),
+            None if more => [&[TAG][..], b"more"].concat(),
             None => write(blocked, alone),
         };
         // The socket doesn't wait. A report that doesn't fit is sent again
-        // the next time the host is blocked.
+        // the next time the host is blocked. Past `more`, nothing is.
         if self.send(&message) {
-            hosts.insert(host, alone);
+            hosts.insert(host, alone && !more);
         }
     }
 
@@ -391,14 +391,9 @@ mod tests {
         for blocked in reports {
             for alone in [false, true] {
                 let read = read(&write(&blocked, alone));
-                let lookup = matches!(blocked, Blocked::Lookup(_));
-                match read {
-                    Some(Read::Blocked(read, was)) => {
-                        assert!(read == blocked && was == alone && !(lookup && alone));
-                    }
-                    None => assert!(lookup && alone),
-                    Some(Read::More) => panic!("{blocked:?}"),
-                }
+                assert!(
+                    matches!(&read, Some(Read::Blocked(read, was)) if *read == blocked && *was == alone)
+                );
             }
         }
         assert!(matches!(read(b"!more"), Some(Read::More)));
@@ -584,6 +579,7 @@ mod tests {
             "-https://example.com/open/secret",
             "-https://example.net/secret",
             "+https://example.org/open",
+            "-example.org:8080",
         ]
         .map(OsString::from)
         .to_vec();
@@ -606,7 +602,13 @@ mod tests {
         deny("example.com", "/other");
         // None would allow this one.
         deny("example.net", "/secret");
-        // A rule for the host would allow the first, which still decides.
+        // No rule for the host alone would allow the connection, but one
+        // would allow the request after it, and nothing after that changes it.
+        reporter.report(Blocked::Connection {
+            name: Some("example.org".to_owned()),
+            address,
+            port: 8080,
+        });
         deny("example.org", "/other");
         deny("example.org", "/open/../x");
         drop(theirs);

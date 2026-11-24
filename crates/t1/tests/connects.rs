@@ -947,6 +947,7 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
     let script = format!(
         "echo \"allowed $(timeout 20 git ls-remote {url}/allowed/repo 2>&1 | head -1)\"\n\
          echo \"denied $(timeout 20 git ls-remote {url}/denied/repo 2>&1 | head -1)\"\n\
+         timeout 20 bash -c 'exec 3<>/dev/tcp/host.ap.internal/{port}' 2>/dev/null\n\
          tcp not-http host.ap.internal {port}\n"
     );
     // Without the listener's authority in `SSL_CERT_FILE`, nothing reaches
@@ -959,7 +960,8 @@ fn a_url_rule_decides_each_https_request_to_your_host() {
     let (lines, _, errors, name) = run_to_end(&scratch, "url", &script);
     // The allowed request reached the listener, which doesn't know the
     // repository. The denied one didn't, and the guest's connection reset.
-    // So did the connection that isn't HTTP.
+    // So did the connection that isn't HTTP. One that sent nothing and
+    // closed was refused by nothing, and has no line.
     assert!(
         lines[0].starts_with("allowed ") && lines[0].contains("not found"),
         "{lines:?}"

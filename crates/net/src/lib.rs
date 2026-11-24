@@ -336,9 +336,9 @@ impl Blocked {
 /// neither would allow it.
 pub fn allowing(network: &Network, harness: &[&str], blocked: &Blocked) -> Option<String> {
     match blocked {
-        Blocked::Lookup(name) => suggest(network, blocked, |added| {
-            could_allow(added, harness, name)
-        }),
+        Blocked::Lookup(name) => {
+            suggest(network, blocked, |added| could_allow(added, harness, name))
+        }
         Blocked::Connection {
             name,
             address,

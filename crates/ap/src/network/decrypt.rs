@@ -21,6 +21,7 @@
 //! didn't get the value.
 
 use std::cell::Cell;
+use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream};
 use std::path::Path;
@@ -273,9 +274,8 @@ impl Decrypted {
             }
             Err(error) => {
                 // A request the rules denied was decided already.
-                self.not_http = self.reads == Reads::Requests
-                    && error.kind() == io::ErrorKind::PermissionDenied
-                    && !denied.get();
+                let unread = error.get_ref().is_some_and(|error| error.is::<NotHttp>());
+                self.not_http = self.reads == Reads::Requests && unread && !denied.get();
                 stack.abort(self.id);
                 stack.forget(self.id);
                 false
@@ -307,7 +307,7 @@ impl Decrypted {
             self.allowed = true;
         }
         if matches!(self.stage, Stage::Hello(..)) && self.since.elapsed() >= HELLO_WAIT {
-            return Err(refused("a client hello that doesn't end"));
+            return Err(not_http("a client hello that doesn't end"));
         }
         loop {
             let mut moved = false;
@@ -468,22 +468,22 @@ impl Decrypted {
                     allows(Scheme::Http, target)
                 });
                 self.allowed |= self.to_upstream.len() > before;
-                fed.map_err(|_| refused("a request the rules deny"))
+                fed.map_err(|_| not_http("a request the check can't read, or the rules deny"))
             }
             Stage::Hello(acceptor, raw) => {
                 raw.extend_from_slice(input);
                 while !input.is_empty() {
                     if acceptor.read_tls(&mut input)? == 0 {
-                        return Err(refused("a client hello that doesn't end"));
+                        return Err(not_http("a client hello that doesn't end"));
                     }
                 }
                 let accepted = match acceptor.accept() {
                     Ok(None) if raw.len() > HELLO_LIMIT => {
-                        return Err(refused("a long client hello"));
+                        return Err(not_http("a long client hello"));
                     }
                     Ok(None) => return Ok(()),
                     Ok(Some(accepted)) => accepted,
-                    Err(_) => return Err(refused("a client hello it can't read")),
+                    Err(_) => return Err(not_http("a client hello it can't read")),
                 };
                 let server = accepted.client_hello().server_name().map(str::to_owned);
                 let agrees = server.as_deref().map(|server| {
@@ -496,7 +496,7 @@ impl Decrypted {
                     _ if required => return Err(refused("a request without its key")),
                     (Reads::Requests, None) => {}
                     (Reads::Requests, Some(false)) => {
-                        return Err(refused("a server name that disagrees"));
+                        return Err(not_http("a server name that disagrees"));
                     }
                     // Not for the bound host, so it isn't decrypted.
                     (Reads::Injects { by_name }, _) => {
@@ -598,7 +598,7 @@ impl Decrypted {
                     if without.is_some() {
                         return Err(refused("a request without its key"));
                     }
-                    fed.map_err(|_| refused("a request the rules deny"))?;
+                    fed.map_err(|_| not_http("a request the check can't read, or the rules deny"))?;
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error),
@@ -629,7 +629,7 @@ impl Decrypted {
                     }
                     // A server that speaks before a request is allowed isn't
                     // HTTP.
-                    Ok(_) if !self.allowed => return Err(refused("a server that speaks first")),
+                    Ok(_) if !self.allowed => return Err(not_http("a server that speaks first")),
                     Ok(n) => guest.writer().write_all(&buffer[..n])?,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                     Err(error) => return Err(error),
@@ -657,6 +657,23 @@ impl Decrypted {
 
 fn refused(why: &str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, why.to_owned())
+}
+
+/// Why the proxy refused what came on a connection: it wasn't HTTP that the
+/// request check could read, or the rules denied a request.
+#[derive(Debug)]
+struct NotHttp(&'static str);
+
+impl fmt::Display for NotHttp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for NotHttp {}
+
+fn not_http(why: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, NotHttp(why))
 }
 
 fn waited(error: &io::Error) -> bool {

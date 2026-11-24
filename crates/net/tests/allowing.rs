@@ -202,4 +202,8 @@ fn a_request_gets_a_rule_only_where_the_rule_would_allow_the_request() {
         assert!(!proxied(&rules, HARNESS, &request(target)).allows());
         assert_eq!(allowing_request(&rules, HARNESS, &request(target)), None);
     }
+    // Under `NETWORK +`, no rule for the host beats the `-` URL rule either.
+    let open = network("NETWORK +\nNETWORK -https://example.com/secret\n");
+    assert!(!proxied(&open, HARNESS, &request("/secret")).allows());
+    assert_eq!(allowing_request(&open, HARNESS, &request("/secret")), None);
 }

@@ -582,6 +582,39 @@ fn a_run_stays_active_while_its_share_server_answers_a_request() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
 }
 
+#[test]
+fn only_the_server_that_keeps_pending_changes_holds_the_record() {
+    let scratch = Scratch::new("server-keeps");
+    let runs = Runs::new(scratch.store());
+    let run = runs.create("notes", 1).unwrap().name;
+    runs.create_pending(&run).unwrap();
+    let pending = runs.create_pending_share(&run, &scratch.root).unwrap();
+    let record = runs.lock(&run).unwrap();
+    let root = File::open(&scratch.root).unwrap();
+    let kept = File::open(&pending).unwrap();
+    let roots = [
+        share::Root::new(root.as_fd(), share::Mode::ReadWrite),
+        share::Root::new(root.as_fd(), share::Mode::CopyOnWrite(kept.as_fd())),
+    ];
+    let ap = Path::new(env!("CARGO_BIN_EXE_ap"));
+    let servers = share::start(ap, &roots, &[], Some(record.as_fd())).unwrap();
+    drop((root, kept, record));
+    let mut held = Vec::new();
+    for server in servers.started {
+        let pid = server.process.id();
+        let process = Killed(server.process);
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
+        let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+        held.push((args[1].to_vec(), args.contains(&&b"keep"[..])));
+        drop(server.socket);
+        drop(process);
+    }
+
+    // The `rw` share's server changes modes and times, so it holds nothing
+    // but its shares.
+    assert_eq!(held, [(b"rw".to_vec(), false), (b"keep".to_vec(), true)]);
+}
+
 /// A process that is killed if the test fails before it ends.
 struct Killed(Child);
 

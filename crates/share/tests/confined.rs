@@ -311,6 +311,17 @@ fn a_confined_rw_server_changes_the_mode_of_what_it_can_t_read() {
 // #440: Landlock doesn't cover a file's mode or times, and a server with
 // an `rw` share may change those, so it holds no other share's root.
 #[test]
+fn a_server_of_rw_shares_keeps_nothing_but_its_shares() {
+    let tree = Tree::new("confined-rw-kept");
+    let record = tree.base.join("record");
+    fs::write(&record, "").unwrap();
+    let (mut server, socket) = start(&[("keep", &record), ("rw", &tree.root)], None);
+    drop(socket);
+    // It refuses before it serves, and exits with 1.
+    assert_eq!(server.wait().unwrap().code(), Some(1));
+}
+
+#[test]
 fn a_server_that_changes_modes_and_times_serves_only_rw_shares() {
     for mode in ["ro", "cow"] {
         let tree = Tree::new(&format!("confined-mixed-{mode}-rw"));

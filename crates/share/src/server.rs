@@ -656,7 +656,9 @@ impl Share {
     /// Refuses a directory that the host has moved out from under the
     /// root, as if it were gone. Each directory above it is opened in turn,
     /// with `O_PATH`, and only its identity is read, until the root, or the
-    /// top of the host's tree.
+    /// top of the host's tree. A directory with no search permission can't
+    /// be walked up from, so for one the guest knows, its name shows where
+    /// it is, once in each walk.
     fn served(&self, directory: &OwnedFd) -> Result<(), i32> {
         if directory.as_raw_fd() == self.root.as_raw_fd() {
             return Ok(());
@@ -669,10 +671,25 @@ impl Share {
                 .map_err(errno)
         };
         let mut here = identity(directory.as_fd())?;
-        let mut above: Option<OwnedFd> = None;
+        let mut above: Option<Rc<OwnedFd>> = None;
+        let mut named = Vec::new();
         while here != root {
-            let from = above.as_ref().map_or(directory.as_fd(), AsFd::as_fd);
-            let up = sys::parent(from).map_err(errno)?;
+            let from = above.as_deref().map_or(directory.as_fd(), AsFd::as_fd);
+            let up = match sys::parent(from).map_err(errno) {
+                Ok(up) => Rc::new(up),
+                Err(libc::EACCES) if !named.contains(&here) => {
+                    named.push(here);
+                    let found = self.known.get(&here).and_then(|node| self.nodes.get(node));
+                    let found = found.ok_or(libc::EACCES)?;
+                    let flags = libc::O_PATH | libc::O_NOFOLLOW;
+                    let fd = sys::open_beneath(found.parent.as_fd(), &found.name, flags);
+                    if identity(fd.map_err(errno)?.as_fd())? != here {
+                        return Err(libc::ENOENT);
+                    }
+                    Rc::clone(&found.parent)
+                }
+                Err(error) => return Err(error),
+            };
             let next = identity(up.as_fd())?;
             if next == here {
                 return Err(libc::ENOENT);
@@ -682,19 +699,16 @@ impl Share {
         Ok(())
     }
 
-    /// A node's attributes, while it is beneath the root. A file is where
-    /// its directory is. A directory with no search permission can't be
-    /// walked up from, so its name shows where it is.
+    /// A node's attributes, while it is beneath the root. A file is checked
+    /// by the directory it was found in, because a file the agent holds
+    /// open can have no name left.
     fn getattr(&self, node: u64) -> Answer {
         let found = self.node(node)?;
-        if !is(found.mode, libc::S_IFDIR) {
-            self.served(&found.parent)?;
-        } else if let Err(error) = self.served(&found.fd) {
-            if error != libc::EACCES {
-                return Err(error);
-            }
-            self.reopen(found, libc::O_PATH | libc::O_NOFOLLOW)?;
-        }
+        let directory = match is(found.mode, libc::S_IFDIR) {
+            true => &found.fd,
+            false => &found.parent,
+        };
+        self.served(directory)?;
         let stat = sys::fstat(found.fd.as_fd()).map_err(errno)?;
         Ok(attr_out(&stat, self.owner))
     }

@@ -1049,7 +1049,8 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
 }
 
 // spec(ap stop): If the run's `ap run` is suspended, `ap stop` resumes it.
-// spec(ap stop): Once `ap stop` has reached the run, its terminal's job control no longer suspends its `ap run`.
+// spec(ap stop): Once `ap stop` has reached the run, its `ap run` no longer waits to be in the foreground of its terminal.
+// spec(ap stop): An interactive run that `ap stop` reaches before its `ap run` has set your terminal's modes leaves them as they are.
 #[test]
 fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let scratch = Scratch::new("background");
@@ -1058,12 +1059,19 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     // A shell with job control, as yours is, starts an interactive run in
     // the background of its terminal, as `ap run open &` would. Raw mode
     // can't be set from there, so `ap run` stops on `SIGTTOU`, and again
-    // each time it resumes.
+    // each time it resumes. Once the shell gets `SIGTERM`, as from its
+    // guard, it kills the run's process group, and waits for it.
     let mut command = Command::new("sh");
     command
         .arg("-c")
         .arg(format!(
-            "set -m; timeout -k 10 {TIMEOUT} \"$0\" run open & exec sleep {TIMEOUT}"
+            "set -m
+            timeout -k 10 {TIMEOUT} \"$0\" run open &
+            run=$!
+            sleep {TIMEOUT} &
+            sleeper=$!
+            trap 'kill -KILL -- -$run $sleeper; wait $run; exit 0' TERM
+            wait $sleeper"
         ))
         .arg(&shared().0)
         .env_clear()
@@ -1080,7 +1088,7 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
     program.extend_from_slice(b"\0run\0");
     let deadline = Instant::now() + SHOWN_WITHIN;
-    let run = loop {
+    let (run, rows) = loop {
         let found: Vec<u32> = descendants(shell.0.id())
             .into_iter()
             .filter(|pid| {
@@ -1088,18 +1096,22 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
                     .is_ok_and(|cmdline| cmdline.starts_with(&program))
             })
             .collect();
+        // The run is listed once the run process holds its record.
         if let [run] = found[..]
             && stopped(run)
+            && let rows = scratch.ps()
+            && rows.len() == 1
         {
-            break run;
+            break (run, rows);
         }
         assert!(Instant::now() < deadline, "ap run didn't stop: {found:?}");
         thread::sleep(Duration::from_millis(10));
     };
     let vm = run_process(run);
-    let rows = scratch.ps();
-    assert_eq!(rows.len(), 1, "{rows:?}");
     let name = rows[0].split_whitespace().next().unwrap().to_owned();
+    // Modes of the shell's, which `ap run` mustn't change from where it is.
+    stty(&terminal, &["-echo"]);
+    let modes = stty(&terminal, &["-g"]);
 
     let mut stop = Started(
         Command::new(&shared().0)
@@ -1124,6 +1136,19 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     assert!(!running(run), "ap run outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 143"));
+    assert_eq!(stty(&terminal, &["-g"]), modes);
+}
+
+/// Runs `stty` with `args` on `terminal`, from outside its session, and
+/// returns what it printed.
+fn stty(terminal: &File, args: &[&str]) -> String {
+    let output = Command::new("stty")
+        .args(args)
+        .stdin(terminal.try_clone().unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
 }
 
 /// Whether the process `pid` is stopped, as by `SIGSTOP`.

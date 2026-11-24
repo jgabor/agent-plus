@@ -383,11 +383,28 @@ static SAVED_MODES: OnceLock<libc::termios> = OnceLock::new();
 const ENDING: [libc::c_int; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
 
 /// Your terminal in raw mode, until this drops: every key goes to the run as
-/// it is typed, and nothing turns a key into a signal.
-pub(super) struct RawMode(libc::termios);
+/// it is typed, and nothing turns a key into a signal. A run that `ap stop`
+/// reaches while `ap run` waits in the background of your terminal leaves
+/// its modes as they are, and holds none.
+pub(super) struct RawMode(Option<libc::termios>);
 
 impl RawMode {
     pub(super) fn start() -> io::Result<RawMode> {
+        while !foreground() {
+            if runs::stopping() {
+                return Ok(RawMode(None));
+            }
+            // From the background, this waits as setting the modes would:
+            // job control suspends `ap run` until it is in the foreground,
+            // or until it ignores job control, and it changes nothing.
+            // SAFETY: `tcdrain` takes and returns plain integers.
+            if unsafe { libc::tcdrain(libc::STDIN_FILENO) } != 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
         let mut saved = MaybeUninit::uninit();
         // SAFETY: `tcgetattr` fills the whole struct when it returns 0.
         let saved = unsafe {
@@ -405,14 +422,24 @@ impl RawMode {
                 return Err(io::Error::last_os_error());
             }
         }
-        Ok(RawMode(saved))
+        Ok(RawMode(Some(saved)))
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        restore(&self.0);
+        if let Some(saved) = &self.0 {
+            restore(saved);
+        }
     }
+}
+
+/// Whether `ap run` is in the foreground of your terminal, or of one with no
+/// job control, which isn't its controlling terminal.
+fn foreground() -> bool {
+    // SAFETY: both calls take and return plain integers.
+    let (terminal, ours) = unsafe { (libc::tcgetpgrp(libc::STDIN_FILENO), libc::getpgrp()) };
+    terminal == -1 || terminal == ours
 }
 
 /// Puts your terminal's modes back. A terminal that went away has nothing to

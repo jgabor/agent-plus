@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -65,7 +65,7 @@ fn stop(name: &str) -> Result<(), String> {
         runs::send_stop(&mut stream)?;
         stream.set_read_timeout(Some(RESUME_EVERY))?;
         loop {
-            resume(serving);
+            resume(serving.as_ref());
             match stream.read(&mut [0; 64]) {
                 Ok(0) => return Ok(()),
                 Ok(_) => {}
@@ -88,9 +88,10 @@ fn stop(name: &str) -> Result<(), String> {
     }
 }
 
-/// The process id of the `ap run` that serves the socket at the other end
-/// of `stream`, which the kernel names, if it has one here.
-fn server(stream: &UnixStream) -> Option<libc::pid_t> {
+/// The `ap run` that serves the socket at the other end of `stream`, which
+/// the kernel names, as a pidfd, so that no process that takes its id later
+/// is resumed in its place.
+fn server(stream: &UnixStream) -> Option<OwnedFd> {
     let mut credentials = libc::ucred {
         pid: 0,
         uid: 0,
@@ -109,15 +110,31 @@ fn server(stream: &UnixStream) -> Option<libc::pid_t> {
         )
     };
     // A listener in another process namespace has no process id here.
-    (read == 0 && credentials.pid > 0).then_some(credentials.pid)
+    if read != 0 || credentials.pid <= 0 {
+        return None;
+    }
+    // SAFETY: `pidfd_open` takes and returns plain integers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, credentials.pid, 0) };
+    // SAFETY: the kernel just returned this descriptor, and nothing else
+    // owns it.
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-/// Resumes the `ap run` with this process id, in case it is suspended.
+/// Resumes the `ap run` behind this pidfd, in case it is suspended.
 /// `SIGCONT` does nothing to one that runs, so a failure here holds back no
 /// stop that would reach the run anyway.
-fn resume(serving: Option<libc::pid_t>) {
-    if let Some(pid) = serving {
-        // SAFETY: `kill` takes and returns plain integers.
-        unsafe { libc::kill(pid, libc::SIGCONT) };
+fn resume(serving: Option<&OwnedFd>) {
+    if let Some(pidfd) = serving {
+        // SAFETY: `pidfd_send_signal` takes plain integers, and a null
+        // `siginfo_t`, which makes it act as `kill` does.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                pidfd.as_raw_fd(),
+                libc::SIGCONT,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
     }
 }

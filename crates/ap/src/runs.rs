@@ -61,7 +61,7 @@ use std::net::Shutdown;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
@@ -876,14 +876,25 @@ impl ToRun {
     }
 }
 
+/// Whether `ap stop` has reached this run, in `ap run`.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Whether `ap stop` has reached the run that this `ap run` serves, which
+/// then ignores its terminal's job control.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::SeqCst)
+}
+
 /// Keeps the terminal's job control from suspending this process again, so
 /// that a run `ap stop` has reached can end, and `ap run` with it, even from
 /// the background of its terminal. From here, writes and changes to the
 /// terminal's modes go through, and reads from it fail.
 fn ignore_job_control() {
+    // First, so that what sees job control ignored sees the stop too.
+    STOPPING.store(true, Ordering::SeqCst);
     for signal in [libc::SIGTTOU, libc::SIGTTIN] {
-        // SAFETY: `signal` takes and returns plain integers, and ignoring
-        // either signal is a valid action.
+        // SAFETY: `SIG_IGN` installs no handler, and is a valid action for
+        // either signal.
         unsafe { libc::signal(signal, libc::SIG_IGN) };
     }
 }

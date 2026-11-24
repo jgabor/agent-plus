@@ -30,6 +30,15 @@ pub fn create_beneath(
     flags: i32,
     mode: u32,
 ) -> io::Result<OwnedFd> {
+    // A name that ends in a slash can't be made a file, once the way to it
+    // opens.
+    let bytes = name.to_bytes();
+    if let Some(at) = bytes.iter().rposition(|&byte| byte != b'/')
+        && at + 1 < bytes.len()
+    {
+        walk(directory, &component(&bytes[..=at])?)?;
+        return Err(io::Error::from_raw_os_error(libc::EISDIR));
+    }
     let (above, last) = walk(directory, name)?;
     let from = above.as_ref().map_or(directory, AsFd::as_fd);
     openat(from, &last, flags | libc::O_CREAT, mode)
@@ -50,7 +59,11 @@ fn walk(directory: BorrowedFd, name: &CStr) -> io::Result<(Option<OwnedFd>, CStr
     if name.starts_with(b"/") {
         return Err(io::Error::from_raw_os_error(libc::EXDEV));
     }
-    let mut components = name.split(|&byte| byte == b'/').filter(|c| !c.is_empty());
+    // A name that ends in a slash names a directory, as `.` in it does.
+    let trailing = name.ends_with(b"/").then_some(&b"."[..]);
+    let mut components = (name.split(|&byte| byte == b'/'))
+        .filter(|c| !c.is_empty())
+        .chain(trailing);
     let mut last = components.next().unwrap_or_default();
     let mut above: Option<OwnedFd> = None;
     for next in components {
@@ -344,4 +357,124 @@ pub fn ofd_lock(fd: BorrowedFd, command: i32, lock: &mut libc::flock) -> io::Res
 pub fn flock(fd: BorrowedFd, operation: i32) -> io::Result<()> {
     // SAFETY: this call takes no pointer.
     check(unsafe { libc::syscall(libc::SYS_flock, fd.as_raw_fd(), operation) }).map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use std::os::unix::fs::symlink;
+    use std::path::Path;
+
+    /// The kernel's own `openat2`, staying beneath `directory` and
+    /// following no symlink, which the walk must match.
+    fn oracle(directory: BorrowedFd, name: &CStr, flags: i32) -> io::Result<OwnedFd> {
+        let how = [(flags | libc::O_CLOEXEC) as u64, 0, 0x02 | 0x04 | 0x08];
+        // SAFETY: `name` and `how`, a `struct open_how`, outlive the call.
+        let fd = check(unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                how.as_ptr(),
+                size_of_val(&how),
+            )
+        })?;
+        // SAFETY: the descriptor is new, and nothing else owns it.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+    }
+
+    fn outcome(opened: io::Result<OwnedFd>) -> Result<(u64, u64), i32> {
+        match opened {
+            Ok(fd) => {
+                let stat = fstat(fd.as_fd()).unwrap();
+                Ok((stat.st_dev, stat.st_ino))
+            }
+            Err(error) => Err(error.raw_os_error().unwrap()),
+        }
+    }
+
+    #[test]
+    fn opening_beneath_a_directory_matches_openat2() {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/sys-test")
+            .join(std::process::id().to_string());
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(base.join("root/dir")).unwrap();
+        fs::write(base.join("root/hello.txt"), "hello").unwrap();
+        fs::write(base.join("root/dir/nested.txt"), "nested").unwrap();
+        fs::write(base.join("outside"), "outside").unwrap();
+        symlink("hello.txt", base.join("root/link")).unwrap();
+        symlink("dir", base.join("root/dirlink")).unwrap();
+        symlink("../outside", base.join("root/escape")).unwrap();
+        let root = File::open(base.join("root")).unwrap();
+        let names = [
+            ".",
+            "hello.txt",
+            "dir",
+            "dir/nested.txt",
+            "dir//nested.txt",
+            "./dir/nested.txt",
+            "link",
+            "dirlink",
+            "dirlink/nested.txt",
+            "escape",
+            "hello.txt/",
+            "hello.txt/x",
+            "dir/",
+            "link/",
+            "dirlink/",
+            "missing",
+            "missing/x",
+            "..",
+            "../outside",
+            "/etc/hostname",
+            "",
+        ];
+        let flags = [
+            libc::O_RDONLY,
+            libc::O_RDONLY | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_DIRECTORY,
+            libc::O_PATH | libc::O_NOFOLLOW,
+            libc::O_PATH | libc::O_DIRECTORY,
+        ];
+        let mut checked = 0;
+        for name in names {
+            let name = CString::new(name).unwrap();
+            for flags in flags {
+                let walked = outcome(open_beneath(root.as_fd(), &name, flags));
+                let expected = outcome(oracle(root.as_fd(), &name, flags));
+                assert_eq!(walked, expected, "{name:?} {flags:#o}");
+                checked += 1;
+            }
+        }
+        // Making a file beneath it, too.
+        for name in [
+            "made",
+            "dir/made",
+            "link",
+            "dirlink/made",
+            "made/",
+            "dir/made/",
+            "missing/made/",
+            "dir/",
+            "../made",
+        ] {
+            let name = CString::new(name).unwrap();
+            let flags = libc::O_WRONLY | libc::O_EXCL;
+            let walked = outcome(create_beneath(root.as_fd(), &name, flags, 0o600));
+            if walked.is_ok() {
+                fs::remove_file(base.join("root").join(name.to_str().unwrap())).unwrap();
+            }
+            let how = flags | libc::O_CREAT;
+            let expected = outcome(oracle(root.as_fd(), &name, how)).map(|_| ());
+            assert_eq!(walked.map(|_| ()), expected, "{name:?}");
+            if expected.is_ok() {
+                fs::remove_file(base.join("root").join(name.to_str().unwrap())).unwrap();
+            }
+            checked += 1;
+        }
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(checked, 114);
+    }
 }

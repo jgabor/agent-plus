@@ -12,8 +12,9 @@ use std::fs::{self, File};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 /// The share server's arguments, one to a line, for the process the test
 /// starts.
@@ -118,9 +119,9 @@ fn turn(directory: &OwnedFd, openat2: bool, path: &CStr) {
 }
 
 /// Starts a confined server with one `rw` share at `root`, which, once it
-/// has served, turns on `path` from the root with `call`, and waits for it
-/// to end.
-fn serve_and_turn(root: &Path, call: &str, path: &str) {
+/// has served, turns on `path` from the root with `call`. Returns how it
+/// ended.
+fn serve_and_turn(root: &Path, call: &str, path: &str) -> ExitStatus {
     let (mine, theirs) = UnixStream::pair().unwrap();
     let inherited = share::inheritable(File::open(root).unwrap().as_fd()).unwrap();
     let fd = inherited.as_raw_fd();
@@ -136,8 +137,7 @@ fn serve_and_turn(root: &Path, call: &str, path: &str) {
         .unwrap();
     drop(inherited);
     drop(mine);
-    // The filter may kill it on the way, which is the point.
-    server.wait().unwrap();
+    server.wait().unwrap()
 }
 
 /// The mode and modification time of the file at `path`.
@@ -153,7 +153,9 @@ fn a_confined_rw_server_can_t_change_the_mode_or_times_of_a_file_outside_it() {
     let absolute = tree.secret.to_str().unwrap();
     for call in ["openat", "openat2"] {
         for path in ["../outside/secret", absolute] {
-            serve_and_turn(&tree.root, call, path);
+            // The filter kills it at `openat2`, or at access mode 3.
+            let status = serve_and_turn(&tree.root, call, path);
+            assert_eq!(status.signal(), Some(libc::SIGSYS), "{call} {path}");
             assert_eq!(mode_and_time(&tree.secret), before, "{call} {path}");
         }
     }
@@ -247,6 +249,9 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     let mut body = O_WRONLY.to_le_bytes().to_vec();
     body.extend([0; 4]);
     assert_eq!(guest.call_share(1, OPEN, node, &body).0, EROFS);
+    let mut neither = 3u32.to_le_bytes().to_vec();
+    neither.extend([0; 4]);
+    assert_eq!(guest.call_share(1, OPEN, node, &neither).0, EROFS);
     assert_eq!(guest.call_share(1, MKDIR, 1, &[0; 16]).0, EROFS);
     let (error, out) = guest.call_share(1, OPEN, node, &[0; 8]);
     assert_eq!(error, 0);

@@ -89,9 +89,12 @@ const APPROVE_FOR_ME_FROM: [u64; 3] = [0, 147, 0];
 /// The first version whose interactive `codex` has `--no-daemon`.
 const NO_DAEMON_FROM: [u64; 3] = [0, 156, 0];
 
+/// A Codex version, as its three numbers.
+type Version = [u64; 3];
+
 /// The `[auto_review]` keys that give the reviewer instructions, each with
 /// the first version that takes it and the first that no longer does.
-const REVIEWER_TEXT: [(&str, [u64; 3], Option<[u64; 3]>); 4] = [
+const REVIEWER_TEXT: [(&str, Version, Option<Version>); 4] = [
     ("policy", [0, 137, 0], None),
     (
         "experimental_policy_template",

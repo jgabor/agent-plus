@@ -1108,7 +1108,15 @@ fn prove(
         scores,
     )?;
     if let Some(kept) = scoring.kept {
-        record.budgets.extend(kept.budgets.clone());
+        // A pinned size is the same on every machine, so the rebased tree's
+        // stands, and the bench's results are kept.
+        let measured = kept
+            .budgets
+            .iter()
+            .filter(|(key, _)| !bench::is_pinned(key));
+        record
+            .budgets
+            .extend(measured.map(|(key, value)| (key.clone(), *value)));
         record.reason = kept.reason.clone();
     }
     let mut accepted = waiting;

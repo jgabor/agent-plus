@@ -3572,6 +3572,49 @@ fn a_refresh_keeps_the_branchs_budgets_and_runs_no_bench() {
     assert!(record.contains(&format!("base = \"{main}\"\n")), "{record}");
 }
 
+/// A kernel that the fixture's tests fetch where a record reads it.
+fn fetching(kernel: &str) -> String {
+    format!(
+        "pub fn f() {{}}\n\n#[test]\nfn fetch() {{\n    let guest = concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../target/guest\");\n    std::fs::create_dir_all(guest).unwrap();\n    std::fs::write(format!(\"{{guest}}/vmlinux\"), {kernel:?}).unwrap();\n}}\n"
+    )
+}
+
+/// A pinned size is the same on every machine, so it follows the rebased tree.
+#[test]
+fn a_kept_record_has_the_sizes_that_the_rebased_tree_pins() {
+    let (old, new) = ("an old kernel\n", "a new kernel, larger\n");
+    let pin = |sha256: &str| format!("version = \"1\"\nsha256 = \"{sha256}\"\n");
+    let budgets = format!("{BUDGETS}\n[[budget]]\nkey = \"kernel_bytes\"\nname = \"Kernel\"\n");
+    let base = record(0, 1, "");
+    let (old_pin, old_fetch) = (
+        pin("cb0e1c77d92bf650037e5a22dd2e52e8776a5aa30aab83ff2caa6774fc6ba764"),
+        fetching(old),
+    );
+    let repo = Repo::with(
+        "prepare-kept-pinned",
+        &[
+            ("harness/ledger/3.toml", base.as_str()),
+            ("harness/budgets.toml", budgets.as_str()),
+            ("guest/kernel/pin.toml", old_pin.as_str()),
+            ("crates/demo/src/lib.rs", old_fetch.as_str()),
+        ],
+        &[("docs.txt", "x\n")],
+    );
+    let kept = format!("kernel_bytes = {}\n{KEPT}", old.len());
+    repo.change_branch("harness/ledger/7.toml", &record(0, 1, &kept));
+    repo.advance_main(
+        "guest/kernel/pin.toml",
+        &pin("083c89b4717f7e0be368ddf18af5cc26fb24ccd6c4e7f070226d37225b35b1b2"),
+    );
+    repo.advance_main("crates/demo/src/lib.rs", &fetching(new));
+
+    let output = repo.xtask(&["prepare", "9", "--keep-budgets"]);
+    assert_prepared(&repo, &output);
+    let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
+    let budgets = format!("[budgets]\nkernel_bytes = {}\n{KEPT}", new.len());
+    assert!(record.ends_with(budgets.trim_end()), "{record}");
+}
+
 /// Commits after the record mean that it doesn't describe this branch.
 #[test]
 fn a_refresh_with_no_record_at_the_tip_fails_and_pushes_nothing() {

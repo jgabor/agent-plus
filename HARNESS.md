@@ -880,7 +880,10 @@ the runner's user map ids in a user namespace. The
    `main`. After the squash, `refresh` removes `land-needed` from the PR and its
    issue, because GitHub starts no workflow for a merge made with the workflow's
    own token. Then it closes the issue as completed, which GitHub leaves open
-   after such a merge.
+   after such a merge. It tries each of these steps, even when one fails. The
+   PR merged all the same, so its row says `merged`, and `refresh` names each
+   label or issue left behind on stderr, and exits 1. The next run lists only
+   open PRs, so it can't retry them.
    A PR whose proof in this run accepts what the approval doesn't cover isn't
    merged, and it and its issue keep `land-needed`. GitHub merges an armed PR
    once it is green, so its `prepare` turned auto-merge off before posting

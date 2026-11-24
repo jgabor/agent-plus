@@ -834,6 +834,8 @@ releases the slot. So does a merge whose caller stops, as on Ctrl-C. Running it
 again starts over from the fetch, and so does running it after a kill at any
 step. A merge that stops this way can leave `pending` on the PR until the
 next proof.
+The timeout stops while `main`'s xtask waits to take the slot again, because
+the slot is let go as the merge starts that xtask.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's own
 xtask starts its proof, so each proof gets all of it. The PR's own xtask can't
 start it again. It stops while a proof waits for a place, and starts again once

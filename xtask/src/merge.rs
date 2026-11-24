@@ -35,9 +35,9 @@ const TIMEOUT_SECONDS: u64 = 30 * 60;
 /// Replaces the timeout, so that a test doesn't wait for it.
 const TIMEOUT_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
 /// What the worker tells its supervisor: it holds the slot, which starts the
-/// timeout again, it waits for other work to free a place or the activity
-/// lock, which stops it, or its bench's wait is over, which lets the timeout
-/// go on from where it stopped.
+/// timeout again, it waits for other work to free the slot, a place, or the
+/// activity lock, which stops it, or its bench's wait is over, which lets the
+/// timeout go on from where it stopped.
 const SLOT: u8 = b's';
 const WAITING: u8 = b'w';
 const GOING: u8 = b'g';
@@ -187,6 +187,9 @@ fn sequence(
     {
         return refuse(&why);
     }
+    // The xtask of `main` waits for the slot again, because it is let go on
+    // the `exec`, and the timeout has started by then.
+    tell_supervisor(WAITING)?;
     let slot = lock::merge_slot(&root)?;
     report_slot()?;
     Tree::sweep(&root)?;
@@ -681,12 +684,12 @@ fn supervised() -> Result<i32, Problem> {
 }
 
 /// Stops the worker's group once the worker has held the slot for the timeout,
-/// because a stuck merge would hold it for every other merge. A wait for a
-/// place doesn't count, because other work holds the places, and neither does
-/// a bench's wait for the activity lock, which other work holds. Says whether it
-/// did. Only the caller exits, once the worker is reaped, because this thread
-/// can be slow to go on after the kill lands, and the caller would then see a
-/// killed worker and die as it did.
+/// because a stuck merge would hold it for every other merge. A wait for the
+/// slot or a place doesn't count, because other work holds them, and neither
+/// does a bench's wait for the activity lock, which other work holds. Says
+/// whether it did. Only the caller exits, once the worker is reaped, because
+/// this thread can be slow to go on after the kill lands, and the caller would
+/// then see a killed worker and die as it did.
 fn time_out(reports: io::PipeReader, group: u32, seconds: u64) -> Arc<AtomicBool> {
     let timed_out = Arc::new(AtomicBool::new(false));
     let said = Arc::clone(&timed_out);

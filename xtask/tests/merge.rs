@@ -1873,6 +1873,84 @@ fn the_wait_for_a_place_does_not_count_against_the_timeout() {
     assert_merged(&repo, &merge.wait_with_output().unwrap());
 }
 
+/// The merge runs again in the xtask of `main`, which takes the slot again,
+/// and another merge can take it in between. That wait doesn't count against
+/// the timeout either. The build of that xtask waits until this test is about
+/// to wait for the slot, so that it does before the merge lets the slot go.
+/// The proof takes up to 40 seconds on a loaded machine, of the 60 that the
+/// timeout gives it.
+#[test]
+fn the_wait_for_the_slot_in_the_xtask_of_main_does_not_count_against_the_timeout() {
+    let repo = Repo::new("slot-wait-again");
+    let build = "cargo build --quiet --package xtask";
+    let waiting = repo.temp.join("waiting");
+    // To files, because nothing reads a pipe while this waits.
+    let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", build)
+        .env(
+            "RUN_COMMAND",
+            format!(
+                "until [ -f '{}' ]; do sleep 0.1; done; sleep 1",
+                waiting.display()
+            ),
+        )
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .stdout(said("merge.out"))
+        .stderr(said("merge.err"))
+        .spawn()
+        .unwrap();
+    let ended = |merge: &mut std::process::Child, why: &str| -> ! {
+        let _ = merge.kill();
+        let status = merge.wait().unwrap();
+        panic!(
+            "{why}: {status}\n{}\n{}",
+            fs::read_to_string(repo.temp.join("merge.out")).unwrap(),
+            fs::read_to_string(repo.temp.join("merge.err")).unwrap()
+        );
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !repo.calls().contains(build) {
+        if merge.try_wait().unwrap().is_some() || Instant::now() > deadline {
+            ended(&mut merge, "the merge never built the xtask of `main`");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let slot = fs::OpenOptions::new()
+        .write(true)
+        .open(repo.root.join(".git/xtask/merge.lock"))
+        .unwrap();
+    fs::write(&waiting, "").unwrap();
+    slot.lock().unwrap();
+    if merge.try_wait().unwrap().is_some() || repo.bin.join("merged").exists() {
+        ended(&mut merge, "the merge let the slot go only as it ended");
+    }
+    // The wait alone now outlasts the timeout.
+    thread::sleep(Duration::from_secs(62));
+    if merge.try_wait().unwrap().is_some() {
+        ended(&mut merge, "the merge didn't wait for the slot");
+    }
+    slot.unlock().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = merge.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            ended(&mut merge, "the merge didn't end once it had the slot");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let output = Output {
+        status,
+        stdout: fs::read(repo.temp.join("merge.out")).unwrap(),
+        stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
+    };
+    assert_merged(&repo, &output);
+}
+
 /// Other work holds the activity lock for as long as it runs, so the wait of a
 /// merge's bench to hold it alone doesn't count against the timeout either.
 /// The proof's other work takes up to 40 seconds on a loaded machine, of the

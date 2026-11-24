@@ -1623,6 +1623,24 @@ fn a_codex_lock_from_before_bubblewrap_resolves_its_version_again_and_gets_it() 
         "{error}"
     );
     assert_eq!(settling.lockfile().unwrap(), old);
+    // So does a lock whose code-mode host GitHub now gives another digest,
+    // or none.
+    for (name, recorded) in [
+        (
+            "settle-codex-old-bwrap-host",
+            common::digest(b"another host"),
+        ),
+        ("settle-codex-old-bwrap-none", "-".to_string()),
+    ] {
+        let settling = Settling::new(name, "AGENT codex\nOS minimal\n");
+        let old = format!("HARNESS codex 0.169.0 {digest} {recorded}\n");
+        fs::write(settling.dir.join("Agentfile.lock"), &old).unwrap();
+        let error = settling.settle(&server).unwrap_err().to_string();
+        assert!(error.contains("its code-mode host the digest"), "{error}");
+        assert!(error.contains(&format!("not the {recorded} ")), "{error}");
+        assert_eq!(settling.lockfile().unwrap(), old, "{name}");
+        assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+    }
 }
 
 // spec(AGENT): A Codex release that publishes a code-mode host, which Codex runs its tools through, has it installed beside Codex, and the lockfile records its digest.
@@ -1770,6 +1788,22 @@ fn a_lock_reads_a_code_mode_host_only_for_codex() {
     assert_eq!(locked.code_mode_host, Companion::Digest(host.clone()));
     assert_eq!(lock.text(), text);
     assert_eq!(locked.bwrap, Companion::Unrecorded);
+    for (text, host) in [
+        (
+            format!("HARNESS codex 0.169.0 {digest}\n"),
+            Companion::Unrecorded,
+        ),
+        (
+            format!("HARNESS codex 0.169.0 {digest} -\n"),
+            Companion::Unpublished,
+        ),
+    ] {
+        let lock = ap::lock::Lock::read(&text).unwrap();
+        let locked = lock.harness.as_ref().unwrap();
+        assert_eq!(locked.code_mode_host, host, "{text}");
+        assert_eq!(locked.bwrap, Companion::Unrecorded, "{text}");
+        assert_eq!(lock.text(), text);
+    }
     let none = format!("HARNESS codex 0.169.0 {digest} - -\n");
     let lock = ap::lock::Lock::read(&none).unwrap();
     let locked = lock.harness.as_ref().unwrap();

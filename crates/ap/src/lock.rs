@@ -112,7 +112,7 @@ pub struct Locked {
 }
 
 /// What a lock records of a file that Codex's release publishes, which `ap`
-/// installs beside Codex.
+/// installs with Codex.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Companion {
     /// The SHA-256 digest of the file it is installed from.
@@ -234,8 +234,8 @@ impl Lock {
 /// Settles the harness that `agent` names, and returns whether `lock`
 /// changed. A lock that resolves `agent` is kept. A Codex lock that would,
 /// but doesn't record the code-mode host or bubblewrap, resolves the version
-/// it locks again, and a digest for Codex's file that isn't the lock's is an
-/// error. Any other resolves again:
+/// it locks again, and a digest for Codex's file, or for a code-mode host the
+/// lock records, that isn't the lock's is an error. Any other resolves again:
 /// a channel resolves to the exact version the harness's publisher
 /// publishes for it, and the lock gets that version and the digest the
 /// publisher publishes for its file, and for Codex's code-mode host and
@@ -272,14 +272,29 @@ pub fn settle(
             };
             let resolved =
                 resolve_codex(&locked.version, client, origins.codex_api).map_err(again)?;
-            if resolved.sha256 != locked.sha256 {
-                return Err(again(io::Error::new(
+            let changed = |what: &str, given: &str, locked: &str| {
+                again(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
-                        "GitHub gives its file the digest {}, not the {} that the lock locks",
-                        resolved.sha256, locked.sha256
+                        "GitHub gives {what} the digest {given}, not the {locked} that the lock locks"
                     ),
-                )));
+                ))
+            };
+            if resolved.sha256 != locked.sha256 {
+                return Err(changed("its file", &resolved.sha256, &locked.sha256));
+            }
+            let shown = |companion: &Companion| match companion {
+                Companion::Digest(digest) => digest.clone(),
+                _ => "-".to_string(),
+            };
+            if locked.code_mode_host != Companion::Unrecorded
+                && resolved.code_mode_host != locked.code_mode_host
+            {
+                return Err(changed(
+                    "its code-mode host",
+                    &shown(&resolved.code_mode_host),
+                    &shown(&locked.code_mode_host),
+                ));
             }
             resolved
         }

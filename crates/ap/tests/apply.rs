@@ -2532,3 +2532,69 @@ fn a_file_in_place_of_an_ignored_directory_is_skipped() {
     );
     assert!(!repository.has_branch());
 }
+
+/// From #713: your `.gitignore` ignores `*.log` files, but no directory,
+/// and the agent's `HEAD` tracks `foo.log`, `docs/old.log`, and
+/// `mine.log`. The agent replaced the first two with directories of files
+/// git doesn't ignore, and wrote a file in `mine.log`, which you had made
+/// a directory before the run. Git can't hold a file and a directory at
+/// one path, so each git-ignored file stays as that `HEAD` holds it, and
+/// `ap apply` skips the files and symlinks in those directories and says
+/// why. A file the agent wrote elsewhere lands.
+// spec(SHARE): Where the agent's `HEAD` holds a git-ignored file, and a directory is in its place in the share, `ap apply` skips each file and symlink the agent wrote in that directory, and says why.
+// spec(SHARE): The last commit holds the git-ignored file as that `HEAD` holds it.
+#[test]
+fn a_directory_in_place_of_an_ignored_file_is_skipped() {
+    let ignored = |share: &Path| {
+        fs::write(share.join(".gitignore"), "*.log\n!*/\n").unwrap();
+        fs::create_dir(share.join("docs")).unwrap();
+        let files = [".gitignore", "foo.log", "docs/old.log", "mine.log"];
+        for file in &files[1..] {
+            fs::write(share.join(file), "kept\n").unwrap();
+        }
+        repo::run(share, &[&["add", "-f"][..], &files].concat());
+        repo::run(share, &["commit", "-q", "-m", "ignored"]);
+        fs::remove_file(share.join("mine.log")).unwrap();
+        fs::create_dir(share.join("mine.log")).unwrap();
+    };
+    let repository = Repository::with(
+        "directory-for-ignored",
+        true,
+        Setup {
+            before: Some(&ignored),
+            ..Setup::default()
+        },
+    );
+    let (share, pending) = (repository.share(), &repository.pending);
+    delete(share, pending, "foo.log");
+    dir(pending, "foo.log", 0o755);
+    // As the share server records a directory made where a file was.
+    delete(share, pending, "docs/old.log");
+    fs::create_dir_all(pending.join("tree/docs/old.log")).unwrap();
+    record(pending, "DIR \"docs/old.log\" 755 opaque");
+    write(pending, "foo.log/bar", 0o644, b"bar\n");
+    dir(pending, "docs/old.log/a", 0o755);
+    write(pending, "docs/old.log/a/b", 0o644, b"b\n");
+    link(pending, "docs/old.log/a/c", "b");
+    write(pending, "mine.log/new", 0o644, b"new\n");
+    write(pending, "notes", 0o644, b"notes\n");
+    let guest = &repository.guest;
+    fs::write(guest.join("notes"), "notes\n").unwrap();
+    let tree = repository.tree_after(&[&["add", "notes"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it is in a directory that would replace a git-ignored file";
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "skipped docs/old.log/a/b: {why}\nskipped docs/old.log/a/c: {why}\n\
+             skipped foo.log/bar: {why}\nskipped mine.log/new: {why}\n\
+             skipped 2 git-ignored files\n"
+        )
+    );
+    repository.assert_last_commit(&tree, during);
+    let kept = format!("{}:docs/old.log", repository.branch());
+    assert_eq!(repo::run(share, &["cat-file", "-p", &kept]), "kept");
+}

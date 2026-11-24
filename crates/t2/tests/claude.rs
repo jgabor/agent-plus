@@ -1,6 +1,7 @@
 //! Real Claude Code in a guest, with no credentials: a static `ap` builds an
 //! agent from Anthropic's release, and runs it in a terminal, as you would.
 
+use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -71,6 +72,29 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
         &format!("HARNESS claude {VERSION} {DIGEST}\n"),
     );
     reaches_its_prompt(Interactive::start(scratch.run("claude")));
+}
+
+// Claude Code 2.1.323 counts no trust record above a repository's root, so
+// the record for `/` doesn't cover this one.
+// spec(Run): Each run also marks its working directory and every directory above it as trusted, so an interactive run whose working directory is in a git repository doesn't ask whether to trust it.
+#[test]
+fn an_interactive_claude_code_run_in_a_shared_repository_reaches_its_prompt() {
+    let scratch = Scratch::new("repository-dialog");
+    scratch.build(
+        "claude",
+        &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\n"),
+        &format!("HARNESS claude {VERSION} {DIGEST}\n"),
+    );
+    // The least that git takes as a repository. Claude Code reads the
+    // quote and the backslash in its name from the state as JSON.
+    let project = scratch.root.join("a \"project\" \\ here");
+    for directory in [".git/objects", ".git/refs/heads"] {
+        fs::create_dir_all(project.join(directory)).unwrap();
+    }
+    fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    let mut run = scratch.run("claude");
+    run.arg("--share").arg(&project);
+    reaches_its_prompt(Interactive::start(run));
 }
 
 // Claude Code asks whether to use a key from its environment that its state

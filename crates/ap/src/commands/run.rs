@@ -795,7 +795,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     // SPEC.md's AUTH: `key` and `token` read their variable as a secret
     // does. A key is hidden, and every request to its hosts must carry its
     // placeholder. A token is visible.
-    let mut written = Vec::new();
+    let mut placeholder_given = None;
     let harness = Settings::read(&instructions)
         .map_err(unreadable)?
         .agent
@@ -821,7 +821,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
                     .map_err(|error| fail(format!("can't make a placeholder: {error}")))?;
                 given.push((variable.as_bytes().to_vec(), placeholder.clone()));
                 // Only a key has hosts.
-                written = ap::adapter::key_files(harness, &placeholder);
+                placeholder_given = Some(placeholder.clone());
                 hidden.push(Hidden {
                     name: variable.to_owned(),
                     value,
@@ -988,6 +988,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         (None, None, [only]) => (*only).clone(),
         (None, None, _) => HOME.to_owned(),
     };
+    let written = ap::adapter::run_files(harness, &directory, placeholder_given.as_deref());
     shares.extend(typed);
     // SPEC.md's MODE section: every share joins the harness's workspace. The
     // share from `--share` is a directory.

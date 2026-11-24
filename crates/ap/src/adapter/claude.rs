@@ -2,9 +2,10 @@
 //!
 //! Its files are the global instructions from `SYSTEM`, the user settings
 //! that turn self-updates off, and the state that tells Claude Code its
-//! onboarding is done and `/` is trusted. Its command line sets the model, the effort, and the
-//! permission mode every time it starts the harness, so neither a project's
-//! settings nor an earlier session can pick others. A version older than
+//! onboarding is done and which directories it trusts. Its command line sets
+//! the model, the effort, and the permission mode every time it starts the
+//! harness, so neither a project's settings nor an earlier session can pick
+//! others. A version older than
 //! `--effort` gets the effort from `CLAUDE_CODE_EFFORT_LEVEL`, which it reads
 //! before its settings.
 //!
@@ -102,7 +103,8 @@ const AUTO_FROM: [u64; 3] = [2, 1, 71];
 /// welcome screens. It also marks `/` as trusted, so an interactive run skips
 /// the trust dialog. Claude Code 2.1.323 takes a directory as trusted when it
 /// or a directory above it is, but in a git repository it looks no higher
-/// than the repository's root.
+/// than the repository's root, so a run writes the state again, from
+/// [`state`], with its working directory.
 pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     let mut files = Vec::new();
     if !system.is_empty() {
@@ -114,20 +116,39 @@ pub fn files(system: &[Vec<u8>], mode: Mode) -> Vec<(&'static str, Vec<u8>)> {
     }
     settings.push_str("\n}\n");
     files.push((SETTINGS, settings.into_bytes()));
-    files.push((STATE, state(None)));
+    files.push((STATE, state("/", None)));
     files
 }
 
 /// How many of a key's last characters Claude Code keeps to approve it.
 const APPROVED_CHARACTERS: usize = 20;
 
-/// What [`STATE`] holds. With `AUTH key`, it also approves the run's
-/// placeholder, so an interactive run doesn't ask whether to use the key.
-/// Claude Code 2.1.330 uses a key from its environment without asking only
-/// when its state lists the key's last 20 characters in
-/// `customApiKeyResponses.approved`.
-pub fn state(placeholder: Option<&[u8]>) -> Vec<u8> {
-    let mut state = b"{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {\n    \"/\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }".to_vec();
+/// What [`STATE`] holds. It marks `directory` and every directory above it
+/// as trusted, from `/` down. Claude Code 2.1.323 skips the trust dialog
+/// when its working directory, or a directory above it up to the root of the
+/// git repository it is in, has a record, and records the root when you
+/// accept the dialog. A run passes its working directory, so the root of any
+/// repository the run starts in has one. `directory` is a guest path, made
+/// normal here.
+///
+/// With `AUTH key`, it also approves the run's placeholder, so an
+/// interactive run doesn't ask whether to use the key. Claude Code 2.1.330
+/// uses a key from its environment without asking only when its state lists
+/// the key's last 20 characters in `customApiKeyResponses.approved`.
+pub fn state(directory: &str, placeholder: Option<&[u8]>) -> Vec<u8> {
+    let projects: Vec<String> = (trusted(directory).iter())
+        .map(|path| {
+            format!(
+                "    {}: {{\n      \"hasTrustDialogAccepted\": true\n    }}",
+                json_string(path)
+            )
+        })
+        .collect();
+    let mut state = format!(
+        "{{\n  \"hasCompletedOnboarding\": true,\n  \"projects\": {{\n{}\n  }}",
+        projects.join(",\n")
+    )
+    .into_bytes();
     if let Some(placeholder) = placeholder {
         let kept = &placeholder[placeholder.len().saturating_sub(APPROVED_CHARACTERS)..];
         state.extend_from_slice(b",\n  \"customApiKeyResponses\": {\n    \"approved\": [\"");
@@ -136,6 +157,41 @@ pub fn state(placeholder: Option<&[u8]>) -> Vec<u8> {
     }
     state.extend_from_slice(b"\n}\n");
     state
+}
+
+/// `directory` and every directory above it, from `/` down, with `.` and
+/// `..` resolved and no empty parts.
+fn trusted(directory: &str) -> Vec<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in directory.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    let mut paths = vec!["/".to_owned()];
+    paths.extend((1..=parts.len()).map(|end| format!("/{}", parts[..end].join("/"))));
+    paths
+}
+
+/// `text` as a JSON string.
+fn json_string(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            character if character.is_control() => {
+                quoted.push_str(&format!("\\u{:04x}", u32::from(character)));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// The level this version of Claude Code gets for `effort`, and a warning

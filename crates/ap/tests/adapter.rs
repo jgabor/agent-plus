@@ -680,9 +680,37 @@ fn another_providers_names_are_not_claude_codes_sign_in() {
 #[test]
 fn a_keyed_runs_state_approves_its_placeholder_alone() {
     let placeholder = b"0123456789abcdef0123456789abcdef";
-    let files = ap::adapter::key_files(agentfile::Harness::Claude, placeholder);
+    let files = ap::adapter::run_files(agentfile::Harness::Claude, "/", Some(placeholder));
     let paths: Vec<&str> = files.iter().map(|(path, _)| *path).collect();
     assert_eq!(paths, [claude::STATE]);
     golden("claude-key.json", &files[0].1);
-    assert!(ap::adapter::key_files(agentfile::Harness::Codex, placeholder).is_empty());
+    assert!(ap::adapter::run_files(agentfile::Harness::Codex, "/", Some(placeholder)).is_empty());
+}
+
+// spec(Run): Each run also marks its working directory and every directory above it as trusted, so an interactive run whose working directory is in a git repository doesn't ask whether to trust it.
+#[test]
+fn a_runs_state_trusts_its_working_directory_and_every_directory_above_it() {
+    let files = ap::adapter::run_files(agentfile::Harness::Claude, "/home/agent/project", None);
+    let paths: Vec<&str> = files.iter().map(|(path, _)| *path).collect();
+    assert_eq!(paths, [claude::STATE]);
+    golden("claude-run.json", &files[0].1);
+    // The path is made normal, and written as a JSON string.
+    let state = claude::state("/home//agent/./x/../a \"b\" \\c\u{1}/", None);
+    let state = String::from_utf8(state).unwrap();
+    let trusted: Vec<&str> = (state.lines())
+        .filter_map(|line| line.strip_suffix(": {"))
+        .map(str::trim)
+        .collect();
+    assert_eq!(
+        trusted,
+        [
+            "\"projects\"",
+            "\"/\"",
+            "\"/home\"",
+            "\"/home/agent\"",
+            "\"/home/agent/a \\\"b\\\" \\\\c\\u0001\""
+        ],
+        "{state}"
+    );
+    assert!(ap::adapter::run_files(agentfile::Harness::Codex, "/home/agent", None).is_empty());
 }

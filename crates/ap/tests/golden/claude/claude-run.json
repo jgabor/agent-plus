@@ -1,0 +1,17 @@
+{
+  "hasCompletedOnboarding": true,
+  "projects": {
+    "/": {
+      "hasTrustDialogAccepted": true
+    },
+    "/home": {
+      "hasTrustDialogAccepted": true
+    },
+    "/home/agent": {
+      "hasTrustDialogAccepted": true
+    },
+    "/home/agent/project": {
+      "hasTrustDialogAccepted": true
+    }
+  }
+}

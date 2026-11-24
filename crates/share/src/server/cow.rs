@@ -38,6 +38,11 @@
 //! mode, and each directory and regular file with your times.
 //! The agent's changes there are recorded as anywhere else.
 //!
+//! The server sets no mode and no time itself once it is confined, so no
+//! code of its own can change your files' modes or times. A mode is a
+//! record, and a copy's times are set by the times process, which reaches
+//! the tree alone.
+//!
 //! A guest's node is a path. Each request resolves it again, one layer at a
 //! time, beneath the root or the tree, following no symlink. A directory
 //! that has your files beneath it can't be renamed, as in overlayfs, so a
@@ -46,6 +51,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
+use crate::times::Times;
 
 const TREE: &CStr = c"tree";
 const RECORDS: &CStr = c"records";
@@ -177,6 +183,8 @@ pub(super) struct Cow {
     /// The copy of your `.git`, if the root held one when the run started.
     git: Option<OwnedFd>,
     tree: OwnedFd,
+    /// The process that sets the times of the copies in `tree`.
+    times: Times,
     records: OwnedFd,
     /// How long `records` is, so a record that fails half-written goes.
     recorded: std::cell::Cell<u64>,
@@ -426,8 +434,10 @@ fn names(fd: BorrowedFd) -> Result<Vec<(Vec<u8>, u8, u64)>, i32> {
     }
 }
 
-fn set_times(fd: BorrowedFd, stat: &libc::stat) -> Result<(), i32> {
-    let times = [
+/// The access and modification times that `stat` describes, as
+/// `futimens` takes them.
+fn times_of(stat: &libc::stat) -> [libc::timespec; 2] {
+    [
         libc::timespec {
             tv_sec: stat.st_atime,
             tv_nsec: stat.st_atime_nsec,
@@ -436,8 +446,7 @@ fn set_times(fd: BorrowedFd, stat: &libc::stat) -> Result<(), i32> {
             tv_sec: stat.st_mtime,
             tv_nsec: stat.st_mtime_nsec,
         },
-    ];
-    sys::futimens(fd, &times).map_err(errno)
+    ]
 }
 
 /// Copies what `from` holds to `to`, each an open regular file.
@@ -708,7 +717,7 @@ fn finish(copy: BorrowedFd, stat: &libc::stat) -> io::Result<()> {
         false => copy,
     };
     sys::fchmod(fd, stat.st_mode & PERMISSIONS)?;
-    set_times(fd, stat).map_err(io::Error::from_raw_os_error)
+    sys::futimens(fd, &times_of(stat))
 }
 
 impl Cow {
@@ -725,12 +734,14 @@ impl Cow {
         let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_EXCL;
         let records = sys::create_beneath(pending.as_fd(), RECORDS, flags, FILE_MODE)?;
         let git = capture(root.as_fd(), pending.as_fd())?;
+        let times = Times::start(tree.as_fd())?;
         Ok(Self {
             root,
             owner,
             pending,
             git,
             tree,
+            times,
             records,
             recorded: std::cell::Cell::new(0),
             entries: BTreeMap::new(),
@@ -754,6 +765,11 @@ impl Cow {
     /// The share's root, and its pending directory.
     pub(super) fn directories(&self) -> (BorrowedFd<'_>, BorrowedFd<'_>) {
         (self.root.as_fd(), self.pending.as_fd())
+    }
+
+    /// The socket of the process that sets the times of the copies.
+    pub(super) fn times(&self) -> RawFd {
+        self.times.socket()
     }
 
     fn open_lower(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
@@ -962,8 +978,7 @@ impl Cow {
                 if view.upper.is_none() {
                     self.mkdir_upper(path)?;
                 }
-                let dir = self.open_upper(path, libc::O_RDONLY | libc::O_DIRECTORY)?;
-                set_times(dir.as_fd(), &stat)?;
+                self.times.set(path, &times_of(&stat))?;
                 Entry::Dir {
                     mode,
                     opaque: false,
@@ -985,7 +1000,7 @@ impl Cow {
                             rdev: encode(stat.st_rdev),
                         },
                     };
-                    set_times(copy.as_fd(), &stat)?;
+                    self.times.set(path, &times_of(&stat))?;
                     Ok(entry)
                 })();
                 match made {
@@ -1631,14 +1646,9 @@ impl Cow {
         }
         let times = FATTR_ATIME | FATTR_MTIME | FATTR_ATIME_NOW | FATTR_MTIME_NOW;
         if valid & times != 0 {
-            let flags = match dir {
-                true => libc::O_RDONLY | libc::O_DIRECTORY,
-                false => READ_FLAGS,
-            };
-            let fd = self.open_upper(&path, flags)?;
             let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
             let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
-            sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
+            self.times.set(&path, &[access, modify])?;
         }
         Ok(attr_out(
             &self.attributes(node, &self.view(&path)?)?,
@@ -1673,7 +1683,8 @@ impl Cow {
         if valid & times != 0 {
             let access = time(valid, FATTR_ATIME, FATTR_ATIME_NOW, field(32)?, word(56)?);
             let modify = time(valid, FATTR_MTIME, FATTR_MTIME_NOW, field(40)?, word(60)?);
-            sys::futimens(fd.as_fd(), &[access, modify]).map_err(errno)?;
+            // Its name is gone, so the times process takes the file itself.
+            self.times.set_unnamed(fd.as_fd(), &[access, modify])?;
         }
         let mut stat = sys::fstat(fd.as_fd()).map_err(errno)?;
         stat.st_ino = node;

@@ -23,10 +23,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString, OsStr};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, PathBuf};
 use std::rc::Rc;
+
+use vmm::confine::Changes;
 
 use crate::landlock::Access;
 use crate::sys;
@@ -1448,6 +1450,28 @@ impl Server {
             }
         }
         access
+    }
+
+    /// What the server changes once it is confined. Only an `rw` share's
+    /// server changes modes and times itself.
+    pub(crate) fn changes(&self) -> Changes {
+        let changes = |share: &Served| match share {
+            Served::Direct(share) if share.read_only => Changes::Nothing,
+            Served::Direct(_) => Changes::FilesModesAndTimes,
+            Served::CopyOnWrite(_) => Changes::Files,
+        };
+        let all = self.shares.iter().map(changes);
+        all.max().unwrap_or(Changes::Nothing)
+    }
+
+    /// The sockets of the processes that set the times of the copy-on-write
+    /// shares' copies.
+    pub(crate) fn times(&self) -> Vec<RawFd> {
+        let cow = self.shares.iter().filter_map(|share| match share {
+            Served::CopyOnWrite(share) => Some(share.times()),
+            Served::Direct(_) => None,
+        });
+        cow.collect()
     }
 
     /// The answer to one request for share `share`, or nothing for a request

@@ -10,6 +10,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::symlink;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::{PoisonError, RwLock, RwLockReadGuard, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use vmm::fs::{Relay, Server as _};
@@ -95,6 +96,18 @@ pub struct Guest {
 /// What came back: the error, and the payload.
 pub type Reply = (i32, Vec<u8>);
 
+/// Held while a server is made. A copy-on-write share's server forks, and
+/// until the child closes what it doesn't keep, it holds a copy of every
+/// descriptor of this process, and so every lock taken through one. `ap`
+/// makes a server in a process of its own, with one thread.
+static STARTING: RwLock<()> = RwLock::new(());
+
+/// Held by a test that checks a lock is gone once it lets it go, so that no
+/// server is made meanwhile.
+pub fn no_server_starts() -> RwLockReadGuard<'static, ()> {
+    STARTING.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl Guest {
     pub fn new(root: &Path) -> Self {
         Self::with(root, Mode::ReadOnly)
@@ -117,13 +130,21 @@ impl Guest {
     }
 
     /// A guest of the server `make` makes, on the thread that serves it.
+    /// It returns once the server is made.
     pub fn made(make: impl FnOnce() -> Server + Send + 'static) -> Self {
         let (mine, theirs) = UnixStream::pair().unwrap();
+        let (ready, started) = mpsc::channel();
         let server = thread::spawn(move || {
+            let starting = STARTING.write().unwrap_or_else(PoisonError::into_inner);
             let mut server = make();
+            drop(starting);
+            let _ = ready.send(());
             let mut theirs = theirs;
             share::serve(&mut theirs, &mut server).unwrap();
         });
+        // A server that panicked sends nothing, and the guest's first call
+        // fails.
+        let _ = started.recv();
         let mut guest = Self::over(OwnedFd::from(mine));
         guest.server = Some(server);
         guest

@@ -502,6 +502,41 @@ fn a_file_open_for_reading_reads_the_agent_s_copy_once_it_has_one() {
     assert_eq!(guest.read(READ, reader, 0, 64), (0, b"agent".to_vec()));
 }
 
+/// The modification time the guest sees of `node`.
+fn mtime_of(guest: &mut Guest, node: u64) -> i64 {
+    let (error, attr) = guest.call(GETATTR, node, &[0; 16]);
+    assert_eq!(error, 0);
+    i64::from_le_bytes(attr[16 + 32..16 + 40].try_into().unwrap())
+}
+
+#[test]
+fn the_agent_s_copy_keeps_your_times_until_it_sets_its_own() {
+    let tree = Tree::new("cow-times");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let nested = tree.root.join("dir/nested.txt");
+    let yours = fs::metadata(&nested).unwrap().mtime();
+    let node = guest.walk("dir/nested.txt").unwrap();
+    // A mode change copies your file, with its times.
+    assert_eq!(guest.setattr(node, FATTR_MODE, 0, 0o600), 0);
+    assert_eq!(mtime_of(&mut guest, node), yours);
+    assert_eq!(guest.setattr(node, FATTR_MTIME, 0, 0), 0);
+    assert_eq!(mtime_of(&mut guest, node), 0);
+    // A file the agent removed takes them through its handle.
+    let (file, handle) = guest.create(1, b"temp", 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, 1, b"temp"), 0);
+    let mut body = (FATTR_MTIME | 64).to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body.extend(handle.to_le_bytes());
+    body.resize(88, 0);
+    let (error, attr) = guest.call(SETATTR, file, &body);
+    assert_eq!(error, 0);
+    assert_eq!(
+        i64::from_le_bytes(attr[16 + 32..16 + 40].try_into().unwrap()),
+        0
+    );
+    assert_eq!(fs::metadata(&nested).unwrap().mtime(), yours);
+}
+
 #[test]
 fn a_file_the_agent_removed_still_changes_through_its_handle() {
     let tree = Tree::new("cow-removed-open");
@@ -631,6 +666,7 @@ fn a_lock_held_on_your_file_holds_after_the_agent_writes_it() {
     let tree = Tree::new("cow-lock-held");
     let path = tree.root.join("hello.txt");
     let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let _quiet = no_server_starts();
     let hello = guest.walk("hello.txt").unwrap();
     let reader = guest.open(hello, 0).unwrap();
     assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, 0).0, 0);
@@ -659,6 +695,7 @@ fn a_lock_held_on_your_file_holds_after_the_agent_writes_it() {
 fn a_lock_held_across_the_agent_s_first_write_stands_against_its_copy() {
     let tree = Tree::new("cow-lock-across");
     let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let _quiet = no_server_starts();
     let hello = guest.walk("hello.txt").unwrap();
     let reader = guest.open(hello, 0).unwrap();
     assert_eq!(guest.lock(SETLK, reader, 7, F_RDLCK, 0).0, 0);

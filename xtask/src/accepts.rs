@@ -6,7 +6,7 @@
 use crate::forge::{Forge, Gh, PullRequest};
 use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
-use crate::merge::{GOING, SLOT, WAITING, again};
+use crate::merge::{GOING, SLOT, WAITING};
 use crate::{Problem, Verdict, base, bench, journey, lock, waits, work};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -177,10 +177,10 @@ pub fn hold_back(
     let new = unapproved(lists.last().map(|(_, reasons)| &reasons[..]), accepted);
     // Read after the comment, so no approval given before it stands. One
     // given just after it is taken back too, which keeps the PR open.
-    if new.is_empty() || !again(|| gh.armed(number))?.auto_merge {
+    if new.is_empty() || !gh.armed(number)?.auto_merge {
         return Ok(());
     }
-    again(|| gh.disable_auto_merge(number))?;
+    gh.disable_auto_merge(number)?;
     println!(
         "{command}: PR {number}'s auto-merge is off, because what the owner approved doesn't cover what merging it now accepts:"
     );

@@ -229,7 +229,9 @@ fn sequence(
             }
             gh.comment_on_pr(number, &body)
         })?;
-        hold_back(&gh, number, command, &earlier, &accepted)?;
+        // It only reads, and turns auto-merge off if it is on, so it can run
+        // twice.
+        again(|| hold_back(&gh, number, command, &earlier, &accepted))?;
     }
     status.passed(&format!(
         "spec {} of {}, journey {} of {}",

@@ -27,9 +27,9 @@ reason specific to agents.
 
 This is your code. The owner decides direction, and you maintain the code: its
 design is yours, and you will change it again. When a change needs what the
-code nearly has, reshape what is there, and don't add a copy beside it. Do that
-inside the issue's `Touches`. A cleanup that reaches further is other work, and
-gets [an issue of its own](#issues).
+code nearly has, reshape what is there, and don't add a copy beside it. A
+cleanup the change doesn't need, or one that reaches past the issue's
+`Touches`, is other work, and gets [an issue of its own](#issues).
 
 ## Glossary
 

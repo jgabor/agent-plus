@@ -75,7 +75,9 @@ can't continue alone, park the issue as AGENTS.md says.
 
 6. Open the PR and link it with `mcp__t3-code__link_pull_request`. `xtask/gate`
    is the only check, and no bot reviews this repository, so don't wait for
-   either.
+   either. If `cargo xtask gate` said that the spec count is level, and
+   neither the journey nor a budget rises, add a `Hill: none, <reason>` line
+   to the PR body before you run `merge` or `prepare`.
 7. If the issue has `auto:merge`, run `cargo xtask merge <pr> --thread <id>`.
    If it prints `fail owner`, because the PR waits for the owner, or `fail
    hills`, `fail journey`, or `fail budgets` because a count fell, run `cargo

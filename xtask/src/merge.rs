@@ -182,10 +182,16 @@ fn sequence(
         )));
     }
     let gh = Gh::new(&root);
-    if mode != Mode::Land
-        && let Decision::Refused(why) = decide(&gh, number, mode, thread)?
-    {
-        return refuse(&why);
+    if mode != Mode::Land {
+        match decide(&gh, number, mode, thread)? {
+            Decision::Refused(why) => return refuse(&why),
+            Decision::Ready { pr, issue } => {
+                if fails_before_the_slot(&root, &gh, number, &pr, issue, mode)? {
+                    return Ok(Verdict::Fail);
+                }
+            }
+            Decision::Merged => {}
+        }
     }
     // The xtask of `main` waits for the slot again, because it is let go on
     // the `exec`, and the timeout has started by then.
@@ -216,7 +222,7 @@ fn sequence(
         refuse(why)
     };
     let kept = if keep_budgets {
-        if !record_at_tip(&tree.path, issue)? {
+        if !record_at(&tree.path, "HEAD", issue)? {
             return unproven(&format!(
                 "the tip of PR {number} has no ledger record, so there are no budgets to keep. Run `cargo xtask prepare {number}`"
             ));
@@ -987,16 +993,16 @@ fn head(tree: &Path) -> Result<String, Problem> {
 /// A record at the tip came from an earlier attempt. It describes a head that
 /// is about to change, and the merge writes a new one.
 fn drop_earlier_record(tree: &Path, issue: u64) -> Result<(), Problem> {
-    if record_at_tip(tree, issue)? {
+    if record_at(tree, "HEAD", issue)? {
         base::git_text(tree, &["reset", "-q", "--hard", "HEAD~1"])?;
     }
     Ok(())
 }
 
-/// Whether the newest commit does nothing but write this issue's record.
-fn record_at_tip(tree: &Path, issue: u64) -> Result<bool, Problem> {
-    let args = ["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"];
-    let touched = base::git_text(tree, &args)?;
+/// Whether `commit` does nothing but write this issue's record.
+fn record_at(root: &Path, commit: &str, issue: u64) -> Result<bool, Problem> {
+    let args = ["diff-tree", "--no-commit-id", "--name-only", "-r", commit];
+    let touched = base::git_text(root, &args)?;
     Ok(touched.trim() == ledger::path(issue as usize))
 }
 
@@ -1044,27 +1050,8 @@ fn prove(
     let prepare = mode != Mode::Merge;
     let commit = base::find(tree)?
         .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
-    // Before the gate, so that a PR that waits for the owner fails fast.
-    let waiting = waits::reasons(tree, &commit)?;
-    if !prepare && !waiting.is_empty() {
-        for reason in &waiting {
-            eprintln!("owner: {reason}");
-        }
-        eprintln!(
-            "owner: so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
-        );
-        let mut failed = Failed::new();
-        gate::record("owner", false, &mut failed);
-        return Ok(Err(failed));
-    }
-    // Before the gate too, because a PR that can't raise a count needs the
-    // line whatever the proof finds.
-    if !declares_no_hill(&pr.body) && !can_raise_a_count(tree, &commit)? {
-        eprintln!(
-            "hills: PR {number} changes only paths that no count comes from, so its body needs a `Hill: none, <reason>` line"
-        );
-        let mut failed = Failed::new();
-        gate::record("hill-line", false, &mut failed);
+    let waiting = waits::reasons(tree, &commit, "HEAD")?;
+    if let Some(failed) = fails_early(tree, &commit, "HEAD", &waiting, number, &pr.body, mode)? {
         return Ok(Err(failed));
     }
     telling(WAITING)?;
@@ -1129,6 +1116,103 @@ fn prove(
             .push("an exact revert, so it can remove checks, and the bench didn't run".to_string());
     }
     Ok(Ok(Proof { record, accepted }))
+}
+
+/// Whether the proof would fail the PR before its gate, from its diff with the
+/// `main` it starts from, so that the merge needn't wait for the slot. The
+/// xtask that starts a merge can be any, so `main`'s checks again under the
+/// slot, and decides. A failure is posted on the branch's head. The fetch
+/// writes refs of its own, so that it never holds a lock that the merge in the
+/// slot needs.
+fn fails_before_the_slot(
+    root: &Path,
+    gh: &Gh,
+    number: u64,
+    pr: &PullRequest,
+    issue: u64,
+    mode: Mode,
+) -> Result<bool, Problem> {
+    let refs = [
+        format!("refs/xtask/early-{number}/main"),
+        format!("refs/xtask/early-{number}/branch"),
+    ];
+    let main = format!("+refs/heads/main:{}", refs[0]);
+    let branch = format!("+refs/heads/{}:{}", pr.head_ref, refs[1]);
+    base::git_text(root, &["fetch", "-q", "origin", &main, &branch])?;
+    let resolve = |name: &str| -> Result<String, Problem> {
+        let commit = base::git_text(root, &["rev-parse", name])?;
+        base::git_text(root, &["update-ref", "-d", name])?;
+        Ok(commit.trim().to_string())
+    };
+    let (main, branch) = (resolve(&refs[0])?, resolve(&refs[1])?);
+    // `main`'s xtask checks under the slot, and the caller has checked.
+    if env::var(CHECKS_OF).ok().as_deref() == Some(main.as_str()) {
+        return Ok(false);
+    }
+    // The rebase under the slot says why there is no fork point.
+    let fork = base::git(root, &["merge-base", &main, &branch])?;
+    if !fork.status.success() {
+        return Ok(false);
+    }
+    let fork = String::from_utf8_lossy(&fork.stdout).trim().to_string();
+    let head = if record_at(root, &branch, issue)? {
+        format!("{branch}~1")
+    } else {
+        branch.clone()
+    };
+    let waiting = waits::reasons(root, &fork, &head)?;
+    let Some(failed) = fails_early(root, &fork, &head, &waiting, number, &pr.body, mode)? else {
+        return Ok(false);
+    };
+    post_gate(
+        gh,
+        &branch,
+        "failure",
+        &format!("Failed: {}", failed.join(", ")),
+    );
+    Ok(true)
+}
+
+/// What fails a proof before its gate runs, comparing `head` with `commit`:
+/// under `merge`, a PR that waits for the owner for the reasons in `waiting`,
+/// and a body without the `Hill: none, <reason>` line that the PR needs
+/// whatever the proof finds. It says why on stderr.
+fn fails_early(
+    root: &Path,
+    commit: &str,
+    head: &str,
+    waiting: &[String],
+    number: u64,
+    body: &str,
+    mode: Mode,
+) -> Result<Option<Failed>, Problem> {
+    let mut failed = Failed::new();
+    if mode == Mode::Merge && !waiting.is_empty() {
+        for reason in waiting {
+            eprintln!("owner: {reason}");
+        }
+        eprintln!(
+            "owner: so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
+        );
+        gate::record("owner", false, &mut failed);
+        return Ok(Some(failed));
+    }
+    if declares_no_hill(body) {
+        return Ok(None);
+    }
+    if has_hill_line(body) {
+        eprintln!(
+            "hills: the `Hill:` line of PR {number} gives no reason, so its body needs a `Hill: none, <reason>` line"
+        );
+    } else if !can_raise_a_count(root, commit, head)? {
+        eprintln!(
+            "hills: PR {number} changes only paths that no count comes from, so its body needs a `Hill: none, <reason>` line"
+        );
+    } else {
+        return Ok(None);
+    }
+    gate::record("hill-line", false, &mut failed);
+    Ok(Some(failed))
 }
 
 /// The spec count is compared by the gate. This compares the two that need the
@@ -1210,6 +1294,11 @@ fn declares_no_hill(body: &str) -> bool {
         .any(|reason| !reason.trim().is_empty())
 }
 
+/// Whether the body has a `Hill:` line, which `declares_no_hill` may not take.
+fn has_hill_line(body: &str) -> bool {
+    body.lines().any(|line| line.trim().starts_with("Hill:"))
+}
+
 /// What no count is read from: a path, or a directory that ends in `/`.
 const NO_COUNT: [&str; 5] = [
     "AGENTS.md",
@@ -1219,10 +1308,10 @@ const NO_COUNT: [&str; 5] = [
     "xtask/tests/",
 ];
 
-/// Whether the change touches a path that a count can come from.
-fn can_raise_a_count(tree: &Path, commit: &str) -> Result<bool, Problem> {
-    let args = ["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"];
-    let changed = base::git_text(tree, &args)?;
+/// Whether `head` changes a path that a count can come from.
+fn can_raise_a_count(root: &Path, commit: &str, head: &str) -> Result<bool, Problem> {
+    let args = ["diff", "--name-only", "--no-renames", "-z", commit, head];
+    let changed = base::git_text(root, &args)?;
     Ok(changed
         .split('\0')
         .filter(|path| !path.is_empty())
@@ -1238,24 +1327,60 @@ fn can_raise_a_count(tree: &Path, commit: &str) -> Result<bool, Problem> {
 fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
     let args = ["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"];
     let changed = base::git_text(tree, &args)?;
-    Ok(changed.split('\0').any(|path| {
-        path.starts_with("crates/")
-            || path.starts_with(".cargo/")
-            || path.starts_with("guest/kernel/")
-            || [
-                "Cargo.toml",
-                "Cargo.lock",
-                "rust-toolchain.toml",
-                "harness/budgets.toml",
-                "xtask/src/bench.rs",
-            ]
-            .contains(&path)
-    }))
+    Ok(changed.split('\0').any(affects_a_budget))
 }
 
-/// Whether the PR changes the xtask that proves it.
+/// The packages under `crates/` that `ap` and `fake-harness` are built from,
+/// which the bench builds. A test fails while a package is on neither list.
+#[cfg(test)]
+const BENCHED: [&str; 11] = [
+    "agentfile",
+    "ap",
+    "erofs",
+    "fake-harness",
+    "git",
+    "guest",
+    "net",
+    "netstack",
+    "share",
+    "store",
+    "vmm",
+];
+/// The packages under `crates/` that neither is built from.
+const NOT_BENCHED: [&str; 5] = ["fake-upstream", "fake-vm", "fuzz", "t1", "t2"];
+
+/// A path under `crates/` affects a budget unless it is in a package's
+/// `tests/`, or in a package that `NOT_BENCHED` names. A package on neither
+/// list does, until a test puts it on one.
+fn affects_a_budget(path: &str) -> bool {
+    if let Some(inside) = path.strip_prefix("crates/") {
+        let (package, rest) = inside.split_once('/').unwrap_or((inside, ""));
+        return !NOT_BENCHED.contains(&package) && !rest.starts_with("tests/");
+    }
+    path.starts_with(".cargo/")
+        || path.starts_with("guest/kernel/")
+        || [
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "harness/budgets.toml",
+            "xtask/src/bench.rs",
+        ]
+        .contains(&path)
+}
+
+/// Whether the PR changes the xtask that proves it. Its tests aren't part of
+/// it, and the gate runs them either way.
 fn changes_xtask(tree: &Path, main: &str) -> Result<bool, Problem> {
-    let args = ["diff", "--name-only", main, "HEAD", "--", "xtask/"];
+    let args = [
+        "diff",
+        "--name-only",
+        main,
+        "HEAD",
+        "--",
+        "xtask/",
+        ":(exclude)xtask/tests/",
+    ];
     Ok(!base::git_text(tree, &args)?.trim().is_empty())
 }
 
@@ -1477,8 +1602,8 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 #[cfg(test)]
 mod tests {
     use super::{
-        GOING, SLOT, TREE_PATH, WAITING, acceptance, acceptances, keep, left_after, long,
-        unapproved,
+        BENCHED, GOING, NOT_BENCHED, SLOT, TREE_PATH, WAITING, acceptance, acceptances,
+        affects_a_budget, keep, left_after, long, unapproved,
     };
     use std::fs;
     use std::path::Path;
@@ -1517,6 +1642,61 @@ mod tests {
             left_after(GOING, SLOT, seconds(40), seconds(5), whole),
             whole
         );
+    }
+
+    #[test]
+    fn only_what_ap_and_the_fake_harness_are_built_from_can_change_a_budget() {
+        for path in [
+            "crates/ap/src/main.rs",
+            "crates/ap/Cargo.toml",
+            "crates/ap/build.rs",
+            "crates/fake-harness/src/main.rs",
+            "crates/git/src/lib.rs",
+            "crates/vmm/src/tests.rs",
+            "crates/new/src/lib.rs",
+            "Cargo.lock",
+            "xtask/src/bench.rs",
+        ] {
+            assert!(affects_a_budget(path), "{path}");
+        }
+        for path in [
+            "crates/ap/tests/run.rs",
+            "crates/git/tests/data/pack",
+            "crates/t1/src/lib.rs",
+            "crates/t2/tests/claude.rs",
+            "crates/fuzz/src/lib.rs",
+            "crates/fake-upstream/src/main.rs",
+            "crates/fake-vm/Cargo.toml",
+            "xtask/src/merge.rs",
+            "docs.txt",
+        ] {
+            assert!(!affects_a_budget(path), "{path}");
+        }
+    }
+
+    /// A new package has to be put on one side of the rule.
+    #[test]
+    fn every_package_under_crates_is_benched_or_not() {
+        let root = crate::workspace::root().unwrap();
+        let crates = root.join("crates");
+        let mut named = 0;
+        for package in crate::workspace::packages(&root).unwrap() {
+            let Ok(directory) = package.directory.strip_prefix(&crates) else {
+                continue;
+            };
+            let directory = directory.to_string_lossy();
+            let sides = [
+                BENCHED.contains(&&*directory),
+                NOT_BENCHED.contains(&&*directory),
+            ];
+            assert_eq!(
+                sides.iter().filter(|side| **side).count(),
+                1,
+                "`crates/{directory}` must be in exactly one of `BENCHED` and `NOT_BENCHED`"
+            );
+            named += 1;
+        }
+        assert_eq!(named, BENCHED.len() + NOT_BENCHED.len());
     }
 
     fn reasons(items: &[&str]) -> Vec<String> {

@@ -27,21 +27,21 @@ const DEFINES: [&str; 4] = [
     "xtask/src/spec.rs",
 ];
 
-/// Each reason that HEAD waits for the owner, compared with `commit`.
-pub fn reasons(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
+/// Each reason that `head` waits for the owner, compared with `commit`.
+pub fn reasons(root: &Path, commit: &str, head: &str) -> Result<Vec<String>, Problem> {
     let listing = base::git_text(
         root,
-        &["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"],
+        &["diff", "--name-only", "--no-renames", "-z", commit, head],
     )?;
     let changed: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
     let touched = |path: &str| changed.contains(&path);
     let mut reasons = Vec::new();
     if touched(SPEC) {
-        reasons.extend(rewritten_units(root, commit)?);
+        reasons.extend(rewritten_units(root, commit, head)?);
     }
     if touched(WAIVERS) {
         let fields = |line: &str| line.splitn(3, '\t').take(2).collect::<Vec<_>>().join("\t");
-        for added in added_entries(root, commit, WAIVERS, fields)? {
+        for added in added_entries(root, commit, head, WAIVERS, fields)? {
             let (heading, sentence) = added.split_once('\t').unwrap_or((&added, ""));
             reasons.push(format!(
                 "it adds a waiver to {WAIVERS} under `{heading}`: {sentence}"
@@ -50,7 +50,7 @@ pub fn reasons(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
     }
     if touched(BUDGETS) {
         let before = budgets_at(root, commit)?;
-        let after = budgets_at(root, "HEAD")?;
+        let after = budgets_at(root, head)?;
         reasons.extend(loosened(&before, &after));
     }
     if touched(BUILD_SCRIPTS) {
@@ -60,12 +60,12 @@ pub fn reasons(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        for added in added_entries(root, commit, BUILD_SCRIPTS, fields)? {
+        for added in added_entries(root, commit, head, BUILD_SCRIPTS, fields)? {
             reasons.push(format!("it adds `{added}` to {BUILD_SCRIPTS}"));
         }
     }
     if changed.iter().any(|path| path.starts_with(GATE_TESTS)) {
-        let (before, after) = (tests_at(root, commit)?, tests_at(root, "HEAD")?);
+        let (before, after) = (tests_at(root, commit)?, tests_at(root, head)?);
         if after < before {
             reasons.push(format!(
                 "the number of tests under `{GATE_TESTS}` fell from {before} to {after}"
@@ -96,14 +96,14 @@ pub fn file_at(root: &Path, commit: &str, path: &str) -> Result<Option<String>, 
     )?))
 }
 
-/// The units of SPEC.md in the base that HEAD doesn't have. A unit ignores
+/// The units of SPEC.md in the base that `head` doesn't have. A unit ignores
 /// whitespace, so a reflowed paragraph keeps its units.
-fn rewritten_units(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
+fn rewritten_units(root: &Path, commit: &str, head: &str) -> Result<Vec<String>, Problem> {
     let units = |at: &str| -> Result<Vec<spec::Unit>, Problem> {
         let text = file_at(root, at, SPEC)?.unwrap_or_default();
         spec::extract(&text).map_err(|e| Problem(format!("SPEC.md at {at}: {e}")))
     };
-    let after: HashSet<(String, String)> = units("HEAD")?
+    let after: HashSet<(String, String)> = units(head)?
         .into_iter()
         .map(|unit| (unit.heading, unit.text))
         .collect();
@@ -119,11 +119,12 @@ fn rewritten_units(root: &Path, commit: &str) -> Result<Vec<String>, Problem> {
         .collect())
 }
 
-/// The entries of a list file that HEAD has and the base doesn't, each as
+/// The entries of a list file that `head` has and the base doesn't, each as
 /// `key` reads it from a line. Comments and blank lines aren't entries.
 fn added_entries(
     root: &Path,
     commit: &str,
+    head: &str,
     path: &str,
     key: impl Fn(&str) -> String,
 ) -> Result<Vec<String>, Problem> {
@@ -136,7 +137,7 @@ fn added_entries(
             .collect())
     };
     let before: HashSet<String> = entries(commit)?.into_iter().collect();
-    Ok(entries("HEAD")?
+    Ok(entries(head)?
         .into_iter()
         .filter(|entry| !before.contains(entry))
         .collect())
@@ -178,7 +179,8 @@ fn budgets_at(root: &Path, commit: &str) -> Result<Vec<Budget>, Problem> {
         .collect()
 }
 
-/// Each budget that HEAD removes, or whose target it raises or band it widens.
+/// Each budget that the head removes, or whose target it raises or band it
+/// widens.
 fn loosened(before: &[Budget], after: &[Budget]) -> Vec<String> {
     let mut reasons = Vec::new();
     for old in before {

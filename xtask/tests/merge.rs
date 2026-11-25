@@ -1370,6 +1370,37 @@ fn the_bench_runs_only_when_a_budget_can_be_affected() {
     }
 }
 
+/// An integration test isn't part of the `ap` that the bench measures.
+#[test]
+fn a_change_only_to_the_tests_of_a_crate_runs_no_bench() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "bench-tests-only",
+        &[("harness/ledger/3.toml", base.as_str())],
+        &[("crates/ap/tests/a.rs", "#[test]\nfn a() {}\n")],
+    );
+    let output = repo.merge();
+    assert_merged(&repo, &output);
+    assert!(!stdout(&output).contains("bench:"), "{}", stdout(&output));
+    assert!(!repo.calls().contains("Proving: bench"), "{}", repo.calls());
+}
+
+/// Its own xtask is built from `xtask/src`, which is `main`'s, so it would
+/// prove the same thing again.
+#[test]
+fn a_change_only_to_xtask_tests_is_not_proven_by_its_own_xtask() {
+    let repo = changing(
+        "own-tests-only",
+        &[("xtask/tests/a.rs", "#[test]\nfn one() {}\n")],
+        &[("xtask/tests/a.rs", TWO_GATE_TESTS)],
+    );
+    let output = repo.merge();
+    assert_merged(&repo, &output);
+    let calls = repo.calls();
+    assert_eq!(calls.matches("cargo fmt --all").count(), 1, "{calls}");
+    assert!(!calls.contains("its own xtask"), "{calls}");
+}
+
 /// Neither change loosens a budget, so each merges.
 #[test]
 fn a_change_to_how_budgets_are_measured_runs_the_bench() {
@@ -1555,7 +1586,10 @@ fn a_merge_waits_for_the_merge_slot() {
         .spawn()
         .unwrap();
     thread::sleep(Duration::from_millis(500));
-    assert!(!repo.calls().contains("git fetch"), "{}", repo.calls());
+    // It reads the PR's diff before the slot, and starts nothing.
+    let calls = repo.calls();
+    assert!(!calls.contains("git worktree add"), "{calls}");
+    assert!(!calls.contains("git rebase"), "{calls}");
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0));
@@ -1588,6 +1622,160 @@ fn the_pr_is_read_again_after_the_slot() {
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
     assert_refused(&repo, &output, "targets `release`");
+}
+
+/// Runs `command` while another run holds the merge slot, and fails if it
+/// waits for the slot.
+#[track_caller]
+fn run_while_the_slot_is_held(repo: &Repo, command: &str) -> Output {
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let mut child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args([command, "9"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let ended = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        ended,
+        "{command} waited for the slot\nstdout: {}\nstderr: {}",
+        stdout(&output),
+        stderr(&output)
+    );
+    output
+}
+
+/// A PR that waits for the owner fails `merge` before the slot, with the words
+/// it fails with under the slot.
+#[test]
+fn a_pr_that_waits_fails_before_the_slot() {
+    let repo = changing(
+        "early-owner",
+        &[],
+        &[(".github/workflows/x.yml", "name: x\n")],
+    );
+    let output = run_while_the_slot_is_held(&repo, "merge");
+    assert_refused(&repo, &output, "it changes `.github/workflows/x.yml`");
+    assert!(
+        stdout(&output).contains("fail owner"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!repo.calls().contains("git rebase"), "{}", repo.calls());
+    assert_eq!(last_post(&repo), "failure Failed: owner");
+    // `prepare` takes it, so only the slot tells it apart.
+    assert_prepared(&repo, &repo.prepare());
+}
+
+/// A `Hill` line with no reason, or a change that no count comes from and no
+/// line, fails before the slot, under either command.
+#[test]
+fn a_hill_line_the_proof_would_refuse_fails_before_the_slot() {
+    let base = record(0, 1, "");
+    let cases = [
+        (
+            "Closes #7.\n\nHill: none\n",
+            "crates/demo/src/lib.rs",
+            CHECK_ONE,
+        ),
+        ("Closes #7.\n", "AGENTS.md", "# Rules\n"),
+    ];
+    for (index, (body, path, content)) in cases.into_iter().enumerate() {
+        for command in ["merge", "prepare"] {
+            let repo = Repo::with(
+                &format!("early-hill-{index}-{command}"),
+                &[("harness/ledger/3.toml", base.as_str())],
+                &[(path, content)],
+            );
+            repo.set_pr(&Pr {
+                body,
+                ..Pr::default()
+            });
+            let output = run_while_the_slot_is_held(&repo, command);
+            assert_refused(&repo, &output, "Hill: none, <reason>");
+            assert!(
+                stdout(&output).contains("fail hill-line"),
+                "{}",
+                stdout(&output)
+            );
+            assert!(!repo.calls().contains("git rebase"), "{}", repo.calls());
+            assert_eq!(last_post(&repo), "failure Failed: hill-line");
+        }
+    }
+}
+
+/// What the PR says while the merge waits for the slot is what counts.
+#[test]
+fn the_xtask_of_main_checks_the_hill_line_again_under_the_slot() {
+    let repo = Repo::new("early-hill-again");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !repo.calls().contains("update-ref -d") {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    repo.set_pr(&Pr {
+        body: "Closes #7.\n\nHill: none\n",
+        ..Pr::default()
+    });
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_refused(&repo, &output, "Hill: none, <reason>");
+    assert!(repo.calls().contains("git rebase"), "{}", repo.calls());
+    assert_eq!(last_post(&repo), "failure Failed: hill-line");
+}
+
+/// The same, for a change that makes the PR wait.
+#[test]
+fn the_xtask_of_main_checks_what_waits_again_under_the_slot() {
+    let repo = Repo::new("early-owner-again");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !repo.calls().contains("update-ref -d") {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    repo.change_branch(".github/workflows/x.yml", "name: x\n");
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_refused(&repo, &output, "it changes `.github/workflows/x.yml`");
+    assert!(repo.calls().contains("git rebase"), "{}", repo.calls());
+    assert_eq!(last_post(&repo), "failure Failed: owner");
 }
 
 #[test]

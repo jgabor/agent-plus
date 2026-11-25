@@ -318,7 +318,7 @@ fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
 }
 
 // spec(NETWORK): The checks that `ap build` runs on `NETWORK` and `SECRET` rules run again on the merged rules, and a failure fails the run.
-// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn a_run_refuses_typed_rules_that_would_decrypt_a_harness_host() {
     let scratch = Scratch::new("run-decrypt");

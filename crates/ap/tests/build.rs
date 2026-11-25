@@ -2268,7 +2268,7 @@ fn a_reserved_name_is_reported_with_other_errors() {
     assert!(lines[1].starts_with("Agentfile:4: "), "{message}");
 }
 
-// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn a_rule_that_would_decrypt_a_harness_host_fails_the_build() {
     let scratch = Scratch::new("decrypt-harness");
@@ -2318,7 +2318,7 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_the_build() {
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
-// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn the_same_rules_on_another_harnesss_hosts_build() {
     let scratch = Scratch::new("decrypt-other");

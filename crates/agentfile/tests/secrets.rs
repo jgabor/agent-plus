@@ -883,7 +883,7 @@ fn parse_for_checks_the_agents_own_harness() {
     assert!(parsed.is_ok(), "{parsed:?}");
 }
 
-// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
     for (rules, line, rule) in [
@@ -917,7 +917,7 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
     }
 }
 
-// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn rules_that_decrypt_no_harness_host_pass() {
     for rules in [

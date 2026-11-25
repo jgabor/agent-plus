@@ -1,0 +1,19 @@
+issue = 870
+pr = 885
+commit = "8b73fb4e1ad90e237d4a911ce48f9734c0dd2178"
+base = "250d412341ca2bde5f3161833dc44cd5975fb1d2"
+date = "2026-11-25"
+host = "linux-x86_64"
+spec = { proven = 573, promises = 971 }
+journey = { passing = 11, steps = 19 }
+reason = ""
+
+[budgets]
+binary_bytes = 8209328
+boot_ms = 112.8
+idle_mib = 47
+kernel_bytes = 15363160
+noop_build_ms = 1.28
+os_bytes = 183574528
+run_ms = 135.72
+version_ms = 0.29

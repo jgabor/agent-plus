@@ -199,30 +199,45 @@ pub fn url_rules(network: &Network, name: &str) -> bool {
     })
 }
 
-/// Whether a `+` host rule of `network` allows `name` with a narrower `-`
-/// rule beneath it, so that the proxy decrypts TLS to `name` and checks
-/// each request's host, because a client can reuse one connection for
-/// several names. A narrower rule is a host or URL rule for the `+` rule's
-/// name, or a name under it, on any port. The default is never the `+`
+/// Whether a `+` host rule of `network` covers a connection to `name` on
+/// `port` with a narrower `-` rule beneath it, so that the proxy decrypts
+/// TLS to `name` and checks each request's host, because a client can reuse
+/// one connection for several names. A name rule must allow the connection.
+/// The narrower rule is a `-` host or URL rule for a name under the `+`
+/// rule's, a URL rule for its own name, or a host rule for its own name on
+/// one port when the `+` rule names no port. The default is never the `+`
+/// rule, and a harness host, one of `harness`, is never decrypted for a
 /// rule. A name is in any case, with or without a final dot.
-pub fn narrowed(network: &Network, name: &str) -> bool {
+pub fn narrowed(network: &Network, harness: &[&str], name: &str, port: u16) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.strip_suffix('.').unwrap_or(&name);
+    if harness.iter().any(|host| host.eq_ignore_ascii_case(name)) {
+        return false;
+    }
+    let allowed = name_decision(&network.rules, name, port, None);
+    if !allowed.is_some_and(|rule| rule.sign == Sign::Allow) {
+        return false;
+    }
     // Rules hold their names in lowercase.
     let under = |host: &str, broad: &str| {
-        host == broad || (host.strip_suffix(broad)).is_some_and(|start| start.ends_with('.'))
+        (host.strip_suffix(broad)).is_some_and(|start| start.ends_with('.'))
+    };
+    let narrower = |broad: &str, every_port: bool, narrow: &NetworkRule| match &narrow.destination {
+        _ if narrow.sign == Sign::Allow => false,
+        Destination::Url { host, .. } => host == broad || under(host, broad),
+        Destination::Host { name, port } => {
+            under(name, broad) || name == broad && port.is_some() && every_port
+        }
+        Destination::Address { .. } => false,
     };
     (network.rules.iter()).any(|broad| match &broad.destination {
         Destination::Host {
-            name: broad_name, ..
+            name: broad_name,
+            port: only,
         } if broad.sign == Sign::Allow => {
-            under(name, broad_name)
-                && (network.rules.iter()).any(|narrow| match &narrow.destination {
-                    Destination::Host { name: host, .. } | Destination::Url { host, .. } => {
-                        narrow.sign == Sign::Deny && under(host, broad_name)
-                    }
-                    Destination::Address { .. } => false,
-                })
+            (name == broad_name || under(name, broad_name))
+                && only.is_none_or(|only| only == port)
+                && (network.rules.iter()).any(|narrow| narrower(broad_name, only.is_none(), narrow))
         }
         _ => false,
     })

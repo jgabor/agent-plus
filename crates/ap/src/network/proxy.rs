@@ -890,7 +890,7 @@ fn allowed(
 ) -> (Vec<IpAddr>, Check) {
     let url = name.is_some_and(|name| url_rules(network, name));
     let bound = name.is_some_and(|name| injection.binds(name));
-    let narrowed = name.is_some_and(|name| net::narrowed(network, name));
+    let narrowed = name.is_some_and(|name| net::narrowed(network, harness, name, port));
     // UDP to such a host, QUIC among it, isn't HTTP. QUIC to another host
     // the proxy decrypts would carry what the proxy can't read: a request
     // for another name, or the placeholder. A host whose every request must

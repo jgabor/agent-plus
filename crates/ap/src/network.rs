@@ -309,15 +309,17 @@ fn reaches_nothing(network: &Network, harness: &[String]) -> bool {
 }
 
 /// Whether the proxy may decrypt TLS under `network`, with the hidden
-/// secrets of `injection`: to a host with URL rules, a host under a `+` rule
-/// with a narrower `-` rule beneath it, or a hidden secret's bound host.
+/// secrets of `injection`: to a host with URL rules, a hidden secret's bound
+/// host, or a host under a `+` rule with a narrower `-` rule beneath it,
+/// which needs a `+` host rule and a `-` host rule.
 fn decrypts(network: &Network, injection: &Injection) -> bool {
-    !injection.secrets.is_empty()
-        || (network.rules.iter()).any(|rule| match &rule.destination {
-            Destination::Url { .. } => true,
-            Destination::Host { name, .. } => ::net::narrowed(network, name),
-            Destination::Address { .. } => false,
-        })
+    let has = |sign| {
+        (network.rules.iter())
+            .any(|rule| rule.sign == sign && matches!(rule.destination, Destination::Host { .. }))
+    };
+    let url =
+        (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
+    !injection.secrets.is_empty() || url || has(Sign::Allow) && has(Sign::Deny)
 }
 
 /// The guest's gateway, at the addresses the guest's init gives it.

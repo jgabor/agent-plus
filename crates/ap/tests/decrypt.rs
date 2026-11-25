@@ -820,6 +820,7 @@ fn a_host_without_url_rules_is_passed_through_without_decryption() {
 }
 
 // spec(NETWORK): under a broader rule of the opposite sign: with `+github.com` and `-gist.github.com`, on every TLS connection that `+github.com` allows, because a client can reuse one connection for several names.
+// spec(NETWORK): TLS that the proxy decrypts and that doesn't carry HTTP is denied, because the proxy can't check the names in it.
 #[test]
 fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
     let (root, config) = server();
@@ -847,6 +848,26 @@ fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
     assert!(answer.is_ok(), "{answer:?}");
     let answer = guest.exchange(unnamed, Some(&mut tls), gist.as_bytes());
     assert_eq!(answer, Err("reset".to_owned()));
+    // TLS that doesn't carry HTTP is denied, since its names can't be read.
+    let other = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(other, Some(&mut tls), b"a001 LOGIN me secret\r\n\r\n");
+    assert!(answer.is_err(), "{answer:?}");
+    // Traffic that isn't TLS passes, and plain HTTP gets the name check.
+    let (plain, heard) = destination(None);
+    let mut guest = Guest::new(&rules, Vec::new(), plain);
+    let handle = guest.connect();
+    let answer = guest.exchange(handle, None, b"SSH-2.0-OpenSSH_9.9\r\n\r\n");
+    assert!(answer.is_ok(), "{answer:?}");
+    let handle = guest.connect();
+    let answer = guest.exchange(handle, None, &get("/plain"));
+    assert!(answer.is_ok(), "{answer:?}");
+    let answer = guest.exchange(handle, None, gist.as_bytes());
+    assert_eq!(answer, Err("reset".to_owned()));
+    assert_eq!(
+        settled(&heard),
+        ["SSH-2.0-OpenSSH_9.9 (plain)", "GET /plain HTTP/1.1 (plain)"]
+    );
     // A server that speaks first, as SSH does, still reaches the guest.
     let (port, _) = greeter();
     let mut guest = Guest::new(&rules, Vec::new(), port);

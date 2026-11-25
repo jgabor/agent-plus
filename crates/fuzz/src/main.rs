@@ -944,7 +944,7 @@ fn narrowed_agrees(
     decision: &net::Decision,
     name: &str,
 ) {
-    let narrowed = net::narrowed(network, name);
+    let narrowed = net::narrowed(network, &[], name, connection.port);
     if narrowed {
         assert!(!network.allows(name), "{name} is decrypted and allowed");
     }

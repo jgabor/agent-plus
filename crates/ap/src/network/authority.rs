@@ -270,52 +270,58 @@ mod tests {
     /// Set in the process that [`a_confined_network_process_issues_a_leaf`]
     /// starts, which confines itself.
     const CONFINED_VARIABLE: &str = "AP_AUTHORITY_CONFINED";
-    const CONFINED_TEST: &str =
-        "network::authority::tests::a_confined_network_process_issues_a_leaf";
     /// What the confined process prints once its leaf verifies.
     const VERIFIED: &str = "a leaf verified in a confined process";
-    /// The confined process runs on a test's thread here, and `ap` runs the
-    /// network process on its main thread. One malloc arena keeps the
-    /// test's like `ap`'s, which glibc grows with `brk`, where a thread's
-    /// own arena grows with `mprotect`, which the filter refuses.
-    const ARENAS: &str = "MALLOC_ARENA_MAX";
     const GETRANDOM: std::ffi::c_long = 318;
 
     unsafe extern "C" {
         fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
     }
 
+    /// The process that [`a_confined_network_process_issues_a_leaf`]
+    /// starts. It runs before the test harness, so that it is the process's
+    /// only thread, as the network process is in `ap`.
+    #[used]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    static CONFINED_PROCESS: extern "C" fn() = confined_process;
+
+    extern "C" fn confined_process() {
+        if std::env::var_os(CONFINED_VARIABLE).is_none() {
+            return;
+        }
+        let now = SystemTime::now();
+        let authority = Authority::generate(now).unwrap();
+        let threads = std::fs::read_dir("/proc/self/task").unwrap().count();
+        assert_eq!(threads, 1, "the network process has threads it doesn't own");
+        // Standard input is the link, which the filter lets it read.
+        vmm::confine::confine_network_connecting(0).unwrap();
+        let leaf = authority.issue("api.example.com", now).unwrap();
+        assert!(verifies(&authority, &leaf, "api.example.com", now));
+        // glibc can answer from the vDSO without a system call, but musl
+        // and older glibc make the call, so this makes it too.
+        let mut bytes = [0u8; 16];
+        // SAFETY: getrandom writes at most `bytes.len()` bytes to it.
+        let drawn = unsafe { syscall(GETRANDOM, bytes.as_mut_ptr(), bytes.len(), 0) };
+        assert_eq!(drawn, bytes.len() as std::ffi::c_long);
+        // Four megabytes held in small blocks grow the heap, as serving a
+        // busy guest does.
+        let pages: Vec<Vec<u8>> = (0..1024).map(|_| vec![1; 4096]).collect();
+        std::hint::black_box(&pages);
+        println!("{VERIFIED}");
+        // The process ends here, before the test harness starts.
+        // SAFETY: `_exit` ends the process at once.
+        unsafe { libc::_exit(0) };
+    }
+
     /// The network process makes its authority before it confines itself,
     /// and issues leaves after, which draws on the random source. This
-    /// starts this test again in a process of its own, which makes an
+    /// starts this program again in a process of its own, which makes an
     /// authority, confines itself as the network process does when it may
     /// connect, and then issues a leaf and verifies it.
     #[test]
     fn a_confined_network_process_issues_a_leaf() {
-        if std::env::var_os(CONFINED_VARIABLE).is_some() {
-            let now = SystemTime::now();
-            let authority = Authority::generate(now).unwrap();
-            // Standard input is the link, which the filter lets it read.
-            vmm::confine::confine_network_connecting(0).unwrap();
-            let leaf = authority.issue("api.example.com", now).unwrap();
-            assert!(verifies(&authority, &leaf, "api.example.com", now));
-            // glibc can answer from the vDSO without a system call, but
-            // musl and older glibc make the call, so this makes it too.
-            let mut bytes = [0u8; 16];
-            // SAFETY: getrandom writes at most `bytes.len()` bytes to it.
-            let drawn = unsafe { syscall(GETRANDOM, bytes.as_mut_ptr(), bytes.len(), 0) };
-            assert_eq!(drawn, bytes.len() as std::ffi::c_long);
-            // Four megabytes held in small blocks grow the heap, as serving
-            // a busy guest does.
-            let pages: Vec<Vec<u8>> = (0..1024).map(|_| vec![1; 4096]).collect();
-            std::hint::black_box(&pages);
-            println!("{VERIFIED}");
-            return;
-        }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([CONFINED_TEST, "--exact", "--test-threads=1", "--nocapture"])
             .env(CONFINED_VARIABLE, "1")
-            .env(ARENAS, "1")
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();

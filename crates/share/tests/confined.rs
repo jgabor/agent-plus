@@ -29,25 +29,27 @@ const ARGS: &str = "AP_SHARE_CONFINED_ARGS";
 /// it tries on that file, `fchmod`, `futimens`, or both, and `raise` first
 /// to take up every capability it holds.
 const AIM: &str = "AP_SHARE_CONFINED_AIM";
-const SERVER: &str = "confined_server_process";
 /// The number of the descriptor the server keeps, which its process tries
 /// to unlock once it has served, as if its own code were turned against it.
 const UNLOCK: &str = "AP_SHARE_CONFINED_UNLOCK";
-/// The server runs on a test's thread here, and `ap` runs it on its main
-/// thread. One malloc arena keeps the test's like `ap`'s, which grows with
-/// `brk`, where a thread's own arena grows with `mprotect`, which the
-/// filter refuses.
-const ARENAS: &str = "MALLOC_ARENA_MAX";
 const FALLOCATE: u32 = 43;
 const FSYNC: u32 = 20;
 
-/// The share server's process, when the test below starts it. Its standard
-/// input is the socket.
-#[test]
-fn confined_server_process() {
+/// The share server's process, when a test below starts this program
+/// again with [`ARGS`] set. It runs before the test harness, so that it is
+/// the process's only thread, as it is in `ap`. Its standard input is the
+/// socket.
+#[used]
+#[unsafe(link_section = ".init_array")]
+static SERVER_PROCESS: extern "C" fn() = server_process;
+
+extern "C" fn server_process() {
     let Some(args) = env::var_os(ARGS) else {
         return;
     };
+    // As the Rust runtime does before `main`, which hasn't run.
+    // SAFETY: ignoring a signal changes no memory.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     let args: Vec<OsString> = args.to_str().unwrap().lines().map(OsString::from).collect();
     // A copy of the aim's descriptor, which the server doesn't close.
     let aim = env::var(AIM).ok().map(|aim| {
@@ -61,6 +63,7 @@ fn confined_server_process() {
         let changes = ["fchmod", "futimens", "raise"].map(|change| changes.contains(&change));
         (share::inheritable(fd).unwrap(), call, path, changes)
     });
+    assert!(alone(), "the server's process has threads it doesn't own");
     let status = share::main(&args);
     if let (0, Some((directory, openat2, path, changes))) = (status, aim) {
         turn(&directory, openat2, &path, changes);
@@ -69,8 +72,7 @@ fn confined_server_process() {
         // SAFETY: `flock` takes and returns plain integers.
         unsafe { libc::flock(fd.parse().unwrap(), libc::LOCK_UN) };
     }
-    // The filter allows nothing the test harness does after a test, so
-    // the process ends here.
+    // The process ends here, before the test harness starts.
     // SAFETY: `_exit` ends the process at once.
     unsafe { libc::_exit(i32::from(status)) };
 }
@@ -195,9 +197,7 @@ fn launch(
     }
     let mut command = Command::new(env::current_exe().unwrap());
     command
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args.join("\n"))
-        .env(ARENAS, "1")
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -421,9 +421,7 @@ fn a_confined_server_can_t_unlock_what_it_keeps() {
     let (mine, theirs) = UnixStream::pair().unwrap();
     let mut command = Command::new(env::current_exe().unwrap());
     command
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args)
-        .env(ARENAS, "1")
         .env(UNLOCK, kept.as_raw_fd().to_string())
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null())

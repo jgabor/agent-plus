@@ -1,8 +1,10 @@
 //! Decides each connection from the `NETWORK` rules that `agentfile` reads,
 //! by the evaluation under NETWORK in SPEC.md. It is pure functions: the
-//! resolver and the proxy hand it what they know of a connection.
+//! resolver and the proxy hand it what they know of a connection. Its
+//! `hpack` module reads and writes HTTP/2's header blocks, for the proxy.
 
 mod check;
+pub mod hpack;
 mod inject;
 
 pub use check::{NameCheck, Refused};

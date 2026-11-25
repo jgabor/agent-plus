@@ -1,0 +1,14 @@
+:scheme: https
+:authority: example.com
+:path: /
+:method: GET
+user-agent: hpack-test
+cookie: xxxxxxx1
+x-hello: world
+
+:scheme: https
+:authority: example.com
+:path: /
+:method: GET
+user-agent: hpack-test
+cookie: xxxxxxx2

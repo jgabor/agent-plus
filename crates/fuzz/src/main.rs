@@ -32,7 +32,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 10] = [
+const TARGETS: [Target; 11] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -377,6 +377,57 @@ const TARGETS: [Target; 10] = [
         ],
     },
     Target {
+        name: "hpack",
+        check: |input| {
+            hpack_input(input);
+        },
+        corpus: &[
+            "",
+            // The requests of RFC 7541's C.3, C.4 with Huffman coding, and
+            // the responses of C.6.
+            concat!(
+                "\u{82}\u{86}\u{84}A\x0fwww.example.com\u{1100}",
+                "\u{82}\u{86}\u{84}\u{be}X\x08no-cache\u{1100}",
+                "\u{82}\u{87}\u{85}\u{bf}@\x0acustom-key\x0ccustom-value",
+            ),
+            concat!(
+                "\u{82}\u{86}\u{84}A\u{8c}\u{f1}\u{e3}\u{c2}\u{e5}\u{f2}:k\u{a0}\u{ab}\u{90}\u{f4}\u{ff}\u{1100}",
+                "\u{82}\u{86}\u{84}\u{be}X\u{86}\u{a8}\u{eb}\x10d\u{9c}\u{bf}\u{1100}",
+                "\u{82}\u{87}\u{85}\u{bf}@\u{88}%\u{a8}I\u{e9}[\u{a9}}\x7f\u{89}%\u{a8}I\u{e9}[\u{b8}\u{e8}\u{b4}\u{bf}",
+            ),
+            concat!(
+                "H\u{82}d\x02X\u{85}\u{ae}\u{c3}w\x1aKa\u{96}\u{d0}z\u{be}\u{94}\x10T\u{d4}D\u{a8} \x05\u{95}\x04\x0b\u{81}f\u{e0}\u{82}\u{a6}-\x1b\u{ff}n\u{91}\u{9d})\u{ad}\x17\x18c\u{c7}\u{8f}\x0b\u{97}\u{c8}\u{e9}\u{ae}\u{82}\u{ae}C\u{d3}\u{1100}",
+                "H\u{83}d\x0e\u{ff}\u{c1}\u{c0}\u{bf}\u{1100}",
+                "\u{88}\u{c1}a\u{96}\u{d0}z\u{be}\u{94}\x10T\u{d4}D\u{a8} \x05\u{95}\x04\x0b\u{81}f\u{e0}\u{84}\u{a6}-\x1b\u{ff}\u{c0}Z\u{83}\u{9b}\u{d9}\u{ab}w\u{ad}\u{94}\u{e7}\u{82}\x1d\u{d7}\u{f2}\u{e6}\u{c7}\u{b3}5\u{df}\u{df}\u{cd}[9`\u{d5}\u{af}'\x08\x7f6r\u{c1}\u{ab}'\x0f\u{b5})\x1f\u{95}\u{87}1`e\u{c0}\x03\u{ed}N\u{e5}\u{b1}\x06=P\x07",
+            ),
+            // Updates to 0 and back, a field never indexed, then a limit of 256
+            // with its update, and a field indexed.
+            "\x20\x3f\u{e1}\x1f\x10\x08password\x06secret\u{200}\x3f\u{e1}\x01\x40\x01a\x01b\u{be}",
+        ],
+        words: &[
+            "\u{80}",
+            "\u{82}",
+            "\u{be}",
+            "\u{bf}",
+            "\u{c0}",
+            "\u{ff}",
+            "\x7f",
+            "\x40",
+            "\x41",
+            "\x00",
+            "\x10",
+            "\x20",
+            "\x3f\u{e1}\x1f",
+            "\x0f",
+            "\x0a",
+            "\u{8c}",
+            "\u{100}",
+            "\u{200}",
+            "\u{1100}",
+            "\u{4100}",
+        ],
+    },
+    Target {
         name: "name-check",
         check: |input| {
             name_check_input(input);
@@ -563,6 +614,45 @@ fn dns_input(input: &str) -> bool {
     assert_eq!(answer.get(4..6), Some(&[0, 1][..]), "{answer:?}");
     assert_eq!(resolver.answer(query), Some(answer));
     true
+}
+
+/// Decodes the blocks of `input` on one connection, where each character
+/// is the byte of its code point, and each past U+00FF ends a block. Each
+/// block the decoder accepts, it encodes on a second connection, and panics
+/// if decoding that gives other headers. A character that ends a block,
+/// less U+0100, is the next table limit of both connections. Returns how
+/// many blocks the decoder accepted.
+fn hpack_input(input: &str) -> usize {
+    use net::hpack::{Decoder, Encoder};
+    const LIST_LIMIT: usize = 64 * 1024;
+    let mut decoder = Decoder::new(4096, LIST_LIMIT);
+    let mut encoder = Encoder::new(4096);
+    let mut again = Decoder::new(4096, LIST_LIMIT);
+    let mut accepted = 0;
+    let mut rest = input;
+    loop {
+        let end = rest.find(|c: char| c > '\u{ff}');
+        let block: Vec<u8> = rest[..end.unwrap_or(rest.len())]
+            .chars()
+            .map(|c| c as u32 as u8)
+            .collect();
+        let Ok(headers) = decoder.decode(&block) else {
+            return accepted;
+        };
+        let mut encoded = Vec::new();
+        encoder.encode(&headers, &mut encoded);
+        assert_eq!(again.decode(&encoded), Ok(headers), "{encoded:x?}");
+        accepted += 1;
+        let Some(end) = end else {
+            return accepted;
+        };
+        let ending = rest[end..].chars().next().expect("a character");
+        let limit = ending as usize - 0x100;
+        encoder.set_table_limit(limit);
+        decoder.set_table_limit(limit);
+        again.set_table_limit(limit);
+        rest = &rest[end + ending.len_utf8()..];
+    }
 }
 
 /// Feeds `input` to the name check of a connection attributed to
@@ -1962,6 +2052,19 @@ mod tests {
     #[should_panic(expected = "iri-string")]
     fn a_broken_escape_with_a_normal_form_is_found() {
         same_path("/a%zz", Some("/a%zz"));
+    }
+
+    #[test]
+    fn the_hpack_corpus_decodes_and_encodes_back() {
+        let corpus = TARGETS.iter().find(|t| t.name == "hpack").unwrap().corpus;
+        for input in corpus {
+            let blocks = input.chars().filter(|&c| c > '\u{ff}').count() + 1;
+            assert_eq!(hpack_input(input), blocks, "{input:?}");
+        }
+        // The decoder refuses index 0, and nothing after it is decoded.
+        assert_eq!(hpack_input("\u{82}\u{1100}\u{80}\u{1100}\u{82}"), 1);
+        // A limit lowered, and a block that doesn't say so.
+        assert_eq!(hpack_input("\u{82}\u{200}\u{82}"), 1);
     }
 
     #[test]

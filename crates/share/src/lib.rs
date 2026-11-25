@@ -192,7 +192,7 @@ pub fn main(args: &[OsString]) -> u8 {
 
 fn run(args: &[OsString]) -> io::Result<()> {
     // Never closed, so its number is never another file's, which the filter
-    // would refuse to lock.
+    // would refuse to lock or close.
     let (kept, args) = match args {
         [keep, fd, rest @ ..] if keep == KEEP => (Some(open_kept(fd)?), rest),
         _ => (None, args),

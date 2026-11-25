@@ -921,6 +921,12 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
             3,
             "-other.harness.example:22",
         ),
+        // A URL rule for the `+` rule's own name is narrower than it.
+        (
+            "NETWORK +harness.example\nNETWORK -https://harness.example/x",
+            3,
+            "-https://harness.example/x",
+        ),
         (
             "NETWORK -https://other.harness.example/x\nNETWORK +harness.example:443",
             2,
@@ -949,6 +955,9 @@ fn rules_that_decrypt_no_harness_host_pass() {
         "NETWORK -other.harness.example",
         // A broader `-` rule allows nothing to decrypt.
         "NETWORK -harness.example\nNETWORK +api.harness.example",
+        // Rules for two ports of one name are disjoint, so neither is
+        // narrower.
+        "NETWORK +api.harness.example:443\nNETWORK -api.harness.example:22",
         // The rules tie, so they deny.
         "NETWORK +harness.example\nNETWORK -harness.example\nNETWORK -other.harness.example",
     ] {

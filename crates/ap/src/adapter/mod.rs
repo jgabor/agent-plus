@@ -23,12 +23,24 @@ pub const CERTIFICATES: [&str; 5] = [
 pub const RUN: [&str; 3] = ["HOME", "USER", "LOGNAME"];
 
 /// What the adapter for `harness` keeps for itself: the variables `ap` and
-/// it set, the ones the harness reads for sign-in, and the harness's own
-/// hosts.
+/// it set, the ones the harness reads for sign-in, the one `AUTH key` reads,
+/// and the harness's own hosts.
 pub fn reserved(harness: Harness) -> Reserved<'static> {
-    let (name, set, sign_in, hosts) = match harness {
-        Harness::Claude => ("Claude Code", claude::SET, claude::SIGN_IN, claude::HOSTS),
-        Harness::Codex => ("Codex", codex::SET, codex::SIGN_IN, codex::HOSTS),
+    let (name, set, sign_in, key, hosts) = match harness {
+        Harness::Claude => (
+            "Claude Code",
+            claude::SET,
+            claude::SIGN_IN,
+            claude::KEY,
+            claude::HOSTS,
+        ),
+        Harness::Codex => (
+            "Codex",
+            codex::SET,
+            codex::SIGN_IN,
+            codex::KEY,
+            codex::HOSTS,
+        ),
     };
     Reserved {
         harness: name,
@@ -39,6 +51,7 @@ pub fn reserved(harness: Harness) -> Reserved<'static> {
             .copied()
             .collect(),
         sign_in,
+        key,
         hosts,
     }
 }

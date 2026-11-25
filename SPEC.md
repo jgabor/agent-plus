@@ -1252,6 +1252,10 @@ ENV EDITOR ${EDITOR:-vi}
   as in `ENV TOKEN $GITHUB_TOKEN` with `SECRET GITHUB_TOKEN`, because it
   would hand the agent the value the secret hides. A value can read the
   variable of a `visible` secret.
+- With [`AUTH key`](#auth), a value that reads the host variable the key
+  comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with
+  `AGENT claude`, because it would hand the agent the key that `AUTH key`
+  hides.
 - Setting the same key twice, or a key that a `SECRET` or `SEAL` also names,
   is an error. So is a key the adapter sets, such as `CLAUDE_CONFIG_DIR` or the
   certificate variables under [SECRET](#secret), and a name the harness

@@ -778,9 +778,51 @@ fn reserved_errors(lines: &str) -> Vec<Error> {
         harness: "Harness",
         set: vec!["SET_BY_ADAPTER"],
         sign_in: &["HARNESS_KEY", "HARNESS_TOKEN"],
+        key: "HARNESS_KEY",
         hosts: &["api.harness.example"],
     };
     reserved(&instructions, &lists)
+}
+
+// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because it would hand the agent the key that `AUTH key` hides.
+#[test]
+fn an_env_value_cannot_read_the_variable_auth_key_reads() {
+    for value in [
+        "$HARNESS_KEY",
+        "${HARNESS_KEY}",
+        "${HARNESS_KEY:-none}",
+        "\"Bearer $HARNESS_KEY\"",
+        "x${HARNESS_KEY}y$HARNESS_KEY",
+    ] {
+        let env = format!("ENV LEAK {value}");
+        for (lines, env_line, auth_line) in [
+            (format!("AUTH key\n{env}\n"), 3, 2),
+            (format!("{env}\nAUTH key\n"), 2, 3),
+        ] {
+            let errors = reserved_errors(&lines);
+            assert_eq!(lines_of(&errors), [env_line], "{lines:?}: {errors:?}");
+            let message = &errors[0].message;
+            for named in [
+                "`ENV LEAK`",
+                "`$HARNESS_KEY`",
+                &format!("line {auth_line}"),
+                "`AUTH key`",
+                "Remove",
+            ] {
+                assert!(message.contains(named), "{named}: {message}");
+            }
+        }
+    }
+    // Another sign-in name, no `AUTH key`, or `\$` reads no hidden key.
+    for lines in [
+        "AUTH key\nENV LEAK $HARNESS_TOKEN\n",
+        "AUTH token\nENV LEAK $HARNESS_KEY\n",
+        "ENV LEAK $HARNESS_KEY\n",
+        "AUTH key\nENV LEAK \\$HARNESS_KEY\n",
+    ] {
+        let errors = reserved_errors(lines);
+        assert!(errors.is_empty(), "{lines:?}: {errors:?}");
+    }
 }
 
 #[test]

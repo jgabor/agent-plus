@@ -185,11 +185,13 @@ fn sequence(
     if mode != Mode::Land {
         match decide(&gh, number, mode, thread)? {
             Decision::Refused(why) => return refuse(&why),
-            Decision::Ready { pr, issue } => {
+            // `main`'s xtask, which a merge runs next, checks under the slot.
+            Decision::Ready { pr, issue } if !runs_the_checks_of_main() => {
                 if fails_before_the_slot(&root, &gh, number, &pr, issue, mode)? {
                     return Ok(Verdict::Fail);
                 }
             }
+            Decision::Ready { .. } => {}
             Decision::Merged => {}
         }
     }
@@ -603,6 +605,12 @@ fn hold_back(
 fn is_worker() -> bool {
     let ids = [std::os::unix::process::parent_id(), process::id()];
     env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))
+}
+
+/// Whether this process is the xtask of `main` that a merge runs, which names
+/// itself in the variable, unlike a worker or a merge that its tests start.
+fn runs_the_checks_of_main() -> bool {
+    env::var(WORKER_OF).is_ok_and(|named| named == process::id().to_string())
 }
 
 /// Tells the supervisor that the worker holds the slot, so that the timeout
@@ -1118,12 +1126,12 @@ fn prove(
     Ok(Ok(Proof { record, accepted }))
 }
 
-/// Whether the proof would fail the PR before its gate, from its diff with the
-/// `main` it starts from, so that the merge needn't wait for the slot. The
-/// xtask that starts a merge can be any, so `main`'s checks again under the
-/// slot, and decides. A failure is posted on the branch's head. The fetch
-/// writes refs of its own, so that it never holds a lock that the merge in the
-/// slot needs.
+/// Whether the proof would fail the PR before its gate, so that the merge
+/// needn't wait for the slot. It compares `main` with the tree that merging
+/// the branch into it makes, which is what the rebase under the slot makes
+/// unless they conflict. The xtask that starts a merge can be any, so
+/// `main`'s checks again under the slot, and decides. A failure is posted on
+/// the branch's head.
 fn fails_before_the_slot(
     root: &Path,
     gh: &Gh,
@@ -1132,45 +1140,88 @@ fn fails_before_the_slot(
     issue: u64,
     mode: Mode,
 ) -> Result<bool, Problem> {
-    let refs = [
-        format!("refs/xtask/early-{number}/main"),
-        format!("refs/xtask/early-{number}/branch"),
-    ];
-    let main = format!("+refs/heads/main:{}", refs[0]);
-    let branch = format!("+refs/heads/{}:{}", pr.head_ref, refs[1]);
-    base::git_text(root, &["fetch", "-q", "origin", &main, &branch])?;
-    let resolve = |name: &str| -> Result<String, Problem> {
-        let commit = base::git_text(root, &["rev-parse", name])?;
-        base::git_text(root, &["update-ref", "-d", name])?;
-        Ok(commit.trim().to_string())
+    let Some(fetched) = Early::fetch(root, number, &pr.head_ref)? else {
+        return Ok(false);
     };
-    let (main, branch) = (resolve(&refs[0])?, resolve(&refs[1])?);
-    // `main`'s xtask checks under the slot, and the caller has checked.
-    if env::var(CHECKS_OF).ok().as_deref() == Some(main.as_str()) {
-        return Ok(false);
-    }
-    // The rebase under the slot says why there is no fork point.
-    let fork = base::git(root, &["merge-base", &main, &branch])?;
-    if !fork.status.success() {
-        return Ok(false);
-    }
-    let fork = String::from_utf8_lossy(&fork.stdout).trim().to_string();
-    let head = if record_at(root, &branch, issue)? {
+    let Early { main, branch, .. } = &fetched;
+    let head = if record_at(root, branch, issue)? {
         format!("{branch}~1")
     } else {
         branch.clone()
     };
-    let waiting = waits::reasons(root, &fork, &head)?;
-    let Some(failed) = fails_early(root, &fork, &head, &waiting, number, &pr.body, mode)? else {
+    // A conflict is for the rebase under the slot to report.
+    let merged = base::git(root, &["merge-tree", "--write-tree", main, &head])?;
+    if !merged.status.success() {
+        return Ok(false);
+    }
+    let merged = String::from_utf8_lossy(&merged.stdout);
+    let tree = merged.lines().next().unwrap_or_default();
+    let waiting = if mode == Mode::Merge {
+        waits::reasons(root, main, tree)?
+    } else {
+        Vec::new()
+    };
+    let body = &pr.body;
+    let Some(failed) = fails_early(root, main, tree, &waiting, number, body, mode)? else {
         return Ok(false);
     };
-    post_gate(
-        gh,
-        &branch,
-        "failure",
-        &format!("Failed: {}", failed.join(", ")),
-    );
+    let said = format!("Failed: {}", failed.join(", "));
+    post_gate(gh, branch, "failure", &said);
     Ok(true)
+}
+
+/// `main` and the branch, fetched before the slot into refs of this run's
+/// own. So the fetch never holds a lock that the merge in the slot needs, and
+/// it fetches no tags and starts no maintenance, which would take locks too.
+/// The refs go when this does.
+struct Early<'a> {
+    root: &'a Path,
+    refs: [String; 2],
+    main: String,
+    branch: String,
+}
+
+impl<'a> Early<'a> {
+    /// `None` when it can't fetch, which the fetch under the slot reports.
+    fn fetch(root: &'a Path, number: u64, branch: &str) -> Result<Option<Early<'a>>, Problem> {
+        let name = format!("refs/xtask/early-{number}-{}", process::id());
+        let mut early = Early {
+            root,
+            refs: [format!("{name}/main"), format!("{name}/branch")],
+            main: String::new(),
+            branch: String::new(),
+        };
+        let main = format!("+refs/heads/main:{}", early.refs[0]);
+        let branch = format!("+refs/heads/{branch}:{}", early.refs[1]);
+        let args = [
+            "fetch",
+            "-q",
+            "--no-tags",
+            "--no-auto-maintenance",
+            "origin",
+            &main,
+            &branch,
+        ];
+        if !base::git(root, &args)?.status.success() {
+            return Ok(None);
+        }
+        let resolve = |name: &str| -> Result<String, Problem> {
+            Ok(base::git_text(root, &["rev-parse", name])?
+                .trim()
+                .to_string())
+        };
+        early.main = resolve(&early.refs[0])?;
+        early.branch = resolve(&early.refs[1])?;
+        Ok(Some(early))
+    }
+}
+
+impl Drop for Early<'_> {
+    fn drop(&mut self) {
+        for name in &self.refs {
+            let _ = base::git(self.root, &["update-ref", "-d", name]);
+        }
+    }
 }
 
 /// What fails a proof before its gate runs, comparing `head` with `commit`:

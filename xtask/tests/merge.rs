@@ -1585,9 +1585,11 @@ fn a_merge_waits_for_the_merge_slot() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    // It reads the PR's diff before the slot, and then waits.
+    wait_for_the_early_check(&repo);
     thread::sleep(Duration::from_millis(500));
-    // It reads the PR's diff before the slot, and starts nothing.
     let calls = repo.calls();
+    assert!(!calls.contains("refs/remotes/origin/"), "{calls}");
     assert!(!calls.contains("git worktree add"), "{calls}");
     assert!(!calls.contains("git rebase"), "{calls}");
     held.unlock().unwrap();
@@ -1622,6 +1624,22 @@ fn the_pr_is_read_again_after_the_slot() {
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
     assert_refused(&repo, &output, "targets `release`");
+}
+
+/// Waits until the merge has removed both refs of its check before the slot,
+/// which it does once the check is done.
+#[track_caller]
+fn wait_for_the_early_check(repo: &Repo) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while repo
+        .calls()
+        .matches("update-ref -d refs/xtask/early-")
+        .count()
+        < 2
+    {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Runs `command` while another run holds the merge slot, and fails if it
@@ -1734,11 +1752,7 @@ fn the_xtask_of_main_checks_the_hill_line_again_under_the_slot() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !repo.calls().contains("update-ref -d") {
-        assert!(Instant::now() < deadline, "{}", repo.calls());
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_the_early_check(&repo);
     repo.set_pr(&Pr {
         body: "Closes #7.\n\nHill: none\n",
         ..Pr::default()
@@ -1765,11 +1779,7 @@ fn the_xtask_of_main_checks_what_waits_again_under_the_slot() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !repo.calls().contains("update-ref -d") {
-        assert!(Instant::now() < deadline, "{}", repo.calls());
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_for_the_early_check(&repo);
     repo.change_branch(".github/workflows/x.yml", "name: x\n");
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();

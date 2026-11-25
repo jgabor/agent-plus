@@ -1339,16 +1339,16 @@ fn verdict(
         }
         _ => {}
     }
+    let written = matches!(
+        records.view(path),
+        View::Agent(Entry::File { .. } | Entry::Symlink { .. })
+    );
     // Git can't hold a file and a directory at one path, and a git-ignored
     // file stays as the agent's `HEAD` holds it.
     if let Some(replacing) = branch {
         if replacing.files.contains(path) {
             return skipped("it would replace a directory that holds a git-ignored file");
         }
-        let written = matches!(
-            records.view(path),
-            View::Agent(Entry::File { .. } | Entry::Symlink { .. })
-        );
         if written && replacing.beneath_dir(path) {
             return skipped("it is in a directory that would replace a git-ignored file");
         }
@@ -1364,7 +1364,24 @@ fn verdict(
             conflict: true,
         });
     }
+    // Your directory keeps its git-ignored files, as one the agent deleted
+    // does, so nothing the agent wrote can take its place.
+    if branch.is_none() && written && holds_ignored(host, ignore, path)? {
+        return skipped("it would replace a directory that holds a git-ignored file");
+    }
     Ok(Verdict::Change)
+}
+
+/// Whether your directory at `path` holds a git-ignored file, at any depth.
+fn holds_ignored(host: &Host, ignore: &Gitignore, path: &[u8]) -> io::Result<bool> {
+    if !host.stat(path)?.is_some_and(|m| m.is_dir()) {
+        return Ok(false);
+    }
+    let mut found = false;
+    host.beneath(path, &mut |yours| {
+        found = found || ignore.is_ignored(bytes_path(&yours), false);
+    })?;
+    Ok(found)
 }
 
 /// Whether your file at `path` is one an earlier `ap apply` landed, with

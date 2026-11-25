@@ -1680,6 +1680,11 @@ attributes, because those can run commands.
     Your `.gitignore` files in the share decide which files are
     git-ignored, and ones the agent wrote don't. `ap diff` counts them
     across every share.
+  - Where your directory holds a git-ignored file, and the agent wrote a
+    file or symlink in its place, `ap apply` skips that file and says why,
+    unless it changed on your side.
+    The directory stays, with its git-ignored files, as if the agent had
+    deleted it.
   - `ap apply` makes a directory only to hold what it applies, and gives
     each file it writes and each directory it makes the permission bits
     the agent gave it.

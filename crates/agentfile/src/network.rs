@@ -325,10 +325,10 @@ fn under(host: &str, name: &str) -> bool {
 /// The errors from `NETWORK` rules that would make the proxy decrypt a
 /// connection to one of `hosts`, the harness's own hosts, by the decryption
 /// under NETWORK in SPEC.md: a URL rule for one, and a `-` rule narrower than
-/// a `+` host rule that one is under, on a port where a name rule allows it.
-/// A connection keeps its port, so a `-` host rule with a port only matters
-/// on that port. Each error is on the line of the rule that turns decryption
-/// on. It finds none while `NETWORK` has errors of its own.
+/// a `+` host rule that one is under, when a name rule allows a connection to
+/// it on a port that the `+` rule covers. It reads no IP rule. Each error is
+/// on the line of the rule that turns decryption on. It finds none while
+/// `NETWORK` has errors of its own.
 pub(crate) fn decrypting(
     instructions: &[Instruction],
     harness: &str,
@@ -356,7 +356,7 @@ pub(crate) fn decrypting(
             Destination::Host { name, .. } | Destination::Url { host: name, .. }
                 if narrow.sign == Sign::Deny =>
             {
-                // The port a `-` host rule is for, if it names one.
+                // Whether it is a URL rule, and the port a host rule names.
                 let (url, only) = match narrow.destination {
                     Destination::Host { port, .. } => (false, port),
                     _ => (true, None),
@@ -377,9 +377,7 @@ pub(crate) fn decrypting(
                         return None;
                     }
                     let allowed = |port: u16| {
-                        only.is_none_or(|only| only == port)
-                            && network.name_decision(&own, Scheme::Https, port, "/")
-                                == Some(Sign::Allow)
+                        network.name_decision(&own, Scheme::Https, port, "/") == Some(Sign::Allow)
                     };
                     (ports.iter().copied().filter(|&port| allowed(port)))
                         .find_map(|port| {

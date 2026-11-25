@@ -205,9 +205,10 @@ pub fn url_rules(network: &Network, name: &str) -> bool {
 /// one connection for several names. A name rule must allow the connection.
 /// The narrower rule is a `-` rule on the connection's port: a host or URL
 /// rule for a name under the `+` rule's, a URL rule for its own name, or a
-/// host rule for its own name on one port when the `+` rule names no port. The default is never the `+`
-/// rule, and a harness host, one of `harness`, is never decrypted for a
-/// rule. A name is in any case, with or without a final dot.
+/// host rule for its own name on one port when the `+` rule names no port.
+/// The default is never the `+` rule, and a harness host, one of `harness`,
+/// is never decrypted for a rule. A name is in any case, with or without a
+/// final dot.
 pub fn narrowed(network: &Network, harness: &[&str], name: &str, port: u16) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.strip_suffix('.').unwrap_or(&name);

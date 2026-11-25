@@ -445,7 +445,8 @@ maybe_kill before
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
   "api repos/"*/comments) cat '{bin}/pr-comments' 2>/dev/null; exit 0 ;;
-  "api repos/"*) posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
+  "api repos/"*) if [ -f '{bin}/status-read-fails' ]; then echo 'no status to read' >&2; exit 1; fi
+    posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
     if [ -f "$posted" ]; then cat "$posted"; else echo '{{"statuses":[]}}'; fi ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
@@ -2005,9 +2006,13 @@ fn a_record_commit_that_changes_more_is_not_merged() {
         stderr(&output)
     );
     assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+    // Its proof passed before the record commit changed more.
     assert_eq!(
         posts(&repo).pop().unwrap(),
-        (repo.head(), "failure Stopped by an error".to_string())
+        (
+            repo.head(),
+            "failure Proven, then stopped by an error".to_string()
+        )
     );
 }
 
@@ -4222,6 +4227,284 @@ fn a_refresh_merges_a_pr_whose_proof_accepts_what_was_approved() {
     assert!(calls.contains(&closed(7)), "{calls}");
     assert!(summary.contains("| #9 | merged | "), "{summary}");
     assert!(!summary.contains("stays open"), "{summary}");
+}
+
+const SOMETHING_WENT_WRONG: &str =
+    "echo 'GraphQL: Something went wrong while executing your query' >&2; exit 1";
+
+impl Repo {
+    /// A refresh that runs `command` in place of the first call that
+    /// matches `on`.
+    fn refresh_running(&self, on: &str, command: &str) -> Output {
+        self.git(&["checkout", "-q", "main"]);
+        self.command(env!("CARGO_BIN_EXE_xtask"))
+            .arg("refresh")
+            .env("RUN_ON", on)
+            .env("RUN_COMMAND", command)
+            .output()
+            .unwrap()
+    }
+
+    /// A refresh where the first call that matches `on` fails, as GitHub's
+    /// GraphQL did for PR 855.
+    fn refresh_failing_once(&self, on: &str) -> Output {
+        self.refresh_running(on, SOMETHING_WENT_WRONG)
+    }
+
+    /// A refresh where every call that matches `on` fails.
+    fn refresh_failing(&self, on: &str) -> Output {
+        let again = format!(
+            "rm '{}'; {SOMETHING_WENT_WRONG}",
+            self.bin.join("ran").display()
+        );
+        self.refresh_running(on, &again)
+    }
+}
+
+/// Asserts that a refresh failed the PR, and kept it for the next run.
+fn assert_kept(output: &Output, calls: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(output),
+        stderr(output)
+    );
+    assert!(!calls.contains("/labels/"), "{calls}");
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    let out = stdout(output);
+    assert!(!out.contains("refresh: proving `main`"), "{out}");
+    let kept = "refresh: PR 9 keeps `land-needed`, because its proof passed, its head moved, or GitHub didn't say, so the next run proves it again";
+    assert!(out.contains(kept), "{out}");
+}
+
+/// A GitHub call that fails after the proof passed gets a second try, so the
+/// PR merges in the same run, with one comment.
+#[test]
+fn a_refresh_merges_a_pr_whose_comment_fails_once_after_its_proof() {
+    let repo = falling("refresh-comment-once");
+    repo.approved(&["journey fell from 2 to 1"]);
+
+    let output = repo.refresh_failing_once("gh pr comment 9");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(repo.bin.join("ran").exists());
+    let head = repo.head();
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(9, &head)), "{calls}");
+    assert!(calls.contains(&closed(7)), "{calls}");
+    let comments = repo.pr_comments();
+    let listed = format!("Merging this PR at `{head}` accepts:");
+    assert_eq!(comments.matches(&listed).count(), 1, "{comments}");
+    assert!(!comments.contains("takes it up"), "{comments}");
+}
+
+#[test]
+fn a_refresh_merges_a_pr_whose_green_fails_once_after_its_proof() {
+    let repo = Repo::new("refresh-green-once");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh_failing_once("state=success");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert!(repo.bin.join("ran").exists());
+    assert_eq!(last_post(&repo), format!("success {GREEN}"));
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+    assert!(!calls.contains("gh pr comment"), "{calls}");
+}
+
+/// `prepare` pushes only a head it proved, so whatever stops it after the
+/// push is never the change's. The PR keeps `land-needed`, and the next run
+/// finishes it.
+#[test]
+fn a_refresh_keeps_a_pr_that_github_fails_after_its_proof() {
+    let repo = falling("refresh-comment-fails");
+    repo.approved(&["journey fell from 2 to 1"]);
+    fs::write(repo.bin.join("comment-fails"), "").unwrap();
+
+    let output = repo.refresh();
+    let calls = repo.calls();
+    assert_kept(&output, &calls);
+    // The comment and its second try. The refresh posts none of its own.
+    assert_eq!(calls.matches("gh pr comment 9").count(), 2, "{calls}");
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (
+            repo.head(),
+            "failure Proven, then stopped by an error".to_string()
+        )
+    );
+
+    fs::remove_file(repo.bin.join("comment-fails")).unwrap();
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+    assert!(calls.contains(&closed(7)), "{calls}");
+}
+
+/// A call can fail after the proof and before the push, and then the
+/// status says so.
+#[test]
+fn a_refresh_keeps_a_pr_that_github_fails_before_its_push() {
+    let repo = Repo::new("refresh-read-fails");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh_failing("ls-remote origin refs/heads/main");
+    let calls = repo.calls();
+    assert_kept(&output, &calls);
+    assert_eq!(calls.matches("ls-remote origin refs/heads/main").count(), 2);
+    assert_eq!(repo.head(), head);
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (head, "failure Proven, then stopped by an error".to_string())
+    );
+    assert!(!calls.contains("gh pr comment"), "{calls}");
+}
+
+/// A status that `prepare` posted can fail to read back, and then the
+/// refresh posts nothing over it.
+#[test]
+fn a_refresh_keeps_a_pr_whose_status_it_can_not_read_after_the_proof() {
+    let repo = Repo::new("refresh-status-unread");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    let head = repo.head();
+    repo.set_open_prs(&[listed(9, BRANCH, &head, 7, false)]);
+    repo.set_land_needed(&[7]);
+    let unreadable = format!(
+        ": > '{}'; rm '{}'; {SOMETHING_WENT_WRONG}",
+        repo.bin.join("status-read-fails").display(),
+        repo.bin.join("ran").display()
+    );
+
+    let output = repo.refresh_running("ls-remote origin refs/heads/main", &unreadable);
+    let calls = repo.calls();
+    assert_kept(&output, &calls);
+    assert!(stderr(&output).contains("no status to read"));
+    assert_eq!(repo.head(), head);
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (head, "failure Proven, then stopped by an error".to_string())
+    );
+}
+
+/// GitHub can fail the refresh's read of where the proof left the PR too.
+#[test]
+fn a_refresh_keeps_a_pr_whose_head_it_can_not_read_after_the_proof() {
+    let repo = falling("refresh-head-unread");
+    repo.approved(&["journey fell from 2 to 1"]);
+    fs::write(repo.bin.join("comment-fails"), "").unwrap();
+
+    let output = repo.refresh_failing_once("ls-remote origin refs/heads/7-x");
+    assert!(repo.bin.join("ran").exists());
+    let calls = repo.calls();
+    assert_kept(&output, &calls);
+    assert_eq!(calls.matches("gh pr comment 9").count(), 2, "{calls}");
+}
+
+/// A comment call can fail after GitHub took the comment.
+#[test]
+fn a_comment_that_was_posted_is_not_posted_again() {
+    let repo = falling("refresh-comment-posted");
+    repo.approved(&["journey fell from 2 to 1"]);
+    let comments = repo.bin.join("pr-comments").display().to_string();
+    let posted = format!("cat >> '{comments}'; echo >> '{comments}'; {SOMETHING_WENT_WRONG}");
+
+    let output = repo.refresh_running("gh pr comment 9", &posted);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let head = repo.head();
+    let calls = repo.calls();
+    assert_eq!(calls.matches("gh pr comment 9").count(), 1, "{calls}");
+    assert!(calls.contains(&merged(9, &head)), "{calls}");
+    let listed = format!("Merging this PR at `{head}` accepts:");
+    let comments = repo.pr_comments();
+    assert_eq!(comments.matches(&listed).count(), 1, "{comments}");
+}
+
+/// A head that someone pushed during the proof wasn't proven, so it isn't
+/// the change's failure either.
+#[test]
+fn a_refresh_keeps_a_pr_whose_head_someone_moved_during_its_proof() {
+    let repo = Repo::new("refresh-pushed-during");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+    // Its commit before the record, as a person would push it.
+    let pushed = repo.origin(&["rev-parse", "refs/heads/7-x~1"]);
+    let push = repo.update_ref("refs/heads/7-x", &pushed);
+
+    let output = repo.refresh_running("cargo fmt", &push);
+    assert!(repo.bin.join("ran").exists());
+    let calls = repo.calls();
+    assert_kept(&output, &calls);
+    assert_eq!(repo.head(), pushed);
+    assert!(!calls.contains("gh pr comment"), "{calls}");
+}
+
+/// A check that fails on a `main` that passes is the change's, so a worker
+/// takes it up again.
+#[test]
+fn a_refresh_hands_back_a_pr_whose_check_fails() {
+    let repo = Repo::new("refresh-check-fails");
+    repo.change_branch("crates/demo/src/lib.rs", "pub  fn f( ) {}\n");
+    repo.prepared(BRANCH, 7, "");
+    repo.advance_main("later.txt", "x\n");
+    repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+    repo.set_land_needed(&[7]);
+
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), "failure Failed: format");
+    let calls = repo.calls();
+    assert!(calls.contains(&unlabeled(7)), "{calls}");
+    assert!(calls.contains(&unlabeled(9)), "{calls}");
+    assert!(!calls.contains("gh pr merge"), "{calls}");
+    let out = stdout(&output);
+    assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
+    let comments = repo.pr_comments();
+    assert!(comments.contains("Failed: format"), "{comments}");
+    assert!(
+        comments.contains("so a worker takes it up again"),
+        "{comments}"
+    );
 }
 
 /// A head that a person pushed after the proof isn't the one it proved.

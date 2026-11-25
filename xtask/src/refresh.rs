@@ -79,7 +79,9 @@ pub fn run() -> Result<Verdict, Problem> {
             }
         };
         let mut proven = true;
-        let mut head = seen;
+        let mut head = seen.clone();
+        // Whether GitHub failed to say where the proof left the PR.
+        let mut unread = false;
         if stale {
             proofs += 1;
             count = count.max(proofs);
@@ -95,9 +97,13 @@ pub fn run() -> Result<Verdict, Problem> {
             }
             row.took = Some(started.elapsed());
             proven = prepared?;
-            head = current_head(&root, pr);
+            match current_head(&root, pr) {
+                Some(now) => head = now,
+                None => unread = true,
+            }
         }
         let result = gh.described_status(&head, merge::GATE);
+        unread |= result.is_err();
         if let Ok(Some((state, said))) = &result {
             row.said.clone_from(said);
             if state == "success" {
@@ -155,7 +161,11 @@ pub fn run() -> Result<Verdict, Problem> {
         let why = match &result {
             Ok(Some((state, said))) if state == "failure" => said.clone(),
             _ => {
-                merge::post_gate(&gh, &head, "failure", NOT_PROVEN);
+                match &result {
+                    // What `prepare` left may be there, so nothing goes over it.
+                    Err(Problem(message)) => eprintln!("refresh: PR {}: {message}", pr.number),
+                    Ok(_) => merge::post_gate(&gh, &head, "failure", NOT_PROVEN),
+                }
                 row.said = NOT_PROVEN.to_string();
                 NOT_PROVEN.to_string()
             }
@@ -163,6 +173,18 @@ pub fn run() -> Result<Verdict, Problem> {
         if why == merge::MAIN_MOVED {
             println!(
                 "refresh: `main` moved during the proof of PR {}, so the next run proves it again",
+                pr.number
+            );
+            continue;
+        }
+        // What stops a proof after it passed isn't taken as the change's.
+        // `prepare` pushes only then, so a head that moved says so even when
+        // GitHub took no status. A head that someone else pushed during the
+        // proof moved too, and nothing proved it. A read that failed may
+        // have hidden either.
+        if why == merge::PROVEN_THEN_STOPPED || head != seen || unread {
+            println!(
+                "refresh: PR {} keeps `{LAND_NEEDED}`, because its proof passed, its head moved, or GitHub didn't say, so the next run proves it again",
                 pr.number
             );
             continue;
@@ -441,14 +463,14 @@ fn needs_proof(root: &Path, gh: &Gh, pr: &OpenPr) -> Result<(String, bool), Prob
 }
 
 /// A `prepare` that failed may have pushed a new head before it stopped.
-fn current_head(root: &Path, pr: &OpenPr) -> String {
+/// `None` when the head can't be read.
+fn current_head(root: &Path, pr: &OpenPr) -> Option<String> {
     if pr.from_fork {
-        return pr.head.clone();
+        return Some(pr.head.clone());
     }
     merge::remote_commit(root, &format!("refs/heads/{}", pr.head_ref))
         .ok()
-        .flatten()
-        .unwrap_or_else(|| pr.head.clone())
+        .map(|head| head.unwrap_or_else(|| pr.head.clone()))
 }
 
 /// Runs the gate on the newest `main`, in a tree of its own, and says what

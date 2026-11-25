@@ -289,6 +289,9 @@ mod tests {
         if std::env::var_os(CONFINED_VARIABLE).is_none() {
             return;
         }
+        // As the Rust runtime does before `main`, which hasn't run.
+        // SAFETY: ignoring a signal changes no memory.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
         let now = SystemTime::now();
         let authority = Authority::generate(now).unwrap();
         let threads = std::fs::read_dir("/proc/self/task").unwrap().count();
@@ -317,7 +320,9 @@ mod tests {
     /// and issues leaves after, which draws on the random source. This
     /// starts this program again in a process of its own, which makes an
     /// authority, confines itself as the network process does when it may
-    /// connect, and then issues a leaf and verifies it.
+    /// connect, and then issues a leaf and verifies it. Only Linux runs the
+    /// process before the test harness.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_confined_network_process_issues_a_leaf() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())

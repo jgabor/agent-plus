@@ -469,7 +469,7 @@ fn arp_request() -> Vec<u8> {
 /// can't write anywhere else once confined. It runs before the test
 /// harness, so that it is the process's only thread, as it is in `ap`.
 #[used]
-#[unsafe(link_section = ".init_array")]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
 static NETWORK_PROCESS: extern "C" fn() = confined_network_process;
 
 extern "C" fn confined_network_process() {

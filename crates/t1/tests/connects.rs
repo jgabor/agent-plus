@@ -1356,7 +1356,7 @@ fn arp_request() -> Vec<u8> {
 /// starts this program again with [`LINK_VARIABLE`] set. It runs before the
 /// test harness, so that it is the process's only thread, as it is in `ap`.
 #[used]
-#[unsafe(link_section = ".init_array")]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
 static NETWORK_PROCESS: extern "C" fn() = connecting_network_process;
 
 extern "C" fn connecting_network_process() {

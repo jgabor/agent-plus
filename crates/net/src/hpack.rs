@@ -183,7 +183,8 @@ pub struct Encoder {
     own: usize,
     /// The table's size as the decoder knows it, from the last block.
     signaled: usize,
-    /// The lowest size the table took since the last block.
+    /// The lowest size the table took since the last block, which is never
+    /// more than `signaled`.
     lowest: usize,
 }
 
@@ -215,7 +216,7 @@ impl Encoder {
         if self.lowest < self.signaled {
             integer(block, 0x20, 5, self.lowest);
         }
-        if self.table.max != self.lowest.min(self.signaled) {
+        if self.table.max != self.lowest {
             integer(block, 0x20, 5, self.table.max);
         }
         (self.signaled, self.lowest) = (self.table.max, self.table.max);

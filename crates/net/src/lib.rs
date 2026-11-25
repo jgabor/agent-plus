@@ -531,9 +531,9 @@ fn masked(address: IpAddr, prefix: u8) -> Option<IpAddr> {
     }
 }
 
-/// The normalized path of a request target, or `None` when a host with URL
-/// rules refuses it.
-fn request_path(target: &str) -> Option<String> {
+/// The normalized path of a request target, which [`decide`] matches URL
+/// rules against, or `None` when a host with URL rules refuses it.
+pub fn request_path(target: &str) -> Option<String> {
     let path = target.split(['?', '#']).next().unwrap_or_default();
     let path = unescape_unreserved(path.strip_prefix('/')?)?;
     // An empty segment is refused, but not the empty last one of `/a/`.

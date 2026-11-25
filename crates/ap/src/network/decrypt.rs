@@ -124,6 +124,11 @@ pub(super) enum Reads {
     /// Its host has URL rules, so the rules decide each request, and
     /// anything that isn't HTTP is refused.
     Requests,
+    /// A `+` rule that allows its host has a narrower `-` rule beneath it,
+    /// so every TLS connection is decrypted, and each request on it must
+    /// name the host. A bound host's requests get its secrets too. Anything
+    /// else gets the name check.
+    Hosts,
     /// Its host is a hidden secret's bound host, and nothing else. Only TLS
     /// whose server name names the host is decrypted, and each request on
     /// it passes, whatever its `Host`. Anything else is read as it would be
@@ -198,7 +203,7 @@ impl Decrypted {
             id,
             upstream,
             check: match reads {
-                Reads::Requests => NameCheck::requests(&name),
+                Reads::Requests | Reads::Hosts => NameCheck::requests(&name),
                 Reads::Injects { .. } => NameCheck::injecting(&name),
             },
             reads,
@@ -303,7 +308,8 @@ impl Decrypted {
         // every request must carry a placeholder. Its first byte still says
         // whether its TLS is decrypted.
         let silent = self.since.elapsed() >= SILENT_WAIT && !injection.requires(&self.name);
-        if let (Stage::First, Reads::Injects { .. }, true) = (&self.stage, self.reads, silent) {
+        let passes = matches!(self.reads, Reads::Hosts | Reads::Injects { .. });
+        if let (Stage::First, true, true) = (&self.stage, passes, silent) {
             self.allowed = true;
         }
         if matches!(self.stage, Stage::Hello(..)) && self.since.elapsed() >= HELLO_WAIT {
@@ -437,6 +443,7 @@ impl Decrypted {
                 (0x16, _) => self.stage = Stage::Hello(Box::default(), Vec::new()),
                 (_, _) if required => return Err(refused("a request without its key")),
                 (_, Reads::Requests) => self.stage = Stage::Plain,
+                (_, Reads::Hosts) => self.passing(true),
                 (_, Reads::Injects { by_name }) => self.passing(by_name),
             }
         }
@@ -448,8 +455,9 @@ impl Decrypted {
                 port,
                 request: Some(Request { scheme, target }),
             }),
-            // The connection's own decision decides its requests.
-            Reads::Injects { .. } => true,
+            // The connection's own decision decides its requests, each of
+            // which names its host.
+            Reads::Hosts | Reads::Injects { .. } => true,
         };
         match &mut self.stage {
             Stage::First => unreachable!(),
@@ -494,10 +502,11 @@ impl Decrypted {
                 match (self.reads, agrees) {
                     (_, Some(true)) => self.injects = injection.binds(&self.name),
                     _ if required => return Err(refused("a request without its key")),
-                    (Reads::Requests, None) => {}
+                    (Reads::Requests | Reads::Hosts, None) => {}
                     (Reads::Requests, Some(false)) => {
                         return Err(not_http("a server name that disagrees"));
                     }
+                    (Reads::Hosts, Some(false)) => return Err(refused("a name that disagrees")),
                     // Not for the bound host, so it isn't decrypted.
                     (Reads::Injects { by_name }, _) => {
                         let raw = std::mem::take(raw);

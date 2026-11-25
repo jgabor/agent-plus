@@ -124,8 +124,11 @@ enum Check {
     Name,
     /// The name has URL rules, so each request is read and decided.
     Requests,
+    /// A `+` rule that allows the name has a narrower `-` rule beneath it,
+    /// so TLS to it is decrypted, and each request in it must name it.
+    Hosts,
     /// The name has URL rules, and the flow is UDP, which isn't HTTP, or
-    /// it is a hidden secret's bound host, and the flow is QUIC's.
+    /// the proxy decrypts TLS to it, and the flow is QUIC's.
     NotHttp,
     /// The name is a hidden secret's bound host and has no URL rules, so
     /// TLS to it is decrypted, and a name decided it if this says so.
@@ -137,6 +140,7 @@ impl Check {
     fn decrypts(self) -> Option<Reads> {
         match self {
             Check::Requests => Some(Reads::Requests),
+            Check::Hosts => Some(Reads::Hosts),
             Check::Injects(by_name) => Some(Reads::Injects { by_name }),
             _ => None,
         }
@@ -872,8 +876,10 @@ fn flow_destination(flow: &Flow) -> SocketAddr {
 /// The addresses of `addresses` that the proxy may connect to on `port`,
 /// for a connection attributed to `name`, which may be a bound host of a
 /// hidden secret of `injection`, over TCP if `tcp`, and what reads it: the
-/// request check, if the name has URL rules, decryption for the secret, if
-/// it is bound, or else the name check, if a name decided any of them.
+/// request check, if the name has URL rules, decryption to check each
+/// request's host, if a `+` rule with a narrower `-` rule beneath it allows
+/// the name, decryption for the secret, if it is bound, or else the name
+/// check, if a name decided any of them.
 fn allowed(
     network: &Network,
     harness: &[&str],
@@ -884,11 +890,13 @@ fn allowed(
 ) -> (Vec<IpAddr>, Check) {
     let url = name.is_some_and(|name| url_rules(network, name));
     let bound = name.is_some_and(|name| injection.binds(name));
-    // UDP to such a host, QUIC among it, isn't HTTP. QUIC to a bound host
-    // would carry the placeholder where the proxy can't reach it. A host
-    // whose every request must carry a placeholder gets no UDP at all.
+    let narrowed = name.is_some_and(|name| net::narrowed(network, name));
+    // UDP to such a host, QUIC among it, isn't HTTP. QUIC to another host
+    // the proxy decrypts would carry what the proxy can't read: a request
+    // for another name, or the placeholder. A host whose every request must
+    // carry a placeholder gets no UDP at all.
     let required = name.is_some_and(|name| injection.requires(name));
-    if (url || bound && port == 443 || required) && !tcp {
+    if (url || (bound || narrowed) && port == 443 || required) && !tcp {
         return (Vec::new(), Check::NotHttp);
     }
     let requests = url;
@@ -914,6 +922,7 @@ fn allowed(
         .collect();
     let check = match (requests, by_name) {
         (true, _) => Check::Requests,
+        (false, true) if narrowed && tcp => Check::Hosts,
         (false, by_name) if bound && tcp => Check::Injects(by_name),
         // The name check reads TCP alone.
         (false, true) if tcp => Check::Name,
@@ -1111,4 +1120,46 @@ fn hung_up(error: &io::Error) -> bool {
         error.kind(),
         io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What reads a connection to `name` over TCP on port 443 under the
+    /// `NETWORK` lines of `lines`, and whether UDP to the same port opens.
+    fn read(lines: &str, name: &str) -> (Check, bool) {
+        let instructions = agentfile::parse(&format!("AGENT claude\n{lines}")).unwrap();
+        let network = Network::read(&instructions).unwrap();
+        let injection = Injection::default();
+        let addresses: [IpAddr; 1] = [Ipv4Addr::new(192, 0, 2, 1).into()];
+        let at = |tcp| {
+            allowed(
+                &network,
+                &[],
+                (Some(name), &injection),
+                443,
+                &addresses,
+                tcp,
+            )
+        };
+        let (allowed, check) = at(true);
+        assert_eq!(allowed, addresses, "{lines}");
+        (check, !at(false).0.is_empty())
+    }
+
+    // spec(NETWORK): The default is never such a rule, so under `NETWORK +`, a `-` rule on its own never causes decryption.
+    #[test]
+    fn a_minus_rule_on_its_own_under_network_plus_causes_no_decryption() {
+        let open = "NETWORK +\nNETWORK -gist.github.com\n";
+        assert!(read(open, "github.com") == (Check::Unread, true));
+        // An explicit `+` rule above it is a broader rule.
+        let explicit = "NETWORK +\nNETWORK +github.com\nNETWORK -gist.github.com\n";
+        assert!(read(explicit, "github.com") == (Check::Hosts, false));
+        assert!(read(explicit, "api.github.com") == (Check::Hosts, false));
+        // Under `NETWORK -`, a `+` rule with nothing beneath it gets the
+        // name check alone.
+        let closed = "NETWORK -\nNETWORK +github.com\n";
+        assert!(read(closed, "github.com") == (Check::Name, true));
+    }
 }

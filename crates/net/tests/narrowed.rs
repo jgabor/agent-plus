@@ -16,7 +16,12 @@ fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
     let rules = network("NETWORK -\nNETWORK +github.com\nNETWORK -gist.github.com\n");
     // Every name that `+github.com` allows, in any case, with or without a
     // final dot.
-    for name in ["github.com", "api.github.com", "GitHub.com.", "x.y.github.com"] {
+    for name in [
+        "github.com",
+        "api.github.com",
+        "GitHub.com.",
+        "x.y.github.com",
+    ] {
         assert!(narrowed(&rules, name), "{name}");
     }
     // A name the `+` rule doesn't reach, or one that only ends the same.
@@ -32,7 +37,9 @@ fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
         "-gist.github.com:22",
         "-github.com:80",
     ] {
-        let rules = network(&format!("NETWORK -\nNETWORK +github.com\nNETWORK {narrower}\n"));
+        let rules = network(&format!(
+            "NETWORK -\nNETWORK +github.com\nNETWORK {narrower}\n"
+        ));
         assert!(narrowed(&rules, "github.com"), "{narrower}");
     }
     // A `+` rule with a port still allows a reused connection.

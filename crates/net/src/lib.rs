@@ -213,7 +213,9 @@ pub fn narrowed(network: &Network, name: &str) -> bool {
         host == broad || (host.strip_suffix(broad)).is_some_and(|start| start.ends_with('.'))
     };
     (network.rules.iter()).any(|broad| match &broad.destination {
-        Destination::Host { name: broad_name, .. } if broad.sign == Sign::Allow => {
+        Destination::Host {
+            name: broad_name, ..
+        } if broad.sign == Sign::Allow => {
             under(name, broad_name)
                 && (network.rules.iter()).any(|narrow| match &narrow.destination {
                     Destination::Host { name: host, .. } | Destination::Url { host, .. } => {

@@ -250,12 +250,8 @@ pub fn main(args: &[OsString]) -> u8 {
             return 1;
         }
     };
-    // Only a host with URL rules, or a hidden secret's bound host, is
-    // decrypted.
-    let decrypts = !injection.secrets.is_empty()
-        || (network.rules.iter()).any(|rule| matches!(rule.destination, Destination::Url { .. }));
     let extra = match std::env::var_os("SSL_CERT_FILE") {
-        Some(path) if decrypts => roots(path.as_ref()),
+        Some(path) if decrypts(&network, &injection) => roots(path.as_ref()),
         _ => Vec::new(),
     };
     // The key lives as long as the process serves.
@@ -310,6 +306,18 @@ fn reaches_nothing(network: &Network, harness: &[String]) -> bool {
         && hosts
             .iter()
             .all(|host| !::net::could_allow(network, &hosts, host))
+}
+
+/// Whether the proxy may decrypt TLS under `network`, with the hidden
+/// secrets of `injection`: to a host with URL rules, a host under a `+` rule
+/// with a narrower `-` rule beneath it, or a hidden secret's bound host.
+fn decrypts(network: &Network, injection: &Injection) -> bool {
+    !injection.secrets.is_empty()
+        || (network.rules.iter()).any(|rule| match &rule.destination {
+            Destination::Url { .. } => true,
+            Destination::Host { name, .. } => ::net::narrowed(network, name),
+            Destination::Address { .. } => false,
+        })
 }
 
 /// The guest's gateway, at the addresses the guest's init gives it.
@@ -437,5 +445,26 @@ fn set_timeout(socket: BorrowedFd, option: c_int, wait: Duration) -> io::Result<
     match set {
         0 => Ok(()),
         _ => Err(io::Error::last_os_error()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decrypts_under(lines: &str) -> bool {
+        let instructions = agentfile::parse(&format!("AGENT claude\n{lines}")).unwrap();
+        let network = Network::read(&instructions).unwrap();
+        decrypts(&network, &Injection::default())
+    }
+
+    #[test]
+    fn the_roots_of_ssl_cert_file_are_read_where_the_proxy_decrypts() {
+        assert!(decrypts_under("NETWORK -\nNETWORK +https://github.com/x\n"));
+        assert!(decrypts_under(
+            "NETWORK -\nNETWORK +github.com\nNETWORK -gist.github.com\n"
+        ));
+        assert!(!decrypts_under("NETWORK -\nNETWORK +github.com\n"));
+        assert!(!decrypts_under("NETWORK +\nNETWORK -gist.github.com\n"));
     }
 }

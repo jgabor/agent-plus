@@ -11,6 +11,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -241,6 +242,22 @@ impl Guest {
         protocols: &[&[u8]],
         server: &str,
     ) -> ClientConnection {
+        Guest::tls_naming(root, protocols, server, true)
+    }
+
+    /// A TLS client as [`Guest::tls`]'s, whose hello names no server.
+    fn tls_unnamed(root: &CertificateDer<'static>) -> ClientConnection {
+        Guest::tls_naming(root, &[b"h2", b"http/1.1"], NAME, false)
+    }
+
+    /// A TLS client for `server`, which trusts only `root`, offers
+    /// `protocols`, and names `server` in its hello if `sni`.
+    fn tls_naming(
+        root: &CertificateDer<'static>,
+        protocols: &[&[u8]],
+        server: &str,
+        sni: bool,
+    ) -> ClientConnection {
         let mut roots = RootCertStore::empty();
         roots.add(root.clone()).unwrap();
         let provider = Arc::new(rustls_graviola::default_provider());
@@ -250,6 +267,7 @@ impl Guest {
             .with_root_certificates(roots)
             .with_no_client_auth();
         config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
+        config.enable_sni = sni;
         let name = ServerName::try_from(server.to_owned()).unwrap();
         ClientConnection::new(Arc::new(config), name).unwrap()
     }
@@ -801,6 +819,94 @@ fn a_host_without_url_rules_is_passed_through_without_decryption() {
     assert_eq!(settled(&seen), ["GET /anything HTTP/1.1 (h2)"]);
 }
 
+// spec(NETWORK): under a broader rule of the opposite sign: with `+github.com` and `-gist.github.com`, on every TLS connection that `+github.com` allows, because a client can reuse one connection for several names.
+// spec(NETWORK): TLS that the proxy decrypts and that doesn't carry HTTP is denied, because the proxy can't check the names in it.
+#[test]
+fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
+    let (root, config) = server();
+    let (port, seen) = destination(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -gist.{NAME}\n");
+    let mut guest = Guest::new(&rules, vec![root.clone()], port);
+    // The guest's side is the run's authority's, and offered only HTTP/1.1.
+    let reused = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(reused, Some(&mut tls), &get("/a"));
+    assert!(
+        answer.as_ref().is_ok_and(|a| a.ends_with("\r\n\r\n/a")),
+        "{answer:?}"
+    );
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
+    // A request for the narrower name on the same connection never reaches
+    // the destination, and resets the connection.
+    let gist = format!("GET /b HTTP/1.1\r\nHost: gist.{NAME}\r\n\r\n");
+    let answer = guest.exchange(reused, Some(&mut tls), gist.as_bytes());
+    assert_eq!(answer, Err("reset".to_owned()));
+    // TLS that names no server is decrypted too.
+    let unnamed = guest.connect();
+    let mut tls = Guest::tls_unnamed(&guest.authority.clone());
+    let answer = guest.exchange(unnamed, Some(&mut tls), &get("/c"));
+    assert!(answer.is_ok(), "{answer:?}");
+    let answer = guest.exchange(unnamed, Some(&mut tls), gist.as_bytes());
+    assert_eq!(answer, Err("reset".to_owned()));
+    // TLS that doesn't carry HTTP is denied, since its names can't be read.
+    let other = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(other, Some(&mut tls), b"a001 LOGIN me secret\r\n\r\n");
+    assert!(answer.is_err(), "{answer:?}");
+    // Traffic that isn't TLS passes, and plain HTTP gets the name check.
+    let (plain, heard) = destination(None);
+    let mut guest = Guest::new(&rules, Vec::new(), plain);
+    let handle = guest.connect();
+    let answer = guest.exchange(handle, None, b"SSH-2.0-OpenSSH_9.9\r\n\r\n");
+    assert!(answer.is_ok(), "{answer:?}");
+    let handle = guest.connect();
+    let answer = guest.exchange(handle, None, &get("/plain"));
+    assert!(answer.is_ok(), "{answer:?}");
+    let answer = guest.exchange(handle, None, gist.as_bytes());
+    assert_eq!(answer, Err("reset".to_owned()));
+    assert_eq!(
+        settled(&heard),
+        ["SSH-2.0-OpenSSH_9.9 (plain)", "GET /plain HTTP/1.1 (plain)"]
+    );
+    // A server that speaks first, as SSH does, still reaches the guest.
+    let (port, _) = greeter();
+    let mut guest = Guest::new(&rules, Vec::new(), port);
+    let handle = guest.connect();
+    let deadline = Instant::now() + WAIT;
+    let mut greeted = Vec::new();
+    while Instant::now() < deadline && greeted.is_empty() {
+        guest.poll();
+        let socket = guest.sockets.get_mut::<tcp::Socket>(handle);
+        if socket.can_recv() {
+            let mut buffer = [0; 256];
+            let n = socket.recv_slice(&mut buffer).unwrap();
+            greeted.extend_from_slice(&buffer[..n]);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(greeted, b"220 greeting\r\n");
+    assert_eq!(
+        settled(&seen),
+        ["GET /a HTTP/1.1 (http/1.1)", "GET /c HTTP/1.1 (http/1.1)"]
+    );
+}
+
+#[test]
+fn a_minus_rule_beside_a_plus_rule_leaves_its_tls_unread() {
+    let (root, config) = server();
+    let (port, seen) = destination(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -other.ap.internal\n");
+    let mut guest = Guest::new(&rules, Vec::new(), port);
+    // The guest sees the destination's own certificate, and agrees HTTP/2
+    // with it.
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&root);
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/anything"));
+    assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(tls.alpn_protocol(), Some(&b"h2"[..]));
+    assert_eq!(settled(&seen), ["GET /anything HTTP/1.1 (h2)"]);
+}
+
 /// Whether a datagram the guest sends to `host.ap.internal` on `port`
 /// gets an answer from the echo there.
 fn echoed(guest: &mut Guest, port: u16) -> bool {
@@ -842,6 +948,77 @@ fn udp_is_denied_on_a_host_with_url_rules() {
     assert!(echoed(&mut Guest::new(&host, Vec::new(), port), port));
     let url = format!("{host}NETWORK -https://{NAME}/secret\n");
     assert!(!echoed(&mut Guest::new(&url, Vec::new(), port), port));
+}
+
+/// Set while a test runs again in a user and network namespace of its own,
+/// where it may listen on port 443.
+const INSIDE: &str = "AP_DECRYPT_TEST_INSIDE";
+
+/// Whether `test` runs in a namespace of its own, where this host's
+/// loopback is up. Outside one, it runs `test` again in one, which must
+/// pass, and returns false.
+fn inside(test: &str) -> bool {
+    if std::env::var_os(INSIDE).is_some() {
+        let up = Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status();
+        assert!(up.as_ref().is_ok_and(|up| up.success()), "{up:?}");
+        return true;
+    }
+    let output = Command::new("unshare")
+        .args(["--user", "--map-root-user", "--net"])
+        .arg(std::env::current_exe().unwrap())
+        .args([test, "--exact", "--nocapture", "--test-threads=1"])
+        .env(INSIDE, "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{:?}", output.status);
+    false
+}
+
+/// An echo for UDP on this host's loopback, on `port`, or on any port if it
+/// is 0. Returns the port.
+fn udp_echo(port: u16) -> u16 {
+    let echo = std::net::UdpSocket::bind(("127.0.0.1", port)).unwrap();
+    let port = echo.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let mut buffer = [0; 64];
+        while let Ok((n, from)) = echo.recv_from(&mut buffer) {
+            let _ = echo.send_to(&buffer[..n], from);
+        }
+    });
+    port
+}
+
+// spec(NETWORK): QUIC to a host that needs decrypting is blocked, so clients fall back to TCP.
+// spec(NETWORK): UDP port 443 is denied to a host the proxy decrypts.
+#[test]
+fn udp_to_port_443_is_denied_to_a_host_the_proxy_decrypts() {
+    if !inside("udp_to_port_443_is_denied_to_a_host_the_proxy_decrypts") {
+        return;
+    }
+    let quic = udp_echo(443);
+    let other = udp_echo(0);
+    // A host rule alone lets QUIC through.
+    let host = format!("NETWORK -\nNETWORK +{NAME}\n");
+    assert!(echoed(&mut Guest::new(&host, Vec::new(), quic), quic));
+    // Under a `+` rule with a narrower `-` rule beneath it, a host gets no
+    // QUIC, and UDP on another port as the rules decide.
+    let narrowed = format!("{host}NETWORK -gist.{NAME}\n");
+    assert!(!echoed(&mut Guest::new(&narrowed, Vec::new(), quic), quic));
+    assert!(echoed(&mut Guest::new(&narrowed, Vec::new(), other), other));
+    // A hidden secret's bound host gets none either.
+    let mut bound = Guest::injecting(&host, Vec::new(), quic, bound_to(NAME));
+    assert!(!echoed(&mut bound, quic));
+    // A host with URL rules gets no UDP at all.
+    let url = format!("{host}NETWORK -https://{NAME}/secret\n");
+    assert!(!echoed(&mut Guest::new(&url, Vec::new(), quic), quic));
 }
 
 /// A clock for the proxy that stands still until the test moves it, and

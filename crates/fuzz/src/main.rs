@@ -924,9 +924,54 @@ fn net_input(input: &str) -> usize {
             (net::By::Rule(one), net::By::Rule(two)) => assert_eq!(one.sign, two.sign),
             (one, two) => assert_eq!(one, two),
         }
+        if let Some(name) = connection.name {
+            narrowed_agrees(&network, &connection, &decision, name);
+        }
         decided += 1;
     }
     decided
+}
+
+/// Whether the proxy decrypts a connection to `name`, which `decision`
+/// decided, because a `+` rule has a narrower `-` rule beneath it, as the
+/// promises say. When a `+` host rule allows it, and the rules deny a name
+/// that rule reaches, which a client could ask for on the same connection,
+/// it is decrypted. A name it decrypts never counts as one that the rules
+/// allow on every connection.
+fn narrowed_agrees(
+    network: &agentfile::Network,
+    connection: &net::Connection,
+    decision: &net::Decision,
+    name: &str,
+) {
+    let narrowed = net::narrowed(network, &[], name, connection.port);
+    if narrowed {
+        assert!(!network.allows(name), "{name} is decrypted and allowed");
+    }
+    let broad = match decision.by {
+        net::By::Rule(agentfile::NetworkRule {
+            sign: agentfile::Sign::Allow,
+            destination: agentfile::Destination::Host { name, .. },
+        }) => name,
+        _ => return,
+    };
+    for rule in &network.rules {
+        let (agentfile::Destination::Host { name: other, .. }
+        | agentfile::Destination::Url { host: other, .. }) = &rule.destination
+        else {
+            continue;
+        };
+        let reached = other == broad || other.ends_with(&format!(".{broad}"));
+        let reused = net::Connection {
+            name: Some(other),
+            request: None,
+            ..*connection
+        };
+        let denied = net::decide(&network.rules, network.default, &reused).sign;
+        if reached && denied == agentfile::Sign::Deny {
+            assert!(narrowed, "{name} carries a request for {other} unread");
+        }
+    }
 }
 
 /// A path normalizes as iri-string normalizes the path of

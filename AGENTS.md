@@ -211,10 +211,11 @@ Under `auto:pr`, park the same way when the merge gate passes, but add
 
 When what blocks you is another issue, and not a question for the owner, park
 without asking. File that issue if it doesn't exist, and add `Blocked by #n.`
-to yours. Name an issue, never a PR. Set your state to parked, and remove
-`in-progress`, again until it succeeds, because a parked status never expires.
-Add no `answer-needed`. Your issue is Available on its branch once that issue
-closes, and the Planner gives the issue you filed a label.
+to yours. Name an issue, never a PR. Set your state to parked, then remove
+`in-progress`, and try again until it succeeds, because a parked status never
+expires. Add no `answer-needed`, stop watching any PR, and end your turn. Your
+issue is Available on its branch once that issue closes, and the Planner gives
+the issue you filed a label.
 
 Park only when you can't continue alone: you can't prove the change, the merge
 gate can't pass, the goal is ambiguous in a way that changes the result, or

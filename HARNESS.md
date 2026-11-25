@@ -605,7 +605,7 @@ diagnostics go to stderr.
 | State | Condition | Next |
 |---|---|---|
 | Unavailable | No `auto:*` label | Available, when the owner labels it, or the planner adopts it under a labeled parent |
-| Blocked | An issue in `Blocked by` is open | Available on its branch, when it closes |
+| Blocked | An issue in `Blocked by` is open | Available, on its branch if it has one, when it closes |
 | Available | Claimable under AGENTS.md | Claimed |
 | Claimed | `in-progress`, with a live lease | Parked, Blocked when it waits for another issue, Abandoned, Closed, or Available on its branch, when a Mac hands it over |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
@@ -671,9 +671,10 @@ work it builds on exists. A prepared PR waiting for the owner doesn't count.
 Every run starts by adopting the issues that hold up labeled work: each open
 issue with no parent and no label, filed by the owner's account, that an open
 issue with an `auto:*` label names in its `Blocked by` line. The planner
-adopts it under #840, the same way, with #840's label. It needs no gap, and it
-is apart from the milestone's limits, because the work it blocks is already
-planned. An issue that someone else filed waits for the owner.
+adopts it under #840, with the same checks and #840's label, while #840 is
+open and labeled. It needs no gap, and it is apart from the milestone's limits,
+because the work it blocks is already planned. It still takes a worker slot.
+An issue that someone else filed waits for the owner.
 
 The planner works on one milestone at a time: the first on the roadmap with a
 step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open

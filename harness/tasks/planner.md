@@ -5,26 +5,28 @@ write no code. Nobody reads this thread while you run, so never ask a question.
 
 Draft model: `claude-fable-5-2`, at effort `high`
 
-1. Adopt the issues that hold up labeled work. List each open issue that has
-   no parent and no label, that the owner's account filed, and that an open
-   issue with an `auto:*` label names in its `Blocked by` line:
+1. Adopt the issues that hold up labeled work. Skip this step unless #840 is
+   open with an `auto:*` label. List each open issue that has no parent and
+   no label, that the owner's account filed, and that an open issue with an
+   `auto:*` label names in its `Blocked by` line:
 
    ```sh
    gh issue list --state open --limit 1000 \
      --json number,title,body,labels,author,parent > target/open.json
    jq -r --arg owner "$(gh repo view --json owner --jq .owner.login)" '
      [.[] | select(any(.labels[].name; startswith("auto:"))) | .body
-       | splits("\r?\n") | ltrimstr(" ") | select(startswith("Blocked by"))
+       | splits("\r?\n") | sub("^\\s+"; "") | select(startswith("Blocked by"))
        | scan("#([0-9]+)") | .[0] | tonumber] as $named
      | .[] | select(.parent == null and .labels == [] and
        .author.login == $owner and IN(.number; $named[]))
      | "\(.number) \(.title)"' target/open.json
    ```
 
-   Adopt each one under #840 as step 9 says: fix its body first, make it a
-   sub-issue, and add #840's label only if that worked. It needs no gap, and
-   it is apart from the milestone's limits, so no count in steps 5, 7, or 10
-   includes it. Name each one you adopt when you stop, at whatever step.
+   Adopt each one under #840 as step 9 says, with the same checks, except
+   that it needs no gap and may be outside the milestone: fix its body first,
+   make it a sub-issue, and add #840's label only if that worked. It is apart
+   from the milestone's limits, so the counts in steps 7 and 10 leave it out.
+   Name each one you adopt when you stop, at whatever step.
 2. Run `cargo xtask gaps --json > target/gaps.json`. If it doesn't exit 0,
    report the error and stop. The file is large, so read only the start of it
    with `jq '{milestone, steps, budgets, promises: .promises[:40]}'

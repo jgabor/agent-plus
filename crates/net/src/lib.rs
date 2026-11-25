@@ -3,6 +3,7 @@
 //! resolver and the proxy hand it what they know of a connection.
 
 mod check;
+pub mod hpack;
 mod inject;
 
 pub use check::{NameCheck, Refused};

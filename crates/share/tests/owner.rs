@@ -24,8 +24,6 @@ const NOBODY: (u32, u32) = (65534, 65534);
 /// The uid and gid the server runs as below, in a user namespace of its own.
 const OTHER: u32 = 1001;
 const ARGS: &str = "AP_SHARE_OWNER_ARGS";
-const SERVER: &str = "owner_server_process";
-const ARENAS: &str = "MALLOC_ARENA_MAX";
 
 /// The owner in the `struct fuse_attr` at `at` in a reply.
 fn owner_at(reply: &[u8], at: usize) -> (u32, u32) {
@@ -45,14 +43,23 @@ impl Guest {
     }
 }
 
-/// The share server's process, when the test below starts it as another
-/// user. Its standard input is the socket.
-#[test]
-fn owner_server_process() {
+/// The share server's process, when the test below starts this program
+/// again as another user, with [`ARGS`] set. It runs before the test
+/// harness, so that it is the process's only thread, as it is in `ap`. Its
+/// standard input is the socket.
+#[used]
+#[unsafe(link_section = ".init_array")]
+static SERVER_PROCESS: extern "C" fn() = server_process;
+
+extern "C" fn server_process() {
     let Some(args) = env::var_os(ARGS) else {
         return;
     };
+    // As the Rust runtime does before `main`, which hasn't run.
+    // SAFETY: ignoring a signal changes no memory.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
     let args: Vec<OsString> = args.to_str().unwrap().lines().map(OsString::from).collect();
+    assert!(alone(), "the server's process has threads it doesn't own");
     let status = share::main(&args);
     // SAFETY: `_exit` ends the process at once.
     unsafe { libc::_exit(i32::from(status)) };
@@ -151,9 +158,7 @@ fn start_as_other(mode: &str, root: &Path) -> (Child, Guest) {
     let gid_line = format!("{OTHER} {} 1\n", me.1);
     let mut command = Command::new(env::current_exe().unwrap());
     command
-        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
         .env(ARGS, args)
-        .env(ARENAS, "1")
         .stdin(OwnedFd::from(theirs))
         .stdout(Stdio::null());
     // SAFETY: the closure runs in the forked child, and makes only system

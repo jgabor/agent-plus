@@ -52,6 +52,13 @@ pub const S_IFLNK: u32 = 0o120_000;
 pub const S_IFDIR: u32 = 0o040_000;
 pub const S_IFREG: u32 = 0o100_000;
 
+/// Whether this process has one thread. The filter a server installs
+/// confines every thread of its process, so a thread of the test harness
+/// would die at its next call that the filter refuses.
+pub fn alone() -> bool {
+    fs::read_dir("/proc/self/task").unwrap().count() == 1
+}
+
 /// A directory tree with a share's root and a host file beside it.
 pub struct Tree {
     pub base: PathBuf,

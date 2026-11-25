@@ -9,6 +9,13 @@ pub mod kernel;
 pub mod os;
 pub mod started;
 
+/// Whether this process has one thread. A filter that a process installs
+/// confines every thread of it, so a thread of the test harness would die
+/// at its next call that the filter refuses.
+pub fn alone() -> bool {
+    std::fs::read_dir("/proc/self/task").unwrap().count() == 1
+}
+
 /// The value of `key` in a `pin.toml`.
 fn pinned(pin: &'static str, key: &str) -> &'static str {
     pin.lines()

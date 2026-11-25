@@ -1231,16 +1231,10 @@ fn dns_answer(query: &[u8], svc: Ipv4Addr) -> Option<Vec<u8>> {
 }
 
 const SIGSYS: i32 = 31;
-const OWNER_TEST: &str = "connecting_network_process";
 const ATTEMPT_VARIABLE: &str = "AP_CONNECTS_ATTEMPT";
 const TARGET_VARIABLE: &str = "AP_CONNECTS_TARGET";
 const LINK_VARIABLE: &str = "AP_CONNECTS_LINK";
 const PEER_VARIABLE: &str = "AP_CONNECTS_PEER";
-/// The network process runs on a test's thread here, and `ap` runs it on its
-/// main thread. One malloc arena keeps the test's like `ap`'s, which glibc
-/// grows with `brk`, where a thread's own arena grows with `mprotect`, which
-/// the filter refuses.
-const ARENAS: &str = "MALLOC_ARENA_MAX";
 /// How long the check waits for a confined process to say something.
 const QUIET: Duration = Duration::from_secs(3);
 const PR_SET_DUMPABLE: c_int = 4;
@@ -1249,8 +1243,11 @@ const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = 1;
 const SOCK_SEQPACKET: c_int = 5;
 const SOCK_CLOEXEC: c_int = 0o2_000_000;
+const SIGPIPE: c_int = 13;
+const SIG_IGN: usize = 1;
 
 unsafe extern "C" {
+    fn signal(signal: c_int, handler: usize) -> usize;
     fn fork() -> c_int;
     fn _exit(status: c_int) -> !;
     fn prctl(option: c_int, ...) -> c_int;
@@ -1355,13 +1352,20 @@ fn arp_request() -> Vec<u8> {
 }
 
 /// The process that confines itself as the network process does when it
-/// may connect, makes one attempt, and then serves its link. It does
-/// nothing in a normal test run.
-#[test]
-fn connecting_network_process() {
+/// may connect, makes one attempt, and then serves its link, when a test
+/// starts this program again with [`LINK_VARIABLE`] set. It runs before the
+/// test harness, so that it is the process's only thread, as it is in `ap`.
+#[used]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+static NETWORK_PROCESS: extern "C" fn() = connecting_network_process;
+
+extern "C" fn connecting_network_process() {
     let Some(fd) = env::var_os(LINK_VARIABLE) else {
         return;
     };
+    // As the Rust runtime does before `main`, which hasn't run.
+    // SAFETY: ignoring a signal changes no memory.
+    unsafe { signal(SIGPIPE, SIG_IGN) };
     // The filter kills this process on purpose, so it doesn't dump core.
     // SAFETY: the call matches the prctl signature for this option.
     assert_eq!(unsafe { prctl(PR_SET_DUMPABLE, 0 as c_ulong) }, 0);
@@ -1372,6 +1376,10 @@ fn connecting_network_process() {
     // SAFETY: the parent passed this descriptor for this process alone.
     let link = File::from(unsafe { OwnedFd::from_raw_fd(fd) });
     let mut stack = ap::network::stack();
+    assert!(
+        t1::alone(),
+        "the network process has threads it doesn't own"
+    );
     ap::network::confine_connecting(link.as_fd()).unwrap();
     let attempting = format!("attempting {}", attempt.name());
     (&link).write_all(attempting.as_bytes()).unwrap();
@@ -1383,6 +1391,9 @@ fn connecting_network_process() {
     std::hint::black_box(&pages);
     let mut resolver = ap::network::resolver(&["--".into(), "+".into()]).unwrap();
     ap::network::serve(&link, &mut stack, &mut resolver).unwrap();
+    // The process ends here, before the test harness starts.
+    // SAFETY: `_exit` ends the process at once.
+    unsafe { _exit(0) };
 }
 
 /// Makes one attempt in its own process, and returns how that process
@@ -1396,12 +1407,10 @@ fn attempt(directory: &Path, attempt: Attempt, peer: SocketAddr) -> (ExitStatus,
     fs::write(&target, "a host file the network process doesn't need").unwrap();
     let mut command = Command::new(env::current_exe().unwrap());
     command
-        .args([OWNER_TEST, "--exact", "--test-threads=1"])
         .env(ATTEMPT_VARIABLE, attempt.name())
         .env(TARGET_VARIABLE, &target)
         .env(PEER_VARIABLE, peer.to_string())
         .env(LINK_VARIABLE, fd.to_string())
-        .env(ARENAS, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: the closure only clears close-on-exec on a descriptor this

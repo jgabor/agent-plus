@@ -318,8 +318,10 @@ that is `main` as it is: one with no base, or no change from it but in
 `harness/ledger/`. It prints `pass t2` or `fail t2` on a line of its own.
 Otherwise it prints `skip t2` and leaves `t2` out. A `t2` check counts toward
 the spec score only when `t2` runs, so a promise needs a check in another
-tier too. The nightly job tests `main` as it is, so its gate runs `t2`, and
-that run is its T2 check.
+tier too. The gate's `spec` check fails a promise that a `t2` check quotes
+when no passing check in another tier proves it. A check in a package that
+links a `fake-*` crate earns no score, so it doesn't count. The nightly job
+tests `main` as it is, so its gate runs `t2`, and that run is its T2 check.
 
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins
 into `target/guest/vmlinux`, and checks its digest on every use. The gate keeps

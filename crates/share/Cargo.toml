@@ -6,9 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-git = { path = "../git" }
 libc = "0.2"
 vmm = { path = "../vmm" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+git = { path = "../git" }
 
 [lints]
 workspace = true

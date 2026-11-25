@@ -33,6 +33,7 @@ use vmm::confine::Changes;
 use crate::landlock::Access;
 use crate::namespace;
 use crate::sys;
+use crate::{Mode, Root};
 
 mod cow;
 
@@ -119,60 +120,6 @@ const AGENTFILES: [&str; 2] = ["agentfile", "agentfile.lock"];
 const DOT_GIT: &str = ".git";
 /// The entries git finds a bare repository by, folded.
 const BARE: [&str; 4] = ["head", "objects", "refs", "commondir"];
-
-/// What a share allows. A copy-on-write share keeps the agent's changes
-/// in a directory of its own, `P`.
-#[derive(Debug)]
-pub enum Mode<P = OwnedFd> {
-    ReadOnly,
-    ReadWrite,
-    CopyOnWrite(P),
-}
-
-/// A share's root, as the server takes it: a directory, and what the share
-/// allows. A file share shows one `file` in the directory, by its name, and
-/// nothing else of it.
-#[derive(Debug)]
-pub struct Root<F = OwnedFd> {
-    pub directory: F,
-    pub file: Option<CString>,
-    pub mode: Mode<F>,
-}
-
-impl<F> Root<F> {
-    /// The share of the directory `directory`.
-    pub fn new(directory: F, mode: Mode<F>) -> Self {
-        Self {
-            directory,
-            file: None,
-            mode,
-        }
-    }
-
-    /// The share of the file `name` in `directory`.
-    pub fn file(directory: F, name: CString, mode: Mode<F>) -> Self {
-        Self {
-            directory,
-            file: Some(name),
-            mode,
-        }
-    }
-}
-
-impl<F: AsFd> Root<F> {
-    /// The same root, borrowing its descriptors.
-    pub fn as_fd(&self) -> Root<BorrowedFd<'_>> {
-        Root {
-            directory: self.directory.as_fd(),
-            file: self.file.clone(),
-            mode: match &self.mode {
-                Mode::ReadOnly => Mode::ReadOnly,
-                Mode::ReadWrite => Mode::ReadWrite,
-                Mode::CopyOnWrite(pending) => Mode::CopyOnWrite(pending.as_fd()),
-            },
-        }
-    }
-}
 
 /// Where a file sits, for what an `rw` share protects. It follows from the
 /// place of the directory above, and the file's name.

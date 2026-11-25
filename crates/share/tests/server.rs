@@ -2,6 +2,8 @@
 //! process: each request is a FUSE request as a guest's kernel, or a guest
 //! that took its kernel over, would send it.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

@@ -20,12 +20,27 @@
 //! file until it exits, such as a run's locked record, so the run stays
 //! active until it has answered its last request. Its filter refuses to
 //! lock, unlock, or close that file.
+//!
+//! The server runs on Linux alone. On macOS, each part of it that only Linux
+//! can build has a stand-in, in `macos.rs`, and each call with no macOS
+//! equivalent yet fails and says so.
 
+#[cfg(target_os = "linux")]
 mod landlock;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "linux")]
 mod namespace;
+mod root;
+#[cfg(target_os = "linux")]
 mod server;
+#[cfg(target_os = "linux")]
 mod sys;
+#[cfg(target_os = "linux")]
 mod times;
+
+#[cfg(target_os = "macos")]
+use macos::{landlock, namespace, server, sys};
 
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
@@ -38,7 +53,8 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 pub use namespace::spawn as spawn_read_write;
-pub use server::{Mode, Root, Server};
+pub use root::{Mode, Root};
+pub use server::Server;
 #[doc(hidden)]
 pub use server::{when_a_copy_moves, when_git_is_listed};
 

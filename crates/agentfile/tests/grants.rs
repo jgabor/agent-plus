@@ -178,6 +178,7 @@ fn variables_in_env_values_are_grants() {
 }
 
 // spec(Grants): | Secrets, their bound hosts, and their visibility | `SECRET`, `SEAL`, `AUTH key`, `AUTH token` |
+// spec(SECRET): Every `SECRET` is a [grant](#grants).
 #[test]
 fn secrets_seals_and_their_hosts_are_grants() {
     let grants = grants_of(
@@ -202,6 +203,7 @@ fn secrets_seals_and_their_hosts_are_grants() {
 }
 
 // spec(Grants): | Secrets, their bound hosts, and their visibility | `SECRET`, `SEAL`, `AUTH key`, `AUTH token` |
+// spec(AUTH): `AUTH key` and `AUTH token` are [grants](#grants).
 #[test]
 fn auth_key_and_token_are_grants_and_login_is_not() {
     assert_eq!(grants_of("AUTH key").auth, Some(Auth::Key));

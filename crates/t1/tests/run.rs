@@ -2394,6 +2394,8 @@ fn a_run_starts_its_share_servers_and_cleanup_without_a_hidden_secret_s_variable
 }
 
 // spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
+// spec(AUTH): | `token` | With a subscription token from your host. Claude Code only | The token |
+// spec(AUTH): **`AUTH token`** uses a subscription token you created, such as one from `claude setup-token`.
 #[test]
 fn auth_token_hands_the_harness_its_token() {
     let scratch = Scratch::new("auth-token");
@@ -2403,6 +2405,14 @@ fn auth_token_hands_the_harness_its_token() {
         start_reporting(&scratch, "tokened", &[("CLAUDE_CODE_OAUTH_TOKEN", token)]);
     assert_eq!(seen(&report, "CLAUDE_CODE_OAUTH_TOKEN"), token, "{report}");
     drop(run);
+    // With Codex, it doesn't build.
+    let codex = scratch.root.join("codex");
+    fs::create_dir_all(&codex).unwrap();
+    fs::write(codex.join("Agentfile"), "AGENT codex\nAUTH token\n").unwrap();
+    let built = scratch.ap(&["build", codex.to_str().unwrap()]);
+    assert_eq!(built.status.code(), Some(1), "{built:?}");
+    let stderr = String::from_utf8_lossy(&built.stderr);
+    assert!(stderr.contains("`token`"), "{stderr}");
 }
 
 // spec(AUTH): With Claude Code, the run's `~/.claude.json` approves the placeholder, so an interactive run doesn't ask whether to use the key.

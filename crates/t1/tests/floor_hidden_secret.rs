@@ -396,6 +396,7 @@ fn reported<'a>(report: &'a str, name: &str) -> &'a str {
 }
 
 // spec(AUTH): The agent sees only a placeholder, and the adapter signs the harness in with it.
+// spec(AUTH): | `key` | With the harness's API key from your host | A placeholder only |
 #[test]
 fn floor_auth_key() {
     let _turn = ONE_AT_A_TIME

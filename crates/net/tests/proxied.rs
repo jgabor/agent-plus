@@ -78,6 +78,62 @@ fn the_rules_and_the_default_decide() {
     );
 }
 
+// spec(NETWORK): The default `+` really does allow everything.
+// spec(NETWORK): That includes your local network, services listening on your host's network addresses, and cloud metadata endpoints when the host runs in a cloud.
+#[test]
+fn the_open_default_reaches_the_local_network_your_host_and_cloud_metadata() {
+    let open = network("NETWORK +\n");
+    for address in [
+        // Private and shared networks, where your host's own addresses are.
+        "10.0.0.1",
+        "172.16.0.1",
+        "192.168.1.20",
+        "100.64.0.1",
+        "fd00::1",
+        "::ffff:192.168.1.20",
+        // Link-local, and the metadata endpoints of AWS, GCP, Azure, and
+        // Alibaba Cloud.
+        "169.254.169.254",
+        "fe80::1",
+        "fd00:ec2::254",
+        "100.100.100.200",
+        // Anywhere else.
+        "93.184.215.14",
+        "2606:4700::1111",
+    ] {
+        assert_eq!(
+            decided(&open, None, address),
+            "Allow by default",
+            "{address}"
+        );
+    }
+    for (name, address) in [
+        ("metadata.google.internal", "169.254.169.254"),
+        ("router.lan", "192.168.1.1"),
+    ] {
+        assert_eq!(
+            decided(&open, Some(name), address),
+            "Allow by default",
+            "{name}"
+        );
+    }
+}
+
+// spec(NETWORK): Under `NETWORK +`, a deny rule for a name is best effort: a client that connects to a literal IP address without a name only meets IP rules.
+#[test]
+fn under_the_open_default_a_literal_address_meets_only_ip_rules() {
+    let lines = "NETWORK +\nNETWORK -example.com\n";
+    // By its name, the deny rule decides.
+    assert!(!allows(lines, Some("example.com"), "93.184.215.14"));
+    // By its address alone, the same server is allowed.
+    let open = network(lines);
+    assert_eq!(decided(&open, None, "93.184.215.14"), "Allow by default");
+    // Only an IP rule meets a literal address.
+    let lines = "NETWORK +\nNETWORK -example.com\nNETWORK -93.184.215.14\n";
+    assert!(!allows(lines, None, "93.184.215.14"));
+    assert!(allows(lines, None, "93.184.215.15"));
+}
+
 // spec(NETWORK): **Harness hosts.** The hosts the harness needs for its model API and sign-in stay allowed under `NETWORK -`, so an agent never loses its own model.
 // spec(NETWORK): An explicit `-` rule for such a host still wins.
 #[test]

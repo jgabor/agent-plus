@@ -614,7 +614,7 @@ fn without_a_base_t2_runs() {
 const T2_CHECKS_THREE: &str = "// spec(B): Three.\n#[test]\nfn three() {}\n";
 
 /// The count reaches the record's 2, so `hills` passes, and `spec` still
-/// fails, because no check in another tier quotes `Three.`
+/// fails, because no check in another tier proves `Three.`.
 #[test]
 fn a_t2_check_counts_toward_the_spec_score_when_t2_runs() {
     let record = record_with_proven(2);
@@ -653,4 +653,9 @@ fn a_t2_check_left_out_does_not_count() {
     let output = repo.gate();
     assert!(stdout(&output).contains("skip t2\n"), "{}", stdout(&output));
     assert_fails(&output, "hills", "from 2 to 1");
+    assert!(
+        stderr(&output).contains("another tier"),
+        "{}",
+        stderr(&output)
+    );
 }

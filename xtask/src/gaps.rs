@@ -6,7 +6,8 @@ use crate::{Problem, Verdict, bench, journey, ledger, lock, score, testrun, work
 use std::collections::BTreeMap;
 
 /// A gap isn't a failure of this command. A broken spec quote is, as in
-/// `score`, because the list can't be trusted while one exists.
+/// `score`, because the list can't be trusted while one exists. So is a
+/// promise that only a `t2` check proves.
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let hold = lock::testing(&root)?;

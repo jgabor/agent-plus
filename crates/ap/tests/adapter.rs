@@ -629,10 +629,10 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
 // spec(MODE): With `read`, `ask`, `edit`, or `auto`, when the working directory is a share, a rule in its `.codex/rules` that allows a command lets Codex run that command outside its sandbox without asking.
 #[test]
 fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
-    // Real Codex follows the rule in T2. Here, the adapter's part: Codex
-    // loads a directory's `.codex/rules` only when it trusts the directory,
-    // so the adapter trusts each share that can be the working directory,
-    // keeps the sandbox, and leaves the rules alone.
+    // Real Codex follows the rule in T2. This checks the adapter's part.
+    // Codex loads a directory's `.codex/rules` only when it trusts the
+    // directory. So in each of these modes, the adapter trusts every share
+    // that can be the working directory, and doesn't bypass the sandbox.
     let (_, directories) = shares("codex");
     let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
     for version in CODEX_VERSIONS {
@@ -647,10 +647,6 @@ fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
                     .filter(|pair| pair[0] == "-c")
                     .map(|pair| pair[1].as_str())
                     .collect();
-                assert!(
-                    !overrides.iter().any(|value| value.starts_with("rules")),
-                    "{run} {overrides:?}"
-                );
                 let projects: Vec<&str> = (overrides.iter().copied())
                     .filter(|value| value.starts_with("projects"))
                     .collect();

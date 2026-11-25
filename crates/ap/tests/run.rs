@@ -7,13 +7,13 @@ mod common;
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 
 use guest::linux::{open_terminal, take_terminal};
@@ -382,9 +382,17 @@ fn a_secret_s_value_comes_only_from_its_host_variable() {
     scratch.build("secretive", &format!("{RUNNABLE}{lines}"));
     let both = [("API_TOKEN", "tok-1"), ("NOTE", "note-1")];
     past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &both));
-    // The store says it has none, and doesn't keep the value.
-    let set = scratch.ap(&["secret", "set", "API_TOKEN"], &[]);
+    // The store says it has none, so a value given to it is kept nowhere,
+    // and the runs below don't find it.
+    let mut set = scratch.command(&["secret", "set", "API_TOKEN"], &[]);
+    let mut set = (set.stdin(Stdio::piped()).stderr(Stdio::piped()))
+        .spawn()
+        .unwrap();
+    set.stdin.take().unwrap().write_all(b"tok-1\n").unwrap();
+    let set = set.wait_with_output().unwrap();
     assert_eq!(set.status.code(), Some(1), "{set:?}");
+    let said = String::from_utf8_lossy(&set.stderr);
+    assert!(said.contains("no secret store on Linux"), "{said}");
     for (name, other) in [("API_TOKEN", both[1]), ("NOTE", both[0])] {
         // Without its own variable, nothing else gives a secret its value:
         // another secret's variable, one in another case, or one that

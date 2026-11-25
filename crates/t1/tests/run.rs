@@ -228,14 +228,251 @@ fn running(pid: u32) -> bool {
         })
 }
 
+/// How long a failed [`ended`] watches the processes that outlived it.
+const LATER: Duration = Duration::from_secs(30);
+
 /// Fails, saying `what`, unless each process in `pids` has ended by
-/// `deadline`.
+/// `deadline`. The failure says what each process still running waits for,
+/// as [`described`] does, and then whether it ended within [`LATER`]. A
+/// check that passes reads nothing more than [`running`] does.
 fn ended(pids: &[u32], deadline: Instant, what: &str) {
     while pids.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
     let left: Vec<u32> = pids.iter().copied().filter(|pid| running(*pid)).collect();
-    assert!(left.is_empty(), "{what}: {left:?}");
+    if left.is_empty() {
+        return;
+    }
+    let mut message = format!("{what}: {left:?}");
+    for pid in &left {
+        message.push_str(&described(*pid));
+    }
+    let failed = Instant::now();
+    let mut endings: Vec<Option<Duration>> = vec![None; left.len()];
+    while endings.iter().any(Option::is_none) && failed.elapsed() < LATER {
+        for (pid, ending) in left.iter().zip(&mut endings) {
+            if ending.is_none() && !running(*pid) {
+                *ending = Some(failed.elapsed());
+            }
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    for (pid, ending) in left.iter().zip(endings) {
+        match ending {
+            Some(after) => message.push_str(&format!(
+                "\nprocess {pid}: it ended {after:?} after the check failed"
+            )),
+            None => message.push_str(&format!(
+                "\nprocess {pid}: it was still running {LATER:?} after the check failed"
+            )),
+        }
+    }
+    panic!("{message}");
+}
+
+/// What the process `pid` waits for, from `/proc`: its command line, each
+/// thread's state, what it waits in, and its system call, and its open
+/// descriptors, each socket with the processes that hold its far end.
+fn described(pid: u32) -> String {
+    let mut text = format!("\nprocess {pid} ({})", command_line(pid));
+    match fs::read_dir(format!("/proc/{pid}/task")) {
+        Ok(tasks) => {
+            let mut tids: Vec<String> = tasks
+                .flatten()
+                .map(|task| task.file_name().to_string_lossy().into_owned())
+                .collect();
+            tids.sort_by_key(|tid| tid.parse::<u32>().unwrap_or(0));
+            for tid in tids {
+                let task = format!("/proc/{pid}/task/{tid}");
+                let state = fs::read_to_string(format!("{task}/stat"))
+                    .ok()
+                    .and_then(|stat| Some(stat.rsplit_once(") ")?.1.chars().next()?.to_string()))
+                    .unwrap_or_else(|| "unreadable".to_owned());
+                text.push_str(&format!(
+                    "\n  thread {tid}: state {state}, waits in {}, system call {}",
+                    proc_text(&format!("{task}/wchan")),
+                    proc_text(&format!("{task}/syscall")),
+                ));
+            }
+        }
+        Err(error) => text.push_str(&format!("\n  threads unreadable ({error})")),
+    }
+    let mut descriptors = match fs::read_dir(format!("/proc/{pid}/fd")) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|entry| {
+                let fd = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                Some((fd, fs::read_link(entry.path())))
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            text.push_str(&format!("\n  descriptors unreadable ({error})"));
+            Vec::new()
+        }
+    };
+    descriptors.sort_by_key(|(fd, _)| *fd);
+    for (fd, target) in descriptors {
+        let target = match target {
+            Ok(target) => target.to_string_lossy().into_owned(),
+            Err(error) => format!("unreadable ({error})"),
+        };
+        text.push_str(&format!("\n  descriptor {fd}: {target}"));
+        let Some(inode) = target
+            .strip_prefix("socket:[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|inode| inode.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        match far_end(inode) {
+            Ok(None | Some(0)) => text.push_str(", which has no far end"),
+            Ok(Some(peer)) => {
+                let holders = holding(&format!("socket:[{peer}]"));
+                match holders.is_empty() {
+                    true => {
+                        text.push_str(&format!(", whose far end socket:[{peer}] no process holds"))
+                    }
+                    false => text.push_str(&format!(
+                        ", whose far end socket:[{peer}] is held by {}",
+                        holders.join(", ")
+                    )),
+                }
+            }
+            Err(error) => text.push_str(&format!(", whose far end is unknown ({error})")),
+        }
+    }
+    text
+}
+
+/// The trimmed text of the file at `path`, or why it can't be read.
+fn proc_text(path: &str) -> String {
+    match fs::read_to_string(path) {
+        Ok(text) => text.trim().to_owned(),
+        Err(error) => format!("unreadable ({error})"),
+    }
+}
+
+/// The command line of the process `pid`, its arguments divided by spaces.
+fn command_line(pid: u32) -> String {
+    match fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(cmdline) => cmdline
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(String::from_utf8_lossy)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(error) => format!("unreadable ({error})"),
+    }
+}
+
+/// Each process that has a descriptor for `target`, such as
+/// `socket:[123]`, as its id and its command line.
+fn holding(target: &str) -> Vec<String> {
+    let mut holders = Vec::new();
+    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let holds = fs::read_dir(entry.path().join("fd"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|link| link.as_os_str() == target));
+        if holds {
+            holders.push(format!("{pid} ({})", command_line(pid)));
+        }
+    }
+    holders
+}
+
+const AF_NETLINK: c_int = 16;
+const AF_UNIX: u8 = 1;
+const SOCK_DGRAM: c_int = 2;
+const SOCK_CLOEXEC: c_int = 0o2_000_000;
+const NETLINK_SOCK_DIAG: c_int = 4;
+const SOCK_DIAG_BY_FAMILY: u16 = 20;
+const NLM_F_REQUEST: u16 = 1;
+const NLMSG_ERROR: u16 = 2;
+const UDIAG_SHOW_PEER: u32 = 4;
+const UNIX_DIAG_PEER: u16 = 2;
+/// The lengths of a netlink header, and of a `unix_diag_msg` after it.
+const NLMSG_HEADER: usize = 16;
+const UNIX_DIAG_MSG: usize = 16;
+
+/// The inode of the far end of the Unix socket with inode `inode`, as the
+/// kernel's `sock_diag` says, or `None` if it has none. A far end that has
+/// closed reads as inode 0.
+fn far_end(inode: u32) -> io::Result<Option<u32>> {
+    // SAFETY: `socket` takes and returns plain integers.
+    let fd = unsafe { socket(AF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_SOCK_DIAG) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    let netlink = unsafe { OwnedFd::from_raw_fd(fd) };
+    // A `nlmsghdr`, then a `unix_diag_req` that asks for this one socket,
+    // in any state, and its peer, with no cookie to match.
+    let mut request = Vec::with_capacity(40);
+    request.extend(40u32.to_ne_bytes());
+    request.extend(SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+    request.extend(NLM_F_REQUEST.to_ne_bytes());
+    request.extend(1u32.to_ne_bytes());
+    request.extend(0u32.to_ne_bytes());
+    request.extend([AF_UNIX, 0, 0, 0]);
+    request.extend(u32::MAX.to_ne_bytes());
+    request.extend(inode.to_ne_bytes());
+    request.extend(UDIAG_SHOW_PEER.to_ne_bytes());
+    request.extend([0xff; 8]);
+    // SAFETY: the request is valid for its whole length.
+    let sent = unsafe {
+        send(
+            netlink.as_raw_fd(),
+            request.as_ptr().cast(),
+            request.len(),
+            0,
+        )
+    };
+    if sent < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut reply = vec![0u8; 8192];
+    // SAFETY: the buffer is valid for its whole length, which `recv`
+    // writes no further than.
+    let got = unsafe {
+        recv(
+            netlink.as_raw_fd(),
+            reply.as_mut_ptr().cast(),
+            reply.len(),
+            0,
+        )
+    };
+    let got = usize::try_from(got).map_err(|_| io::Error::last_os_error())?;
+    let u16_at = |at: usize| u16::from_ne_bytes([reply[at], reply[at + 1]]);
+    let u32_at = |at: usize| u32::from_ne_bytes(reply[at..at + 4].try_into().unwrap());
+    if got < NLMSG_HEADER + 4 {
+        return Err(io::Error::other(format!("a reply of {got} bytes")));
+    }
+    if u16_at(4) == NLMSG_ERROR {
+        let error = u32_at(NLMSG_HEADER) as i32;
+        return Err(io::Error::from_raw_os_error(-error));
+    }
+    let end = (u32_at(0) as usize).min(got);
+    let mut at = NLMSG_HEADER + UNIX_DIAG_MSG;
+    while at + 4 <= end {
+        let (length, kind) = (u16_at(at) as usize, u16_at(at + 2));
+        if length < 4 {
+            break;
+        }
+        if kind == UNIX_DIAG_PEER && length >= 8 && at + 8 <= end {
+            return Ok(Some(u32_at(at + 4)));
+        }
+        at += length.div_ceil(4) * 4;
+    }
+    Ok(None)
 }
 
 /// A process that outlives its check says what it waits for. Here, a
@@ -247,7 +484,7 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
     let (reading, held) = UnixStream::pair().unwrap();
     let holder = Started(
         Command::new("sleep")
-            .arg("3")
+            .arg("5")
             .stdin(OwnedFd::from(held))
             .stdout(Stdio::null())
             .spawn()
@@ -261,8 +498,24 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
             .unwrap(),
     );
     let (holder_pid, reader_pid) = (holder.0.id(), reader.0.id());
+    // The reader sleeps once it waits to read.
+    let asleep = || {
+        fs::read_to_string(format!("/proc/{reader_pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('S'))
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !asleep() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(asleep(), "the reader didn't wait");
     let failure = std::panic::catch_unwind(|| {
-        ended(&[reader_pid], Instant::now(), "the reader outlived its check")
+        ended(
+            &[reader_pid],
+            Instant::now(),
+            "the reader outlived its check",
+        )
     })
     .unwrap_err();
     let message = failure.downcast_ref::<String>().unwrap();
@@ -270,12 +523,15 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
         message.starts_with("the reader outlived its check"),
         "{message}"
     );
-    assert!(message.contains(&format!("thread {reader_pid}: ")), "{message}");
-    assert!(message.contains("waits in "), "{message}");
+    assert!(
+        message.contains(&format!("thread {reader_pid}: ")),
+        "{message}"
+    );
+    assert!(message.contains(": state S, waits in "), "{message}");
     assert!(message.contains("system call "), "{message}");
     assert!(message.contains("descriptor 0: socket:["), "{message}");
     assert!(
-        message.contains(&format!("held by {holder_pid} (sleep 3)")),
+        message.contains(&format!("held by {holder_pid} (sleep 5)")),
         "{message}"
     );
     assert!(message.contains("it ended "), "{message}");
@@ -889,7 +1145,11 @@ fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
 
     let processes = started.into_inner().unwrap();
     assert_eq!(processes.len(), 4, "{processes:?}");
-    ended(&processes[..1], Instant::now(), "`ap run` outlived its guard");
+    ended(
+        &processes[..1],
+        Instant::now(),
+        "`ap run` outlived its guard",
+    );
     ended(
         &processes,
         Instant::now() + Duration::from_secs(10),
@@ -1268,6 +1528,8 @@ const EBADF: i32 = 9;
 unsafe extern "C" {
     fn syscall(number: c_long, ...) -> c_long;
     fn recv(fd: c_int, buffer: *mut c_void, length: usize, flags: c_int) -> isize;
+    fn send(fd: c_int, buffer: *const c_void, length: usize, flags: c_int) -> isize;
+    fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
 }
 
 /// Whether `text` waits to be read on one of the sockets of `pid`, a process

@@ -9,12 +9,13 @@ use std::time::Instant;
 
 use netstack::{Config, Flow, Stack, Verdict};
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
+use smoltcp::phy::{self, ChecksumCapabilities, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
-    EthernetAddress, EthernetFrame, HardwareAddress, IpAddress, IpCidr, Ipv4Packet, TcpPacket,
-    UdpPacket,
+    EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, HardwareAddress, Icmpv4Packet,
+    Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv4Repr,
+    Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket,
 };
 
 const GUEST_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x15];
@@ -977,5 +978,111 @@ fn udp_ports_stay_within_their_limit() {
         });
         assert_eq!(again, 1, "bad {bad}");
         assert!(stack.recv_datagram().is_some(), "bad {bad}");
+    }
+}
+
+/// The guest's ICMP or ICMPv6 echo request to `to`, as `ping` sends it.
+fn echo_request(to: IpAddr) -> Vec<u8> {
+    let data = b"ping";
+    let checksums = ChecksumCapabilities::default();
+    let (ethertype, ip) = match to {
+        IpAddr::V4(to) => {
+            let icmp = Icmpv4Repr::EchoRequest {
+                ident: 7,
+                seq_no: 1,
+                data,
+            };
+            let ip = Ipv4Repr {
+                src_addr: GUEST_V4,
+                dst_addr: to,
+                next_header: IpProtocol::Icmp,
+                payload_len: icmp.buffer_len(),
+                hop_limit: 64,
+            };
+            let mut packet = vec![0; ip.buffer_len() + icmp.buffer_len()];
+            let mut ipv4 = Ipv4Packet::new_unchecked(&mut packet[..]);
+            ip.emit(&mut ipv4, &checksums);
+            icmp.emit(
+                &mut Icmpv4Packet::new_unchecked(ipv4.payload_mut()),
+                &checksums,
+            );
+            (EthernetProtocol::Ipv4, packet)
+        }
+        IpAddr::V6(to) => {
+            let icmp = Icmpv6Repr::EchoRequest {
+                ident: 7,
+                seq_no: 1,
+                data,
+            };
+            let ip = Ipv6Repr {
+                src_addr: GUEST_V6,
+                dst_addr: to,
+                next_header: IpProtocol::Icmpv6,
+                payload_len: icmp.buffer_len(),
+                hop_limit: 64,
+            };
+            let mut packet = vec![0; ip.buffer_len() + icmp.buffer_len()];
+            let mut ipv6 = Ipv6Packet::new_unchecked(&mut packet[..]);
+            ip.emit(&mut ipv6);
+            let mut echo = Icmpv6Packet::new_unchecked(ipv6.payload_mut());
+            icmp.emit(&GUEST_V6, &to, &mut echo, &checksums);
+            (EthernetProtocol::Ipv6, packet)
+        }
+    };
+    let ethernet = EthernetRepr {
+        src_addr: EthernetAddress(GUEST_MAC),
+        dst_addr: EthernetAddress(STACK_MAC),
+        ethertype,
+    };
+    let mut frame = vec![0; ethernet.buffer_len()];
+    ethernet.emit(&mut EthernetFrame::new_unchecked(&mut frame[..]));
+    frame.extend(ip);
+    frame
+}
+
+/// Whether `frame` is an ICMP or ICMPv6 echo reply.
+fn echo_reply(frame: &[u8]) -> bool {
+    match frame[12..14] {
+        [0x08, 0x00] => {
+            let header = usize::from(frame[14] & 0xf) * 4;
+            frame[14 + 9] == 1 && frame[14 + header] == 0
+        }
+        [0x86, 0xdd] => frame[14 + 6] == 58 && frame[14 + 40] == 129,
+        _ => false,
+    }
+}
+
+// spec(NETWORK): **ICMP** isn't carried, so `ping` gets no reply.
+#[test]
+fn a_ping_gets_no_reply_from_anywhere() {
+    let start = Instant::now();
+    let mut stack = stack();
+    // A datagram over each protocol first, so that each side knows the
+    // other's link address, and the stack could send a reply. A guest
+    // waits a second between lookups, so each protocol gets its own.
+    for to in ["198.51.100.9:53", "[2001:db8::9]:53"] {
+        let to: SocketAddr = to.parse().unwrap();
+        let mut guest = Guest::new();
+        let handle = guest.udp(40000);
+        let socket = guest.sockets.get_mut::<udp::Socket>(handle);
+        socket.send_slice(b"query", to).unwrap();
+        exchange(&mut guest, &mut stack, start);
+        assert!(stack.recv_datagram().is_some(), "{to}");
+    }
+    // To a destination past the stack, and to the stack itself.
+    for to in [
+        IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+        IpAddr::V4(STACK_V4),
+        IpAddr::V6("2606:4700::1111".parse().unwrap()),
+        IpAddr::V6(STACK_V6),
+    ] {
+        let now = Instant::now();
+        stack.receive(&echo_request(to), now, |flow| {
+            panic!("a ping to {to} opened {flow:?}")
+        });
+        stack.poll(now);
+        while let Some(frame) = stack.transmit() {
+            assert!(!echo_reply(&frame), "a ping to {to} got a reply");
+        }
     }
 }

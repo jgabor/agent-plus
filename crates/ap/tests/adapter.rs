@@ -794,3 +794,54 @@ fn a_runs_state_trusts_its_working_directory_and_every_directory_above_it() {
     );
     assert!(ap::adapter::run_files(agentfile::Harness::Codex, "/home/agent", None).is_empty());
 }
+
+/// How the proxy decides an HTTPS request for `url`, such as
+/// `https://api.anthropic.com/v1/messages`, under the worked example's rules
+/// in SPEC.md's NETWORK section, with `harness`'s hosts as its adapter lists
+/// them.
+fn worked_example(harness: agentfile::Harness, url: &str) -> String {
+    let agent = match harness {
+        agentfile::Harness::Claude => "claude",
+        agentfile::Harness::Codex => "codex",
+    };
+    let instructions = agentfile::parse(&format!(
+        "AGENT {agent}\nNETWORK -\nNETWORK +github.com\nNETWORK -gist.github.com\n\
+         NETWORK +https://codeberg.org/forgejo/forgejo\n"
+    ))
+    .unwrap();
+    let network = agentfile::Network::read(&instructions).unwrap();
+    let rest = url.strip_prefix("https://").unwrap();
+    let (name, target) = rest.split_at(rest.find('/').unwrap());
+    let connection = net::Connection {
+        name: Some(name),
+        address: "203.0.113.9".parse().unwrap(),
+        port: 443,
+        request: Some(net::Request {
+            scheme: agentfile::Scheme::Https,
+            target,
+        }),
+    };
+    let hosts = ap::adapter::reserved(harness).hosts;
+    match net::proxied(&network, hosts, &connection) {
+        net::Proxied::Harness => "allow by harness host".to_owned(),
+        net::Proxied::Decided(decision) => match (decision.sign, decision.by) {
+            (agentfile::Sign::Deny, net::By::Default) => "deny by default".to_owned(),
+            other => format!("{other:?}"),
+        },
+        net::Proxied::Loopback => "loopback".to_owned(),
+    }
+}
+
+// spec(NETWORK): | `https://api.anthropic.com/v1/messages` | allow | harness host |
+// spec(NETWORK): | `https://api.openai.com/v1/responses` | deny | default `-` (a harness host only for `codex`) |
+#[test]
+fn the_worked_example_s_harness_rows_decide_as_its_table_says() {
+    use agentfile::Harness::{Claude, Codex};
+    let anthropic = "https://api.anthropic.com/v1/messages";
+    let openai = "https://api.openai.com/v1/responses";
+    assert_eq!(worked_example(Claude, anthropic), "allow by harness host");
+    assert_eq!(worked_example(Claude, openai), "deny by default");
+    // Under `AGENT codex`, the hosts trade places.
+    assert_eq!(worked_example(Codex, openai), "allow by harness host");
+    assert_eq!(worked_example(Codex, anthropic), "deny by default");
+}

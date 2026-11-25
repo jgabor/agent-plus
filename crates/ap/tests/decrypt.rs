@@ -1430,6 +1430,31 @@ fn the_placeholder_passes_unchanged_anywhere_but_to_the_bound_host() {
     }
 }
 
+// spec(SECRET): A bound host matches that exact host only, not its subdomains.
+#[test]
+fn a_secret_bound_to_a_parent_host_never_reaches_its_subdomain() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    // `host.ap.internal` is a subdomain of `ap.internal`, and `.internal`.
+    for parent in ["ap.internal", "internal"] {
+        let mut guest = Guest::injecting(&rules, Vec::new(), port, bound_to(parent));
+        let handle = guest.connect();
+        // The connection isn't decrypted, so the guest sees the
+        // destination's own certificate.
+        let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+        let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+        assert!(answer.is_ok(), "{parent}: {answer:?}");
+    }
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    for request in seen {
+        assert!(!request.contains(VALUE), "{request}");
+        assert_eq!(request.matches(PLACEHOLDER).count(), 4, "{request}");
+        assert!(request.contains(BASIC_PLACEHOLDER), "{request}");
+    }
+}
+
 #[test]
 fn a_bound_host_with_url_rules_gets_the_value_in_the_requests_they_allow() {
     let (root, config) = server();

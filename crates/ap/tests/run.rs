@@ -373,7 +373,37 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
     );
 }
 
+// spec(SECRET): On Linux, v0.1.0 has no secret store, so `ap` reads the value only from the host environment variable.
+#[test]
+fn a_secret_s_value_comes_only_from_its_host_variable() {
+    let scratch = Scratch::new("secret-variable");
+    let lines = "NETWORK +api.example.com\nSECRET API_TOKEN @api.example.com\n\
+                 SECRET NOTE visible\n";
+    scratch.build("secretive", &format!("{RUNNABLE}{lines}"));
+    let both = [("API_TOKEN", "tok-1"), ("NOTE", "note-1")];
+    past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &both));
+    // The store says it has none, and doesn't keep the value.
+    let set = scratch.ap(&["secret", "set", "API_TOKEN"], &[]);
+    assert_eq!(set.status.code(), Some(1), "{set:?}");
+    for (name, other) in [("API_TOKEN", both[1]), ("NOTE", both[0])] {
+        // Without its own variable, nothing else gives a secret its value:
+        // another secret's variable, one in another case, or one that
+        // only names it.
+        for env in [
+            vec![other],
+            vec![other, (&name.to_ascii_lowercase(), "tok-1")],
+            vec![other, (&format!("AP_{name}"), "tok-1")],
+        ] {
+            refused(
+                &scratch.ap(&["run", "secretive", "-p", "hi"], &env),
+                &format!("`{name}`"),
+            );
+        }
+    }
+}
+
 // spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
+// spec(AUTH): **`AUTH key`** uses the harness's API key.
 #[test]
 fn auth_key_and_token_need_their_variable_before_the_vm_starts() {
     let scratch = Scratch::new("auth");

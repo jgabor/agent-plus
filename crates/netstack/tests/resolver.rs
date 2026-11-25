@@ -270,6 +270,8 @@ fn a_name_no_rule_could_allow_gets_no_address() {
 }
 
 // spec(NETWORK): The resolver removes HTTPS and SVCB records, so clients can't use Encrypted Client Hello to hide the server name.
+// spec(NETWORK): It answers only `A` queries, and only for a name that a rule or the default could allow.
+// spec(NETWORK): For such a name, it gives every other record type an empty answer.
 #[test]
 fn every_query_but_a_gets_an_empty_answer() {
     let mut net = Net::new(&["kagi.com"], pool());
@@ -278,9 +280,15 @@ fn every_query_but_a_gets_an_empty_answer() {
         assert_eq!(code, RCODE::NoError, "type {kind}");
         assert!(addresses.is_empty(), "type {kind}: {addresses:?}");
     }
-    // Only an allowed name gets one, though.
+    // Only an allowed name gets one, though, and only it gets an address.
     let (code, _) = read(&net.ask(&query(15, "example.com", AAAA)), 15);
     assert_eq!(code, RCODE::NameError);
+    let (code, addresses) = read(&net.ask(&query(21, "example.com", A)), 21);
+    assert_eq!(code, RCODE::NameError);
+    assert!(addresses.is_empty());
+    let (code, addresses) = read(&net.ask(&query(22, "kagi.com", A)), 22);
+    assert_eq!(code, RCODE::NoError);
+    assert_eq!(addresses.len(), 1);
     // So does a type the parser doesn't know, such as SSHFP or TLSA. The
     // answer is read by hand here, because `simple-dns` can't read it.
     for (id, kind, name, code) in [

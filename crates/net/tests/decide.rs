@@ -299,7 +299,7 @@ fn request_paths_are_normalized_before_matching() {
     // An escape of a reserved character stays one, so it is another path.
     decides(
         rules,
-        request("https://github.com/jgabor/agent-plus%3B"),
+        request("https://github.com/jgabor/agent-plus%3A"),
         DENY,
         "default",
     );
@@ -413,6 +413,41 @@ fn empty_segments_under_a_host_with_url_rules_are_denied() {
     ] {
         decides(rules, request(url), ALLOW, "+github.com");
     }
+}
+
+// spec(NETWORK): So are paths there with a backslash or a `;`, even escaped, because some servers read a backslash as a slash, or drop a `;` and what follows it in its segment.
+#[test]
+fn backslashes_and_semicolons_under_a_host_with_url_rules_are_denied() {
+    let rules = "NETWORK +github.com\nNETWORK -https://github.com/jgabor/secret\n";
+    for url in [
+        "https://github.com/jgabor\\secret",
+        "https://github.com/jgabor%5Csecret",
+        "https://github.com/jgabor%5csecret",
+        "https://github.com/\\jgabor/secret",
+        "https://github.com/jgabor/secret;x",
+        "https://github.com/jgabor;x/secret",
+        "https://github.com/jgabor/secret%3Bx",
+        "https://github.com/jgabor/secret%3bx",
+        "https://github.com/x;",
+        "https://github.com/x/..;/jgabor/secret",
+    ] {
+        decides(rules, request(url), DENY, "path");
+    }
+    // A query isn't part of the path.
+    decides(
+        rules,
+        request("https://github.com/jgabor?a=b;c%5Cd\\e"),
+        ALLOW,
+        "+github.com",
+    );
+    // Without URL rules for the host, the path doesn't matter.
+    let rules = "NETWORK -\nNETWORK +github.com\nNETWORK +https://codeberg.org/x\n";
+    decides(
+        rules,
+        request("https://github.com/a\\b;c%5C%3B"),
+        ALLOW,
+        "+github.com",
+    );
 }
 
 // spec(NETWORK): **Evaluation.** The most specific matching rule wins, so line order never matters.

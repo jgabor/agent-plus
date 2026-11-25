@@ -323,6 +323,10 @@ const TARGETS: [Target; 11] = [
             "%2F",
             "%2e",
             "%7E",
+            "%3B",
+            "%5C",
+            ";",
+            "\\",
             ".",
             "..",
             ":22",
@@ -2034,7 +2038,7 @@ mod tests {
             "/a/",
             "/jgabor/agent-plus?tab=readme",
             "/%6agabor/agent%2Dplus#top",
-            "/%41%3b%e2%82%ac",
+            "/%41%3a%e2%82%ac",
         ] {
             let path = target.split(['?', '#']).next().unwrap_or_default();
             let ours = net::request_path(target).expect(target);

@@ -1062,3 +1062,15 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
         "{read:?}"
     );
 }
+
+#[test]
+#[should_panic(expected = "SETTINGS_MAX_FRAME_SIZE")]
+fn a_frame_too_long_to_write_is_refused_not_cut() {
+    let frame = Frame::Data {
+        stream: 1,
+        data: vec![0; 1 << 24],
+        padding: None,
+        end_stream: false,
+    };
+    Writer::new().write(&frame, &mut Vec::new());
+}

@@ -47,8 +47,9 @@ const STREAM_MASK: u32 = 0x7fff_ffff;
 /// no reserved bit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
-    /// Section 6.1. `padding` is how many bytes of padding it had, which
-    /// flow control counts.
+    /// Section 6.1. `padding` is how many bytes of padding it had. Flow
+    /// control counts the whole payload: the data, the padding, and the
+    /// Pad Length byte if it has one.
     Data {
         stream: u32,
         data: Vec<u8>,
@@ -108,7 +109,9 @@ pub enum Error {
     /// SETTINGS without ACK, by section 3.4.
     Preface,
     /// A frame past SETTINGS_MAX_FRAME_SIZE, of a length its type doesn't
-    /// allow, or too short for its fields, by section 4.2.
+    /// allow, or too short for its fields, by section 4.2. Section 6.3
+    /// makes a PRIORITY frame of the wrong length a stream error, and the
+    /// reader makes it a connection error, as section 5.4 allows.
     FrameSize,
     /// Padding as long as what is left of the payload, or longer, by
     /// sections 6.1, 6.2, and 6.6.
@@ -198,7 +201,8 @@ impl Reader {
         }
     }
 
-    /// Adds bytes from the connection.
+    /// Adds bytes from the connection. The reader keeps them until
+    /// `frame` reads them, so the caller reads before it adds more.
     pub fn push(&mut self, bytes: &[u8]) {
         if self.failed.is_some() {
             return;
@@ -501,7 +505,9 @@ fn priority(fields: &[u8; 5]) -> Priority {
 
 /// Writes the frames of one direction of one connection, within the
 /// default SETTINGS_MAX_FRAME_SIZE. It splits a header block across
-/// CONTINUATION frames where it needs to, and pads nothing but DATA.
+/// CONTINUATION frames where it needs to, and pads nothing but DATA. It
+/// panics on any other frame that doesn't fit, so the caller splits DATA,
+/// and keeps SETTINGS and GOAWAY within one frame.
 pub struct Writer {
     encoder: Encoder,
 }
@@ -519,8 +525,7 @@ impl Writer {
         }
     }
 
-    /// Appends `frame` to `out`. A DATA frame's data and padding must fit
-    /// in one frame, so the caller splits data.
+    /// Appends `frame` to `out`.
     pub fn write(&mut self, frame: &Frame, out: &mut Vec<u8>) {
         let flag = |set: bool, flag: u8| if set { flag } else { 0 };
         match frame {
@@ -634,8 +639,13 @@ impl Writer {
     }
 }
 
-/// Appends a frame header, by section 4.1.
+/// Appends a frame header, by section 4.1. A longer frame is a bug in the
+/// caller, and would desync the connection, so it panics.
 fn head(out: &mut Vec<u8>, length: usize, kind: u8, flags: u8, stream: u32) {
+    assert!(
+        length <= MAX_FRAME_SIZE,
+        "a frame of {length} bytes is past SETTINGS_MAX_FRAME_SIZE"
+    );
     out.extend(&(length as u32).to_be_bytes()[1..]);
     out.extend([kind, flags]);
     out.extend(stream.to_be_bytes());

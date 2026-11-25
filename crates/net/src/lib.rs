@@ -199,6 +199,33 @@ pub fn url_rules(network: &Network, name: &str) -> bool {
     })
 }
 
+/// Whether a `+` host rule of `network` allows `name` with a narrower `-`
+/// rule beneath it, so that the proxy decrypts TLS to `name` and checks
+/// each request's host, because a client can reuse one connection for
+/// several names. A narrower rule is a host or URL rule for the `+` rule's
+/// name, or a name under it, on any port. The default is never the `+`
+/// rule. A name is in any case, with or without a final dot.
+pub fn narrowed(network: &Network, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix('.').unwrap_or(&name);
+    // Rules hold their names in lowercase.
+    let under = |host: &str, broad: &str| {
+        host == broad || (host.strip_suffix(broad)).is_some_and(|start| start.ends_with('.'))
+    };
+    (network.rules.iter()).any(|broad| match &broad.destination {
+        Destination::Host { name: broad_name, .. } if broad.sign == Sign::Allow => {
+            under(name, broad_name)
+                && (network.rules.iter()).any(|narrow| match &narrow.destination {
+                    Destination::Host { name: host, .. } | Destination::Url { host, .. } => {
+                        narrow.sign == Sign::Deny && under(host, broad_name)
+                    }
+                    Destination::Address { .. } => false,
+                })
+        }
+        _ => false,
+    })
+}
+
 /// Whether the proxy may open `connection`, to a host with URL rules, as
 /// [`proxied`] decides it: because it allows the connection before any
 /// request, or would allow a request for the path of one of its `+` URL

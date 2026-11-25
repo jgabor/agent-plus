@@ -731,7 +731,7 @@ fn a_merge_records_pushes_verifies_and_squashes() {
     let output = repo.merge();
     assert_merged(&repo, &output);
     // It took the slot at once.
-    assert!(!stderr(&output).contains("merge slot"), "{}", stderr(&output));
+    assert!(!stderr(&output).contains(SLOT_WAIT), "{}", stderr(&output));
 
     let head = repo.head();
     let gated = repo.origin(&["rev-parse", &format!("{head}~1")]);
@@ -1611,6 +1611,8 @@ fn a_merge_waits_for_the_merge_slot() {
             Err(_) => panic!("it never said that it waits: {heard:?}"),
         }
     }
+    // It says so before it waits, so give it time to go on if it didn't wait.
+    thread::sleep(Duration::from_millis(500));
     let calls = repo.calls();
     assert!(!calls.contains("refs/remotes/origin/"), "{calls}");
     assert!(!calls.contains("git worktree add"), "{calls}");

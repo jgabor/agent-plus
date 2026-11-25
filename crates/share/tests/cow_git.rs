@@ -290,3 +290,15 @@ fn git_that_keeps_changing_fails_the_capture() {
         fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
+
+#[test]
+fn a_tree_with_directories_you_cant_change_is_removed() {
+    let tree = Tree::new("cow-git-removed");
+    repository(&tree.root);
+    let base = tree.base.clone();
+    for (path, mode) in [(".git/info", 0o555), (".git/objects", 0o111), ("dir", 0o0)] {
+        fs::set_permissions(tree.root.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+    drop(tree);
+    assert!(!base.exists());
+}

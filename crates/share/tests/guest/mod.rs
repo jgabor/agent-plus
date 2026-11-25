@@ -7,7 +7,7 @@ use share::{Mode, Root, Server};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{PoisonError, RwLock, RwLockReadGuard, mpsc};
@@ -63,7 +63,7 @@ impl Tree {
     pub fn new(label: &str) -> Self {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"))
             .join(format!("share-{label}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
+        remove(&base);
         let root = base.join("root");
         let secret = base.join("outside/secret");
         fs::create_dir_all(root.join("dir")).unwrap();
@@ -81,7 +81,27 @@ impl Tree {
 
 impl Drop for Tree {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.base);
+        remove(&self.base);
+    }
+}
+
+/// Removes `path`, after giving you back each directory under it that a
+/// test, even one that failed, left you unable to list or change.
+fn remove(path: &Path) {
+    writable(path);
+    let _ = fs::remove_dir_all(path);
+}
+
+fn writable(path: &Path) {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
+    if !metadata.is_dir() {
+        return;
+    }
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    for entry in fs::read_dir(path).into_iter().flatten().flatten() {
+        writable(&entry.path());
     }
 }
 

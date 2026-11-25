@@ -2026,10 +2026,11 @@ allow one.
     `-gist.github.com`, on every TLS connection that `+github.com` allows,
     because a client can reuse one connection for several names. The
     default is never such a rule, so under `NETWORK +`, a `-` rule on its
-    own never causes decryption. The narrower rule is a `-` rule for a name
-    under the `+` rule's, a URL rule for the `+` rule's own name, or a rule
-    for that name on one port when the `+` rule names no port. Only a
-    connection on a port that the `+` rule covers is decrypted for it.
+    own never causes decryption. The narrower rule is a `-` rule that covers
+    the connection's port: one for a name under the `+` rule's, a URL rule
+    for the `+` rule's own name, or a rule for that name on one port when the
+    `+` rule names no port. Only a connection on a port that the `+` rule
+    covers is decrypted for it.
   - on a hidden secret's bound hosts and on the hosts of `AUTH key`, to
     inject the value
 

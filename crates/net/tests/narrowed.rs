@@ -65,7 +65,7 @@ fn the_default_is_never_a_broader_rule() {
     assert!(narrowed(explicit, "github.com"));
 }
 
-// spec(NETWORK): The narrower rule is a `-` rule for a name under the `+` rule's, a URL rule for the `+` rule's own name, or a rule for that name on one port when the `+` rule names no port.
+// spec(NETWORK): The narrower rule is a `-` rule that covers the connection's port: one for a name under the `+` rule's, a URL rule for the `+` rule's own name, or a rule for that name on one port when the `+` rule names no port.
 // spec(NETWORK): Only a connection on a port that the `+` rule covers is decrypted for it.
 #[test]
 fn a_narrower_rule_is_under_the_plus_rule_by_name_path_or_port() {
@@ -73,14 +73,21 @@ fn a_narrower_rule_is_under_the_plus_rule_by_name_path_or_port() {
         "-deep.api.github.com",
         "-https://api.github.com/",
         "-https://github.com/x",
-        // A `-` rule for a narrower name counts on any port.
-        "-gist.github.com:22",
-        "-github.com:80",
+        // A `-` rule on the connection's port counts, for a narrower name,
+        // or for the same name when the `+` rule names no port.
+        "-gist.github.com:443",
+        "-github.com:443\nNETWORK +api.github.com",
+        "-https://github.com:443/x",
     ] {
         let lines = format!("NETWORK -\nNETWORK +github.com\nNETWORK {narrower}\n");
         assert!(narrowed(&lines, "api.github.com"), "{narrower}");
     }
     for lines in [
+        // A `-` rule on another port is out of a reused connection's reach.
+        "NETWORK -\nNETWORK +github.com\nNETWORK -gist.github.com:22\n",
+        "NETWORK -\nNETWORK +github.com\nNETWORK -github.com:80\n",
+        "NETWORK -\nNETWORK +github.com\nNETWORK -https://github.com:8443/x\n",
+        "NETWORK -\nNETWORK +github.com\nNETWORK -http://github.com/x\n",
         // A `-` rule for the same name on every port is broader by port.
         "NETWORK -\nNETWORK +github.com:443\nNETWORK -github.com\n",
         // Rules for two ports of one name are disjoint.

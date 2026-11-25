@@ -203,9 +203,9 @@ pub fn url_rules(network: &Network, name: &str) -> bool {
 /// `port` with a narrower `-` rule beneath it, so that the proxy decrypts
 /// TLS to `name` and checks each request's host, because a client can reuse
 /// one connection for several names. A name rule must allow the connection.
-/// The narrower rule is a `-` host or URL rule for a name under the `+`
-/// rule's, a URL rule for its own name, or a host rule for its own name on
-/// one port when the `+` rule names no port. The default is never the `+`
+/// The narrower rule is a `-` rule on the connection's port: a host or URL
+/// rule for a name under the `+` rule's, a URL rule for its own name, or a
+/// host rule for its own name on one port when the `+` rule names no port. The default is never the `+`
 /// rule, and a harness host, one of `harness`, is never decrypted for a
 /// rule. A name is in any case, with or without a final dot.
 pub fn narrowed(network: &Network, harness: &[&str], name: &str, port: u16) -> bool {
@@ -222,11 +222,25 @@ pub fn narrowed(network: &Network, harness: &[&str], name: &str, port: u16) -> b
     let under = |host: &str, broad: &str| {
         (host.strip_suffix(broad)).is_some_and(|start| start.ends_with('.'))
     };
+    // A narrower rule matters only on the connection's own port, since a
+    // reused connection reaches no other.
     let narrower = |broad: &str, every_port: bool, narrow: &NetworkRule| match &narrow.destination {
         _ if narrow.sign == Sign::Allow => false,
-        Destination::Url { host, .. } => host == broad || under(host, broad),
-        Destination::Host { name, port } => {
-            under(name, broad) || name == broad && port.is_some() && every_port
+        Destination::Url {
+            scheme,
+            host,
+            port: only,
+            ..
+        } => {
+            let default = match scheme {
+                Scheme::Https => 443,
+                Scheme::Http => 80,
+            };
+            only.unwrap_or(default) == port && (host == broad || under(host, broad))
+        }
+        Destination::Host { name, port: only } => {
+            only.is_none_or(|only| only == port)
+                && (under(name, broad) || name == broad && only.is_some() && every_port)
         }
         Destination::Address { .. } => false,
     };

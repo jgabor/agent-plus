@@ -605,9 +605,9 @@ diagnostics go to stderr.
 | State | Condition | Next |
 |---|---|---|
 | Unavailable | No `auto:*` label | Available, when the owner labels it, or the planner adopts it under a labeled parent |
-| Blocked | An issue in `Blocked by` is open | Available, when it closes |
+| Blocked | An issue in `Blocked by` is open | Available, on its branch if it has one, when it closes |
 | Available | Claimable under AGENTS.md | Claimed |
-| Claimed | `in-progress`, with a live lease | Parked, Abandoned, Closed, or Available on its branch, when a Mac hands it over |
+| Claimed | `in-progress`, with a live lease | Parked, Blocked when it waits for another issue, Abandoned, Closed, or Available on its branch, when a Mac hands it over |
 | Abandoned | `in-progress`, with an expired lease and no commits since | Claimed |
 | Parked | `land-needed` or `answer-needed` | Available on its branch, when the owner removes the label |
 | Closed | Its PR merged, or triage closed it as fixed or covered | |
@@ -668,6 +668,14 @@ keeps a parent to at most 3 open sub-issues without `land-needed`, whether they
 are blocked or not, because a sub-issue filed far ahead is written before the
 work it builds on exists. A prepared PR waiting for the owner doesn't count.
 
+Every run starts by adopting the issues that hold up labeled work: each open
+issue with no parent and no label, filed by the owner's account, that an open
+issue with an `auto:*` label names in its `Blocked by` line. The planner
+adopts it under #840, with the same checks and #840's label, while #840 is
+open and labeled. It needs no gap, and it is apart from the milestone's limits,
+because the work it blocks is already planned. It still takes a worker slot.
+An issue that someone else filed waits for the owner.
+
 The planner works on one milestone at a time: the first on the roadmap with a
 step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open
 issue that the owner has labeled, and whose body names that milestone in a
@@ -724,6 +732,12 @@ a parent is the owner's.
    blocked.
 8. Open the PR, and wait for checks and reviews.
 9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
+
+A worker that another issue blocks, and not a question for the owner, files
+that issue if it doesn't exist, and adds `Blocked by` to its own. It parks
+its status and removes `in-progress`, with no `answer-needed`. The issue is
+Blocked, and the first dispatch after the other issue closes continues it on
+its branch. The planner gives the other issue a label by adopting it.
 
 A worker on a Mac does steps 1 to 4 and 7, with the checks that run there,
 because the gate needs Linux, KVM, and systemd. It then opens the PR with its

@@ -122,6 +122,14 @@ Your checkout's `xtask` may be older than this brief. If `status`, or a command
 given `--thread`, exits 2 with a usage message, rebase your branch onto
 `origin/main`, push it with `--force-with-lease`, and run the command again.
 
+When what blocks you is another issue, and not a question for the owner, park
+as AGENTS.md says, and add no `answer-needed`. File that issue if it doesn't
+exist, with no parent and no label, and add `Blocked by #<n>.` to the body of
+yours. Name an issue, never a PR. Set your status to parked, then run `gh
+issue edit <issue> --remove-label in-progress`, and run it again until it
+succeeds. `cargo xtask next` offers your issue again on its branch once that
+issue closes, and the planner adopts the one you filed.
+
 When you stop for good and this thread has no open PR, settle it, before you
 remove any worktree. Load `mcp__t3-code__t3_thread_organize` with ToolSearch,
 and call it with `action` set to `settle` and no `threadId`. This covers a lost

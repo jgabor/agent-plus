@@ -107,13 +107,26 @@ pub const GIT_TOKENS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 pub const GIT_CONFIG: &str = "/etc/gitconfig";
 
 /// The [`GIT_CONFIG`] that has git sign in to `https://github.com` with the
-/// variable `token`, which holds a hidden secret's placeholder or a visible
-/// one's value. The helper reads it when git asks, so no value is written.
+/// secret `token`. A hidden one's `placeholder` is written as it is, since it
+/// isn't secret and a harness can leave a variable named like a secret out
+/// of the commands it runs. A visible one's value is read from its variable
+/// when git asks, so no value is written, and an empty one gives nothing.
 /// Any username works with a token, and git reads only the answer to `get`.
-pub fn git_config(token: &str) -> Vec<u8> {
+/// The placeholder is hex, so it needs no escape.
+pub fn git_config(token: &str, placeholder: Option<&[u8]>) -> Vec<u8> {
+    let (check, password) = match placeholder {
+        Some(placeholder) => (
+            String::new(),
+            String::from_utf8_lossy(placeholder).into_owned(),
+        ),
+        None => (
+            format!("test -n \\\"${token}\\\" || return; "),
+            format!("\\\"${token}\\\""),
+        ),
+    };
     format!(
         "[credential \"https://github.com\"]\n\
-         \thelper = \"!f() {{ echo username=x-access-token; printf 'password=%s\\\\n' \\\"${token}\\\"; }}; f\"\n"
+         \thelper = \"!f() {{ {check}echo username=x-access-token; printf 'password=%s\\\\n' {password}; }}; f\"\n"
     )
     .into_bytes()
 }

@@ -2193,6 +2193,12 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
             true,
         ),
         (
+            "api-only",
+            "SECRET GITHUB_TOKEN\nSECRET GH_TOKEN @api.github.com\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        (
             "visible",
             "SECRET GITHUB_TOKEN visible\n",
             "GITHUB_TOKEN",
@@ -2216,6 +2222,19 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
             ),
             "{agent}",
         );
+        // A command without the variable still gets a hidden token's
+        // placeholder, and nothing for a visible one.
+        let without = format!(
+            "printf 'protocol=https\\nhost=github.com\\n\\n' | \\
+             env -u {variable} GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null; echo \"status $?\""
+        );
+        let unset = scratch.exec(&name, &["sh", "-c", &without], b"");
+        let expected = if hidden {
+            filled.as_str()
+        } else {
+            "status 128\n"
+        };
+        assert_eq!(String::from_utf8_lossy(&unset.stdout), expected, "{agent}");
         // `ap` answers for no other host, not even a subdomain.
         for host in ["example.com", "gist.github.com"] {
             let (filled, _) = credentials(&scratch, &name, variable, host);

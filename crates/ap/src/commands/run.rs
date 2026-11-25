@@ -994,7 +994,13 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         })
     };
     if let Some(token) = ap::adapter::GIT_TOKENS.into_iter().find(bound) {
-        written.push((ap::adapter::GIT_CONFIG, ap::adapter::git_config(token)));
+        let placeholder = (hidden.iter())
+            .find(|secret| secret.name == token)
+            .map(|secret| secret.placeholder.as_slice());
+        written.push((
+            ap::adapter::GIT_CONFIG,
+            ap::adapter::git_config(token, placeholder),
+        ));
     }
     shares.extend(typed);
     // SPEC.md's MODE section: every share joins the harness's workspace. The

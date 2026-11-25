@@ -38,6 +38,11 @@ const ATTEMPT_VARIABLE: &str = "AP_FLOOR_ATTEMPT";
 const CONFINE_VARIABLE: &str = "AP_FLOOR_CONFINE";
 const TARGET_VARIABLE: &str = "AP_FLOOR_TARGET";
 const LINK_VARIABLE: &str = "AP_FLOOR_LINK";
+/// The network process runs on a test's thread here, and `ap` runs it on its
+/// main thread. One malloc arena keeps the test's like `ap`'s, which glibc
+/// grows with `brk`, where a thread's own arena grows with `mprotect`, which
+/// the filter refuses.
+const ARENAS: &str = "MALLOC_ARENA_MAX";
 const TARGET_CONTENTS: &str = "a host file the network process doesn't need";
 /// How long the check waits for a confined process to say something.
 const QUIET: Duration = Duration::from_secs(3);
@@ -486,6 +491,10 @@ fn confined_network_process() {
     (&link).write_all(attempting.as_bytes()).unwrap();
     let outcome = attempt.make(&target);
     (&link).write_all(outcome.as_bytes()).unwrap();
+    // Four megabytes held in small blocks grow the heap, as serving a busy
+    // guest does.
+    let pages: Vec<Vec<u8>> = (0..1024).map(|_| vec![1; 4096]).collect();
+    std::hint::black_box(&pages);
     let mut resolver = ap::network::resolver(&["--".into(), "-".into()]).unwrap();
     ap::network::serve(&link, &mut stack, &mut resolver).unwrap();
 }
@@ -506,6 +515,7 @@ fn attempt(directory: &Path, attempt: Attempt, confine: bool) -> (ExitStatus, Ve
         .env(CONFINE_VARIABLE, if confine { "on" } else { "off" })
         .env(TARGET_VARIABLE, &target)
         .env(LINK_VARIABLE, fd.to_string())
+        .env(ARENAS, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: the closure only clears close-on-exec on a descriptor this

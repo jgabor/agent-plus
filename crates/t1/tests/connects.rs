@@ -1236,6 +1236,11 @@ const ATTEMPT_VARIABLE: &str = "AP_CONNECTS_ATTEMPT";
 const TARGET_VARIABLE: &str = "AP_CONNECTS_TARGET";
 const LINK_VARIABLE: &str = "AP_CONNECTS_LINK";
 const PEER_VARIABLE: &str = "AP_CONNECTS_PEER";
+/// The network process runs on a test's thread here, and `ap` runs it on its
+/// main thread. One malloc arena keeps the test's like `ap`'s, which glibc
+/// grows with `brk`, where a thread's own arena grows with `mprotect`, which
+/// the filter refuses.
+const ARENAS: &str = "MALLOC_ARENA_MAX";
 /// How long the check waits for a confined process to say something.
 const QUIET: Duration = Duration::from_secs(3);
 const PR_SET_DUMPABLE: c_int = 4;
@@ -1372,6 +1377,10 @@ fn connecting_network_process() {
     (&link).write_all(attempting.as_bytes()).unwrap();
     let outcome = attempt.make(&target, peer);
     (&link).write_all(outcome.as_bytes()).unwrap();
+    // Four megabytes held in small blocks grow the heap, as serving a busy
+    // guest does.
+    let pages: Vec<Vec<u8>> = (0..1024).map(|_| vec![1; 4096]).collect();
+    std::hint::black_box(&pages);
     let mut resolver = ap::network::resolver(&["--".into(), "+".into()]).unwrap();
     ap::network::serve(&link, &mut stack, &mut resolver).unwrap();
 }
@@ -1392,6 +1401,7 @@ fn attempt(directory: &Path, attempt: Attempt, peer: SocketAddr) -> (ExitStatus,
         .env(TARGET_VARIABLE, &target)
         .env(PEER_VARIABLE, peer.to_string())
         .env(LINK_VARIABLE, fd.to_string())
+        .env(ARENAS, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: the closure only clears close-on-exec on a descriptor this

@@ -2267,3 +2267,91 @@ fn a_reserved_name_is_reported_with_other_errors() {
     assert!(lines[0].starts_with("Agentfile:3: "), "{message}");
     assert!(lines[1].starts_with("Agentfile:4: "), "{message}");
 }
+
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+#[test]
+fn a_rule_that_would_decrypt_a_harness_host_fails_the_build() {
+    let scratch = Scratch::new("decrypt-harness");
+    for (agent, rules, rule, named) in [
+        (
+            "claude",
+            "NETWORK +https://api.anthropic.com/v1/messages",
+            "+https://api.anthropic.com/v1/messages",
+            "api.anthropic.com",
+        ),
+        (
+            "claude",
+            "NETWORK +anthropic.com\nNETWORK -console.anthropic.com",
+            "-console.anthropic.com",
+            "api.anthropic.com",
+        ),
+        (
+            "codex:0.169.0",
+            "NETWORK -https://chatgpt.com/backend-api",
+            "-https://chatgpt.com/backend-api",
+            "chatgpt.com",
+        ),
+        (
+            "codex:0.169.0",
+            "NETWORK +openai.com\nNETWORK -https://platform.openai.com/docs",
+            "-https://platform.openai.com/docs",
+            "api.openai.com",
+        ),
+    ] {
+        let dir = scratch.project(
+            &format!("{}-{named}", agent.replace(':', "-")),
+            &format!("AGENT {agent}\nOS minimal\nNETWORK +example.com\n{rules}\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {rules}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        let at = 3 + rules.lines().count();
+        assert!(
+            message.starts_with(&format!("Agentfile:{at}: ")),
+            "{message}"
+        );
+        assert!(message.contains(&format!("`{rule}`")), "{message}");
+        assert!(message.contains(&format!("`{named}`")), "{message}");
+        assert!(message.contains("subscription sign-in"), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+#[test]
+fn the_same_rules_on_another_harnesss_hosts_build() {
+    let scratch = Scratch::new("decrypt-other");
+    for (agent, rules) in [
+        (
+            "codex:0.169.0",
+            "NETWORK +https://api.anthropic.com/v1/messages",
+        ),
+        (
+            "codex:0.169.0",
+            "NETWORK +anthropic.com\nNETWORK -console.anthropic.com",
+        ),
+        ("claude", "NETWORK -https://chatgpt.com/backend-api"),
+        (
+            "claude",
+            "NETWORK +openai.com\nNETWORK -https://platform.openai.com/docs",
+        ),
+        // The harness's own hosts are denied, so nothing decrypts them.
+        (
+            "claude",
+            "NETWORK +anthropic.com\nNETWORK -api.anthropic.com\nNETWORK -console.anthropic.com",
+        ),
+    ] {
+        let dir = scratch.project(
+            &format!("{}-{}", agent.replace(':', "-"), rules.len()),
+            &format!("AGENT {agent}\nOS minimal\n{rules}\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes", "--replace"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{agent} {rules}: {}",
+            stderr(&output)
+        );
+    }
+}

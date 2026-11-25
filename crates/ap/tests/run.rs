@@ -317,6 +317,52 @@ fn a_run_with_network_asks_nothing_and_checks_the_merged_rules() {
     ));
 }
 
+// spec(NETWORK): The checks that `ap build` runs on `NETWORK` and `SECRET` rules run again on the merged rules, and a failure fails the run.
+// spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+#[test]
+fn a_run_refuses_typed_rules_that_would_decrypt_a_harness_host() {
+    let scratch = Scratch::new("run-decrypt");
+    scratch.build("closed", RUNNABLE);
+    refused(
+        &scratch.ap(
+            &[
+                "run",
+                "closed",
+                "--network=+https://api.anthropic.com/v1/messages",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "`+https://api.anthropic.com/v1/messages` is a URL rule for `api.anthropic.com`",
+    );
+    refused(
+        &scratch.ap(
+            &[
+                "run",
+                "closed",
+                "--network=+anthropic.com",
+                "--network=-console.anthropic.com",
+                "-p",
+                "hi",
+            ],
+            &[],
+        ),
+        "`-console.anthropic.com` under `+anthropic.com`",
+    );
+    past_checks(&scratch.ap(
+        &[
+            "run",
+            "closed",
+            "--network=+openai.com",
+            "--network=-platform.openai.com",
+            "-p",
+            "hi",
+        ],
+        &[],
+    ));
+}
+
 #[test]
 fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts() {
     let scratch = Scratch::new("instructions");

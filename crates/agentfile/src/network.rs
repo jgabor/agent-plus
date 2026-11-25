@@ -316,6 +316,118 @@ impl Network {
     }
 }
 
+/// Whether the name `host` is a subdomain of `name`.
+fn under(host: &str, name: &str) -> bool {
+    host.strip_suffix(name)
+        .is_some_and(|start| start.ends_with('.'))
+}
+
+/// The errors from `NETWORK` rules that would make the proxy decrypt a
+/// connection to one of `hosts`, the harness's own hosts, by the decryption
+/// under NETWORK in SPEC.md: a URL rule for one, and a `-` rule narrower than
+/// a `+` host rule that one is under, when a name rule allows a connection to
+/// it on a port that the `+` rule covers. It reads no IP rule. Each error is
+/// on the line of the rule that turns decryption on. It finds none while
+/// `NETWORK` has errors of its own.
+pub(crate) fn decrypting(
+    instructions: &[Instruction],
+    harness: &str,
+    hosts: &[&str],
+) -> Vec<Error> {
+    let Ok(network) = Network::read(instructions) else {
+        return Vec::new();
+    };
+    // The lines that wrote each rule, in the order `Network::read` keeps.
+    let written: Vec<&Instruction> = (instructions.iter())
+        .filter(|instruction| {
+            instruction.name == "NETWORK" && matches!(line(instruction, rule), Ok(Line::Rule(_)))
+        })
+        .collect();
+    let shown = |at: usize| written[at].arguments[0].as_str();
+    let (ports, _) = network.cases();
+    // For each harness host that no URL rule names, each port that a name
+    // rule allows it on, with the `+` host rules it is under on that port,
+    // in rule order. It doesn't depend on the `-` rule, so it is found once.
+    let covered: Vec<(String, Vec<Vec<usize>>)> = (hosts.iter())
+        .map(|own| own.to_ascii_lowercase())
+        .filter(|own| !url_host(&network, own))
+        .map(|own| {
+            let broad = (ports.iter().copied())
+                .filter(|&port| {
+                    network.name_decision(&own, Scheme::Https, port, "/") == Some(Sign::Allow)
+                })
+                .map(|port| {
+                    (network.rules.iter().enumerate())
+                        .filter(|(_, broad)| {
+                            broad.sign == Sign::Allow
+                                && matches!(&broad.destination, Destination::Host { name: broader, port: at }
+                                    if (own == *broader || under(&own, broader))
+                                        && at.is_none_or(|at| at == port))
+                        })
+                        .map(|(at, _)| at)
+                        .collect()
+                })
+                .collect();
+            (own, broad)
+        })
+        .collect();
+    let mut errors = Vec::new();
+    for (at, narrow) in network.rules.iter().enumerate() {
+        let own = |name: &str| (hosts.iter()).find(|own| own.eq_ignore_ascii_case(name));
+        let message = match &narrow.destination {
+            Destination::Url { host, .. } if let Some(own) = own(host) => format!(
+                "`{}` is a URL rule for `{own}`, one of {harness}'s own hosts, so the proxy would decrypt its connections, which can carry your subscription sign-in",
+                shown(at)
+            ),
+            Destination::Host { name, .. } | Destination::Url { host: name, .. }
+                if narrow.sign == Sign::Deny =>
+            {
+                // Whether it is a URL rule, and the port a host rule names.
+                let (url, only) = match narrow.destination {
+                    Destination::Host { port, .. } => (false, port),
+                    _ => (true, None),
+                };
+                let narrower = |broad: &NetworkRule| match &broad.destination {
+                    Destination::Host {
+                        name: broader,
+                        port,
+                    } if broad.sign == Sign::Allow => {
+                        under(name, broader)
+                            || name == broader && (url || only.is_some() && port.is_none())
+                    }
+                    _ => false,
+                };
+                let found = covered.iter().find_map(|(own, by_port)| {
+                    (by_port.iter().flatten())
+                        .find(|&&broad| narrower(&network.rules[broad]))
+                        .map(|&broad| (own, broad))
+                });
+                let Some((own, broad)) = found else {
+                    continue;
+                };
+                format!(
+                    "`{}` under `{}` would make the proxy decrypt connections to `{own}`, one of {harness}'s own hosts, which can carry your subscription sign-in",
+                    shown(at),
+                    shown(broad)
+                )
+            }
+            _ => continue,
+        };
+        errors.push(Error {
+            line: written[at].line,
+            message,
+        });
+    }
+    errors
+}
+
+/// Whether `network` has a URL rule for the name `host`.
+fn url_host(network: &Network, host: &str) -> bool {
+    (network.rules.iter()).any(
+        |rule| matches!(&rule.destination, Destination::Url { host: name, .. } if name == host),
+    )
+}
+
 /// The loopback and unspecified blocks, which the proxy refuses whatever
 /// the IP rules say, including their IPv4-mapped forms.
 const REFUSED: [(&str, u8); 6] = [

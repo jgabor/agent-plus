@@ -770,7 +770,7 @@ fn git_ignored_files_are_counted_and_not_applied() {
 /// hold a git-ignored file, at any depth, are skipped, and each directory
 /// stays with its git-ignored files, as if the agent had deleted it. A file
 /// in place of a directory with no ignored file in it lands.
-// spec(SHARE): Where your directory holds a git-ignored file, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why.
+// spec(SHARE): Where your directory holds a git-ignored file, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why, unless it changed on your side.
 // spec(SHARE): The directory stays, with its git-ignored files, as if the agent had deleted it.
 #[test]
 fn a_file_in_place_of_your_directory_with_an_ignored_file_is_skipped() {
@@ -792,19 +792,49 @@ fn a_file_in_place_of_your_directory_with_an_ignored_file_is_skipped() {
     link(&pending, "cache", ".gitignore");
     change(share, &pending, "plain", 0o644, b"plain\n");
 
+    let diff = scratch.ap(&["diff", &run]);
     let output = scratch.ap(&["apply", &run]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let why = "it would replace a directory that holds a git-ignored file";
+    let skipped = format!("skipped cache: {why}\nskipped logs: {why}\n");
+    assert!(stdout(&diff).starts_with(&skipped), "{}", stdout(&diff));
     assert_eq!(
         stdout(&output),
-        format!("skipped cache: {why}\nskipped logs: {why}\nskipped 2 git-ignored files\n")
+        format!("{skipped}skipped 2 git-ignored files\n")
     );
     assert_eq!(scratch.names("logs"), ["old.log"]);
     assert_eq!(scratch.names("cache"), ["deep"]);
     assert_eq!(scratch.read("cache/deep/run.log"), "run\n");
     assert_eq!(scratch.read("plain"), "plain\n");
     assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
+/// A git-ignored file you put in your directory after the agent replaced
+/// it is a change on your side, so the agent's file stays pending.
+// spec(SHARE): Where your directory holds a git-ignored file, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why, unless it changed on your side.
+#[test]
+fn an_ignored_file_you_add_where_the_agent_wrote_a_file_is_a_change_on_your_side() {
+    let scratch = Scratch::new("ignored-added");
+    let share = &scratch.share;
+    fs::write(share.join(".gitignore"), "*.log\n").unwrap();
+    fs::create_dir(share.join("logs")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    change(share, &pending, "logs", 0o644, b"a file\n");
+    fs::write(share.join("logs/today.log"), "today\n").unwrap();
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped logs: it changed on your side after the agent first changed it\n",
+            "skipped 1 git-ignored file\n",
+        )
+    );
+    assert_eq!(scratch.names("logs"), ["today.log"]);
+    assert!(scratch.runs().has_pending(&run).unwrap());
 }
 
 // spec(SHARE): `ap apply` and `ap discard` fail while the run is active.

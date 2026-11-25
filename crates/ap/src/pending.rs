@@ -1353,11 +1353,6 @@ fn verdict(
             return skipped("it is in a directory that would replace a git-ignored file");
         }
     }
-    // Your directory keeps its git-ignored files, as one the agent deleted
-    // does, so nothing the agent wrote can take its place.
-    if branch.is_none() && written && holds_ignored(host, ignore, path)? {
-        return skipped("it would replace a directory that holds a git-ignored file");
-    }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.
     if branch.is_none() && changed_on_your_side(records, host, path)? {
@@ -1368,6 +1363,11 @@ fn verdict(
             why: "it changed on your side after the agent first changed it".to_owned(),
             conflict: true,
         });
+    }
+    // Your directory keeps its git-ignored files, as one the agent deleted
+    // does, so nothing the agent wrote can take its place.
+    if branch.is_none() && written && holds_ignored(host, ignore, path)? {
+        return skipped("it would replace a directory that holds a git-ignored file");
     }
     Ok(Verdict::Change)
 }

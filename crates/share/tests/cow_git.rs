@@ -4,6 +4,8 @@
 //! from the lock tests in `cow.rs`, which a child holding a copy of their
 //! descriptors for a moment would break.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

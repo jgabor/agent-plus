@@ -5,6 +5,8 @@
 //! your files' modes or times, and a server with an `rw` share holds no
 //! other share, even if its own code were turned against it.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

@@ -3,6 +3,8 @@
 //! the server reports, so the host user's files must appear as the agent's
 //! whatever that user's uid and gid are.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

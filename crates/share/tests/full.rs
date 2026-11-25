@@ -1,6 +1,8 @@
 //! A copy-on-write share on a disk that fills up, alone in its process,
 //! because the limit it sets on file sizes is the whole process's.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

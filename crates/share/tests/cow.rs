@@ -2,6 +2,8 @@
 //! what the agent changes lands in the share's pending directory, and your
 //! files stay as they were.
 
+#![cfg(target_os = "linux")]
+
 mod guest;
 
 use guest::*;

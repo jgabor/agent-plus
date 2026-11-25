@@ -205,6 +205,15 @@ pub(super) struct Cow {
     next_handle: u64,
 }
 
+/// The files a copy opened on the agent's copy, with their locks taken,
+/// for each lock owner, by node and owner, and each reader, by handle, that
+/// it moves there.
+#[derive(Default)]
+struct Moves {
+    locks: Vec<((u64, u64), OwnedFd)>,
+    readers: Vec<(u64, OwnedFd)>,
+}
+
 /// One guest lock owner's POSIX locks on one file.
 struct Locks {
     /// The file that holds them.
@@ -466,9 +475,16 @@ fn copy_contents(from: BorrowedFd, to: BorrowedFd) -> io::Result<()> {
     }
 }
 
+/// What a test runs before a copy opens a file it moves, which can fail it.
+type Moving = Box<dyn FnMut() -> Result<(), i32>>;
+
 thread_local! {
     /// What runs each time a capture on this thread has listed `.git`.
     static LISTED: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// What runs on this thread before a copy opens the agent's copy for
+    /// a reader or a lock owner it moves there.
+    static MOVING: std::cell::RefCell<Option<Moving>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -477,6 +493,14 @@ thread_local! {
 #[doc(hidden)]
 pub fn when_git_is_listed(hook: Option<Box<dyn FnMut()>>) {
     LISTED.with(|listed| *listed.borrow_mut() = hook);
+}
+
+/// Runs `hook` before each file a copy on this thread opens on the agent's
+/// copy, for a reader or a lock owner it moves there, until it is set
+/// again. An error from `hook` fails that open. A test fails a move with it.
+#[doc(hidden)]
+pub fn when_a_copy_moves(hook: Option<Moving>) {
+    MOVING.with(|moving| *moving.borrow_mut() = hook);
 }
 
 /// How many times a capture copies a `.git` that changes while it copies.
@@ -973,16 +997,17 @@ impl Cow {
         let stat = sys::fstat(lower.as_fd()).map_err(errno)?;
         self.base(path, Some(&stat))?;
         let mode = stat.st_mode & PERMISSIONS;
-        let entry = match stat.st_mode & libc::S_IFMT {
+        let (entry, moves) = match stat.st_mode & libc::S_IFMT {
             libc::S_IFDIR => {
                 if view.upper.is_none() {
                     self.mkdir_upper(path)?;
                 }
                 self.times.set(path, &times_of(&stat))?;
-                Entry::Dir {
+                let entry = Entry::Dir {
                     mode,
                     opaque: false,
-                }
+                };
+                return self.set(path, entry);
             }
             kind => {
                 let copy = self.create_upper(path, libc::O_WRONLY)?;
@@ -1001,10 +1026,13 @@ impl Cow {
                         },
                     };
                     self.times.set(path, &times_of(&stat))?;
-                    Ok(entry)
+                    Ok((entry, self.ready_moves(path)?))
                 })();
+                // Removing the copy may need the descriptor it holds, as
+                // when the move failed with `EMFILE`.
+                drop(copy);
                 match made {
-                    Ok(entry) => entry,
+                    Ok(made) => made,
                     Err(error) => {
                         // A copy with no entry would read as a directory.
                         let _ = self.unlink_upper(path, 0);
@@ -1013,56 +1041,66 @@ impl Cow {
                 }
             }
         };
-        if !matches!(entry, Entry::Dir { .. }) {
-            self.keep(path, entry)?;
-        } else {
-            self.set(path, entry)?;
-        }
+        self.keep(path, entry)?;
         // What the guest has open of your file reads the copy from now on,
         // and its locks are taken there, as well as the ones it holds. The
         // locks it holds on your file hold until it lets them go.
-        let node = self.paths.get(path).copied();
-        let moved: Vec<_> = self
-            .locks
-            .keys()
-            .filter(|(locked, _)| Some(*locked) == node)
-            .copied()
-            .collect();
-        for key in moved {
-            if let Some(Locks { fd, ranges }) = self.locks.remove(&key) {
-                self.held.push((key, fd));
-                let locks = Locks {
-                    fd: self.open_upper(path, LOCK_FLAGS)?,
-                    ranges,
-                };
-                locks.take(locks.fd.as_fd())?;
-                self.locks.insert(key, locks);
+        for (key, fd) in moves.locks {
+            if let Some(locks) = self.locks.get_mut(&key) {
+                self.held.push((key, std::mem::replace(&mut locks.fd, fd)));
             }
         }
-        let readers: Vec<_> = self
-            .handles
-            .iter()
-            .filter(|(_, handle)| matches!(handle, Handle::File { node: open, lower: true, .. } if Some(*open) == node))
-            .map(|(&id, _)| id)
-            .collect();
-        for id in readers {
-            let fd = self.open_upper(path, READ_FLAGS)?;
+        for (id, fd) in moves.readers {
             if let Some(Handle::File {
                 fd: open,
                 lower,
                 kept,
-                flock,
                 ..
             }) = self.handles.get_mut(&id)
             {
-                if let Some(operation) = *flock {
-                    sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(errno)?;
-                }
                 *kept = Some(std::mem::replace(open, fd));
                 *lower = false;
             }
         }
         Ok(())
+    }
+
+    /// Opens the agent's copy at `path` for each lock owner and each reader
+    /// the guest has of your file there, and takes their locks on it, so
+    /// that the copy's record is kept only once nothing can fail its move.
+    fn ready_moves(&self, path: &[u8]) -> Result<Moves, i32> {
+        let mut moves = Moves::default();
+        let Some(node) = self.paths.get(path).copied() else {
+            return Ok(moves);
+        };
+        for (&key, locks) in self.locks.range((node, 0)..=(node, u64::MAX)) {
+            let fd = self.open_moved(path, LOCK_FLAGS)?;
+            locks.take(fd.as_fd())?;
+            moves.locks.push((key, fd));
+        }
+        for (&id, handle) in &self.handles {
+            if let Handle::File {
+                node: open,
+                lower: true,
+                flock,
+                ..
+            } = handle
+                && *open == node
+            {
+                let fd = self.open_moved(path, READ_FLAGS)?;
+                if let Some(operation) = *flock {
+                    sys::flock(fd.as_fd(), operation | libc::LOCK_NB).map_err(errno)?;
+                }
+                moves.readers.push((id, fd));
+            }
+        }
+        Ok(moves)
+    }
+
+    /// Opens the agent's copy at `path` for what the guest moves there.
+    fn open_moved(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
+        MOVING.with(|moving| moving.borrow_mut().as_mut().map_or(Ok(()), |hook| hook()))?;
+        self.open_upper(path, flags)
     }
 
     /// Removes `path` from the tree.

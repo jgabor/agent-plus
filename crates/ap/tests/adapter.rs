@@ -626,6 +626,44 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
     );
 }
 
+// spec(MODE): With `read`, `ask`, `edit`, or `auto`, when the working directory is a share, a rule in its `.codex/rules` that allows a command lets Codex run that command outside its sandbox without asking.
+#[test]
+fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
+    // Real Codex follows the rule in T2. Here, the adapter's part: Codex
+    // loads a directory's `.codex/rules` only when it trusts the directory,
+    // so the adapter trusts each share that can be the working directory,
+    // keeps the sandbox, and leaves the rules alone.
+    let (_, directories) = shares("codex");
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in [Mode::Read, Mode::Ask, Mode::Edit, Mode::Auto] {
+                let mut arguments = codex::arguments(version, None, None, mode, interactive);
+                arguments.extend(codex::workspace(&directories));
+                let run = format!("{version} {mode:?} {interactive}");
+                let bypass = "--dangerously-bypass-approvals-and-sandbox";
+                assert!(!arguments.iter().any(|a| a == bypass), "{run}");
+                let overrides: Vec<&str> = (arguments.windows(2))
+                    .filter(|pair| pair[0] == "-c")
+                    .map(|pair| pair[1].as_str())
+                    .collect();
+                assert!(
+                    !overrides.iter().any(|value| value.starts_with("rules")),
+                    "{run} {overrides:?}"
+                );
+                let projects: Vec<&str> = (overrides.iter().copied())
+                    .filter(|value| value.starts_with("projects"))
+                    .collect();
+                assert_eq!(projects.len(), 1, "{run} {projects:?}");
+                for share in &directories {
+                    let trusted = format!("\"{share}\"={{trust_level=\"trusted\"}}");
+                    assert!(projects[0].contains(&trusted), "{run} {share}");
+                }
+            }
+        }
+    }
+}
+
 // spec(SECRET): Each adapter's allowlist is `Authorization` and `x-api-key`.
 #[test]
 fn each_adapter_lets_the_proxy_fill_authorization_and_x_api_key() {

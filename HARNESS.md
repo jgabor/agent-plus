@@ -428,17 +428,21 @@ boundary. A PR waits when it:
 - lowers a count.
 - changes a path under `.github/`, because a workflow there runs with a token
   that can write, and a leaked token can't be taken back.
-- changes `xtask/src/waits.rs`, `merge.rs`, `gate.rs`, or `spec.rs`, which
-  decide this.
+- changes a file under `xtask/src/` that decides what a merge accepts:
+  `accepts.rs`, `base.rs`, `floors.rs`, `gate.rs`, `journey.rs`, `ledger.rs`,
+  `readme.rs`, `score.rs`, `spec.rs`, `testrun.rs`, or `waits.rs`. A file
+  decides when it says what waits for the owner, what a count or a floor is
+  and whether one fell, which checks a proof runs, or what makes a check pass.
 
 Each of these lowers the bar for later PRs, or can't be undone by a revert.
 Everything else merges under `auto:merge`: a new SPEC.md sentence with its
-check, AGENTS.md, HARNESS.md, the task briefs, and the rest of `xtask/` and
-`harness/`. Nightly mutation testing is what notices a weakened test that kept
-its count. The xtask built from `main` decides, so a PR can't let itself
-through. `merge` fails a PR that waits with `fail owner`, and names each
-reason. `prepare` passes it, and its comment lists each reason under
-"Merging this PR at `<head>` accepts:".
+check, AGENTS.md, HARNESS.md, the task briefs, the rest of `harness/`, and the
+rest of `xtask/`, such as the timeout and the slot in `merge.rs`, and how
+`bench.rs` measures a budget. Nightly mutation testing is what notices a
+weakened test that kept its count. The xtask built from `main` decides, so a
+PR can't let itself through. `merge` fails a PR that waits with `fail owner`,
+and names each reason. `prepare` passes it, and its comment lists each reason
+under "Merging this PR at `<head>` accepts:".
 
 ## Data formats
 

@@ -175,7 +175,7 @@ fn stand_in_build() -> String {
     format!(
         r#"if [ "$1 $2 $3 $4 $5" = "build --quiet --package xtask --target-dir" ]; then
   built='{own}'
-  if grep -qs 'variant: unprotected' xtask/src/base.rs; then built='{unprotected}'; fi
+  if grep -qs 'variant: unprotected' xtask/src/merge.rs; then built='{unprotected}'; fi
   if grep -qs 'variant: failing' xtask/src/journey.rs; then built='{failing}'; fi
   if grep -qs 'variant: lying' xtask/src/bench.rs; then built='{lying}'; fi
   mkdir -p "$6/debug" && rm -f "$6/debug/xtask" && cp "$built" "$6/debug/xtask"
@@ -960,6 +960,31 @@ fn a_pr_that_changes_what_waits_waits() {
         &repo,
         "it changes `xtask/src/waits.rs`, which decides what waits for the owner",
     );
+}
+
+/// How a fallen count is found decides what a merge accepts.
+#[test]
+fn a_pr_that_changes_how_a_fallen_count_is_found_waits() {
+    let repo = changing(
+        "waits-counts",
+        &[],
+        &[("xtask/src/accepts.rs", "// a count that fell\n")],
+    );
+    assert_waits(
+        &repo,
+        "it changes `xtask/src/accepts.rs`, which decides what waits for the owner",
+    );
+}
+
+/// The timeout is how a merge runs, not what it accepts.
+#[test]
+fn a_pr_that_changes_the_timeout_merges() {
+    let repo = changing(
+        "free-timeout",
+        &[],
+        &[("xtask/src/merge.rs", "// a longer timeout\n")],
+    );
+    assert_merged(&repo, &repo.merge());
 }
 
 #[test]
@@ -4574,7 +4599,7 @@ fn a_pr_that_lets_itself_through_still_waits() {
         "checks-unprotect",
         &[],
         &[
-            ("xtask/src/base.rs", "// variant: unprotected\n"),
+            ("xtask/src/merge.rs", "// variant: unprotected\n"),
             (".github/workflows/x.yml", "name: x\n"),
         ],
     );
@@ -4633,7 +4658,7 @@ fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
         &[("harness/ledger/3.toml", base.as_str())],
         &[
             ("xtask/src/journey.rs", "// variant: failing\n"),
-            ("xtask/src/merge.rs", "// what waits\n"),
+            ("xtask/src/accepts.rs", "// what waits\n"),
         ],
     );
     repo.prepared(BRANCH, 7, "");
@@ -4653,7 +4678,7 @@ fn a_refresh_proves_a_change_to_xtask_with_its_own_xtask_too() {
     let comments = repo.pr_comments();
     assert!(comments.contains("journey fell from 1 to 0"), "{comments}");
     assert!(
-        comments.contains("it changes `xtask/src/merge.rs`, which decides"),
+        comments.contains("it changes `xtask/src/accepts.rs`, which decides"),
         "{comments}"
     );
 }

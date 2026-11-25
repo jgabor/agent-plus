@@ -415,7 +415,7 @@ fn empty_segments_under_a_host_with_url_rules_are_denied() {
     }
 }
 
-// spec(NETWORK): So are paths there with a backslash or a `;`, even escaped, because some servers read a backslash as a slash, or drop what follows a `;`.
+// spec(NETWORK): So are paths there with a backslash or a `;`, even escaped, because some servers read a backslash as a slash, or drop a `;` and what follows it in its segment.
 #[test]
 fn backslashes_and_semicolons_under_a_host_with_url_rules_are_denied() {
     let rules = "NETWORK +github.com\nNETWORK -https://github.com/jgabor/secret\n";
@@ -429,6 +429,7 @@ fn backslashes_and_semicolons_under_a_host_with_url_rules_are_denied() {
         "https://github.com/jgabor/secret%3Bx",
         "https://github.com/jgabor/secret%3bx",
         "https://github.com/x;",
+        "https://github.com/x/..;/jgabor/secret",
     ] {
         decides(rules, request(url), DENY, "path");
     }

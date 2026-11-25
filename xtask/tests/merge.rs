@@ -175,7 +175,7 @@ fn stand_in_build() -> String {
     format!(
         r#"if [ "$1 $2 $3 $4 $5" = "build --quiet --package xtask --target-dir" ]; then
   built='{own}'
-  if grep -qs 'variant: unprotected' xtask/src/base.rs; then built='{unprotected}'; fi
+  if grep -qs 'variant: unprotected' xtask/src/merge.rs; then built='{unprotected}'; fi
   if grep -qs 'variant: failing' xtask/src/journey.rs; then built='{failing}'; fi
   if grep -qs 'variant: lying' xtask/src/bench.rs; then built='{lying}'; fi
   mkdir -p "$6/debug" && rm -f "$6/debug/xtask" && cp "$built" "$6/debug/xtask"
@@ -4599,7 +4599,7 @@ fn a_pr_that_lets_itself_through_still_waits() {
         "checks-unprotect",
         &[],
         &[
-            ("xtask/src/base.rs", "// variant: unprotected\n"),
+            ("xtask/src/merge.rs", "// variant: unprotected\n"),
             (".github/workflows/x.yml", "name: x\n"),
         ],
     );

@@ -9,11 +9,13 @@
 //! nanoseconds since the Unix epoch. A record appears under its name complete
 //! and synced, or not at all, and never replaces another run's. When the run
 //! ends, its run process adds `EXITED <status>`, the status `ap run` exits
-//! with, before it lets go of the lock.
+//! with, before it exits.
 //!
-//! While a run is active, its run process holds an exclusive lock on its
-//! record. The kernel drops the lock when that process exits, for
-//! any reason, so a run whose process is gone never reads as active.
+//! While a run is active, an exclusive lock on its record is held. `ap run`
+//! takes it with [`Runs::lock`], and its run process and the share server
+//! that keeps its pending changes each hold a copy of what it opened. The
+//! kernel drops the lock when the last of them exits, for any reason, so a
+//! run whose processes are gone never reads as active.
 //!
 //! A run's log is kept apart from its record, under `logs` with the run's
 //! name, and only `ap run` writes it. The changes a run's agent made to its
@@ -103,8 +105,9 @@ pub fn random_name() -> io::Result<String> {
     }
 }
 
-/// Adds the status the run ended with to its record, which [`Runs::hold`]
-/// opened. It is one write, so a reader sees the whole line or none of it.
+/// Adds the status the run ended with to its record, which
+/// [`Runs::appending`] or [`Runs::hold`] opened. It is one write, so a
+/// reader sees the whole line or none of it.
 pub fn record_exit(mut held: &File, status: u8) -> io::Result<()> {
     held.write_all(format!("EXITED {status}\n").as_bytes())
 }
@@ -393,20 +396,37 @@ impl Runs {
     /// which marks the run active until the returned hold drops. Its file
     /// can add to the record, as [`record_exit`] does.
     pub fn hold(&self, name: &str) -> io::Result<Held> {
+        let file = self.appending(name)?;
+        lock(name, &file)?;
+        Ok(Held(file))
+    }
+
+    /// Opens the record of the run with this name to add to it, as
+    /// [`record_exit`] does, and takes no lock.
+    pub fn appending(&self, name: &str) -> io::Result<File> {
+        self.open_record(name, OpenOptions::new().read(true).append(true))
+    }
+
+    /// Opens the record of the run with this name to read, and takes the
+    /// exclusive lock on what it opened. The lock belongs to the open file,
+    /// not to this process: each copy of the file, in any process, holds it
+    /// until the last copy closes, so the run is active until then.
+    pub fn lock(&self, name: &str) -> io::Result<File> {
+        let file = self.open_record(name, OpenOptions::new().read(true))?;
+        lock(name, &file)?;
+        Ok(file)
+    }
+
+    fn open_record(&self, name: &str, options: &OpenOptions) -> io::Result<File> {
         check_run_name(name)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .append(true)
+        options
             .open(self.dir.join(name))
             .map_err(|error| match error.kind() {
                 io::ErrorKind::NotFound => {
                     io::Error::new(error.kind(), format!("no run is named {name}"))
                 }
                 _ => io::Error::new(error.kind(), format!("run {name}: {error}")),
-            })?;
-        file.lock()
-            .map_err(|error| io::Error::new(error.kind(), format!("run {name}: {error}")))?;
-        Ok(Held(file))
+            })
     }
 
     /// Whether the run with this name is active: whether a process holds the
@@ -430,6 +450,11 @@ impl Runs {
             Err(error) => Err(io::Error::new(error.kind(), format!("run {name}: {error}"))),
         }
     }
+}
+
+fn lock(name: &str, file: &File) -> io::Result<()> {
+    file.lock()
+        .map_err(|error| io::Error::new(error.kind(), format!("run {name}: {error}")))
 }
 
 fn check_run_name(name: &str) -> io::Result<()> {

@@ -16,7 +16,10 @@
 //! times of a copy-on-write share's copies. A server of `rw` shares runs in
 //! a user namespace of its own, in [`namespace`], so it can change the mode
 //! of a file it can't read. The frames on the socket are the ones
-//! [`vmm::fs`] describes.
+//! [`vmm::fs`] describes. A server with no `rw` share can hold one more
+//! file until it exits, such as a run's locked record, so the run stays
+//! active until it has answered its last request. Its filter refuses to
+//! lock, unlock, or close that file.
 
 mod landlock;
 mod namespace;
@@ -27,7 +30,7 @@ mod times;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -46,6 +49,8 @@ const READ_WRITE: &str = "rw";
 const COPY_ON_WRITE: &str = "cow";
 /// Before a share's mode, names the one file a file share shows.
 const FILE: &str = "file";
+/// Before the shares, names a descriptor the server holds until it exits.
+const KEEP: &str = "keep";
 const STDIN: i32 = 0;
 const STDERR: i32 = 2;
 
@@ -69,8 +74,17 @@ pub struct Servers {
 /// share order. Each root's directory is one the caller opened, and so is
 /// a copy-on-write share's pending directory, which must be empty. A server
 /// serves what the caller checked, and never opens a path itself. Each one
-/// starts without the environment variables named in `hidden`.
-pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> io::Result<Servers> {
+/// starts without the environment variables named in `hidden`. The server
+/// of shares that aren't `rw`, the only one that keeps pending changes,
+/// starts with a copy of `kept`, if there is one, which it holds until it
+/// exits. A server of `rw` shares changes modes and times, so it holds
+/// nothing but its shares.
+pub fn start(
+    program: &Path,
+    roots: &[Root<BorrowedFd>],
+    hidden: &[String],
+    kept: Option<BorrowedFd>,
+) -> io::Result<Servers> {
     let mut started = Vec::new();
     let mut serving = vec![0; roots.len()];
     for read_write in [true, false] {
@@ -82,7 +96,8 @@ pub fn start(program: &Path, roots: &[Root<BorrowedFd>], hidden: &[String]) -> i
             }
         }
         if !served.is_empty() {
-            started.push(start_one(program, &served, hidden, read_write)?);
+            let kept = kept.filter(|_| !read_write);
+            started.push(start_one(program, &served, hidden, kept, read_write)?);
         }
     }
     Ok(Servers { started, serving })
@@ -94,6 +109,7 @@ fn start_one(
     program: &Path,
     roots: &[&Root<BorrowedFd>],
     hidden: &[String],
+    kept: Option<BorrowedFd>,
     read_write: bool,
 ) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
@@ -101,6 +117,9 @@ fn start_one(
     // its arguments. The copies are made just for it, and closed once it
     // has started.
     let mut inherited = Vec::new();
+    if let Some(kept) = kept {
+        inherited.push(inheritable(kept)?);
+    }
     for root in roots {
         inherited.push(inheritable(root.directory)?);
         if let Mode::CopyOnWrite(pending) = root.mode {
@@ -113,6 +132,9 @@ fn start_one(
         command.env_remove(name);
     }
     command.arg0(PROGRAM);
+    if kept.is_some() {
+        command.arg(KEEP).arg(numbers.next().unwrap_or_default());
+    }
     for root in roots {
         if let Some(name) = &root.file {
             command.arg(FILE).arg(OsStr::from_bytes(name.as_bytes()));
@@ -153,9 +175,11 @@ pub fn inheritable(fd: BorrowedFd) -> io::Result<OwnedFd> {
 /// inherited descriptor of a root directory for each share, and for a
 /// copy-on-write share the number of its pending directory's after it. A
 /// file share has `file` and the file's name before its mode. The shares
-/// are all `rw`, or none of them are. It serves requests from its standard
-/// input, a socket, until the VMM hangs up, and returns the status to exit
-/// with.
+/// are all `rw`, or none of them are. Before them, `keep` and the number of
+/// another inherited descriptor name one it holds until it exits, so that a
+/// lock on that file outlives its last answer. A server of `rw` shares
+/// refuses it. It serves requests from its standard input, a socket, until
+/// the VMM hangs up, and returns the status to exit with.
 pub fn main(args: &[OsString]) -> u8 {
     match run(args) {
         Ok(()) => 0,
@@ -167,7 +191,13 @@ pub fn main(args: &[OsString]) -> u8 {
 }
 
 fn run(args: &[OsString]) -> io::Result<()> {
-    let roots = open_roots(args)?;
+    // Never closed, so its number is never another file's, which the filter
+    // would refuse to lock or close.
+    let (kept, args) = match args {
+        [keep, fd, rest @ ..] if keep == KEEP => (Some(open_kept(fd)?), rest),
+        _ => (None, args),
+    };
+    let roots = open_roots(args, kept)?;
     let read_write = |root: &Root| matches!(root.mode, Mode::ReadWrite);
     if roots.iter().any(read_write) && !roots.iter().all(read_write) {
         return Err(io::Error::other(
@@ -175,6 +205,11 @@ fn run(args: &[OsString]) -> io::Result<()> {
         ));
     }
     if roots.iter().all(read_write) {
+        if kept.is_some() {
+            return Err(io::Error::other(
+                "a server of `rw` shares keeps nothing but its shares",
+            ));
+        }
         namespace::lower()?;
     }
     let mut server = Server::new(roots)?;
@@ -185,17 +220,31 @@ fn run(args: &[OsString]) -> io::Result<()> {
     // in this process owns it.
     let mut socket = File::from(unsafe { OwnedFd::from_raw_fd(STDIN) });
     let times = server.times();
-    vmm::confine::confine_share_server(socket.as_raw_fd(), server.changes(), &times)?;
+    vmm::confine::confine_share_server(socket.as_raw_fd(), server.changes(), &times, kept)?;
     serve(&mut socket, &mut server)
 }
 
-fn open_roots(args: &[OsString]) -> io::Result<Vec<Root>> {
+/// The descriptor that `keep` names, which must be open and past standard
+/// error.
+fn open_kept(arg: &OsString) -> io::Result<RawFd> {
+    let fd = (arg.to_str())
+        .and_then(|fd| fd.parse::<i32>().ok())
+        .filter(|fd| *fd > STDERR)
+        .ok_or_else(|| io::Error::other("`keep` takes a descriptor"))?;
+    // SAFETY: this call takes and returns plain integers.
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
     let usage = || {
         io::Error::other(
-            "usage: ap-share-server ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
+            "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
         )
     };
-    let mut taken: Vec<i32> = Vec::new();
+    let mut taken: Vec<i32> = kept.into_iter().collect();
     let mut take = |arg: Option<&OsString>| -> io::Result<OwnedFd> {
         let fd = (arg.and_then(|arg| arg.to_str()))
             .and_then(|fd| fd.parse::<i32>().ok())

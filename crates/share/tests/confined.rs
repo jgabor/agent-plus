@@ -28,6 +28,9 @@ const ARGS: &str = "AP_SHARE_CONFINED_ARGS";
 /// to take up every capability it holds.
 const AIM: &str = "AP_SHARE_CONFINED_AIM";
 const SERVER: &str = "confined_server_process";
+/// The number of the descriptor the server keeps, which its process tries
+/// to unlock once it has served, as if its own code were turned against it.
+const UNLOCK: &str = "AP_SHARE_CONFINED_UNLOCK";
 /// The server runs on a test's thread here, and `ap` runs it on its main
 /// thread. One malloc arena keeps the test's like `ap`'s, which grows with
 /// `brk`, where a thread's own arena grows with `mprotect`, which the
@@ -59,6 +62,10 @@ fn confined_server_process() {
     let status = share::main(&args);
     if let (0, Some((directory, openat2, path, changes))) = (status, aim) {
         turn(&directory, openat2, &path, changes);
+    }
+    if let (0, Some(fd)) = (status, env::var(UNLOCK).ok()) {
+        // SAFETY: `flock` takes and returns plain integers.
+        unsafe { libc::flock(fd.parse().unwrap(), libc::LOCK_UN) };
     }
     // The filter allows nothing the test harness does after a test, so
     // the process ends here.
@@ -304,6 +311,17 @@ fn a_confined_rw_server_changes_the_mode_of_what_it_can_t_read() {
 // #440: Landlock doesn't cover a file's mode or times, and a server with
 // an `rw` share may change those, so it holds no other share's root.
 #[test]
+fn a_server_of_rw_shares_keeps_nothing_but_its_shares() {
+    let tree = Tree::new("confined-rw-kept");
+    let record = tree.base.join("record");
+    fs::write(&record, "").unwrap();
+    let (mut server, socket) = start(&[("keep", &record), ("rw", &tree.root)], None);
+    drop(socket);
+    // It refuses before it serves, and exits with 1.
+    assert_eq!(server.wait().unwrap().code(), Some(1));
+}
+
+#[test]
 fn a_server_that_changes_modes_and_times_serves_only_rw_shares() {
     for mode in ["ro", "cow"] {
         let tree = Tree::new(&format!("confined-mixed-{mode}-rw"));
@@ -385,6 +403,39 @@ fn a_confined_server_changes_an_rw_share_and_nothing_else() {
     drop(guest);
     assert!(server.wait().unwrap().success());
     assert_eq!(fs::read(&tree.secret).unwrap(), CANARY);
+}
+
+#[test]
+fn a_confined_server_can_t_unlock_what_it_keeps() {
+    let tree = Tree::new("confined-kept");
+    let record = tree.base.join("record");
+    fs::write(&record, "").unwrap();
+    let locked = File::open(&record).unwrap();
+    locked.lock().unwrap();
+    let kept = share::inheritable(locked.as_fd()).unwrap();
+    let root = share::inheritable(File::open(&tree.root).unwrap().as_fd()).unwrap();
+    let args = ["keep", &kept.as_raw_fd().to_string(), "ro"].join("\n");
+    let args = format!("{args}\n{}", root.as_raw_fd());
+    let (mine, theirs) = UnixStream::pair().unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([SERVER, "--exact", "--test-threads=1", "--quiet"])
+        .env(ARGS, args)
+        .env(ARENAS, "1")
+        .env(UNLOCK, kept.as_raw_fd().to_string())
+        .stdin(OwnedFd::from(theirs))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut server = command.spawn().unwrap();
+    drop((command, kept, root));
+    drop(Guest::over(OwnedFd::from(mine)));
+
+    // The filter kills it at `flock`. An unlock would have unlocked this
+    // process's copy too, which is the same open file.
+    assert_eq!(server.wait().unwrap().signal(), Some(libc::SIGSYS));
+    let other = File::open(&record).unwrap();
+    assert!(other.try_lock_shared().is_err(), "the server unlocked it");
+    drop(locked);
 }
 
 #[test]

@@ -45,16 +45,16 @@ use std::ffi::{CString, OsString};
 use std::fs::{DirBuilder, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use agentfile::{
     Auth, Files, GuestPath, Harness, Instruction, Network, Os, Part, Secrets, Settings, Share,
@@ -194,9 +194,9 @@ fn run_agent(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
     let name = args.agent.to_string_lossy();
-    // Held from before the run is recorded until its run process has locked
-    // the record and opened the layers, so `ap rm` and rebuilds wait, and
-    // never find the run finished or free a layer it is about to read.
+    // Held from before the run is recorded until its record is locked and
+    // its run process has opened the layers, so `ap rm` and rebuilds wait,
+    // and never find the run finished or free a layer it is about to read.
     let digests: Vec<&str> = layers.iter().map(|layer| layer.digest.as_str()).collect();
     let held_layers = ::store::Agents::new(root)
         .hold_layers(&name, &digests)
@@ -258,14 +258,21 @@ fn run_agent(
     start.authority = authority;
     // The values live in the network process alone from here.
     drop(injection);
+    // The run is active from here until the run process and the share
+    // server that keeps pending changes have exited, because each holds a
+    // copy of what this locked.
+    let record = runs
+        .lock(&run.name)
+        .map_err(fail("can't lock the run's record"))?;
     let roots: Vec<_> = shares.iter().map(share::Root::as_fd).collect();
     let share::Servers { started, serving } =
-        share::start(exe, &roots, &names).map_err(fail("can't start the share server"))?;
+        share::start(exe, &roots, &names, Some(record.as_fd()))
+            .map_err(fail("can't start the share server"))?;
     let share_sockets = (started.iter())
         .map(|server| share::inheritable(server.socket.as_fd()))
         .collect::<io::Result<Vec<_>>>()
         .map_err(fail("can't start the share server"))?;
-    drop(started);
+    let mut servers: Vec<Child> = started.into_iter().map(|server| server.process).collect();
     // Made after the share servers start, so that only the run process
     // inherits it.
     let link = share::inheritable(network_link.as_fd())
@@ -279,6 +286,8 @@ fn run_agent(
     let their_layers =
         share::inheritable(held_layers.as_fd()).map_err(fail("can't start the run"))?;
     drop(held_layers);
+    let their_record = share::inheritable(record.as_fd()).map_err(fail("can't start the run"))?;
+    drop(record);
     drop(network_process);
     let mut command = Command::new(exe);
     for secret in &names {
@@ -290,7 +299,8 @@ fn run_agent(
         .arg(&run.name)
         .arg(link.as_raw_fd().to_string())
         .arg(their_keys.as_raw_fd().to_string())
-        .arg(their_layers.as_raw_fd().to_string());
+        .arg(their_layers.as_raw_fd().to_string())
+        .arg(their_record.as_raw_fd().to_string());
     for server in serving {
         command.arg(share_sockets[server].as_raw_fd().to_string());
     }
@@ -306,6 +316,7 @@ fn run_agent(
     drop(link);
     drop(their_keys);
     drop(their_layers);
+    drop(their_record);
     drop(share_sockets);
     // The log is made only once the run process runs, which records how
     // the run ends, so `ap ps -a` never lists a run that couldn't start.
@@ -341,6 +352,12 @@ fn run_agent(
     drop(raw);
     // The run process exits once it has reported, so this doesn't wait long.
     let exited = process.wait();
+    // Each share server ends once it has answered what the run process
+    // sent, and the run is active until then, so `ap run` exits after it.
+    let deadline = Instant::now() + SERVER_WAIT;
+    for server in &mut servers {
+        wait_or_kill(server, deadline);
+    }
     drop(held);
     // SPEC.md's Run, under **Blocked hosts**. The network process ends once
     // the run process has, and its reports end with it.
@@ -365,6 +382,47 @@ fn run_agent(
 /// How long a run that has ended waits for the network process to end, for
 /// the hosts it blocked.
 const REPORTS_WAIT: Duration = Duration::from_secs(2);
+
+/// How long a run whose run process has exited waits for its share servers
+/// to answer what it sent, before it kills them. A server answers one
+/// request at most by then, so only a hung one takes this long.
+const SERVER_WAIT: Duration = Duration::from_secs(10);
+
+/// Waits for `child` to exit, and kills it if it hasn't by `deadline`.
+/// Without pidfds, it waits as long as `child` takes.
+fn wait_or_kill(child: &mut Child, deadline: Instant) {
+    // SAFETY: `pidfd_open` takes and returns plain integers.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    if let Ok(fd) = i32::try_from(fd)
+        && fd >= 0
+    {
+        // SAFETY: the kernel just returned this descriptor, and nothing
+        // else owns it.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let exited = loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let mut poll = libc::pollfd {
+                fd: pidfd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = i32::try_from(left.as_millis()).unwrap_or(i32::MAX);
+            // SAFETY: `poll` reads and writes `poll` alone, which outlives
+            // the call.
+            match unsafe { libc::poll(&mut poll, 1, timeout) } {
+                0 => break false,
+                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {}
+                // It exited, or `poll` failed and only `wait` is left.
+                _ => break true,
+            }
+        };
+        if !exited {
+            // Nothing has reaped it, so its process id is still its own.
+            let _ = child.kill();
+        }
+    }
+    let _ = child.wait();
+}
 
 /// An error from `ap run`'s own work, in this context.
 fn fail(context: &str) -> impl Fn(io::Error) -> Error + '_ {
@@ -1236,6 +1294,21 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
+
+    #[test]
+    fn a_share_server_that_hangs_is_killed_at_the_deadline() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut hung = Command::new("sleep").arg("60").spawn().unwrap();
+        let started = Instant::now();
+        wait_or_kill(&mut hung, started + Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        let status = hung.try_wait().unwrap().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+
+        let mut done = Command::new("true").spawn().unwrap();
+        wait_or_kill(&mut done, Instant::now() + Duration::from_secs(60));
+        assert!(done.try_wait().unwrap().unwrap().success());
+    }
 
     /// A log that a terminal can look at.
     struct Log(Rc<RefCell<Vec<u8>>>);

@@ -193,28 +193,6 @@ impl Network {
         })
     }
 
-    /// The index of a `+` host rule that decides connections to the name
-    /// `host` on `port`, when one does: the most specific host rule that
-    /// matches, with no rule as specific that denies. It skips URL rules, so
-    /// it is for a host that has none.
-    fn allowed_by(&self, host: &str, port: u16) -> Option<usize> {
-        let matching = || {
-            (self.rules.iter().enumerate()).filter_map(move |(at, rule)| match &rule.destination {
-                Destination::Host { name, port: only }
-                    if (host == name || under(host, name))
-                        && only.is_none_or(|only| only == port) =>
-                {
-                    Some(((name.split('.').count(), only.is_some()), at, rule.sign))
-                }
-                _ => None,
-            })
-        };
-        let (key, at, _) = matching().max_by_key(|&(key, ..)| key)?;
-        (matching())
-            .all(|(other, _, sign)| other != key || sign == Sign::Allow)
-            .then_some(at)
-    }
-
     /// Each port and path a rule names, and one that none names, so that
     /// every way a request can match the rules gets tried.
     fn cases(&self) -> (Vec<u16>, Vec<String>) {
@@ -346,12 +324,11 @@ fn under(host: &str, name: &str) -> bool {
 
 /// The errors from `NETWORK` rules that would make the proxy decrypt a
 /// connection to one of `hosts`, the harness's own hosts, by the decryption
-/// under NETWORK in SPEC.md: a URL rule for one, and a `-` rule under the
-/// broader `+` host rule that decides a connection to one. A `-` host rule
-/// for the `+` rule's own name only narrows its port, and a connection keeps
-/// its port, so it decrypts nothing. Each error is on the line of the rule
-/// that turns decryption on. It finds none while `NETWORK` has errors of its
-/// own.
+/// under NETWORK in SPEC.md: a URL rule for one, and a `-` rule narrower than
+/// a `+` host rule that one is under, on a port where a name rule allows it.
+/// A connection keeps its port, so a `-` host rule with a port only matters
+/// on that port. Each error is on the line of the rule that turns decryption
+/// on. It finds none while `NETWORK` has errors of its own.
 pub(crate) fn decrypting(
     instructions: &[Instruction],
     harness: &str,
@@ -379,19 +356,39 @@ pub(crate) fn decrypting(
             Destination::Host { name, .. } | Destination::Url { host: name, .. }
                 if narrow.sign == Sign::Deny =>
             {
-                let url = matches!(narrow.destination, Destination::Url { .. });
+                // The port a `-` host rule is for, if it names one.
+                let (url, only) = match narrow.destination {
+                    Destination::Host { port, .. } => (false, port),
+                    _ => (true, None),
+                };
+                let narrower = |broad: &NetworkRule| match &broad.destination {
+                    Destination::Host {
+                        name: broader,
+                        port,
+                    } if broad.sign == Sign::Allow => {
+                        under(name, broader)
+                            || name == broader && (url || only.is_some() && port.is_none())
+                    }
+                    _ => false,
+                };
                 let found = hosts.iter().find_map(|own| {
                     let own = own.to_ascii_lowercase();
                     if url_host(&network, &own) {
                         return None;
                     }
-                    (ports.iter())
-                        .filter_map(|&port| network.allowed_by(&own, port))
-                        .find(|&broad| match &network.rules[broad].destination {
-                            Destination::Host { name: broader, .. } => {
-                                under(name, broader) || url && name == broader
-                            }
-                            _ => false,
+                    let allowed = |port: u16| {
+                        only.is_none_or(|only| only == port)
+                            && network.name_decision(&own, Scheme::Https, port, "/")
+                                == Some(Sign::Allow)
+                    };
+                    (ports.iter().copied().filter(|&port| allowed(port)))
+                        .find_map(|port| {
+                            (network.rules.iter()).position(|broad| {
+                                narrower(broad)
+                                    && matches!(&broad.destination, Destination::Host { name: broader, port: at }
+                                        if (own == *broader || under(&own, broader))
+                                            && at.is_none_or(|at| at == port))
+                            })
                         })
                         .map(|broad| (own, broad))
                 });

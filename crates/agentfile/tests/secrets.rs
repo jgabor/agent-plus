@@ -902,6 +902,13 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
             3,
             "-other.harness.example",
         ),
+        // A narrower `+` rule for the harness host doesn't change that a
+        // connection to it can carry a request for another name.
+        (
+            "NETWORK +harness.example\nNETWORK +api.harness.example\nNETWORK -other.harness.example",
+            4,
+            "-other.harness.example",
+        ),
         (
             "NETWORK -https://other.harness.example/x\nNETWORK +harness.example:443",
             2,
@@ -926,8 +933,6 @@ fn rules_that_decrypt_no_harness_host_pass() {
         "NETWORK +other.example\nNETWORK -sub.other.example",
         // The `-` rule decides the harness host, so nothing decrypts it.
         "NETWORK +harness.example\nNETWORK -api.harness.example",
-        // A narrower `+` rule decides it, with no `-` rule under that.
-        "NETWORK +harness.example\nNETWORK +api.harness.example\nNETWORK -other.harness.example",
         // Under `NETWORK +`, a `-` rule on its own never decrypts.
         "NETWORK -other.harness.example",
         // A broader `-` rule allows nothing to decrypt.
@@ -935,6 +940,12 @@ fn rules_that_decrypt_no_harness_host_pass() {
         // A connection keeps its port, so a `-` rule for another port of the
         // same name needs nothing decrypted.
         "NETWORK -\nNETWORK +api.harness.example\nNETWORK -api.harness.example:22",
+        // The `-` rule covers the harness host on port 22, so no connection
+        // there is allowed to decrypt.
+        "NETWORK +harness.example\nNETWORK -harness.example:22",
+        // A `-` rule for one port matters only where the harness host is
+        // allowed on that port.
+        "NETWORK +harness.example\nNETWORK -api.harness.example:22\nNETWORK -other.harness.example:22",
         // The rules tie, so they deny.
         "NETWORK +harness.example\nNETWORK -harness.example\nNETWORK -other.harness.example",
     ] {

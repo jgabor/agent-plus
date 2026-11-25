@@ -235,6 +235,7 @@ const LATER: Duration = Duration::from_secs(30);
 /// `deadline`. The failure says what each process still running waits for,
 /// as [`described`] does, and then whether it ended within [`LATER`]. A
 /// check that passes reads nothing more than [`running`] does.
+#[track_caller]
 fn ended(pids: &[u32], deadline: Instant, what: &str) {
     while pids.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
@@ -243,11 +244,11 @@ fn ended(pids: &[u32], deadline: Instant, what: &str) {
     if left.is_empty() {
         return;
     }
+    let failed = Instant::now();
     let mut message = format!("{what}: {left:?}");
     for pid in &left {
         message.push_str(&described(*pid));
     }
-    let failed = Instant::now();
     let mut endings: Vec<Option<Duration>> = vec![None; left.len()];
     while endings.iter().any(Option::is_none) && failed.elapsed() < LATER {
         for (pid, ending) in left.iter().zip(&mut endings) {
@@ -337,6 +338,9 @@ fn described(pid: u32) -> String {
                         holders.join(", ")
                     )),
                 }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                text.push_str(", which isn't a Unix socket, or has closed")
             }
             Err(error) => text.push_str(&format!(", whose far end is unknown ({error})")),
         }
@@ -484,7 +488,7 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
     let (reading, held) = UnixStream::pair().unwrap();
     let holder = Started(
         Command::new("sleep")
-            .arg("5")
+            .arg("10")
             .stdin(OwnedFd::from(held))
             .stdout(Stdio::null())
             .spawn()
@@ -531,7 +535,7 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
     assert!(message.contains("system call "), "{message}");
     assert!(message.contains("descriptor 0: socket:["), "{message}");
     assert!(
-        message.contains(&format!("held by {holder_pid} (sleep 5)")),
+        message.contains(&format!("held by {holder_pid} (sleep 10)")),
         "{message}"
     );
     assert!(message.contains("it ended "), "{message}");

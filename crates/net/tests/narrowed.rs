@@ -109,7 +109,6 @@ fn a_narrower_rule_is_under_the_plus_rule_by_name_path_or_port() {
     assert!(!net::narrowed(&rules, HARNESS, "github.com", 22));
 }
 
-// spec(NETWORK): **Harness hosts are never decrypted for a rule.**
 #[test]
 fn a_harness_host_is_never_decrypted_for_a_narrower_rule() {
     let lines = "NETWORK -\nNETWORK +anthropic.com\nNETWORK -console.anthropic.com\n";

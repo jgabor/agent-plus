@@ -506,7 +506,7 @@ fn one_harness_may_use_what_the_other_keeps() {
     assert_eq!(reserved_errors("codex", claude).len(), 3);
 }
 
-// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because the agent sees only a placeholder for the key.
+// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because it would hand the agent the key that `AUTH key` hides.
 #[test]
 fn an_env_value_cannot_read_the_key_auth_key_hides() {
     for (agent, key) in [("claude", claude::KEY), ("codex", codex::KEY)] {
@@ -538,14 +538,18 @@ fn an_env_value_cannot_read_the_key_auth_key_hides() {
             }
         }
         // Without `AUTH key`, or with `\$`, the value reads no hidden key.
-        for lines in [
+        let mut allowed = vec![
             format!("ENV LEAK ${key}\n"),
-            format!("AUTH token\nENV LEAK ${key}\n"),
             format!("AUTH key\nENV LEAK \\${key}\n"),
-        ] {
-            if agent == "codex" && lines.contains("token") {
-                continue;
-            }
+        ];
+        if agent == "claude" {
+            // `AUTH token` works only with Claude Code.
+            allowed.push(format!("AUTH token\nENV LEAK ${key}\n"));
+        } else {
+            // Codex reads `OPENAI_API_KEY` to sign in, but `AUTH key` doesn't.
+            allowed.push("AUTH key\nENV LEAK $OPENAI_API_KEY\n".to_string());
+        }
+        for lines in allowed {
             let source = format!("AGENT {agent}\nOS minimal\n{lines}");
             let parsed = agentfile::parse_for(&source, ap::adapter::reserved);
             assert!(parsed.is_ok(), "{source:?}: {parsed:?}");

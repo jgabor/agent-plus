@@ -784,7 +784,7 @@ fn reserved_errors(lines: &str) -> Vec<Error> {
     reserved(&instructions, &lists)
 }
 
-// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because the agent sees only a placeholder for the key.
+// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because it would hand the agent the key that `AUTH key` hides.
 #[test]
 fn an_env_value_cannot_read_the_variable_auth_key_reads() {
     for value in [

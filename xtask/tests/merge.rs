@@ -1700,6 +1700,23 @@ fn a_pr_that_waits_fails_before_the_slot() {
     assert_prepared(&repo, &repo.prepare());
 }
 
+/// A change that `main` already has, as from a squashed PR that the branch
+/// was built on, is no part of what merging the branch changes.
+#[test]
+fn a_change_main_already_has_does_not_fail_before_the_slot() {
+    let repo = changing(
+        "early-squashed",
+        &[],
+        &[
+            (".github/workflows/x.yml", "name: x\n"),
+            ("docs.txt", "x\n"),
+        ],
+    );
+    repo.change_branch("crates/demo/src/lib.rs", CHECK_ONE);
+    repo.advance_main(".github/workflows/x.yml", "name: x\n");
+    assert_merged(&repo, &repo.merge());
+}
+
 /// A `Hill` line with no reason, or a change that no count comes from and no
 /// line, fails before the slot, under either command.
 #[test]

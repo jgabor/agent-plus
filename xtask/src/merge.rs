@@ -1173,6 +1173,7 @@ fn fails_before_the_slot(
 /// `main` and the branch, fetched before the slot into refs of this run's
 /// own. So the fetch never holds a lock that the merge in the slot needs, and
 /// it fetches no tags and starts no maintenance, which would take locks too.
+/// It leaves the caller's `FETCH_HEAD` alone.
 /// The refs go when this does.
 struct Early<'a> {
     root: &'a Path,
@@ -1198,6 +1199,7 @@ impl<'a> Early<'a> {
             "-q",
             "--no-tags",
             "--no-auto-maintenance",
+            "--no-write-fetch-head",
             "origin",
             &main,
             &branch,

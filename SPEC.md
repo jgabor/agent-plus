@@ -2054,8 +2054,10 @@ allow one.
 - **Harness hosts are never decrypted for a rule.** A rule set that would
   need it, such as a URL rule for a harness host or `-console.anthropic.com`
   under `+anthropic.com`, is a build error, because those connections can
-  carry your subscription sign-in. `AUTH key` is the one case where the
-  proxy decrypts a harness host's traffic.
+  carry your subscription sign-in. IP rules don't change this, because a
+  build can't know the addresses a harness host's name resolves to.
+  `AUTH key` is the one case where the proxy decrypts a harness host's
+  traffic.
 - **IP rules** are checked against the real destination address.
 - **UDP** follows the same rules, with names attributed through the
   resolver. QUIC to a host that needs decrypting is blocked, so clients

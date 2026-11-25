@@ -942,6 +942,30 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
     }
 }
 
+// spec(NETWORK): IP rules don't change this, because a build can't know the addresses a harness host's name resolves to.
+#[test]
+fn ip_rules_dont_stop_a_rule_that_would_decrypt_a_harness_host() {
+    for ip in ["NETWORK -0.0.0.0/0\nNETWORK -[::]/0", "NETWORK +10.0.0.0/8"] {
+        for (rules, line, rule) in [
+            (
+                "NETWORK +https://api.harness.example/v1",
+                2,
+                "+https://api.harness.example/v1",
+            ),
+            (
+                "NETWORK +harness.example\nNETWORK -other.harness.example",
+                3,
+                "-other.harness.example",
+            ),
+        ] {
+            let errors = reserved_errors(&format!("{rules}\n{ip}"));
+            assert_eq!(lines_of(&errors), [line], "{rules} {ip}: {errors:?}");
+            let message = &errors[0].message;
+            assert!(message.contains(&format!("`{rule}`")), "{message}");
+        }
+    }
+}
+
 // spec(NETWORK): **Harness hosts are never decrypted for a rule.** A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
 #[test]
 fn rules_that_decrypt_no_harness_host_pass() {

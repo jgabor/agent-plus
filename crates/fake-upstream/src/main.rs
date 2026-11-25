@@ -19,11 +19,12 @@
 //! Plain TCP answers a connection's first line with `upstream:<line>`.
 //! HTTPS answers every request with a 404, except a `POST` to a path that
 //! ends in `/responses`, which it answers as a fake model on OpenAI's
-//! Responses API: [`MODEL_TOOL`] while the request holds no tool's output,
-//! and then a message. Each line it gets, and each
-//! request's target, is noted in `<directory>/seen` as one line, `plain
-//! <line>`, `address <line>`, or `tls <target>`, so a check can tell what
-//! reached it. Each HTTPS request, its head and body as they arrived, is
+//! Responses API: a call of Codex's code-mode `exec` tool while the request
+//! holds no tool's output, and then a message. The tool runs [`COMMAND`], or
+//! the text of `<directory>/command` when that file exists as the request
+//! arrives. Each line it gets, and each request's target, is noted in
+//! `<directory>/seen` as one line, `plain <line>`, `address <line>`, or
+//! `tls <target>`, so a check can tell what reached it. Each HTTPS request, its head and body as they arrived, is
 //! also kept whole in `<directory>/requests/<n>`, numbered from 1 in the
 //! order each one finished arriving.
 
@@ -47,19 +48,19 @@ const HOST: &str = "host.ap.internal";
 /// How long a connection may stay quiet before the upstream drops it.
 const QUIET: Duration = Duration::from_secs(60);
 
-/// The JavaScript the fake model asks Codex's code-mode `exec` tool to run,
-/// as a JSON string. It runs a command, which writes `tool-ran` in Codex's
-/// working directory.
-const MODEL_TOOL: &str =
-    r#""text(JSON.stringify(await tools.exec_command({cmd: \"echo the tool ran > tool-ran\"})));""#;
+/// The command the fake model's tool runs, unless `<directory>/command`
+/// names another. It writes `tool-ran` in Codex's working directory.
+const COMMAND: &str = "echo the tool ran > tool-ran";
 
 /// Where each line that reached the upstream is noted.
 type Seen = Arc<Mutex<File>>;
 
-/// Where each HTTPS request is kept whole, and how many came so far.
+/// Where each HTTPS request is kept whole, how many came so far, and the
+/// file that can name the command the fake model's tool runs.
 struct Requests {
     directory: PathBuf,
     count: AtomicUsize,
+    command: PathBuf,
 }
 
 impl Requests {
@@ -105,6 +106,7 @@ fn serve(directory: &Path) -> io::Result<()> {
     let requests = Arc::new(Requests {
         directory: directory.join("requests"),
         count: AtomicUsize::new(0),
+        command: directory.join("command"),
     });
     fs::create_dir_all(&requests.directory)?;
 
@@ -209,7 +211,13 @@ fn https(
         (&mut stream).take(length).read_to_end(&mut request)?;
         requests.keep(&request)?;
         let answer = match model {
-            true => model_answer(&request[start..]),
+            true => {
+                let command = match fs::read_to_string(&requests.command) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => COMMAND.to_owned(),
+                    command => command?,
+                };
+                model_answer(&request[start..], &command)
+            }
             false => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
         };
         stream.get_mut().write_all(&answer)?;
@@ -217,17 +225,20 @@ fn https(
 }
 
 /// The fake model's answer to a request with this body, as a stream of
-/// server-sent events: a call of Codex's code-mode `exec` tool with
-/// [`MODEL_TOOL`], until the body holds the output of a tool's call, and then
-/// a message.
-fn model_answer(body: &[u8]) -> Vec<u8> {
+/// server-sent events: a call of Codex's code-mode `exec` tool that runs
+/// `command`, until the body holds the output of a tool's call, and then a
+/// message.
+fn model_answer(body: &[u8], command: &str) -> Vec<u8> {
     let answered = body
         .windows(b"_call_output\"".len())
         .any(|window| window == b"_call_output\"");
     let item = match answered {
         false => format!(
             r#"{{"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","namespace":"functions","name":"exec","status":"completed","input":{}}}"#,
-            MODEL_TOOL
+            quoted(&format!(
+                "text(JSON.stringify(await tools.exec_command({{cmd: {}}})));",
+                quoted(command)
+            ))
         ),
         true => r#"{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done","annotations":[]}]}"#.to_string(),
     };
@@ -259,6 +270,25 @@ fn model_answer(body: &[u8]) -> Vec<u8> {
     .into_bytes();
     answer.extend_from_slice(body.as_bytes());
     answer
+}
+
+/// `text` as a JSON string, which is also a JavaScript string.
+fn quoted(text: &str) -> String {
+    let mut quoted = String::from('"');
+    for character in text.chars() {
+        match character {
+            '"' | '\\' => {
+                quoted.push('\\');
+                quoted.push(character);
+            }
+            character if character.is_control() => {
+                quoted.push_str(&format!("\\u{:04x}", u32::from(character)));
+            }
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// This host's IPv4 address on its route out, which isn't a loopback

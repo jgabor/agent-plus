@@ -917,8 +917,9 @@ fn a_server_the_proxy_doesn_t_decrypt_can_be_asked_for_a_denied_name() {
     let (port, seen) = destination(Some(config));
     let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -denied.example\n");
     let mut guest = Guest::new(&rules, Vec::new(), port);
-    // The proxy reads the server name, and resets TLS that names the denied
-    // site, before the guest could see any certificate.
+    // The proxy reads the server name: TLS that names another site than
+    // the one the guest connected to is reset, before the guest could see
+    // any certificate.
     let handle = guest.connect();
     let mut tls = Guest::tls_for(&root, &[b"http/1.1"], "denied.example");
     let answer = guest.exchange(handle, Some(&mut tls), &get("/named"));
@@ -1660,7 +1661,12 @@ fn a_secret_s_bound_host_and_a_key_s_host_are_decrypted_to_inject_the_value() {
     let handle = guest.connect();
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
-    assert!(answer.is_err(), "{answer:?}");
+    assert!(
+        answer
+            .as_ref()
+            .is_err_and(|error| error.contains("certificate")),
+        "{answer:?}"
+    );
     // With either, the run's authority signs what the guest sees, and the
     // server gets the value.
     for injection in [bound_to(NAME), key_for(NAME)] {
@@ -1684,6 +1690,18 @@ fn a_secret_s_bound_host_and_a_key_s_host_are_decrypted_to_inject_the_value() {
 // spec(NETWORK): The other harness hosts stay an exfiltration path.
 #[test]
 fn a_harness_host_takes_a_key_the_agent_brought_itself() {
+    // Under `NETWORK -` alone, a harness host is allowed for being one.
+    let closed = Network::read(&parse("AGENT claude\nNETWORK -\n").unwrap()).unwrap();
+    let connection = ::net::Connection {
+        name: Some("api.example.com"),
+        address: "203.0.113.9".parse().unwrap(),
+        port: 443,
+        request: None,
+    };
+    let decided = ::net::proxied(&closed, &["api.example.com"], &connection);
+    assert!(matches!(decided, ::net::Proxied::Harness), "{decided:?}");
+    // A loopback destination needs its `+` rule, which plays the harness's
+    // allowance here.
     let (root, config) = server();
     let (port, seen) = recording(Some(config));
     let rules = format!("NETWORK -\nNETWORK +{NAME}\n");

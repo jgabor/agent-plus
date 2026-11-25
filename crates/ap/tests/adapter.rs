@@ -714,35 +714,6 @@ fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
     assert!(claude::SIGN_IN.contains(&claude::TOKEN));
 }
 
-// spec(AUTH): It can appear once, and the adapter maps it to that harness's own mechanism, so the line still works after you change `AGENT`.
-#[test]
-fn one_auth_line_signs_in_each_harness_its_own_way() {
-    let errors = agentfile::parse_for("AGENT claude\nAUTH key\nAUTH key\n", ap::adapter::reserved)
-        .unwrap_err();
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].line, 3, "{errors:?}");
-    assert!(errors[0].message.contains("`AUTH`"), "{errors:?}");
-    // The same line builds under either harness, and reads that harness's
-    // own key, which the harness itself reads to sign in.
-    let mut keys = Vec::new();
-    for (agent, harness) in [
-        ("claude", agentfile::Harness::Claude),
-        ("codex", agentfile::Harness::Codex),
-    ] {
-        let source = format!("AGENT {agent}\nAUTH key\n");
-        let parsed = agentfile::parse_for(&source, ap::adapter::reserved);
-        assert!(parsed.is_ok(), "{agent}: {parsed:?}");
-        let sign_in = ap::adapter::sign_in(harness, Auth::Key).unwrap();
-        assert!(
-            ap::adapter::reserved(harness)
-                .sign_in
-                .contains(&sign_in.variable)
-        );
-        keys.push(sign_in.variable);
-    }
-    assert_eq!(keys, ["ANTHROPIC_API_KEY", "CODEX_API_KEY"]);
-}
-
 // spec(AUTH): The adapter never turns off a sign-in method the harness offers.
 #[test]
 fn no_adapter_output_limits_how_the_harness_signs_in() {

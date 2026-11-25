@@ -2439,8 +2439,8 @@ fn under_network_plus_code_in_the_agent_can_send_the_token_anywhere() {
     });
     let token = "sk-ant-oat01-token-6b2e";
     let (run, name, _) = start_reporting(&scratch, "open", &[("CLAUDE_CODE_OAUTH_TOKEN", token)]);
-    // A program that isn't the harness reads the token from the harness's
-    // environment, and sends it out.
+    // A program other than the harness reads the token, as any process in
+    // the agent can, and sends it out.
     let script = format!(
         "token=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' \
          | grep -m1 '^CLAUDE_CODE_OAUTH_TOKEN=')\n\

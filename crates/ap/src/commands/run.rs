@@ -984,6 +984,12 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         .collect::<Result<_, _>>()?;
     let merged = agentfile::with_typed_network(&instructions, &rules).map_err(unreadable)?;
     Network::read(&merged).map_err(unreadable)?;
+    // The build checked the rules against the harness's own hosts, and so
+    // does the run, with the rules it adds.
+    let errors = agentfile::reserved(&merged, &ap::adapter::reserved(harness));
+    if !errors.is_empty() {
+        return Err(unreadable(errors));
+    }
     // A build records that the agent has a `PROMPT`, though not the text,
     // which only the guest reads.
     let built_prompt = record

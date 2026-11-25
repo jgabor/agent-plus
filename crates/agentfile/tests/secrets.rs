@@ -882,3 +882,63 @@ fn parse_for_checks_the_agents_own_harness() {
     let parsed = parse_for(&claude, adapter);
     assert!(parsed.is_ok(), "{parsed:?}");
 }
+
+// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+#[test]
+fn a_rule_that_would_decrypt_a_harness_host_fails_on_its_line() {
+    for (rules, line, rule) in [
+        (
+            "NETWORK +https://api.harness.example/v1",
+            2,
+            "+https://api.harness.example/v1",
+        ),
+        (
+            "NETWORK -http://API.harness.example:8080/",
+            2,
+            "-http://API.harness.example:8080/",
+        ),
+        (
+            "NETWORK +harness.example\nNETWORK -other.harness.example",
+            3,
+            "-other.harness.example",
+        ),
+        (
+            "NETWORK -https://other.harness.example/x\nNETWORK +harness.example:443",
+            2,
+            "-https://other.harness.example/x",
+        ),
+    ] {
+        let errors = reserved_errors(rules);
+        assert_eq!(lines_of(&errors), [line], "{rules}: {errors:?}");
+        let message = &errors[0].message;
+        assert!(message.contains(&format!("`{rule}`")), "{message}");
+        assert!(message.contains("`api.harness.example`"), "{message}");
+        assert!(message.contains("Harness's own hosts"), "{message}");
+    }
+}
+
+// spec(NETWORK): A rule set that would need it, such as a URL rule for a harness host or `-console.anthropic.com` under `+anthropic.com`, is a build error, because those connections can carry your subscription sign-in.
+#[test]
+fn rules_that_decrypt_no_harness_host_pass() {
+    for rules in [
+        "NETWORK +https://harness.example/v1",
+        "NETWORK +https://sub.api.harness.example/v1",
+        "NETWORK +other.example\nNETWORK -sub.other.example",
+        // The `-` rule decides the harness host, so nothing decrypts it.
+        "NETWORK +harness.example\nNETWORK -api.harness.example",
+        // A narrower `+` rule decides it, with no `-` rule under that.
+        "NETWORK +harness.example\nNETWORK +api.harness.example\nNETWORK -other.harness.example",
+        // Under `NETWORK +`, a `-` rule on its own never decrypts.
+        "NETWORK -other.harness.example",
+        // A broader `-` rule allows nothing to decrypt.
+        "NETWORK -harness.example\nNETWORK +api.harness.example",
+        // A connection keeps its port, so a `-` rule for another port of the
+        // same name needs nothing decrypted.
+        "NETWORK -\nNETWORK +api.harness.example\nNETWORK -api.harness.example:22",
+        // The rules tie, so they deny.
+        "NETWORK +harness.example\nNETWORK -harness.example\nNETWORK -other.harness.example",
+    ] {
+        let errors = reserved_errors(rules);
+        assert!(errors.is_empty(), "{rules}: {errors:?}");
+    }
+}

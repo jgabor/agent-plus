@@ -110,9 +110,10 @@ pub struct Reserved<'a> {
 }
 
 /// The errors from an `ENV` that sets a key in `reserved`, or that reads
-/// the key `AUTH key` hides, and from a `SECRET` that uses one of those names
-/// or binds one of the harness's hosts, in line order. It skips the
-/// instructions that have errors of their own.
+/// the key `AUTH key` hides, from a `SECRET` that uses one of those names or
+/// binds one of the harness's hosts, and from `NETWORK` rules that would
+/// decrypt one of those hosts, in line order. It skips the instructions that
+/// have errors of their own.
 pub fn reserved(instructions: &[Instruction], reserved: &Reserved) -> Vec<Error> {
     let harness = reserved.harness;
     let auth_key = instructions
@@ -170,6 +171,12 @@ pub fn reserved(instructions: &[Instruction], reserved: &Reserved) -> Vec<Error>
             message,
         });
     }
+    errors.extend(crate::network::decrypting(
+        instructions,
+        harness,
+        reserved.hosts,
+    ));
+    errors.sort_by_key(|error| error.line);
     errors
 }
 

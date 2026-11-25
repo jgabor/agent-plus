@@ -345,6 +345,32 @@ pub(crate) fn decrypting(
         .collect();
     let shown = |at: usize| written[at].arguments[0].as_str();
     let (ports, _) = network.cases();
+    // For each harness host that no URL rule names, each port that a name
+    // rule allows it on, with the `+` host rules it is under on that port,
+    // in rule order. It doesn't depend on the `-` rule, so it is found once.
+    let covered: Vec<(String, Vec<Vec<usize>>)> = (hosts.iter())
+        .map(|own| own.to_ascii_lowercase())
+        .filter(|own| !url_host(&network, own))
+        .map(|own| {
+            let broad = (ports.iter().copied())
+                .filter(|&port| {
+                    network.name_decision(&own, Scheme::Https, port, "/") == Some(Sign::Allow)
+                })
+                .map(|port| {
+                    (network.rules.iter().enumerate())
+                        .filter(|(_, broad)| {
+                            broad.sign == Sign::Allow
+                                && matches!(&broad.destination, Destination::Host { name: broader, port: at }
+                                    if (own == *broader || under(&own, broader))
+                                        && at.is_none_or(|at| at == port))
+                        })
+                        .map(|(at, _)| at)
+                        .collect()
+                })
+                .collect();
+            (own, broad)
+        })
+        .collect();
     let mut errors = Vec::new();
     for (at, narrow) in network.rules.iter().enumerate() {
         let own = |name: &str| (hosts.iter()).find(|own| own.eq_ignore_ascii_case(name));
@@ -371,24 +397,10 @@ pub(crate) fn decrypting(
                     }
                     _ => false,
                 };
-                let found = hosts.iter().find_map(|own| {
-                    let own = own.to_ascii_lowercase();
-                    if url_host(&network, &own) {
-                        return None;
-                    }
-                    let allowed = |port: u16| {
-                        network.name_decision(&own, Scheme::Https, port, "/") == Some(Sign::Allow)
-                    };
-                    (ports.iter().copied().filter(|&port| allowed(port)))
-                        .find_map(|port| {
-                            (network.rules.iter()).position(|broad| {
-                                narrower(broad)
-                                    && matches!(&broad.destination, Destination::Host { name: broader, port: at }
-                                        if (own == *broader || under(&own, broader))
-                                            && at.is_none_or(|at| at == port))
-                            })
-                        })
-                        .map(|broad| (own, broad))
+                let found = covered.iter().find_map(|(own, by_port)| {
+                    (by_port.iter().flatten())
+                        .find(|&&broad| narrower(&network.rules[broad]))
+                        .map(|&broad| (own, broad))
                 });
                 let Some((own, broad)) = found else {
                     continue;

@@ -596,9 +596,9 @@ fn wait_for_hang_up(stream: &UnixStream) {
     {}
 }
 
-/// macOS has no `POLLRDHUP`, and no stand-in for it yet. The run process
-/// doesn't start there, so nothing waits here, and this returns at once,
-/// as if the other end had hung up.
+/// macOS has no `POLLRDHUP`, and no stand-in for it yet. `ap run` fails
+/// there before it serves `ap exec`, so nothing waits here, and this
+/// returns at once, as if the other end had hung up.
 #[cfg(target_os = "macos")]
 fn wait_for_hang_up(_stream: &UnixStream) {}
 

@@ -378,6 +378,31 @@ fn a_count_level_with_the_base_record_passes() {
     assert!(stdout(&output).contains("pass hills\n"));
 }
 
+/// A level spec count is fine for the gate, and tells the worker what the
+/// merge will need.
+#[test]
+fn a_level_spec_count_says_the_pr_needs_a_hill_line() {
+    let line = "Hill: none, <reason>";
+    for (proven, says) in [(1, true), (0, false)] {
+        let record = record_with_proven(proven);
+        let repo = Repo::new(
+            &format!("hills-line-{proven}"),
+            CHECK_ONE,
+            &[("harness/ledger/1.toml", record.as_str())],
+        );
+        let output = repo.gate();
+        assert_passes(&output);
+        assert_eq!(stderr(&output).contains(line), says, "{}", stderr(&output));
+        if says {
+            assert!(
+                stderr(&output).contains("unless the journey or a budget rises"),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
+}
+
 #[test]
 fn with_no_record_the_base_scores_zero() {
     let repo = Repo::new("hills-none", NO_CHECK, &[]);

@@ -182,6 +182,11 @@ fn compare_with_base(
             score.proven
         );
     }
+    if merging.is_none() && score.proven == floor {
+        eprintln!(
+            "hills: the spec count is level with the base's at {floor}, so the PR body needs a `Hill: none, <reason>` line unless the journey or a budget rises"
+        );
+    }
     record("hills", score.proven >= floor || allowed, failed);
     Ok(())
 }

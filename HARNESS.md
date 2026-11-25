@@ -109,7 +109,8 @@ A new sentence raises a denominator, which doesn't lower a hill.
 
 A PR raises at least one count and lowers none. A PR for tooling or seams that
 can't raise one carries a `Hill: none, <reason>` line in its body, which
-`cargo xtask merge` requires and the reviewer confirms.
+`cargo xtask merge` requires and the reviewer confirms. A `Hill:` line that
+gives no reason fails the merge, whatever the counts do.
 
 ### Spec coverage
 
@@ -298,8 +299,16 @@ its default model.
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
 change can affect a budget that the bench measures when its diff touches
-`crates/`, `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`,
-`rust-toolchain.toml`, `harness/budgets.toml`, or `xtask/src/bench.rs`.
+`.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
+`harness/budgets.toml`, `xtask/src/bench.rs`, or what `ap` and
+`fake-harness` are built from under `crates/`. Under `crates/`, neither is
+built from a package's `tests/` directory, or from the packages `t1`, `t2`,
+`fuzz`, `fake-upstream`, and `fake-vm`. Every other path there counts, and a
+test fails when a package is on neither side of that rule.
+
+**Level spec count.** When the spec count is level with its base's, the gate
+says that the PR body needs a `Hill: none, <reason>` line unless the journey
+or a budget rises, and still passes.
 
 **Adapter changes.** A change is an adapter change when the tree, with its
 untracked files, differs from its base under `crates/ap/src/adapter/`,
@@ -568,7 +577,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask prepare <pr> [--keep-budgets] [--thread <link>]` | Runs the [merge sequence](#merge-sequence) up to the squash, under the rules for the owner |
 | `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
-| `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
+| `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` outside `xtask/tests/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
 | `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
@@ -723,7 +732,9 @@ a parent is the owner's.
 2. Read the issue, the sentences it names, and the base scores.
 3. Write the check, and record it failing.
 4. Make the smallest change that passes.
-5. Run the gate, and the bench if a budget can be affected.
+5. Run the gate, and the bench if a budget can be affected. When the gate
+   says the spec count is level, add a `Hill: none, <reason>` line to the PR
+   body before `merge`, unless the journey or a budget rises.
 6. If a floor failed, or no count rose and the PR has no `Hill: none` line,
    revert and try again, within the attempt limit. Past the limit, park the
    issue.
@@ -782,33 +793,41 @@ holds a lock on a file beside its tree. `merge` and `prepare` remove each tree
 of the repository whose lock no live run holds, which is what a killed run
 leaves, in either place.
 
-A PR that changes `xtask/` is proven twice. `main`'s xtask proves it, so that
-it can't pass by changing its judge. The xtask of its rebased tree proves it
-too, through its `prove` command, so that the record says what `main` will
-measure after the merge. It must pass both, and its record is its own xtask's.
-Merging accepts what either accepts, and the comment marks what only `main`'s
-accepts. A PR that changes a file xtask reads together with the code that
-reads it, or how `prove` is called, still has to be staged: teach the reader
-first, and change the file in a later PR.
+A PR that changes `xtask/` outside `xtask/tests/` is proven twice. `main`'s
+xtask proves it, so that it can't pass by changing its judge. The xtask of its
+rebased tree proves it too, through its `prove` command, so that the record says
+what `main` will measure after the merge. It must pass both, and its record is
+its own xtask's. Merging accepts what either accepts, and the comment marks what
+only `main`'s accepts. A PR that changes a file xtask reads together with the
+code that reads it, or how `prove` is called, still has to be staged: teach the
+reader first, and change the file in a later PR.
 
 1. `merge` refuses a PR unless its issue has `auto:merge`. All three commands
    refuse a PR that comes from a fork, doesn't close exactly one issue, doesn't
    target `main`, or has changes requested. `merge` and `prepare` refuse a
    thread that doesn't hold the issue's live claim.
+   `merge` and `prepare` then fetch `main` and the branch into refs of their
+   own, with no tags and no maintenance, so that the fetch takes no lock the
+   merge in the slot needs. They compare `main` with the tree that merging the
+   branch into it makes, and fail a PR that step 4 would fail before its gate,
+   with the words step 4 uses, and post `failure` on the branch's head. The
+   xtask that starts a command can be any, so this only saves a wait. `main`'s
+   xtask checks again in step 4, and decides.
 2. Take the merge slot, and read the PR again.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased
    head, the journey without `spend` steps, and the bench if a budget can be
-   affected. If the PR changes `xtask/`, its own xtask then runs them too. A
-   lowered count fails `merge`, and passes `prepare`. So does a PR that
-   [waits for the owner](#what-waits-for-the-owner), and `merge` fails it
-   before the gate runs. A PR with no `Hill: none` line fails before the gate
-   runs too, if it changes only paths that no count comes from: `AGENTS.md`,
-   `HARNESS.md`, `harness/tasks/`, `.github/`, and `xtask/tests/`. An exact
-   revert under `prepare` skips the bench, because its base may be what
-   doesn't build. If the rebase or this proof fails, the command posts
-   `failure` on the branch's current head and pushes nothing.
+   affected. If the PR changes `xtask/` outside `xtask/tests/`, its own xtask
+   then runs them too. A lowered count fails `merge`, and passes `prepare`. So
+   does a PR that [waits for the owner](#what-waits-for-the-owner), and `merge`
+   fails it before the gate runs. A PR with no `Hill: none, <reason>` line fails
+   before the gate runs too, if its `Hill:` line gives no reason, or if it
+   changes only paths that no count comes from: `AGENTS.md`, `HARNESS.md`,
+   `harness/tasks/`, `.github/`, and `xtask/tests/`. An exact revert under
+   `prepare` skips the bench, because its base may be what doesn't build. If the
+   rebase or this proof fails, the command posts `failure` on the branch's
+   current head and pushes nothing.
 5. Read the PR again, and stop if it would now be refused or `main` has moved.
    Commit the ledger record, whose `commit` is the gated head and whose `base`
    is the `main` it was tested on, and push with `--force-with-lease`.
@@ -960,10 +979,10 @@ proof of `main` in its own fold. `refresh` appends a table to
 took. Under the table, a line for each proven PR that stays open says why.
 Elsewhere it prints no fold markers and writes no summary.
 
-Each `prepare` proves its PR with the xtask of the `main` it fetched, as in
-the [merge sequence](#merge-sequence), so a PR that changes `xtask/` is proven
-both ways here too. If `main` moves during a run, the rest are proven on the
-newer `main`.
+Each `prepare` proves its PR with the xtask of the `main` it fetched, as in the
+[merge sequence](#merge-sequence), so a PR that changes `xtask/` outside
+`xtask/tests/` is proven both ways here too. If `main` moves during a run, the
+rest are proven on the newer `main`.
 
 ### Runner gate
 

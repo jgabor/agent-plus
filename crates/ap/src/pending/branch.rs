@@ -553,7 +553,7 @@ fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     };
     let name = CString::new(path).map_err(io::Error::other)?;
     // With `O_PATH` and `O_NOFOLLOW`, a symlink at the end opens as itself.
-    let flags = libc::O_PATH | libc::O_NOFOLLOW;
+    let flags = O_PATH | libc::O_NOFOLLOW;
     let fd = match openat2(dir.as_raw_fd(), &name, flags, BENEATH) {
         Ok(fd) => fd,
         Err(error) => match error.raw_os_error() {

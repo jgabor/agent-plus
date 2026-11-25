@@ -5,7 +5,9 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -979,6 +981,7 @@ fn open_udp(addresses: &[IpAddr], port: u16) -> Option<UdpSocket> {
 
 /// A non-blocking socket of `kind` that connects to `to`. A TCP connect
 /// goes on after this returns.
+#[cfg(target_os = "linux")]
 fn open(to: SocketAddr, kind: libc::c_int) -> io::Result<OwnedFd> {
     let (family, address, length) = sockaddr(to);
     // SAFETY: a plain call, whose result is checked.
@@ -999,7 +1002,15 @@ fn open(to: SocketAddr, kind: libc::c_int) -> io::Result<OwnedFd> {
     Ok(socket)
 }
 
+/// macOS has no `SOCK_NONBLOCK` or `SOCK_CLOEXEC`, and no stand-in for them
+/// yet.
+#[cfg(target_os = "macos")]
+fn open(_to: SocketAddr, _kind: libc::c_int) -> io::Result<OwnedFd> {
+    Err(crate::not_on_macos())
+}
+
 /// `address` as the socket address that `connect` takes.
+#[cfg(target_os = "linux")]
 fn sockaddr(address: SocketAddr) -> (libc::c_int, libc::sockaddr_storage, libc::socklen_t) {
     // SAFETY: an all-zero `sockaddr_storage` is valid.
     let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };

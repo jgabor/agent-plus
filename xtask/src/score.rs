@@ -82,7 +82,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
     let mut quoted = HashMap::new();
     let mut findings = Vec::new();
     // The gate runs T2 only for an adapter change, so a promise that only a
-    // T2 check quotes would leave the score whenever T2 doesn't run.
+    // T2 check proves would leave the score whenever T2 doesn't run.
     let mut in_t2: HashMap<Sentence, (String, usize)> = HashMap::new();
     let mut elsewhere = HashSet::new();
     let mut promises = units.clone();
@@ -144,7 +144,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                         in_t2
                             .entry(key.clone())
                             .or_insert_with(|| (shown.clone(), quote.line));
-                    } else if !package.fake {
+                    } else if passed && !package.fake {
                         elsewhere.insert(key.clone());
                     }
                     if passed && !package.fake {
@@ -169,7 +169,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             && !elsewhere.contains(sentence)
         {
             findings.push(format!(
-                "{shown}:{line}: only a {T2_PACKAGE} check quotes this sentence under `{}`: {}. The gate runs {T2_PACKAGE} only for an adapter change, so add a check in another tier",
+                "{shown}:{line}: no passing check outside {T2_PACKAGE} proves this sentence under `{}`: {}. The gate runs {T2_PACKAGE} only for an adapter change, so add a check in another tier",
                 sentence.0, sentence.1
             ));
         }

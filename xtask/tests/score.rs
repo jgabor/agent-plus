@@ -132,3 +132,12 @@ fn a_check_linked_to_a_fake_is_not_another_tier() {
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("another tier"), "{stderr}");
 }
+
+#[test]
+fn an_ignored_check_is_not_another_tier() {
+    let ignored = "// spec(A): One.\n#[test]\n#[ignore]\nfn one() {}\n";
+    let root = with_packages("t2-and-ignored", &[("t2", CHECK_ONE), ("demo", ignored)]);
+    let (code, _, stderr) = score_in(&root);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("another tier"), "{stderr}");
+}

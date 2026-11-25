@@ -3,7 +3,7 @@
 
 use guest::linux::Linux;
 use guest::{MOUNTS, System};
-use std::ffi::{c_int, c_long, c_ulong};
+use std::ffi::{c_int, c_ulong};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -57,7 +57,7 @@ unsafe extern "C" {
     fn setgid(gid: u32) -> c_int;
     fn setuid(uid: u32) -> c_int;
     fn unshare(flags: c_int) -> c_int;
-    fn prctl(option: c_int, ...) -> c_long;
+    fn prctl(option: c_int, ...) -> c_int;
 }
 
 fn main() {
@@ -81,9 +81,9 @@ fn main() {
     if UnixStream::pair().is_ok() {
         report.push_str(" unix");
     }
-    // Codex's sandbox, as the agent's user: bubblewrap puts a command in new
-    // user, PID, IPC, and network namespaces, and Codex filters its system
-    // calls with seccomp.
+    // Codex's sandbox, unprivileged as the agent is: bubblewrap puts a
+    // command in new user, PID, IPC, and network namespaces, and Codex
+    // filters its system calls with seccomp.
     for (name, flag) in NAMESPACES {
         if as_nobody(|| unsafe { unshare(CLONE_NEWUSER | flag) } == 0) {
             report.push_str(&format!(" {name}"));
@@ -116,7 +116,7 @@ fn main() {
 
 /// Whether `probe` succeeds in a child that runs as `nobody`, so that what it
 /// changes leaves the init as it was. The init has one thread, so the child
-/// can do anything.
+/// that `fork` makes is in a consistent state.
 fn as_nobody(probe: impl Fn() -> bool) -> bool {
     unsafe {
         let pid = fork();

@@ -4,7 +4,6 @@
 
 use http::Request;
 use tokio::io::duplex;
-use tokio::sync::mpsc;
 
 #[test]
 fn two_requests_on_one_connection_reach_the_server() {
@@ -13,12 +12,12 @@ fn two_requests_on_one_connection_reach_the_server() {
         .expect("runtime");
     let seen = runtime.block_on(async {
         let (client_io, server_io) = duplex(64 * 1024);
-        let (tx, mut rx) = mpsc::unbounded_channel();
 
         let server = tokio::spawn(async move {
             let mut connection = h2::server::handshake(server_io)
                 .await
                 .expect("server handshake");
+            let mut seen = Vec::new();
             while let Some(stream) = connection.accept().await {
                 let (request, mut respond) = stream.expect("accept stream");
                 let authority = request.uri().authority().map(|a| a.as_str().to_owned());
@@ -26,12 +25,13 @@ fn two_requests_on_one_connection_reach_the_server() {
                     .uri()
                     .path_and_query()
                     .map(|p| p.as_str().to_owned());
-                tx.send((authority, path)).expect("record request");
+                seen.push((respond.stream_id().as_u32(), authority, path));
                 let response = http::Response::new(());
                 respond
                     .send_response(response, true)
                     .expect("send response");
             }
+            seen
         });
 
         let (client, connection) = h2::client::handshake(client_io)
@@ -57,20 +57,18 @@ fn two_requests_on_one_connection_reach_the_server() {
         }
         drop(client);
         driver.await.expect("client driver");
-        server.await.expect("server");
-
-        let mut seen = Vec::new();
-        while let Ok(entry) = rx.try_recv() {
-            seen.push(entry);
-        }
-        seen
+        server.await.expect("server")
     });
 
     assert_eq!(
         seen,
         [
-            (Some("example.test".to_owned()), Some("/one".to_owned())),
-            (Some("example.test".to_owned()), Some("/two?x=1".to_owned())),
+            (1, Some("example.test".to_owned()), Some("/one".to_owned())),
+            (
+                3,
+                Some("example.test".to_owned()),
+                Some("/two?x=1".to_owned())
+            ),
         ]
     );
 }

@@ -15,7 +15,7 @@ rustls = { version = "0.23", default-features = false, features = ["std"] }
 h2 = { version = "0.4.20", default-features = false }
 http = { version = "1", default-features = false }
 rustls-graviola = "0.4"
-tokio = { version = "1", default-features = false, features = ["rt", "io-util", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt", "io-util"] }
 
 [lints]
 workspace = true

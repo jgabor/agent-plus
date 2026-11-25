@@ -2193,6 +2193,11 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
             let (filled, _) = credentials(&scratch, &name, variable, host);
             assert_eq!(filled, "status 128\n", "{host}");
         }
+        // No file holds the value.
+        let search = format!(
+            "grep -rlsaF -D skip --exclude-dir=proc --exclude-dir=sys -- {VALUE} / | wc -l"
+        );
+        printed(&scratch.exec(&name, &["sh", "-c", &search], b""), "0\n");
         drop(run);
     }
     // A token bound only to another host configures nothing.

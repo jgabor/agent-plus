@@ -1,6 +1,6 @@
 //! Boots the pinned kernel, and checks in the guest that it has what a run
-//! mounts and drives, what a harness needs to start, and the transport for
-//! shares.
+//! mounts and drives, what a harness needs to start and to sandbox its
+//! commands, and the transport for shares.
 
 use std::fs;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use vmm::{GuestMemory, Stop, Vm, boot};
 const MEMORY: usize = 256 << 20;
 const TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_LINE: &str = "console=ttyS0 reboot=t";
-const NEEDED: [&str; 8] = [
+const NEEDED: [&str; 13] = [
     "erofs",
     "overlay",
     "tmpfs",
@@ -21,10 +21,16 @@ const NEEDED: [&str; 8] = [
     "unix",
     "fuse",
     "virtiofs",
+    "user_ns",
+    "pid_ns",
+    "ipc_ns",
+    "net_ns",
+    "seccomp_filter",
 ];
 
+// spec(MODE): Every Codex mode except `full` relies on Codex's own sandbox, so the guest kernel has to support that sandbox.
 #[test]
-fn the_guest_has_erofs_overlay_tmpfs_devpts_virtio_blk_unix_sockets_and_virtio_fs() {
+fn the_guest_kernel_has_what_runs_shares_and_harnesses_need() {
     let image = fs::read(kernel::vmlinux()).unwrap();
     let init = fs::read(guest_binary::build("features-init")).unwrap();
     let initramfs = initramfs::build(&[Entry::File {

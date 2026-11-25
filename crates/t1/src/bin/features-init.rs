@@ -3,6 +3,7 @@
 
 use guest::linux::Linux;
 use guest::{MOUNTS, System};
+use std::ffi::{c_int, c_long, c_ulong};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
@@ -11,6 +12,53 @@ use std::thread;
 use std::time::Duration;
 
 const FLUSH: Duration = Duration::from_secs(1);
+
+/// `nobody`, which can make the namespaces only if the kernel lets anyone.
+const NOBODY: u32 = 65534;
+const CLONE_NEWUSER: c_int = 0x1000_0000;
+const NAMESPACES: [(&str, c_int); 4] = [
+    ("user_ns", 0),
+    ("pid_ns", 0x2000_0000),
+    ("ipc_ns", 0x0800_0000),
+    ("net_ns", 0x4000_0000),
+];
+const PR_SET_SECCOMP: c_int = 22;
+const PR_SET_NO_NEW_PRIVS: c_int = 38;
+const SECCOMP_MODE_FILTER: c_ulong = 2;
+/// `BPF_RET | BPF_K` returning `SECCOMP_RET_ALLOW`: a filter that allows
+/// every system call.
+const ALLOW: SockFilter = SockFilter {
+    code: 0x06,
+    jt: 0,
+    jf: 0,
+    k: 0x7fff_0000,
+};
+
+/// `struct sock_filter`.
+#[repr(C)]
+struct SockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+/// `struct sock_fprog`.
+#[repr(C)]
+struct SockFprog {
+    len: u16,
+    filter: *const SockFilter,
+}
+
+unsafe extern "C" {
+    fn fork() -> c_int;
+    fn _exit(status: c_int) -> !;
+    fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
+    fn setgid(gid: u32) -> c_int;
+    fn setuid(uid: u32) -> c_int;
+    fn unshare(flags: c_int) -> c_int;
+    fn prctl(option: c_int, ...) -> c_long;
+}
 
 fn main() {
     let mut system = Linux;
@@ -33,6 +81,27 @@ fn main() {
     if UnixStream::pair().is_ok() {
         report.push_str(" unix");
     }
+    // Codex's sandbox, as the agent's user: bubblewrap puts a command in new
+    // user, PID, IPC, and network namespaces, and Codex filters its system
+    // calls with seccomp.
+    for (name, flag) in NAMESPACES {
+        if as_nobody(|| unsafe { unshare(CLONE_NEWUSER | flag) } == 0) {
+            report.push_str(&format!(" {name}"));
+        }
+    }
+    let filter = SockFprog {
+        len: 1,
+        filter: &ALLOW,
+    };
+    // `prctl` reads every argument after the option as an `unsigned long`.
+    let (on, unused): (c_ulong, c_ulong) = (1, 0);
+    let filters = || unsafe {
+        prctl(PR_SET_NO_NEW_PRIVS, on, unused, unused, unused) == 0
+            && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const filter) == 0
+    };
+    if as_nobody(filters) {
+        report.push_str(" seccomp_filter");
+    }
     report.push_str(" end");
     OpenOptions::new()
         .write(true)
@@ -43,4 +112,19 @@ fn main() {
     // own, which power off can cut short.
     thread::sleep(FLUSH);
     system.power_off().expect("the init should power off");
+}
+
+/// Whether `probe` succeeds in a child that runs as `nobody`, so that what it
+/// changes leaves the init as it was. The init has one thread, so the child
+/// can do anything.
+fn as_nobody(probe: impl Fn() -> bool) -> bool {
+    unsafe {
+        let pid = fork();
+        if pid == 0 {
+            let dropped = setgid(NOBODY) == 0 && setuid(NOBODY) == 0;
+            _exit(if dropped && probe() { 0 } else { 1 });
+        }
+        let mut status = 0;
+        pid > 0 && waitpid(pid, &mut status, 0) == pid && status == 0
+    }
 }

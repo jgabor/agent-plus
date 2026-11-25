@@ -583,6 +583,7 @@ impl Execs {
 
 /// Waits until the other end of `stream` hangs up, or this end shuts down.
 /// It reads nothing, so what waits in the stream stays for its reader.
+#[cfg(target_os = "linux")]
 fn wait_for_hang_up(stream: &UnixStream) {
     let mut watched = libc::pollfd {
         fd: stream.as_raw_fd(),
@@ -593,6 +594,29 @@ fn wait_for_hang_up(stream: &UnixStream) {
     while unsafe { libc::poll(&mut watched, 1, -1) } < 0
         && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
     {}
+}
+
+/// macOS has no `POLLRDHUP`, and no stand-in for it yet. The run process
+/// doesn't start there, so nothing waits here, and this returns at once,
+/// as if the other end had hung up.
+#[cfg(target_os = "macos")]
+fn wait_for_hang_up(_stream: &UnixStream) {}
+
+/// Asks for this process to be killed when the thread that started it
+/// ends.
+#[cfg(target_os = "linux")]
+fn die_with_parent() -> io::Result<()> {
+    // SAFETY: a plain call that takes and returns integers.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// macOS has no `PR_SET_PDEATHSIG`, and no stand-in for it yet.
+#[cfg(target_os = "macos")]
+fn die_with_parent() -> io::Result<()> {
+    Err(crate::not_on_macos())
 }
 
 /// The run process: `ap` started as [`RUN_PROCESS`] by the `ap run` whose
@@ -613,11 +637,8 @@ pub fn run_process(args: &[OsString]) -> u8 {
     let parent = args
         .first()
         .and_then(|arg| arg.to_str()?.parse::<libc::pid_t>().ok());
-    // SAFETY: both calls take and return plain integers.
-    let orphaned = unsafe {
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0
-            || Some(libc::getppid()) != parent
-    };
+    // SAFETY: `getppid` takes nothing, and returns a plain integer.
+    let orphaned = die_with_parent().is_err() || Some(unsafe { libc::getppid() }) != parent;
     if args.len() < 6 || orphaned {
         // `ap run` exited before its death could stop this process.
         return 125;

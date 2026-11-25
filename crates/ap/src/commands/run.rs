@@ -391,8 +391,7 @@ const SERVER_WAIT: Duration = Duration::from_secs(10);
 /// Waits for `child` to exit, and kills it if it hasn't by `deadline`.
 /// Without pidfds, it waits as long as `child` takes.
 fn wait_or_kill(child: &mut Child, deadline: Instant) {
-    // SAFETY: `pidfd_open` takes and returns plain integers.
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+    let fd = pidfd_open(child);
     if let Ok(fd) = i32::try_from(fd)
         && fd >= 0
     {
@@ -422,6 +421,19 @@ fn wait_or_kill(child: &mut Child, deadline: Instant) {
         }
     }
     let _ = child.wait();
+}
+
+/// A new pidfd for `child`, or -1 where the kernel has none.
+#[cfg(target_os = "linux")]
+fn pidfd_open(child: &Child) -> libc::c_long {
+    // SAFETY: `pidfd_open` takes and returns plain integers.
+    unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) }
+}
+
+/// macOS has no pidfds, and no stand-in for them yet.
+#[cfg(target_os = "macos")]
+fn pidfd_open(_child: &Child) -> libc::c_long {
+    -1
 }
 
 /// An error from `ap run`'s own work, in this context.
@@ -709,9 +721,11 @@ type Prepared = (
 );
 
 /// How many random bytes a placeholder has. It holds them in hex.
+#[cfg(target_os = "linux")]
 const PLACEHOLDER_BYTES: usize = 16;
 
 /// A new placeholder: random bytes from the kernel, in lowercase hex.
+#[cfg(target_os = "linux")]
 fn random_placeholder() -> io::Result<Vec<u8>> {
     let mut bytes = [0u8; PLACEHOLDER_BYTES];
     let mut filled = 0;
@@ -730,6 +744,12 @@ fn random_placeholder() -> io::Result<Vec<u8>> {
         .iter()
         .flat_map(|byte| format!("{byte:02x}").into_bytes())
         .collect())
+}
+
+/// macOS has no `getrandom`, and no stand-in for it yet.
+#[cfg(target_os = "macos")]
+fn random_placeholder() -> io::Result<Vec<u8>> {
+    Err(ap::not_on_macos())
 }
 
 /// Everything the run needs before its VM starts.

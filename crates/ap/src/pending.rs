@@ -409,7 +409,16 @@ const NO_SYMLINKS: u64 = 0x04 | 0x02;
 /// Those, and `RESOLVE_BENEATH`.
 const BENEATH: u64 = NO_SYMLINKS | 0x08;
 
+/// `O_PATH`, which opens a file to stat it, or to read it if it is a
+/// symlink, and not to read or write its content.
+#[cfg(target_os = "linux")]
+const O_PATH: i32 = libc::O_PATH;
+/// macOS has no `O_PATH`, and [`openat2`] fails there before it matters.
+#[cfg(target_os = "macos")]
+const O_PATH: i32 = 0;
+
 /// `struct open_how`.
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct OpenHow {
     flags: u64,
@@ -419,6 +428,7 @@ struct OpenHow {
 
 /// Opens `name` from `directory` with `openat2`, resolving it as `resolve`
 /// says.
+#[cfg(target_os = "linux")]
 fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<OwnedFd> {
     let how = OpenHow {
         flags: (flags | libc::O_CLOEXEC) as u64,
@@ -441,6 +451,12 @@ fn openat2(directory: i32, name: &CStr, flags: i32, resolve: u64) -> io::Result<
     }
     // SAFETY: the descriptor is new, and nothing else owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
+}
+
+/// macOS has no `openat2`, and no stand-in for it yet.
+#[cfg(target_os = "macos")]
+fn openat2(_directory: i32, _name: &CStr, _flags: i32, _resolve: u64) -> io::Result<OwnedFd> {
+    Err(crate::not_on_macos())
 }
 
 /// Your files in a share, each reached beneath the share's root and never
@@ -490,7 +506,7 @@ impl Host {
 
     /// What you have at `path`, as itself if it is a symlink.
     fn stat(&self, path: &[u8]) -> io::Result<Option<fs::Metadata>> {
-        match self.open(path, libc::O_PATH)? {
+        match self.open(path, O_PATH)? {
             Some(fd) => Ok(Some(File::from(fd).metadata()?)),
             None => Ok(None),
         }
@@ -498,7 +514,7 @@ impl Host {
 
     /// Your file at `path` now.
     fn yours(&self, path: &[u8]) -> io::Result<Yours> {
-        let Some(fd) = self.open(path, libc::O_PATH)? else {
+        let Some(fd) = self.open(path, O_PATH)? else {
             return Ok(Yours::None);
         };
         let metadata = File::from(fd.try_clone()?).metadata()?;
@@ -594,7 +610,9 @@ impl Host {
                         _ => 0o755,
                     };
                     // SAFETY: `name` is NUL-terminated, and outlives the call.
-                    let made = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode) } == 0;
+                    let made = unsafe {
+                        libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), mode as libc::mode_t)
+                    } == 0;
                     if !made {
                         let error = io::Error::last_os_error();
                         if error.kind() != io::ErrorKind::AlreadyExists {
@@ -609,12 +627,7 @@ impl Host {
                 }
                 // A symlink there is never followed, and says so.
                 Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {
-                    let found = openat2(
-                        dir.as_raw_fd(),
-                        &name,
-                        libc::O_PATH | libc::O_NOFOLLOW,
-                        BENEATH,
-                    );
+                    let found = openat2(dir.as_raw_fd(), &name, O_PATH | libc::O_NOFOLLOW, BENEATH);
                     return match found.and_then(|fd| File::from(fd).metadata()) {
                         Ok(metadata) if metadata.is_symlink() => {
                             Err(io::Error::from_raw_os_error(libc::ELOOP))
@@ -1592,7 +1605,9 @@ fn render(out: &mut Vec<u8>, path: &[u8], yours: Yours, theirs: Theirs) {
         (Some((old_mode, old)), Some((new_mode, new))) => {
             let (old_mode, new_mode) = (old_mode & 0o7777, new_mode & 0o7777);
             if old_mode != new_mode {
-                let file = libc::S_IFREG;
+                // Git's bits for a regular file, which a Mac's `S_IFREG`
+                // has too, but in a narrower type.
+                let file = 0o100000;
                 let line = format!(
                     "mode change {:o} => {:o} ",
                     file | old_mode,

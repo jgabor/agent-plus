@@ -6,6 +6,8 @@
 //! as `host.ap.internal`. Each fake destination notes the request line of
 //! every request that reaches it.
 
+#![cfg(target_os = "linux")]
+
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};

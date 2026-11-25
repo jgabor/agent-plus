@@ -182,6 +182,7 @@ fn receive_authority(lookups: BorrowedFd) -> io::Result<Vec<u8>> {
 
 /// A pair of connected sockets that keep message boundaries, and that a
 /// program this process starts doesn't inherit.
+#[cfg(target_os = "linux")]
 fn link() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
     // SAFETY: `fds` has room for the two descriptors the call writes.
@@ -198,6 +199,12 @@ fn link() -> io::Result<(OwnedFd, OwnedFd)> {
     }
     // SAFETY: both descriptors are new, and nothing else owns them.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// macOS has no `SOCK_CLOEXEC`, and no stand-in for it yet.
+#[cfg(target_os = "macos")]
+fn link() -> io::Result<(OwnedFd, OwnedFd)> {
+    Err(crate::not_on_macos())
 }
 
 /// The network process's main: its standard input is its link, its

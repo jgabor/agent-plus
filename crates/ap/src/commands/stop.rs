@@ -10,7 +10,9 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -92,6 +94,7 @@ fn stop(name: &str) -> Result<(), String> {
 /// the kernel names: its process id, and a pidfd for it where the kernel has
 /// them, so that no process that takes its id later is resumed in its
 /// place.
+#[cfg(target_os = "linux")]
 fn server(stream: &UnixStream) -> Option<(libc::pid_t, Option<OwnedFd>)> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -133,6 +136,7 @@ fn server(stream: &UnixStream) -> Option<(libc::pid_t, Option<OwnedFd>)> {
 /// Resumes this `ap run`, in case it is suspended. `SIGCONT` does nothing
 /// to one that runs, so a failure here holds back no stop that would reach
 /// the run anyway.
+#[cfg(target_os = "linux")]
 fn resume(serving: Option<&(libc::pid_t, Option<OwnedFd>)>) {
     let Some((pid, pidfd)) = serving else {
         return;
@@ -154,3 +158,14 @@ fn resume(serving: Option<&(libc::pid_t, Option<OwnedFd>)>) {
         )
     };
 }
+
+/// macOS has no `SO_PEERCRED` or pidfds, and no stand-in for them yet, so
+/// `ap stop` names no `ap run` there.
+#[cfg(target_os = "macos")]
+fn server(_stream: &UnixStream) -> Option<(libc::pid_t, Option<OwnedFd>)> {
+    None
+}
+
+/// With no `ap run` named, there is none to resume.
+#[cfg(target_os = "macos")]
+fn resume(_serving: Option<&(libc::pid_t, Option<OwnedFd>)>) {}

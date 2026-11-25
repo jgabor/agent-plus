@@ -18,6 +18,13 @@ pub mod runs;
 pub mod store;
 pub mod unified;
 
+/// What a call that only Linux has fails with on macOS, where `ap` doesn't
+/// run yet.
+#[cfg(target_os = "macos")]
+pub fn not_on_macos() -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, "ap doesn't run on macOS yet")
+}
+
 /// A running guest. The real implementation is the VMM, and lanes that need
 /// a guest before it exists build against `fake-vm`.
 pub trait Vm {

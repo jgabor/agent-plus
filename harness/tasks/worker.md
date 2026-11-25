@@ -27,7 +27,8 @@ can't continue alone, park the issue as AGENTS.md says.
 5. For the independent review, load `mcp__t3-code__delegate_task` and call it
    with `role` set to `review`, `mode` set to `wait`, and `timeoutMs` set to
    600000. Ask it to confirm that no decision a user could observe is left
-   only in the PR body. Give it a `target`, using the first of these that
+   only in the PR body, and that the PR moves no deciding code out of the
+   files that HARNESS.md's "What waits for the owner" lists. Give it a `target`, using the first of these that
    isn't blocked and works, and say in the PR which one ran. Each names the
    `to11y` harness and the scope its model draws on:
 

@@ -2,7 +2,7 @@
 //!
 //! The owner's merge is for awareness. A PR waits when it lowers the bar that
 //! later PRs are held to, or changes what this file decides. Everything else
-//! merges under `auto:merge`. A count that fell is compared in `merge.rs`.
+//! merges under `auto:merge`. A count that fell is compared in `accepts.rs`.
 
 use crate::toml::{self, Table, Value};
 use crate::{Problem, base, spec};
@@ -17,14 +17,47 @@ const GATE_TESTS: &str = "xtask/";
 /// A workflow runs with a token that can write, and a leaked token can't be
 /// changed afterwards.
 const WORKFLOWS: &str = ".github/";
-/// The code that decides what waits, and what a SPEC.md unit is. This file
-/// reads the budgets itself, so that a change to how they are measured doesn't
-/// wait.
-const DEFINES: [&str; 4] = [
-    "xtask/src/waits.rs",
-    "xtask/src/merge.rs",
+/// The code that decides what a merge accepts. A file decides when it says
+/// what waits for the owner, what a count or a floor is and whether one fell,
+/// which checks a proof runs, or what makes a check pass. This file reads the
+/// budgets itself, so that a change to how they are measured doesn't wait.
+const DECIDES: [&str; 11] = [
+    "xtask/src/accepts.rs",
+    "xtask/src/base.rs",
+    "xtask/src/floors.rs",
     "xtask/src/gate.rs",
+    "xtask/src/journey.rs",
+    "xtask/src/ledger.rs",
+    "xtask/src/readme.rs",
+    "xtask/src/score.rs",
     "xtask/src/spec.rs",
+    "xtask/src/testrun.rs",
+    "xtask/src/waits.rs",
+];
+/// The rest of `xtask/src/`, which runs what those decide, measures, or
+/// reports. A test fails while a file is on neither list.
+#[cfg(test)]
+const RUNS: [&str; 20] = [
+    "xtask/src/bench.rs",
+    "xtask/src/bisect.rs",
+    "xtask/src/forge.rs",
+    "xtask/src/fuzz.rs",
+    "xtask/src/gaps.rs",
+    "xtask/src/json.rs",
+    "xtask/src/limit.rs",
+    "xtask/src/lock.rs",
+    "xtask/src/main.rs",
+    "xtask/src/merge.rs",
+    "xtask/src/mirror.rs",
+    "xtask/src/mutation.rs",
+    "xtask/src/nightly.rs",
+    "xtask/src/refresh.rs",
+    "xtask/src/remove.rs",
+    "xtask/src/report.rs",
+    "xtask/src/roadmap.rs",
+    "xtask/src/toml.rs",
+    "xtask/src/work.rs",
+    "xtask/src/workspace.rs",
 ];
 
 /// Each reason that `head` waits for the owner, compared with `commit`.
@@ -75,7 +108,7 @@ pub fn reasons(root: &Path, commit: &str, head: &str) -> Result<Vec<String>, Pro
     for path in &changed {
         if path.starts_with(WORKFLOWS) {
             reasons.push(format!("it changes `{path}`"));
-        } else if DEFINES.contains(path) {
+        } else if DECIDES.contains(path) {
             reasons.push(format!(
                 "it changes `{path}`, which decides what waits for the owner"
             ));
@@ -231,4 +264,54 @@ fn tests_at(root: &Path, commit: &str) -> Result<usize, Problem> {
         .lines()
         .filter_map(|line| line.rsplit_once(':')?.1.parse::<usize>().ok())
         .sum())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DECIDES, RUNS};
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    /// A new file under `xtask/src/` has to be put on one side of the rule.
+    #[test]
+    fn every_file_under_xtask_src_decides_or_not() {
+        let root = crate::workspace::root().unwrap();
+        let mut named = 0;
+        for entry in fs::read_dir(root.join("xtask/src")).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            let path = format!("xtask/src/{name}");
+            let sides = [DECIDES.contains(&&*path), RUNS.contains(&&*path)];
+            assert_eq!(
+                sides.iter().filter(|side| **side).count(),
+                1,
+                "`{path}` must be in exactly one of `DECIDES` and `RUNS`"
+            );
+            named += 1;
+        }
+        assert_eq!(named, DECIDES.len() + RUNS.len());
+    }
+
+    /// HARNESS.md names the files that decide, in the item that says so.
+    #[test]
+    fn harness_md_lists_the_files_that_decide() {
+        let root = crate::workspace::root().unwrap();
+        let text = fs::read_to_string(root.join("HARNESS.md")).unwrap();
+        let (_, section) = text.split_once("### What waits for the owner").unwrap();
+        let item: String = section
+            .lines()
+            .skip_while(|line| !line.starts_with("- changes a file under `xtask/src/`"))
+            .enumerate()
+            .take_while(|(at, line)| *at == 0 || line.starts_with("  "))
+            .map(|(_, line)| format!("{line} "))
+            .collect();
+        let listed: BTreeSet<String> = item
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|name| name.ends_with(".rs"))
+            .map(|name| format!("xtask/src/{name}"))
+            .collect();
+        let decides: BTreeSet<String> = DECIDES.iter().map(|path| path.to_string()).collect();
+        assert_eq!(listed, decides);
+    }
 }

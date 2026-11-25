@@ -3,7 +3,7 @@
 
 use crate::forge::{Gh, OpenPr};
 use crate::work::LAND_NEEDED;
-use crate::{Problem, Verdict, base, lock, merge, workspace};
+use crate::{Problem, Verdict, accepts, base, lock, merge, workspace};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::OpenOptions;
@@ -277,10 +277,10 @@ fn merge_if_armed(root: &Path, gh: &Gh, pr: &OpenPr, head: &str) -> Result<Lande
 /// What this head's proof accepted that the comment before its own didn't
 /// list. A proof that accepted nothing left no comment for this head.
 fn newly_accepted(gh: &Gh, number: u64, head: &str) -> Result<Vec<String>, Problem> {
-    let lists = merge::acceptances(&gh.acceptances(number)?);
+    let lists = accepts::acceptances(&gh.acceptances(number)?);
     Ok(match lists.split_last() {
         Some(((at, accepted), earlier)) if at == head => {
-            merge::unapproved(earlier.last().map(|(_, reasons)| &reasons[..]), accepted)
+            accepts::unapproved(earlier.last().map(|(_, reasons)| &reasons[..]), accepted)
         }
         _ => Vec::new(),
     })

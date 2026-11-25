@@ -1918,6 +1918,8 @@ Matching follows boundaries:
   URL rules are denied. So are paths there that don't start with `/`, and
   paths with a `%` that two hex digits don't follow. So are paths there with
   an empty segment, as in `/a//b`, though a path may end with one `/`.
+  So are paths there with a backslash or a `;`, even escaped, because some
+  servers read a backslash as a slash, or drop what follows a `;`.
 - A URL rule's path can't have a `.` or `..` segment, even one written with
   `%2e`, because a normalized request path never has one.
 - A URL rule's path can't have an empty segment, as in `/a//b`, because a

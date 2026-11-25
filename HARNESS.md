@@ -203,8 +203,7 @@ The sizes of the pinned layer and kernel are the same on every machine, so the
 bench doesn't measure them. Nothing compares them, so they can't have a target
 or a band. Every record reads them from the copies that T1 fetches into
 `target/guest`. A missing copy, or one whose digest isn't the one its pin
-names, is a problem. A refresh then puts back the values of the record at the
-branch's tip, if that record has them.
+names, is a problem. A refreshed record reads them too, from the rebased tree.
 
 The bench compares the medians of 15 interleaved pairs of base and candidate
 runs. A change that worsens a budget by more than its band fails, unless its
@@ -907,8 +906,10 @@ the runner's user map ids in a user namespace. The
    `Queued, 2 PRs ahead`.
 3. Run `cargo xtask prepare <pr> --keep-budgets` for each as its own process.
    It runs no bench, because a shared runner can't measure a budget. The new
-   record keeps the budget values and reason of the record at the tip of the
-   branch, and `prepare` fails if the tip has none.
+   record reads the sizes of the pinned layer and kernel from the rebased
+   tree, as every record does, so it follows a pin that `main` changed. It
+   keeps the reason and the other budget values of the record at the tip of
+   the branch, and `prepare` fails if the tip has none.
 4. Once a PR's head has `success`, `refresh` squashes it, if its auto-merge is
    still armed, its head is the one that was proven, it still closes the issue
    this run found it with, and no review requests changes. Any other PR stays

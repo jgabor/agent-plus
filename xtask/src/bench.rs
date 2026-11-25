@@ -202,6 +202,12 @@ fn number(table: &Table, field: &str, key: &str) -> Result<Option<f64>, String> 
     Ok(Some(value))
 }
 
+/// Whether `key` is the size of a guest file that `guest/` pins, which a
+/// record reads from its tree on any machine.
+pub fn is_pinned(key: &str) -> bool {
+    matches!(measure_of(key), Some(Measure::Pinned(_)))
+}
+
 /// The sizes of the guest files that `commit` pins, for its budgets that
 /// record them. They come from the copies that the T1 tests fetch, which a
 /// record follows, and each must have the digest its pin names.

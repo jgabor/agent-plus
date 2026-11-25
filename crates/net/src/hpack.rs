@@ -74,7 +74,9 @@ impl Decoder {
     }
 
     /// Sets the most the encoder may make the table, as HTTP/2 does once
-    /// the peer acknowledges SETTINGS_HEADER_TABLE_SIZE.
+    /// the peer acknowledges SETTINGS_HEADER_TABLE_SIZE. A limit below the
+    /// table's maximum size changes that size, which section 4.2 says the
+    /// next block must start by signaling, even if the entries fit.
     pub fn set_table_limit(&mut self, limit: usize) {
         self.limit = limit;
         if limit < self.table.max {

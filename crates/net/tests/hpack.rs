@@ -502,6 +502,14 @@ fn a_block_after_the_limit_fell_must_start_with_an_update_under_it() {
             .map(|h| h.len()),
         Ok(1)
     );
+    // The limit fell to 100 and then to 200, so an update to 150 is too big.
+    let mut decoder = Decoder::new(4096, LIST_LIMIT);
+    decoder.set_table_limit(100);
+    decoder.set_table_limit(200);
+    assert_eq!(
+        decoder.decode(&[0x3f, 0x77, 0x82]),
+        Err(Error::MissingUpdate)
+    );
     // A rise needs no update.
     let mut decoder = Decoder::new(256, LIST_LIMIT);
     decoder.set_table_limit(4096);

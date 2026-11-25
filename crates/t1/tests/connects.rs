@@ -1372,6 +1372,10 @@ fn connecting_network_process() {
     (&link).write_all(attempting.as_bytes()).unwrap();
     let outcome = attempt.make(&target, peer);
     (&link).write_all(outcome.as_bytes()).unwrap();
+    // A megabyte held in small blocks grows the heap, as serving a busy
+    // guest does.
+    let pages: Vec<Vec<u8>> = (0..256).map(|_| vec![1; 4096]).collect();
+    std::hint::black_box(&pages);
     let mut resolver = ap::network::resolver(&["--".into(), "+".into()]).unwrap();
     ap::network::serve(&link, &mut stack, &mut resolver).unwrap();
 }
@@ -1392,6 +1396,11 @@ fn attempt(directory: &Path, attempt: Attempt, peer: SocketAddr) -> (ExitStatus,
         .env(TARGET_VARIABLE, &target)
         .env(PEER_VARIABLE, peer.to_string())
         .env(LINK_VARIABLE, fd.to_string())
+        // The real network process has one thread, whose heap grows with
+        // `brk`. This one serves on a test's thread, whose own heap would
+        // grow with `mprotect`, which the filter refuses, so every thread
+        // shares the first heap.
+        .env("GLIBC_TUNABLES", "glibc.malloc.arena_max=1")
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // SAFETY: the closure only clears close-on-exec on a descriptor this

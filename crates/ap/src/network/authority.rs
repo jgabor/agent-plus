@@ -300,12 +300,21 @@ mod tests {
             // SAFETY: getrandom writes at most `bytes.len()` bytes to it.
             let drawn = unsafe { syscall(GETRANDOM, bytes.as_mut_ptr(), bytes.len(), 0) };
             assert_eq!(drawn, bytes.len() as std::ffi::c_long);
+            // A megabyte held in small blocks grows the heap, as serving a
+            // busy guest does.
+            let pages: Vec<Vec<u8>> = (0..256).map(|_| vec![1; 4096]).collect();
+            std::hint::black_box(&pages);
             println!("{VERIFIED}");
             return;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([CONFINED_TEST, "--exact", "--test-threads=1", "--nocapture"])
             .env(CONFINED_VARIABLE, "1")
+            // The real network process has one thread, whose heap grows
+            // with `brk`. This one runs on a test's thread, whose own heap
+            // would grow with `mprotect`, which the filter refuses, so every
+            // thread shares the first heap.
+            .env("GLIBC_TUNABLES", "glibc.malloc.arena_max=1")
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();

@@ -32,7 +32,7 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 11] = [
+const TARGETS: [Target; 12] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -432,6 +432,73 @@ const TARGETS: [Target; 11] = [
         ],
     },
     Target {
+        name: "h2-frames",
+        check: |input| {
+            h2_frames_input(input);
+        },
+        corpus: &[
+            "",
+            // A client's preface, SETTINGS and their ACK, a request, a
+            // WINDOW_UPDATE, and a PING.
+            concat!(
+                "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+                "\0\0\x06\x04\0\0\0\0\0\0\x03\0\0\0\x64",
+                "\0\0\0\x04\x01\0\0\0\0",
+                "\0\0\x11\x01\x05\0\0\0\x01\u{82}\u{87}\u{84}A\x0cexample.test",
+                "\0\0\x04\x08\0\0\0\0\0\0\x01\0\0",
+                "\0\0\x08\x06\0\0\0\0\x0012345678",
+            ),
+            // A padded HEADERS with a priority and a CONTINUATION, padded
+            // DATA, PRIORITY, RST_STREAM, a frame of an unknown type, and
+            // GOAWAY.
+            concat!(
+                "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+                "\0\0\0\x04\0\0\0\0\0",
+                "\0\0\x0a\x01\x28\0\0\0\x03\x02\0\0\0\x01\x0f\u{82}\u{87}\0\0",
+                "\0\0\x0f\x09\x04\0\0\0\x03\u{84}A\x0cexample.test",
+                "\0\0\x06\0\x09\0\0\0\x03\x03hi\0\0\0",
+                "\0\0\x05\x02\0\0\0\0\x05\u{80}\0\0\x03\x10",
+                "\0\0\x04\x03\0\0\0\0\x03\0\0\0\x08",
+                "\0\0\x02\u{fa}\0\0\0\0\0ok",
+                "\0\0\x08\x07\0\0\0\0\0\0\0\0\x03\0\0\0\0",
+            ),
+            // A server's SETTINGS, a PUSH_PROMISE, and a response.
+            concat!(
+                "\0\0\x06\x04\0\0\0\0\0\0\x02\0\0\0\0",
+                "\0\0\x15\x05\x04\0\0\0\x01\0\0\0\x02\u{82}\u{87}\u{84}A\x0cexample.test",
+                "\0\0\x01\x01\x04\0\0\0\x01\u{88}",
+            ),
+        ],
+        words: &[
+            "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\0\x04\x01\0\0\0\0",
+            "\0\0\x08\x06\0\0\0\0\0",
+            "\0\0\x04\x08\0\0\0\0\0",
+            "\0\0\x01\x01\x04\0\0\0\x01",
+            "\0\0\x01\x01\0\0\0\0\x01",
+            "\0\0\x01\x09\x04\0\0\0\x01",
+            "\0\0\0\0\x01\0\0\0\x01",
+            "\0\x02\0\0\0\x01",
+            "\0\x04\u{80}\0\0\0",
+            "\0\x05\0\0\x40\0",
+            "\0\0\0\0",
+            "\x7f\u{ff}\u{ff}\u{ff}",
+            "\0",
+            "\x01",
+            "\x04",
+            "\x08",
+            "\x09",
+            "\x20",
+            "\x28",
+            "\u{80}",
+            "\u{82}",
+            "\u{88}",
+            "\u{be}",
+            "\u{ff}",
+        ],
+    },
+    Target {
         name: "name-check",
         check: |input| {
             name_check_input(input);
@@ -657,6 +724,48 @@ fn hpack_input(input: &str) -> usize {
         again.set_table_limit(limit);
         rest = &rest[end + ending.len_utf8()..];
     }
+}
+
+/// Reads `input` as the bytes of one connection, where each character is
+/// the byte of its code point: a client's, if it starts with the preface,
+/// and a server's if it doesn't. It writes each frame the reader accepts,
+/// and panics if reading what it wrote gives other frames, or if reading
+/// `input` a byte at a time does. Returns how many frames it accepted.
+fn h2_frames_input(input: &str) -> usize {
+    use net::h2::{Error, Frame, PREFACE, Reader, Writer};
+    const LIST_LIMIT: usize = 64 * 1024;
+    let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+    let client = bytes.starts_with(PREFACE);
+    let reader = || match client {
+        true => Reader::client(LIST_LIMIT),
+        false => Reader::server(LIST_LIMIT),
+    };
+    let read = |pieces: &mut dyn Iterator<Item = &[u8]>| {
+        let mut reader = reader();
+        let mut frames = Vec::new();
+        for piece in pieces {
+            reader.push(piece);
+            loop {
+                match reader.frame() {
+                    Ok(Some(frame)) => frames.push(frame),
+                    Ok(None) => break,
+                    Err(error) => return (frames, Some(error)),
+                }
+            }
+        }
+        (frames, None::<Error>)
+    };
+    let (frames, error) = read(&mut std::iter::once(&bytes[..]));
+    let bytewise = read(&mut bytes.chunks(1));
+    assert_eq!(bytewise, (frames.clone(), error), "a byte at a time");
+    let mut written = if client { PREFACE.to_vec() } else { Vec::new() };
+    let mut writer = Writer::new();
+    for frame in &frames {
+        writer.write(frame, &mut written);
+    }
+    let again: (Vec<Frame>, _) = read(&mut std::iter::once(&written[..]));
+    assert_eq!(again, (frames.clone(), None), "{written:x?}");
+    frames.len()
 }
 
 /// Feeds `input` to the name check of a connection attributed to
@@ -2069,6 +2178,23 @@ mod tests {
         assert_eq!(hpack_input("\u{82}\u{1100}\u{80}\u{1100}\u{82}"), 1);
         // A limit lowered, and a block that doesn't say so.
         assert_eq!(hpack_input("\u{82}\u{200}\u{82}"), 1);
+    }
+
+    #[test]
+    fn the_h2_frames_corpus_reads_and_writes_back() {
+        let corpus = TARGETS
+            .iter()
+            .find(|t| t.name == "h2-frames")
+            .unwrap()
+            .corpus;
+        let counts: Vec<usize> = corpus.iter().map(|input| h2_frames_input(input)).collect();
+        assert_eq!(counts, [0, 5, 6, 3]);
+        // A PING on a stream, and nothing after it is read.
+        let ping = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0\0\0\x08\x06\0\0\0\0\x01";
+        assert_eq!(
+            h2_frames_input(&format!("{ping}12345678\0\0\0\x04\x01\0\0\0\0")),
+            1
+        );
     }
 
     #[test]

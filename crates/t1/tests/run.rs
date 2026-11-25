@@ -2170,32 +2170,60 @@ fn credentials(scratch: &Scratch, name: &str, variable: &str, host: &str) -> (St
 }
 
 // spec(SECRET): When `GITHUB_TOKEN` or `GH_TOKEN` is bound to `github.com`, `ap` also configures git in the guest to use it, so `git push` works over HTTPS.
+// spec(SECRET): If both are, git uses `GH_TOKEN`, as the GitHub CLI does.
 #[test]
 fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
     const VALUE: &str = "git-token-value-3f9c1e";
     let scratch = Scratch::new("git-token");
     let github = "NETWORK +github.com\nNETWORK +api.github.com\nENV FAKE_HARNESS_SLEEP 300\n";
-    for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
-        let agent = variable.to_lowercase().replace('_', "-");
-        scratch.build(&agent, &fake(&format!("{github}SECRET {variable}\n")));
-        let (run, name, _) = start_reporting(&scratch, &agent, &[(variable, VALUE)]);
-        let (filled, placeholder) = credentials(&scratch, &name, variable, "github.com");
-        assert_eq!(placeholder.len(), 32, "{placeholder}");
-        assert_ne!(placeholder, VALUE);
+    // The agent, its lines, the variable git uses, and whether the guest
+    // holds a placeholder in it.
+    let cases = [
+        (
+            "github-token",
+            "SECRET GITHUB_TOKEN\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        ("gh-token", "SECRET GH_TOKEN\n", "GH_TOKEN", true),
+        (
+            "both",
+            "SECRET GITHUB_TOKEN\nSECRET GH_TOKEN\n",
+            "GH_TOKEN",
+            true,
+        ),
+        (
+            "visible",
+            "SECRET GITHUB_TOKEN visible\n",
+            "GITHUB_TOKEN",
+            false,
+        ),
+    ];
+    for (agent, lines, variable, hidden) in cases {
+        scratch.build(agent, &fake(&format!("{github}{lines}")));
+        let env = [("GITHUB_TOKEN", VALUE), ("GH_TOKEN", "gh-token-value-81d4")];
+        let (run, name, _) = start_reporting(&scratch, agent, &env);
+        let (filled, held) = credentials(&scratch, &name, variable, "github.com");
+        if hidden {
+            assert_eq!(held.len(), 32, "{agent}: {held}");
+        } else {
+            assert_eq!(held, VALUE, "{agent}");
+        }
         assert_eq!(
             filled,
             format!(
-                "protocol=https\nhost=github.com\nusername=x-access-token\npassword={placeholder}\nstatus 0\n"
+                "protocol=https\nhost=github.com\nusername=x-access-token\npassword={held}\nstatus 0\n"
             ),
+            "{agent}",
         );
         // `ap` answers for no other host, not even a subdomain.
         for host in ["example.com", "gist.github.com"] {
             let (filled, _) = credentials(&scratch, &name, variable, host);
-            assert_eq!(filled, "status 128\n", "{host}");
+            assert_eq!(filled, "status 128\n", "{agent}: {host}");
         }
-        // No file holds the value.
+        // No file holds a value.
         let search = format!(
-            "grep -rlsaF -D skip --exclude-dir=proc --exclude-dir=sys -- {VALUE} / | wc -l"
+            "grep -rlsaF -D skip --exclude-dir=proc --exclude-dir=sys -e {VALUE} -e gh-token-value / | wc -l"
         );
         printed(&scratch.exec(&name, &["sh", "-c", &search], b""), "0\n");
         drop(run);
@@ -2209,5 +2237,9 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
     let (filled, placeholder) = credentials(&scratch, &name, "GITHUB_TOKEN", "github.com");
     assert_eq!(placeholder.len(), 32, "{placeholder}");
     assert_eq!(filled, "status 128\n");
+    printed(
+        &scratch.exec(&name, &["sh", "-c", "test -e /etc/gitconfig; echo $?"], b""),
+        "1\n",
+    );
     drop(run);
 }

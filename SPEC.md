@@ -1310,7 +1310,8 @@ unchanged.
 In an `Authorization: Basic` header, which git sends over HTTPS, the proxy
 decodes the credentials, replaces the placeholder in them, and encodes them
 again. When `GITHUB_TOKEN` or `GH_TOKEN` is bound to `github.com`, `ap` also
-configures git in the guest to use it, so `git push` works over HTTPS.
+configures git in the guest to use it, so `git push` works over HTTPS. If
+both are, git uses `GH_TOKEN`, as the GitHub CLI does.
 
 The real value is never sent to any other host.
 

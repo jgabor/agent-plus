@@ -25,6 +25,12 @@ the correct behavior unsurprising. Fight scope creep. Refuse slop. Don't add a
 warning or an approval unless comparable tools have one, or there's a concrete
 reason specific to agents.
 
+This is your code. The owner decides direction, and you maintain the code: its
+design is yours, and you will change it again. When a change needs what the
+code nearly has, reshape what is there, and don't add a copy beside it. A
+cleanup the change doesn't need, or one that reaches past the issue's
+`Touches`, is other work, and gets [an issue of its own](#issues).
+
 ## Glossary
 
 - **you**: the agent reading this file and changing Agent+.
@@ -49,10 +55,11 @@ continue from the issue and its branch alone.
 2. Work in its own worktree and branch.
 3. Write the check first, and watch it fail for the right reason.
 4. Make the smallest change that passes.
-5. Get an independent review.
-6. Open the PR, and watch it through checks and reviews.
-7. Merge if the issue's label allows it. Otherwise hand it to the owner.
-8. Update the issue, and clean up.
+5. Tidy what you changed: one copy of each thing, and nothing left unused.
+6. Get an independent review.
+7. Open the PR, and watch it through checks and reviews.
+8. Merge if the issue's label allows it. Otherwise hand it to the owner.
+9. Update the issue, and clean up.
 
 ### Autonomy
 
@@ -279,6 +286,9 @@ Created with <model> in <harness>.
   away. Leave a blank line after `<summary>`, or GitHub shows the Markdown
   inside as plain text. Keep the lines a program reads outside the fold:
   `Closes`, `Hill: none`, and `Budget reason`.
+- A PR that raises no [count](HARNESS.md#hills) gives the reason in a line
+  that reads `Hill: none, <reason>`, or `merge` and `prepare` fail it. A
+  cleanup rarely raises one, and a change to this file never does.
 - Solve one problem per PR. Open a real PR, not a draft, so checks and
   reviewers run.
 - Check the title, body, and attachments for secrets and private details.
@@ -294,6 +304,8 @@ read-only. In T3 Code, use `delegate_task` with a review role.
   it your conclusions only after it has formed its own.
 - Have the reviewer confirm that no decision a user could observe is left
   only in the PR body.
+- Have the reviewer search for code that the diff repeats, in the diff and
+  in the rest of the tree.
 - Rank findings: blocker (the intended case is wrong), should (a real bug
   callers will hit), and nit (everything else).
 - Verify each finding against the source. Fix real ones with the smallest

@@ -506,6 +506,53 @@ fn one_harness_may_use_what_the_other_keeps() {
     assert_eq!(reserved_errors("codex", claude).len(), 3);
 }
 
+// spec(ENV): With [`AUTH key`](#auth), a value that reads the host variable the key comes from is an error too, as in `ENV LEAK $ANTHROPIC_API_KEY` with `AGENT claude`, because the agent sees only a placeholder for the key.
+#[test]
+fn an_env_value_cannot_read_the_key_auth_key_hides() {
+    for (agent, key) in [("claude", claude::KEY), ("codex", codex::KEY)] {
+        for value in [
+            format!("${key}"),
+            format!("${{{key}}}"),
+            format!("${{{key}:-none}}"),
+            format!("\"x-api-key: ${key}\""),
+        ] {
+            let env = format!("ENV LEAK {value}");
+            for (lines, env_line, auth_line) in [
+                (format!("AUTH key\n{env}\n"), 4, 3),
+                (format!("{env}\nAUTH key\n"), 3, 4),
+            ] {
+                let source = format!("AGENT {agent}\nOS minimal\n{lines}");
+                let errors = agentfile::parse_for(&source, ap::adapter::reserved).unwrap_err();
+                let lines: Vec<usize> = errors.iter().map(|error| error.line).collect();
+                assert_eq!(lines, [env_line], "{source:?}: {errors:?}");
+                let message = &errors[0].message;
+                for named in [
+                    "`ENV LEAK`",
+                    &format!("`${key}`"),
+                    &format!("line {auth_line}"),
+                    "`AUTH key`",
+                    "Remove",
+                ] {
+                    assert!(message.contains(named), "{named}: {message}");
+                }
+            }
+        }
+        // Without `AUTH key`, or with `\$`, the value reads no hidden key.
+        for lines in [
+            format!("ENV LEAK ${key}\n"),
+            format!("AUTH token\nENV LEAK ${key}\n"),
+            format!("AUTH key\nENV LEAK \\${key}\n"),
+        ] {
+            if agent == "codex" && lines.contains("token") {
+                continue;
+            }
+            let source = format!("AGENT {agent}\nOS minimal\n{lines}");
+            let parsed = agentfile::parse_for(&source, ap::adapter::reserved);
+            assert!(parsed.is_ok(), "{source:?}: {parsed:?}");
+        }
+    }
+}
+
 /// The Agentfile the workspace golden files show, and whether each `SHARE`
 /// is a directory on the host, in line order.
 const SHARES: &str = "\

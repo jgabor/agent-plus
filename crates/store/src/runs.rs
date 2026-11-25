@@ -12,10 +12,10 @@
 //! with, before it exits.
 //!
 //! While a run is active, an exclusive lock on its record is held. `ap run`
-//! takes it with [`Runs::lock`], and its run process and share servers each
-//! hold a copy of what it opened. The kernel drops the lock when the last of
-//! them exits, for any reason, so a run whose processes are gone never reads
-//! as active.
+//! takes it with [`Runs::lock`], and its run process and the share server
+//! that keeps its pending changes each hold a copy of what it opened. The
+//! kernel drops the lock when the last of them exits, for any reason, so a
+//! run whose processes are gone never reads as active.
 //!
 //! A run's log is kept apart from its record, under `logs` with the run's
 //! name, and only `ap run` writes it. The changes a run's agent made to its

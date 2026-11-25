@@ -26,9 +26,10 @@
 //!
 //! `ap run` locks the run's record before it starts the share servers, which
 //! makes the run active. The lock belongs to what it opened, and the run
-//! process and each share server hold a copy until they exit, so the run
-//! stays active until the last of them has, and none of its changes is
-//! still to come. `ap run` waits for them all before it exits.
+//! process and the share server that keeps pending changes, the one that
+//! isn't for `rw` shares, each hold a copy until they exit. So the run
+//! stays active until both have, and none of its changes is still to come.
+//! `ap run` waits for every share server before it exits.
 //!
 //! `ap run` sends the layers and how to start the harness. For a harness in
 //! a terminal, it then sends what you type and the terminal's new sizes, on

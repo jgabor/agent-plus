@@ -279,7 +279,10 @@ fn share_server_rules(
         Allow(LSEEK),
         Allow(FSTAT),
         Allow(FSTATFS),
-        Allow(CLOSE),
+        match kept {
+            Some(kept) => AllowUnless(CLOSE, 0, kept as u32),
+            None => Allow(CLOSE),
+        },
         // Rust checks a descriptor this way before it closes it. The rest
         // are locks, which never wait.
         AllowIf(FCNTL, 1, vec![F_GETFD, F_OFD_GETLK, F_OFD_SETLK]),
@@ -496,8 +499,9 @@ pub fn confine(readable: &[RawFd]) -> io::Result<()> {
 /// Confines the share server, which has one thread, for the rest of its
 /// life, and lets it make the changes `changes` names. Call it once every
 /// share's root is open. Requests come from `socket`, and answers go back
-/// on it. It asks the processes at `times` to set times. It can't lock or
-/// unlock `kept`, so a lock that `kept` holds lasts until it exits.
+/// on it. It asks the processes at `times` to set times. It can't lock,
+/// unlock, or close `kept`, so a lock that `kept` holds lasts until it
+/// exits.
 pub fn confine_share_server(
     socket: RawFd,
     changes: Changes,
@@ -777,12 +781,14 @@ mod tests {
     }
 
     #[test]
-    fn the_share_server_can_t_lock_or_unlock_what_it_keeps() {
+    fn the_share_server_can_t_lock_unlock_or_close_what_it_keeps() {
         let kept = 9;
         let rules = share_server_rules(SOCKET as RawFd, Changes::Files, &[], Some(kept));
-        let flock = |fd| run_rules(&rules, AUDIT_ARCH_X86_64, FLOCK, [fd, 0, 0, 0, 0, 0]);
-        assert_eq!(flock(kept as u32), RET_KILL_PROCESS);
-        assert_eq!(flock(4), RET_ALLOW);
+        for number in [FLOCK, CLOSE] {
+            let call = |fd| run_rules(&rules, AUDIT_ARCH_X86_64, number, [fd, 0, 0, 0, 0, 0]);
+            assert_eq!(call(kept as u32), RET_KILL_PROCESS, "{number}");
+            assert_eq!(call(4), RET_ALLOW, "{number}");
+        }
     }
 
     #[test]

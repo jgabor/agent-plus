@@ -258,8 +258,9 @@ fn run_agent(
     start.authority = authority;
     // The values live in the network process alone from here.
     drop(injection);
-    // The run is active from here until the run process and each share
-    // server have exited, because each holds a copy of what this locked.
+    // The run is active from here until the run process and the share
+    // server that keeps pending changes have exited, because each holds a
+    // copy of what this locked.
     let record = runs
         .lock(&run.name)
         .map_err(fail("can't lock the run's record"))?;

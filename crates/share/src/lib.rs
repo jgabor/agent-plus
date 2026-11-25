@@ -19,7 +19,7 @@
 //! [`vmm::fs`] describes. A server with no `rw` share can hold one more
 //! file until it exits, such as a run's locked record, so the run stays
 //! active until it has answered its last request. Its filter refuses to
-//! lock or unlock that file.
+//! lock, unlock, or close that file.
 
 mod landlock;
 mod namespace;

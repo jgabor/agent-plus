@@ -7,6 +7,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Output, Stdio};
@@ -225,6 +226,59 @@ fn running(pid: u32) -> bool {
                 })
                 .unwrap_or(false)
         })
+}
+
+/// Fails, saying `what`, unless each process in `pids` has ended by
+/// `deadline`.
+fn ended(pids: &[u32], deadline: Instant, what: &str) {
+    while pids.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let left: Vec<u32> = pids.iter().copied().filter(|pid| running(*pid)).collect();
+    assert!(left.is_empty(), "{what}: {left:?}");
+}
+
+/// A process that outlives its check says what it waits for. Here, a
+/// reader waits for the end of a socket whose far end another process
+/// holds, so the failure names that process, and says when the reader
+/// ended once the holder had.
+#[test]
+fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
+    let (reading, held) = UnixStream::pair().unwrap();
+    let holder = Started(
+        Command::new("sleep")
+            .arg("3")
+            .stdin(OwnedFd::from(held))
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let reader = Started(
+        Command::new("cat")
+            .stdin(OwnedFd::from(reading))
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let (holder_pid, reader_pid) = (holder.0.id(), reader.0.id());
+    let failure = std::panic::catch_unwind(|| {
+        ended(&[reader_pid], Instant::now(), "the reader outlived its check")
+    })
+    .unwrap_err();
+    let message = failure.downcast_ref::<String>().unwrap();
+    assert!(
+        message.starts_with("the reader outlived its check"),
+        "{message}"
+    );
+    assert!(message.contains(&format!("thread {reader_pid}: ")), "{message}");
+    assert!(message.contains("waits in "), "{message}");
+    assert!(message.contains("system call "), "{message}");
+    assert!(message.contains("descriptor 0: socket:["), "{message}");
+    assert!(
+        message.contains(&format!("held by {holder_pid} (sleep 3)")),
+        "{message}"
+    );
+    assert!(message.contains("it ended "), "{message}");
 }
 
 impl Drop for Scratch {
@@ -728,15 +782,10 @@ fn closing_the_terminal_of_an_interactive_run_ends_it_and_leaves_nothing() {
     let mut run = run.close();
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert!(!status.success(), "{status:?}");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
-    assert_eq!(
-        left,
-        Vec::<u32>::new(),
-        "processes outlived the closed terminal"
+    ended(
+        &processes,
+        Instant::now() + Duration::from_secs(10),
+        "processes outlived the closed terminal",
     );
     assert_eq!(scratch.ps(), Vec::<String>::new());
     let sockets = fs::read_dir(scratch.runtime.join("ap")).unwrap().count();
@@ -791,15 +840,10 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
 
     run.0.kill().unwrap();
     run.0.wait().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
-    assert_eq!(
-        left,
-        Vec::<u32>::new(),
-        "processes outlived the killed ap run"
+    ended(
+        &processes,
+        Instant::now() + Duration::from_secs(10),
+        "processes outlived the killed ap run",
     );
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert!(!socket.exists(), "{socket:?} outlived the run");
@@ -845,16 +889,11 @@ fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
 
     let processes = started.into_inner().unwrap();
     assert_eq!(processes.len(), 4, "{processes:?}");
-    assert!(!running(processes[0]), "`ap run` outlived its guard");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while processes.iter().any(|pid| running(*pid)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let left: Vec<u32> = processes.into_iter().filter(|pid| running(*pid)).collect();
-    assert_eq!(
-        left,
-        Vec::<u32>::new(),
-        "processes outlived the failed test"
+    ended(&processes[..1], Instant::now(), "`ap run` outlived its guard");
+    ended(
+        &processes,
+        Instant::now() + Duration::from_secs(10),
+        "processes outlived the failed test",
     );
     assert_eq!(scratch.ps(), Vec::<String>::new());
 }
@@ -954,15 +993,12 @@ fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
     assert!(running(vm), "{unreached:?}");
     printed(&scratch.ap(&["stop", &name]), "");
     // The VM lives in the run process, which has ended by now.
-    assert!(!running(vm), "the VM outlived ap stop");
+    ended(&[vm], Instant::now(), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");
     // It reads the end of its link as soon as the run process exits.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while running(network) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!running(network), "the network process outlived ap stop");
+    ended(&[network], deadline, "the network process outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
 
     printed(&scratch.ap(&["stop", &name]), "");
@@ -1006,7 +1042,7 @@ fn ap_stop_powers_the_vm_off_when_the_harness_ignores_sigterm() {
     let took = started.elapsed();
     assert!(took >= Duration::from_secs(10), "{took:?}");
     assert!(took < Duration::from_secs(20), "{took:?}");
-    assert!(!running(vm), "the VM outlived ap stop");
+    ended(&[vm], Instant::now(), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(137), "{status:?}");
     assert_eq!(scratch.ps(), Vec::<String>::new());
@@ -1048,7 +1084,7 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
     stderr.read_to_string(&mut printed).unwrap();
     assert_eq!(status.code(), Some(0), "{printed}");
     assert_eq!(printed, "", "{status:?}");
-    assert!(!running(vm), "the VM outlived ap stop");
+    ended(&[vm], Instant::now(), "the VM outlived ap stop");
     let status = wait_within(&mut run, Duration::from_secs(10));
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");
     assert_eq!(scratch.ps(), Vec::<String>::new());
@@ -1127,8 +1163,8 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     stderr.read_to_string(&mut printed).unwrap();
     assert_eq!(status.code(), Some(0), "{printed}");
     assert_eq!(printed, "", "{status:?}");
-    assert!(!running(vm), "the VM outlived ap stop");
-    assert!(!running(run), "ap run outlived ap stop");
+    ended(&[vm], Instant::now(), "the VM outlived ap stop");
+    ended(&[run], Instant::now(), "ap run outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
     assert_eq!(stty(&terminal, &["-g"]), modes);
@@ -1330,12 +1366,9 @@ fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
     let vm = run_process(run.0.id());
     let network = network_process(run.0.id());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while (running(vm) || running(network)) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(!running(vm), "the run process didn't end");
+    ended(&[vm], deadline, "the run process didn't end");
     // A run that ends stops its network process, even while `ap run` can't.
-    assert!(!running(network), "the network process outlived the run");
+    ended(&[network], deadline, "the network process outlived the run");
     assert_eq!(scratch.ps(), Vec::<String>::new());
 
     signal("-CONT", run.0.id());

@@ -909,6 +909,35 @@ fn a_minus_rule_beside_a_plus_rule_leaves_its_tls_unread() {
     assert_eq!(settled(&seen), ["GET /anything HTTP/1.1 (h2)"]);
 }
 
+// spec(NETWORK): On a TLS connection that the proxy doesn't decrypt, it sees the server name but not the requests inside.
+// spec(NETWORK): A server you allow can then be asked for other names it serves, including names the policy denies: other names on its certificate, or other sites behind the same shared front, such as a CDN.
+#[test]
+fn a_server_the_proxy_doesn_t_decrypt_can_be_asked_for_a_denied_name() {
+    let (root, config) = server();
+    let (port, seen) = destination(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -denied.example\n");
+    let mut guest = Guest::new(&rules, Vec::new(), port);
+    // The proxy reads the server name, and resets TLS that names the denied
+    // site, before the guest could see any certificate.
+    let handle = guest.connect();
+    let mut tls = Guest::tls_for(&root, &[b"http/1.1"], "denied.example");
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/named"));
+    assert_eq!(answer, Err("reset".to_owned()));
+    // Inside TLS for the allowed name, a request for the denied site reaches
+    // the server, which answers it.
+    let handle = guest.connect();
+    let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+    let inside = b"GET /inside HTTP/1.1\r\nHost: denied.example\r\n\r\n";
+    let answer = guest.exchange(handle, Some(&mut tls), inside);
+    assert!(
+        answer
+            .as_ref()
+            .is_ok_and(|a| a.ends_with("\r\n\r\n/inside")),
+        "{answer:?}"
+    );
+    assert_eq!(settled(&seen), ["GET /inside HTTP/1.1 (http/1.1)"]);
+}
+
 /// Whether a datagram the guest sends to `host.ap.internal` on `port`
 /// gets an answer from the echo there.
 fn echoed(guest: &mut Guest, port: u16) -> bool {
@@ -1617,6 +1646,63 @@ fn a_key_s_server_never_speaks_first() {
         assert!(!socket.can_recv(), "the server spoke first");
         thread::sleep(Duration::from_millis(1));
     }
+}
+
+// spec(NETWORK): on a hidden secret's bound hosts and on the hosts of `AUTH key`, to inject the value
+#[test]
+fn a_secret_s_bound_host_and_a_key_s_host_are_decrypted_to_inject_the_value() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    // Without either, the guest sees the server's own certificate, which
+    // the run's authority didn't sign.
+    let mut guest = Guest::new(&rules, vec![root.clone()], port);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+    assert!(answer.is_err(), "{answer:?}");
+    // With either, the run's authority signs what the guest sees, and the
+    // server gets the value.
+    for injection in [bound_to(NAME), key_for(NAME)] {
+        let mut guest = Guest::injecting(&rules, vec![root.clone()], port, injection);
+        let handle = guest.connect();
+        let mut tls = Guest::tls(&guest.authority.clone());
+        let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
+        assert!(answer.is_ok(), "{answer:?}");
+    }
+    let seen = settled(&seen);
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    for request in &seen {
+        assert!(
+            request.contains(&format!("X-Api-Key: {VALUE}\r\n")),
+            "{seen:?}"
+        );
+    }
+}
+
+// spec(NETWORK): These hosts are an exfiltration path: code in the agent can send data to them with a key it brought itself.
+// spec(NETWORK): The other harness hosts stay an exfiltration path.
+#[test]
+fn a_harness_host_takes_a_key_the_agent_brought_itself() {
+    let (root, config) = server();
+    let (port, seen) = recording(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\n");
+    let harness = vec![NAME.to_owned(), "api.example.com".to_owned()];
+    let theirs = format!(
+        "POST /out HTTP/1.1\r\nHost: {NAME}\r\nX-Api-Key: mine\r\nContent-Length: 4\r\n\r\ndata"
+    );
+    // Without `AUTH key`, and with a key for another of the harness's
+    // hosts, the guest sees the server's own certificate, so the proxy
+    // reads nothing, and the guest's own key and data arrive as it sent
+    // them.
+    for injection in [Injection::default(), key_for("api.example.com")] {
+        let mut guest = Guest::with_harness(&rules, Vec::new(), port, injection, harness.clone());
+        let handle = guest.connect();
+        let mut tls = Guest::tls_offering(&root, &[b"http/1.1"]);
+        let answer = guest.exchange(handle, Some(&mut tls), theirs.as_bytes());
+        assert!(answer.is_ok(), "{answer:?}");
+    }
+    assert_eq!(settled(&seen), [theirs.clone(), theirs]);
 }
 
 // spec(NETWORK): `AUTH key` is the one case where the proxy decrypts a harness host's traffic.

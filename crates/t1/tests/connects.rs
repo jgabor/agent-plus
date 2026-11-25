@@ -27,7 +27,7 @@ use ap::fetch;
 use ap::store::Store;
 use guest::net;
 use t1::started::Started;
-use t1::{guest_binary, kernel, os};
+use t1::{guest_binary, kernel, os, outward_address};
 
 /// How long `ap` may take, in seconds, before `timeout` stops it, and the VM
 /// it holds with it.
@@ -603,18 +603,6 @@ fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() 
     scratch.stop(&name, run);
 }
 
-/// This host's address on its route out, which isn't a loopback address.
-fn outward_address() -> Ipv4Addr {
-    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
-    socket
-        .connect("192.0.2.1:9")
-        .expect("this host has a route out");
-    match socket.local_addr().unwrap().ip() {
-        std::net::IpAddr::V4(address) => address,
-        address => panic!("an IPv4 route out, not {address}"),
-    }
-}
-
 // spec(NETWORK): A connection that no name rule decides skips this check, so under `NETWORK +`, clients that resolve names on their own (DNS over HTTPS, hard-coded addresses) keep working.
 #[test]
 fn a_connection_no_name_rule_decides_skips_the_name_check() {
@@ -1092,6 +1080,7 @@ const DENIED: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 12);
 // spec(NETWORK): For an address from the pool, the proxy resolves the name itself and connects only to the addresses it gets.
 // spec(NETWORK): It resolves through your host's resolver configuration as it is at each connection, so a run follows your host to another network.
 // spec(NETWORK): **IP rules** are checked against the real destination address.
+// spec(NETWORK): `NETWORK` covers only the agent's own connections.
 #[test]
 fn a_run_keeps_resolving_after_the_host_s_resolver_configuration_changes() {
     if let Some(root) = env::var_os(INSIDE_VARIABLE) {
@@ -1149,13 +1138,17 @@ fn inside(scratch: &Scratch) {
     let first_udp = udp_echo(UdpSocket::bind((FIRST, PORT)).unwrap(), "first");
     let denied = tcp_echo(TcpListener::bind((DENIED, PORT)).unwrap(), "denied");
     let looped = tcp_echo(TcpListener::bind(("127.0.0.1", PORT)).unwrap(), "loop");
+    // The proxy's own lookups reach the host's DNS server, though no rule
+    // allows its address, and the agent's connections to it don't.
+    let resolver = tcp_echo(TcpListener::bind((FIRST_DNS, 53)).unwrap(), "resolver");
 
     let (run, name) = scratch.run("resolving");
     let lines = scratch.try_network(
         &name,
         &format!(
             "tcp svc svc.test {PORT}\nudp svc-udp svc.test {PORT}\n\
-             tcp loop loop.test {PORT}\ntcp deny deny.test {PORT}\n"
+             tcp loop loop.test {PORT}\ntcp deny deny.test {PORT}\n\
+             tcp resolver {FIRST_DNS} 53\n"
         ),
     );
     assert_eq!(
@@ -1164,7 +1157,8 @@ fn inside(scratch: &Scratch) {
             "svc first:ping",
             "svc-udp first:ping",
             "loop failed",
-            "deny failed"
+            "deny failed",
+            "resolver failed"
         ]
     );
     // The host moves to another network, with another resolver.
@@ -1175,7 +1169,7 @@ fn inside(scratch: &Scratch) {
     assert_eq!(settled(&first, 2), ["tcp ping", "closed"]);
     assert_eq!(settled(&second, 2), ["tcp ping", "closed"]);
     assert_eq!(settled(&first_udp, 1), ["udp ping"]);
-    for seen in [&denied, &looped] {
+    for seen in [&denied, &looped, &resolver] {
         let seen = seen.lock().unwrap();
         assert!(seen.is_empty(), "a refused destination saw {seen:?}");
     }

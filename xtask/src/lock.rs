@@ -173,26 +173,33 @@ pub fn bench_waits(directory: &Path) -> Result<bool, Problem> {
 /// Held while a claim reads and writes GitHub, so that two claims on this
 /// machine can't interleave. Rules on the comments cover anything else.
 pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {
-    slot(root, "claim.lock")
+    slot(root, "claim.lock", || {})
 }
 
 /// Held for a whole merge, so that only one runs at a time and each is tested
-/// on top of the last.
-pub fn merge_slot(root: &Path) -> Result<Hold, Problem> {
-    slot(root, "merge.lock")
+/// on top of the last. `waiting` runs before a wait, if another run holds it.
+pub fn merge_slot(root: &Path, waiting: impl FnOnce()) -> Result<Hold, Problem> {
+    slot(root, "merge.lock", waiting)
 }
 
 /// Held for a whole response to a failing gate, so that two can't share the
 /// tree its bisect checks commits out in, or file the same issue.
 pub fn response_slot(root: &Path) -> Result<Hold, Problem> {
-    slot(root, "nightly.lock")
+    slot(root, "nightly.lock", || {})
 }
 
-fn slot(root: &Path, name: &str) -> Result<Hold, Problem> {
+fn slot(root: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     let file = open(&directory, name)?;
-    file.lock()
-        .map_err(|e| Problem(format!("couldn't take {name}: {e}")))?;
+    let couldnt = |e| Problem(format!("couldn't take {name}: {e}"));
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            waiting();
+            file.lock().map_err(couldnt)?;
+        }
+        Err(TryLockError::Error(e)) => return Err(couldnt(e)),
+    }
     Ok(Hold {
         files: vec![file],
         directory,

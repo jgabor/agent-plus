@@ -4,9 +4,10 @@
 
 use std::env;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,8 @@ const BUDGETS: &str =
     "[[budget]]\nkey = \"version_ms\"\nname = \"v\"\nband_pct = 20.0\nband_abs = 25.0\n";
 const BRANCH: &str = "7-x";
 const HILL_NONE: &str = "Closes #7.\n\nHill: none, tooling.\n";
+/// What a merge says when another run holds the slot.
+const SLOT_WAIT: &str = "merge: PR 9 waits for the merge slot, which another run holds";
 const NO_REBASE: &str = "the branch doesn't rebase onto `main`. Rebase it by hand, and push it";
 
 fn stdout(output: &Output) -> String {
@@ -727,6 +730,8 @@ fn a_merge_records_pushes_verifies_and_squashes() {
     let repo = Repo::new("happy");
     let output = repo.merge();
     assert_merged(&repo, &output);
+    // It took the slot at once.
+    assert!(!stderr(&output).contains(SLOT_WAIT), "{}", stderr(&output));
 
     let head = repo.head();
     let gated = repo.origin(&["rev-parse", &format!("{head}~1")]);
@@ -1578,23 +1583,43 @@ fn a_merge_waits_for_the_merge_slot() {
     fs::create_dir_all(&directory).unwrap();
     let held = fs::File::create(directory.join("merge.lock")).unwrap();
     held.lock().unwrap();
-    let child = repo
+    let mut child = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .args(["merge", "9"])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let (said, lines) = mpsc::channel();
+    let errors = BufReader::new(child.stderr.take().unwrap());
+    thread::spawn(move || {
+        for line in errors.lines() {
+            let Ok(line) = line else { break };
+            if said.send(line).is_err() {
+                break;
+            }
+        }
+    });
     // It reads the PR's diff before the slot, and then waits.
     wait_for_the_early_check(&repo);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut heard = Vec::new();
+    while !heard.iter().any(|line| line == SLOT_WAIT) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) => heard.push(line),
+            Err(_) => panic!("it never said that it waits: {heard:?}"),
+        }
+    }
+    // It says so before it waits, so give it time to go on if it didn't wait.
     thread::sleep(Duration::from_millis(500));
     let calls = repo.calls();
     assert!(!calls.contains("refs/remotes/origin/"), "{calls}");
     assert!(!calls.contains("git worktree add"), "{calls}");
     assert!(!calls.contains("git rebase"), "{calls}");
     held.unlock().unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(0));
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(0), "{heard:?}");
     assert!(repo.bin.join("merged").exists());
 }
 

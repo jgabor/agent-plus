@@ -2152,3 +2152,113 @@ fn a_run_with_a_secret_it_has_no_value_for_fails_before_its_vm_starts() {
     assert!(!stderr.contains("not built"), "{stderr}");
     assert_eq!(scratch.ps_all(), Vec::<Vec<String>>::new());
 }
+
+/// What git's credential helpers give for `https://<host>`, in the run
+/// `name`, followed by the variable `variable`, as a script prints them:
+/// `git credential fill`'s output, and its status. Git may not prompt, so
+/// a host no helper answers for fails and prints nothing.
+fn credentials(scratch: &Scratch, name: &str, variable: &str, host: &str) -> (String, String) {
+    let script = format!(
+        "printf 'protocol=https\\nhost={host}\\n\\n' | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null; \
+         echo \"status $?\"; printf '%s' \"${variable}\""
+    );
+    let output = scratch.exec(name, &["sh", "-c", &script], b"");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let (filled, held) = stdout.rsplit_once('\n').unwrap();
+    (format!("{filled}\n"), held.to_owned())
+}
+
+// spec(SECRET): When `GITHUB_TOKEN` or `GH_TOKEN` is bound to `github.com`, `ap` also configures git in the guest to use it, so `git push` works over HTTPS.
+// spec(SECRET): If both are, git uses `GH_TOKEN`, as the GitHub CLI does.
+#[test]
+fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
+    const VALUE: &str = "git-token-value-3f9c1e";
+    let scratch = Scratch::new("git-token");
+    let github = "NETWORK +github.com\nNETWORK +api.github.com\nENV FAKE_HARNESS_SLEEP 300\n";
+    // The agent, its lines, the variable git uses, and whether the guest
+    // holds a placeholder in it.
+    let cases = [
+        (
+            "github-token",
+            "SECRET GITHUB_TOKEN\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        ("gh-token", "SECRET GH_TOKEN\n", "GH_TOKEN", true),
+        (
+            "both",
+            "SECRET GITHUB_TOKEN\nSECRET GH_TOKEN\n",
+            "GH_TOKEN",
+            true,
+        ),
+        (
+            "api-only",
+            "SECRET GITHUB_TOKEN\nSECRET GH_TOKEN @api.github.com\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        (
+            "visible",
+            "SECRET GITHUB_TOKEN visible\n",
+            "GITHUB_TOKEN",
+            false,
+        ),
+    ];
+    for (agent, lines, variable, hidden) in cases {
+        scratch.build(agent, &fake(&format!("{github}{lines}")));
+        let env = [("GITHUB_TOKEN", VALUE), ("GH_TOKEN", "gh-token-value-81d4")];
+        let (run, name, _) = start_reporting(&scratch, agent, &env);
+        let (filled, held) = credentials(&scratch, &name, variable, "github.com");
+        if hidden {
+            assert_eq!(held.len(), 32, "{agent}: {held}");
+        } else {
+            assert_eq!(held, VALUE, "{agent}");
+        }
+        assert_eq!(
+            filled,
+            format!(
+                "protocol=https\nhost=github.com\nusername=x-access-token\npassword={held}\nstatus 0\n"
+            ),
+            "{agent}",
+        );
+        // A command without the variable still gets a hidden token's
+        // placeholder, and nothing for a visible one.
+        let without = format!(
+            "printf 'protocol=https\\nhost=github.com\\n\\n' | \\
+             env -u {variable} GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null; echo \"status $?\""
+        );
+        let unset = scratch.exec(&name, &["sh", "-c", &without], b"");
+        let expected = if hidden {
+            filled.as_str()
+        } else {
+            "status 128\n"
+        };
+        assert_eq!(String::from_utf8_lossy(&unset.stdout), expected, "{agent}");
+        // `ap` answers for no other host, not even a subdomain.
+        for host in ["example.com", "gist.github.com"] {
+            let (filled, _) = credentials(&scratch, &name, variable, host);
+            assert_eq!(filled, "status 128\n", "{agent}: {host}");
+        }
+        // No file holds a value.
+        let search = format!(
+            "grep -rlsaF -D skip --exclude-dir=proc --exclude-dir=sys -e {VALUE} -e gh-token-value / | wc -l"
+        );
+        printed(&scratch.exec(&name, &["sh", "-c", &search], b""), "0\n");
+        drop(run);
+    }
+    // A token bound only to another host configures nothing.
+    scratch.build(
+        "elsewhere",
+        &fake("NETWORK +host.ap.internal\nENV FAKE_HARNESS_SLEEP 300\nSECRET GITHUB_TOKEN @host.ap.internal\n"),
+    );
+    let (run, name, _) = start_reporting(&scratch, "elsewhere", &[("GITHUB_TOKEN", VALUE)]);
+    let (filled, placeholder) = credentials(&scratch, &name, "GITHUB_TOKEN", "github.com");
+    assert_eq!(placeholder.len(), 32, "{placeholder}");
+    assert_eq!(filled, "status 128\n");
+    printed(
+        &scratch.exec(&name, &["sh", "-c", "test -e /etc/gitconfig; echo $?"], b""),
+        "1\n",
+    );
+    drop(run);
+}

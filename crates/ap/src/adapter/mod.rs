@@ -98,6 +98,39 @@ pub fn run_files(
     }
 }
 
+/// The secrets that git can use for HTTPS to `github.com`, from SPEC.md's
+/// SECRET section, the one it uses first.
+pub const GIT_TOKENS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Git's system configuration in the guest. `ADD` can't write in `/etc`,
+/// and the OS layer has none, so the run's is the only one.
+pub const GIT_CONFIG: &str = "/etc/gitconfig";
+
+/// The [`GIT_CONFIG`] that has git sign in to `https://github.com` with the
+/// secret `token`. A hidden one's `placeholder` is written as it is, since it
+/// isn't secret and a harness can leave a variable named like a secret out
+/// of the commands it runs. A visible one's value is read from its variable
+/// when git asks, so no value is written, and an empty one gives nothing.
+/// Any username works with a token, and git reads only the answer to `get`.
+/// The placeholder is hex, so it needs no escape.
+pub fn git_config(token: &str, placeholder: Option<&[u8]>) -> Vec<u8> {
+    let (check, password) = match placeholder {
+        Some(placeholder) => (
+            String::new(),
+            String::from_utf8_lossy(placeholder).into_owned(),
+        ),
+        None => (
+            format!("test -n \\\"${token}\\\" || return; "),
+            format!("\\\"${token}\\\""),
+        ),
+    };
+    format!(
+        "[credential \"https://github.com\"]\n\
+         \thelper = \"!f() {{ {check}echo username=x-access-token; printf 'password=%s\\\\n' {password}; }}; f\"\n"
+    )
+    .into_bytes()
+}
+
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
 pub fn system(values: &[Vec<u8>]) -> Vec<u8> {

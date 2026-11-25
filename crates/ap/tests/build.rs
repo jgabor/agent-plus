@@ -2286,20 +2286,20 @@ fn a_rule_that_would_decrypt_a_harness_host_fails_the_build() {
             "api.anthropic.com",
         ),
         (
-            "codex",
+            "codex:0.169.0",
             "NETWORK -https://chatgpt.com/backend-api",
             "-https://chatgpt.com/backend-api",
             "chatgpt.com",
         ),
         (
-            "codex",
+            "codex:0.169.0",
             "NETWORK +openai.com\nNETWORK -https://platform.openai.com/docs",
             "-https://platform.openai.com/docs",
             "api.openai.com",
         ),
     ] {
         let dir = scratch.project(
-            &format!("{agent}-{named}"),
+            &format!("{}-{named}", agent.replace(':', "-")),
             &format!("AGENT {agent}\nOS minimal\nNETWORK +example.com\n{rules}\n"),
         );
         let output = scratch.ap(&dir, &["build", "-t", "notes"]);

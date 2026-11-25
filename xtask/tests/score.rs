@@ -61,3 +61,74 @@ fn a_stray_argument_exits_2() {
     let root = workspace("stray", Some("# A\n"));
     assert_eq!(score(&root, &["extra"]).status.code(), Some(2));
 }
+
+const SPEC: &str = "# A\n\nOne. Two.\n";
+const CHECK_ONE: &str = "// spec(A): One.\n#[test]\nfn one() {}\n";
+
+/// A workspace whose packages are each a name and the `src/lib.rs` it holds.
+fn with_packages(name: &str, packages: &[(&str, &str)]) -> PathBuf {
+    let root = workspace(name, Some(SPEC));
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for (package, lib) in packages {
+        let directory = root.join("crates").join(package);
+        fs::create_dir_all(directory.join("src")).unwrap();
+        let manifest =
+            format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n");
+        fs::write(directory.join("Cargo.toml"), manifest).unwrap();
+        fs::write(directory.join("src/lib.rs"), lib).unwrap();
+    }
+    let output = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    root
+}
+
+fn score_in(root: &Path) -> (Option<i32>, String, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("score")
+        .current_dir(root)
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (
+        output.status.code(),
+        text(&output.stdout),
+        text(&output.stderr),
+    )
+}
+
+#[test]
+fn a_promise_only_a_t2_check_quotes_fails() {
+    let root = with_packages("t2-only", &[("t2", CHECK_ONE)]);
+    let (code, _, stderr) = score_in(&root);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("crates/t2/src/lib.rs:1"), "{stderr}");
+    assert!(stderr.contains("another tier"), "{stderr}");
+}
+
+#[test]
+fn a_t2_quote_passes_with_a_check_in_another_package() {
+    let root = with_packages("t2-and-demo", &[("t2", CHECK_ONE), ("demo", CHECK_ONE)]);
+    let (code, stdout, stderr) = score_in(&root);
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stdout, "spec 1 of 2\n");
+}
+
+#[test]
+fn a_check_linked_to_a_fake_is_not_another_tier() {
+    let root = with_packages(
+        "t2-and-fake",
+        &[("t2", CHECK_ONE), ("fake-demo", CHECK_ONE)],
+    );
+    let (code, _, stderr) = score_in(&root);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("another tier"), "{stderr}");
+}

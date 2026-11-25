@@ -1,5 +1,6 @@
 //! `cargo xtask score`: which promises in SPEC.md have a passing check.
 
+use crate::gate::T2_PACKAGE;
 use crate::journey::{self, JOURNEY_FILE};
 use crate::readme::{self, README_FILE};
 use crate::spec::Arrives;
@@ -80,6 +81,10 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
     let mut proven = HashSet::new();
     let mut quoted = HashMap::new();
     let mut findings = Vec::new();
+    // The gate runs T2 only for an adapter change, so a promise that only a
+    // T2 check quotes would leave the score whenever T2 doesn't run.
+    let mut in_t2: HashMap<Sentence, (String, usize)> = HashMap::new();
+    let mut elsewhere = HashSet::new();
     let mut promises = units.clone();
     for (line, sentence) in read_waivers(root)? {
         if !units.contains(&sentence) {
@@ -135,6 +140,13 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
             for quote in quotes {
                 let key = (quote.heading, quote.text);
                 if promises.contains(&key) {
+                    if package.name == T2_PACKAGE {
+                        in_t2
+                            .entry(key.clone())
+                            .or_insert_with(|| (shown.clone(), quote.line));
+                    } else if !package.fake {
+                        elsewhere.insert(key.clone());
+                    }
                     if passed && !package.fake {
                         proven.insert(key);
                     }
@@ -150,6 +162,16 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                     ));
                 }
             }
+        }
+    }
+    for sentence in &ordered {
+        if let Some((shown, line)) = in_t2.get(sentence)
+            && !elsewhere.contains(sentence)
+        {
+            findings.push(format!(
+                "{shown}:{line}: only a {T2_PACKAGE} check quotes this sentence under `{}`: {}. The gate runs {T2_PACKAGE} only for an adapter change, so add a check in another tier",
+                sentence.0, sentence.1
+            ));
         }
     }
     findings.extend(command_findings(root, &text)?);

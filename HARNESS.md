@@ -318,7 +318,9 @@ that is `main` as it is: one with no base, or no change from it but in
 `harness/ledger/`. It prints `pass t2` or `fail t2` on a line of its own.
 Otherwise it prints `skip t2` and leaves `t2` out. A `t2` check counts toward
 the spec score only when `t2` runs, so a promise needs a check in another
-tier too. The nightly job tests `main` as it is, so its gate runs `t2`, and
+tier too. The gate's `spec` check fails a promise that only `t2` checks
+quote, and a check that earns no score, because it links a `fake-*` crate,
+doesn't count as another tier. The nightly job tests `main` as it is, so its gate runs `t2`, and
 that run is its T2 check.
 
 **Guest kernel.** T1 fetches the kernel that `guest/kernel/pin.toml` pins

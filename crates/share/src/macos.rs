@@ -1,8 +1,8 @@
 //! The share server's stand-ins on macOS, where it doesn't run yet. On
-//! Linux it confines itself with Landlock, a user namespace, and a seccomp
-//! filter, and reaches files with calls that only Linux has. macOS has no
-//! stand-in for those yet, so each of them fails here, and says so. Each
-//! module stands in for the Linux one of the same name.
+//! Linux it confines itself with Landlock, runs `rw` shares in a user
+//! namespace, and reaches files with calls that only Linux has. Each module
+//! stands in for the Linux one of the same name, and each call that has no
+//! macOS equivalent yet fails here, and says so.
 
 use std::io;
 

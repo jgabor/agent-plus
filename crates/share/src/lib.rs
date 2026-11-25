@@ -22,7 +22,8 @@
 //! lock, unlock, or close that file.
 //!
 //! The server runs on Linux alone. On macOS, each part of it that only Linux
-//! can build has a stand-in, in `macos.rs`, that fails and says so.
+//! can build has a stand-in, in `macos.rs`, and each call with no macOS
+//! equivalent yet fails and says so.
 
 #[cfg(target_os = "linux")]
 mod landlock;

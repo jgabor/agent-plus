@@ -102,25 +102,44 @@ pub struct Reserved<'a> {
     pub set: Vec<&'a str>,
     /// The variables the harness reads for sign-in.
     pub sign_in: &'a [&'a str],
+    /// The host variable that `AUTH key` reads, which the agent sees only as
+    /// a placeholder.
+    pub key: &'a str,
     /// The harness's own hosts.
     pub hosts: &'a [&'a str],
 }
 
-/// The errors from an `ENV` that sets a key in `reserved`, and from a
-/// `SECRET` that uses one of those names or binds one of the harness's
-/// hosts, in line order. It skips the instructions that have errors of their
-/// own.
+/// The errors from an `ENV` that sets a key in `reserved`, or that reads
+/// the key `AUTH key` hides, and from a `SECRET` that uses one of those names
+/// or binds one of the harness's hosts, in line order. It skips the
+/// instructions that have errors of their own.
 pub fn reserved(instructions: &[Instruction], reserved: &Reserved) -> Vec<Error> {
     let harness = reserved.harness;
+    let auth_key = instructions
+        .iter()
+        .find_map(|instruction| match item(instruction) {
+            Some(Ok(Item::Auth(Auth::Key))) => Some(instruction.line),
+            _ => None,
+        });
     let mut errors = Vec::new();
     for instruction in instructions {
         let message = match item(instruction) {
-            Some(Ok(Item::Env(Env { key, .. }))) => {
+            Some(Ok(Item::Env(Env { key, value }))) => {
+                let reads_key = value.iter().any(
+                    |part| matches!(part, Part::Variable { name, .. } if name == reserved.key),
+                );
                 if reserved.set.contains(&key.as_str()) {
                     format!("`ap` sets `{key}` for {harness}, so `ENV` can't set it")
                 } else if reserved.sign_in.contains(&key.as_str()) {
                     format!(
                         "{harness} reads `{key}` to sign in, so `ENV` can't set it. Use `AUTH` to sign it in"
+                    )
+                } else if let Some(auth) = auth_key
+                    && reads_key
+                {
+                    let name = reserved.key;
+                    format!(
+                        "`ENV {key}` reads `${name}`, which `AUTH key` on line {auth} hides, so the agent would see its value. Remove this `ENV` line"
                     )
                 } else {
                     continue;

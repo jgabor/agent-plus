@@ -2152,3 +2152,57 @@ fn a_run_with_a_secret_it_has_no_value_for_fails_before_its_vm_starts() {
     assert!(!stderr.contains("not built"), "{stderr}");
     assert_eq!(scratch.ps_all(), Vec::<Vec<String>>::new());
 }
+
+/// What git's credential helpers give for `https://<host>`, in the run
+/// `name`, followed by the variable `variable`, as a script prints them:
+/// `git credential fill`'s output, and its status. Git may not prompt, so
+/// a host no helper answers for fails and prints nothing.
+fn credentials(scratch: &Scratch, name: &str, variable: &str, host: &str) -> (String, String) {
+    let script = format!(
+        "printf 'protocol=https\\nhost={host}\\n\\n' | GIT_TERMINAL_PROMPT=0 git credential fill 2>/dev/null; \
+         echo \"status $?\"; printf '%s' \"${variable}\""
+    );
+    let output = scratch.exec(name, &["sh", "-c", &script], b"");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let (filled, held) = stdout.rsplit_once('\n').unwrap();
+    (format!("{filled}\n"), held.to_owned())
+}
+
+// spec(SECRET): When `GITHUB_TOKEN` or `GH_TOKEN` is bound to `github.com`, `ap` also configures git in the guest to use it, so `git push` works over HTTPS.
+#[test]
+fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
+    const VALUE: &str = "git-token-value-3f9c1e";
+    let scratch = Scratch::new("git-token");
+    let github = "NETWORK +github.com\nNETWORK +api.github.com\nENV FAKE_HARNESS_SLEEP 300\n";
+    for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        let agent = variable.to_lowercase().replace('_', "-");
+        scratch.build(&agent, &fake(&format!("{github}SECRET {variable}\n")));
+        let (run, name, _) = start_reporting(&scratch, &agent, &[(variable, VALUE)]);
+        let (filled, placeholder) = credentials(&scratch, &name, variable, "github.com");
+        assert_eq!(placeholder.len(), 32, "{placeholder}");
+        assert_ne!(placeholder, VALUE);
+        assert_eq!(
+            filled,
+            format!(
+                "protocol=https\nhost=github.com\nusername=x-access-token\npassword={placeholder}\nstatus 0\n"
+            ),
+        );
+        // `ap` answers for no other host, not even a subdomain.
+        for host in ["example.com", "gist.github.com"] {
+            let (filled, _) = credentials(&scratch, &name, variable, host);
+            assert_eq!(filled, "status 128\n", "{host}");
+        }
+        drop(run);
+    }
+    // A token bound only to another host configures nothing.
+    scratch.build(
+        "elsewhere",
+        &fake("NETWORK +host.ap.internal\nENV FAKE_HARNESS_SLEEP 300\nSECRET GITHUB_TOKEN @host.ap.internal\n"),
+    );
+    let (run, name, _) = start_reporting(&scratch, "elsewhere", &[("GITHUB_TOKEN", VALUE)]);
+    let (filled, placeholder) = credentials(&scratch, &name, "GITHUB_TOKEN", "github.com");
+    assert_eq!(placeholder.len(), 32, "{placeholder}");
+    assert_eq!(filled, "status 128\n");
+    drop(run);
+}

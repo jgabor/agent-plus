@@ -985,7 +985,18 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         (None, None, [only]) => (*only).clone(),
         (None, None, _) => HOME.to_owned(),
     };
-    let written = ap::adapter::run_files(harness, &directory, placeholder_given.as_deref());
+    let mut written = ap::adapter::run_files(harness, &directory, placeholder_given.as_deref());
+    // SPEC.md's SECRET: git signs in to `github.com` with the first token
+    // bound to it.
+    if let Some(token) = hidden.iter().find(|secret| {
+        ap::adapter::GIT_TOKENS.contains(&secret.name.as_str())
+            && secret.hosts.iter().any(|host| host == "github.com")
+    }) {
+        written.push((
+            ap::adapter::GIT_CONFIG,
+            ap::adapter::git_config(&token.placeholder),
+        ));
+    }
     shares.extend(typed);
     // SPEC.md's MODE section: every share joins the harness's workspace. The
     // share from `--share` is a directory.

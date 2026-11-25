@@ -98,6 +98,28 @@ pub fn run_files(
     }
 }
 
+/// The secrets that git uses for HTTPS to `github.com`, from SPEC.md's
+/// SECRET section.
+pub const GIT_TOKENS: [&str; 2] = ["GITHUB_TOKEN", "GH_TOKEN"];
+
+/// Git's system configuration in the guest. No layer writes it, and the run's
+/// root is new each run, so it holds only what the run puts there.
+pub const GIT_CONFIG: &str = "/etc/gitconfig";
+
+/// The [`GIT_CONFIG`] that has git sign in to `https://github.com` with
+/// `placeholder`, which the proxy replaces in `Authorization: Basic`. Any
+/// username works with a token, and the placeholder is hex, so it needs no
+/// escape. The helper answers any request, and git reads only the answer to
+/// `get`.
+pub fn git_config(placeholder: &[u8]) -> Vec<u8> {
+    let mut text = b"[credential \"https://github.com\"]\n\
+        \thelper = \"!f() { echo username=x-access-token; echo password="
+        .to_vec();
+    text.extend_from_slice(placeholder);
+    text.extend_from_slice(b"; }; f\"\n");
+    text
+}
+
 /// `SYSTEM`'s values as one text: in file order, separated by a blank line,
 /// and ending in a newline. A value's own blank lines are kept.
 pub fn system(values: &[Vec<u8>]) -> Vec<u8> {

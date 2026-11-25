@@ -766,6 +766,47 @@ fn git_ignored_files_are_counted_and_not_applied() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
+/// A file and a symlink the agent wrote in place of your directories that
+/// hold a git-ignored file, at any depth, are skipped, and each directory
+/// stays with its git-ignored files, as if the agent had deleted it. A file
+/// in place of a directory with no ignored file in it lands.
+// spec(SHARE): Where your directory holds a git-ignored file, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why.
+// spec(SHARE): The directory stays, with its git-ignored files, as if the agent had deleted it.
+#[test]
+fn a_file_in_place_of_your_directory_with_an_ignored_file_is_skipped() {
+    let scratch = Scratch::new("ignored-replaced");
+    let share = &scratch.share;
+    fs::write(share.join(".gitignore"), "*.log\n").unwrap();
+    for (path, data) in [
+        ("logs/old.log", "old\n"),
+        ("logs/notes.txt", "notes\n"),
+        ("cache/deep/run.log", "run\n"),
+        ("plain/a.txt", "a\n"),
+    ] {
+        fs::create_dir_all(share.join(path).parent().unwrap()).unwrap();
+        fs::write(share.join(path), data).unwrap();
+    }
+    let (run, pending) = scratch.run("notes", 1);
+    change(share, &pending, "logs", 0o644, b"a file\n");
+    record(&pending, &base(share, "cache"));
+    link(&pending, "cache", ".gitignore");
+    change(share, &pending, "plain", 0o644, b"plain\n");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it would replace a directory that holds a git-ignored file";
+    assert_eq!(
+        stdout(&output),
+        format!("skipped cache: {why}\nskipped logs: {why}\nskipped 2 git-ignored files\n")
+    );
+    assert_eq!(scratch.names("logs"), ["old.log"]);
+    assert_eq!(scratch.names("cache"), ["deep"]);
+    assert_eq!(scratch.read("cache/deep/run.log"), "run\n");
+    assert_eq!(scratch.read("plain"), "plain\n");
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
 // spec(SHARE): `ap apply` and `ap discard` fail while the run is active.
 #[test]
 fn apply_fails_while_the_run_is_active() {

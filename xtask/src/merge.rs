@@ -198,7 +198,9 @@ fn sequence(
     // The xtask of `main` waits for the slot again, because it is let go on
     // the `exec`, and the timeout has started by then.
     tell_supervisor(WAITING)?;
-    let slot = lock::merge_slot(&root)?;
+    let slot = lock::merge_slot(&root, || {
+        eprintln!("{command}: PR {number} waits for the merge slot, which another run holds");
+    })?;
     report_slot()?;
     Tree::sweep(&root)?;
     let (pr, issue) = match decide(&gh, number, mode, thread)? {

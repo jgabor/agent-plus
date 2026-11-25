@@ -815,7 +815,9 @@ reader first, and change the file in a later PR.
    with the words step 4 uses, and post `failure` on the branch's head. The
    xtask that starts a command can be any, so this only saves a wait. `main`'s
    xtask checks again in step 4, and decides.
-2. Take the merge slot, and read the PR again.
+2. Take the merge slot, and read the PR again. If another run holds the slot,
+   the command first says that it waits for it, so a queue doesn't look like a
+   hang.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased

@@ -368,13 +368,14 @@ fn hand_back(
 const NOT_PROVEN: &str = "Not proven";
 
 /// Whether a fault of the runner or of `main` could have failed the proof,
-/// by what `xtask/gate` says: a check failed, an error stopped the proof, or
-/// it ended without a result. Anything else is a refusal that `prepare` gave
+/// by what `xtask/gate` says: a check failed, an error or the timeout stopped
+/// the proof, or it ended without a result. Anything else is a refusal that `prepare` gave
 /// in words, from the PR and git, which `refresh` takes as the change's.
 fn runner_could_cause(why: &str) -> bool {
     why.starts_with("Failed: ")
         || why.starts_with("Failed in its own xtask: ")
         || why == "Stopped by an error"
+        || why == merge::STOPPED_AT_THE_TIMEOUT
         || why == NOT_PROVEN
 }
 
@@ -628,6 +629,7 @@ mod tests {
             "Failed: lint, tests",
             "Failed in its own xtask: journey",
             "Stopped by an error",
+            merge::STOPPED_AT_THE_TIMEOUT,
             NOT_PROVEN,
         ] {
             assert!(runner_could_cause(why), "{why}");

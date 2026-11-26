@@ -830,8 +830,9 @@ to be staged: teach the reader first, and change the file in a later PR.
    xtask that starts a command can be any, so this only saves a wait. `main`'s
    xtask checks again in step 4, and decides.
 2. Take the merge slot, and read the PR again. If another run holds the slot,
-   the command first says that it waits for it, so a queue doesn't look like a
-   hang.
+   the command first says that it waits for it, and posts that on the PR, so a
+   queue doesn't look like a hang. If it waited, and then refuses the PR, it
+   posts `failure` with why.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased
@@ -864,32 +865,38 @@ passed, each call in steps 5 and 6 that can fail is tried once more, two
 seconds later, and a comment that a failed call posted all the same isn't
 posted again.
 
-The description of `xtask/gate` says what the proof is doing, and then how it
-ended:
+The description of `xtask/gate` says what the merge waits for, what the proof
+is doing, and then how it ended. A merge that doesn't wait posts no `Waiting:`
+status:
 
 | When | State | Description |
 |---|---|---|
+| The merge waits for the merge slot | `pending` | `Waiting: the merge slot` |
+| The merge waits for a place, or for the activity lock | `pending` | `Waiting: a place`, `Waiting: the activity lock` |
+| A wait during the proof ends | `pending` | What the proof is doing, as `Proving: lint` |
 | The proof starts | `pending` | `Proving: lint` |
 | The tests, T2, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: t2`, `Proving: journey`, `Proving: bench` |
 | The PR's own xtask starts | `pending` | `Proving: its own xtask` |
 | The PR is proven | `success` | The counts, as `spec 417 of 812, journey 7 of 19` |
 | A check failed | `failure` | The checks that failed, as `Failed: lint, tests` |
 | A check of the PR's own xtask failed | `failure` | As `Failed in its own xtask: journey` |
-| The branch doesn't rebase, or the PR or `main` changed during the proof | `failure` | Why, in its first 140 characters |
-| An error stopped the proof | `failure` | `Stopped by an error` |
+| The branch doesn't rebase, the PR or `main` changed during the proof, or the merge refuses the PR after it posted a wait | `failure` | Why, in its first 140 characters |
+| An error stopped the merge after it posted a `pending` | `failure` | `Stopped by an error` |
 | An error stopped it after the proof passed | `failure` | `Proven, then stopped by an error` |
+| The merge stopped at the merge timeout | `failure` | `Stopped at the timeout` |
 
 The status goes on the head that GitHub shows for the PR: the fetched head
 until the push, and the new head after it. So proving a green PR again turns
-it yellow until the proof ends. In a GitHub Actions run, each status links to
-the run. A `pending` or `failure` that can't
-be posted is reported, and changes nothing else.
+it yellow until the proof ends. Before the fetch, a wait reads that head from
+GitHub, and posts nothing on a PR that merged or closed. The timeout does the
+same. In a GitHub Actions run, each status links to the run. A `pending` or
+`failure` that can't be posted is reported, and changes nothing else.
 
 A merge past the merge timeout stops, with every command it started, and
 releases the slot. So does a merge whose caller stops, as on Ctrl-C. Running it
 again starts over from the fetch, and so does running it after a kill at any
-step. A merge that stops this way can leave `pending` on the PR until the
-next proof.
+step. A merge stopped at the timeout posts `failure` on the head that the PR
+shows. One whose caller stops it can leave `pending` until the next proof.
 The timeout stops while `main`'s xtask waits to take the slot again, because
 the slot is let go as the merge starts that xtask.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's own
@@ -973,7 +980,7 @@ the runner's user map ids in a user namespace. The
    comment, and the owner approves it by arming the PR again.
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
    and says why. If it ended with neither a `success` nor a `failure` on the
-   PR's head, as at the merge timeout, `refresh` posts `failure` as `Not
+   PR's head, as when it was killed, `refresh` posts `failure` as `Not
    proven`. It posts nothing if it can't read the head's status.
 6. A proof that failed only because `main` moved keeps `land-needed`, and the
    next run proves it again. So does a proof that passed and was then stopped,
@@ -987,8 +994,8 @@ the runner's user map ids in a user namespace. The
    or what the PR says changed during the proof. `refresh` takes each of those
    as the change's, and proves nothing on `main` for it. After the first
    failure of any other kind, which is a failed check, `Stopped by an error`,
-   or `Not proven`, `refresh` runs its own gate on the newest `main`, in a tree
-   of its own, once per run.
+   `Stopped at the timeout`, or `Not proven`, `refresh` runs its own gate on
+   the newest `main`, in a tree of its own, once per run.
    That gate gets the merge timeout, which here counts its wait for a place too.
    It is stopped there, with every command it started, and that counts as a
    `main` that fails. It is stopped the same way when the refresh itself stops.

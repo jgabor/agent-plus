@@ -6,11 +6,12 @@ use crate::{Problem, Verdict, limit, workspace};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::Read;
+use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
@@ -29,6 +30,70 @@ const PLACES_OVERRIDE: &str = "XTASK_PLACES";
 /// Kept by the merge slot's holder while it waits for a place, which every
 /// other run lets it have first.
 const AHEAD: &str = "ahead.lock";
+
+/// What a take waits for, when it can't have its lock at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    Place,
+    Activity,
+}
+
+/// Hears each wait of this process for a place or the activity lock: what it
+/// waits for as the wait starts, and `None` once the take has what it waited
+/// for.
+pub type Watcher = Box<dyn Fn(Option<Wait>) + Send + Sync>;
+
+static WATCHER: OnceLock<Watcher> = OnceLock::new();
+
+/// Lets this process hear its waits. Only the first watcher counts.
+pub fn watch(watcher: Watcher) {
+    let _ = WATCHER.set(watcher);
+}
+
+fn tell(wait: Option<Wait>) {
+    if let Some(watcher) = WATCHER.get() {
+        watcher(wait);
+    }
+}
+
+/// A wait that started, which ends as this drops.
+struct Waiting;
+
+impl Waiting {
+    /// Starts a wait for `what`, unless the take already waits.
+    fn start(waiting: &mut Option<Waiting>, what: Wait) {
+        if waiting.is_none() {
+            tell(Some(what));
+            *waiting = Some(Waiting);
+        }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        tell(None);
+    }
+}
+
+/// Locks `file`, shared or alone, and starts a wait for `what` if it has to.
+fn take(file: &File, shared: bool, what: Wait, waiting: &mut Option<Waiting>) -> io::Result<()> {
+    let tried = if shared {
+        file.try_lock_shared()
+    } else {
+        file.try_lock()
+    };
+    match tried {
+        Ok(()) => return Ok(()),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(e)) => return Err(e),
+    }
+    Waiting::start(waiting, what);
+    if shared {
+        file.lock_shared()
+    } else {
+        file.lock()
+    }
+}
 
 /// How this process holds one of the locks: not at all, through a parent that
 /// passed it down, or by a file of its own. The kernel drops a lock when its
@@ -335,18 +400,20 @@ fn is_executable(path: &Path) -> bool {
 /// Every holder passes through the turnstile, which a pending bench keeps, so
 /// a bench isn't starved by a stream of new holders.
 fn take_shared(directory: &Path) -> Result<File, Problem> {
+    let mut waiting = None;
     let turnstile = open(directory, "turnstile.lock")?;
-    turnstile.lock().map_err(failed)?;
+    take(&turnstile, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
-    activity.lock_shared().map_err(failed)?;
+    take(&activity, true, Wait::Activity, &mut waiting).map_err(failed)?;
     Ok(activity)
 }
 
 fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
+    let mut waiting = None;
     let turnstile = open(directory, "turnstile.lock")?;
-    turnstile.lock().map_err(failed)?;
+    take(&turnstile, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
-    activity.lock().map_err(failed)?;
+    take(&activity, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let mut hold = Hold::new(directory);
     hold.activity = Held::Own(activity);
     hold.files.push(turnstile);
@@ -359,16 +426,17 @@ fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
 /// while the holder waits gives it up, and waits until the holder has one.
 fn take_place(directory: &Path, count: usize, ahead: bool) -> Result<File, Problem> {
     let couldnt = |e: std::io::Error| Problem(format!("couldn't take a place: {e}"));
+    let mut waiting = None;
     let turn = open(directory, if ahead { AHEAD } else { "places.lock" })?;
-    turn.lock().map_err(couldnt)?;
+    take(&turn, false, Wait::Place, &mut waiting).map_err(couldnt)?;
     loop {
-        let place = free_place(directory, count)?;
+        let place = free_place(directory, count, &mut waiting)?;
         if ahead || !waits_ahead(directory)? {
             return Ok(place);
         }
         drop(place);
         let behind = open(directory, AHEAD)?;
-        behind.lock_shared().map_err(couldnt)?;
+        take(&behind, true, Wait::Place, &mut waiting).map_err(couldnt)?;
     }
 }
 
@@ -376,7 +444,11 @@ fn take_place(directory: &Path, count: usize, ahead: bool) -> Result<File, Probl
 /// of several files, so this waits on each place in a thread of its own, and
 /// keeps the first it gets. A thread that gets one later finds nobody to hand
 /// it to, and frees it at once.
-fn free_place(directory: &Path, count: usize) -> Result<File, Problem> {
+fn free_place(
+    directory: &Path,
+    count: usize,
+    waiting: &mut Option<Waiting>,
+) -> Result<File, Problem> {
     let couldnt = |e: std::io::Error| Problem(format!("couldn't take a place: {e}"));
     let names: Vec<String> = (0..count).map(|i| format!("place-{i}.lock")).collect();
     for name in &names {
@@ -387,6 +459,7 @@ fn free_place(directory: &Path, count: usize) -> Result<File, Problem> {
             Err(TryLockError::Error(e)) => return Err(couldnt(e)),
         }
     }
+    Waiting::start(waiting, Wait::Place);
     let (taken, first) = sync_channel(0);
     for name in names {
         let file = open(directory, &name)?;

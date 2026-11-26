@@ -49,6 +49,13 @@ fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+/// A SETTINGS frame of one setting, by section 6.5.1.
+fn setting(id: u16, value: u32) -> Vec<u8> {
+    let mut payload = id.to_be_bytes().to_vec();
+    payload.extend(value.to_be_bytes());
+    frame(SETTINGS, 0, 0, &payload)
+}
+
 /// A client's preface and an empty SETTINGS frame, by section 3.4.
 fn start() -> Vec<u8> {
     let mut bytes = PREFACE.to_vec();
@@ -477,10 +484,7 @@ fn a_bad_settings_value_is_an_error_6_5_2() {
         (5, 16383, Error::Settings, PROTOCOL_ERROR),
         (5, 1 << 24, Error::Settings, PROTOCOL_ERROR),
     ] {
-        let mut payload = id.to_be_bytes().to_vec();
-        payload.extend(value.to_be_bytes());
-        let frames = [frame(SETTINGS, 0, 0, &payload)];
-        assert_eq!(refused(&frames), error, "{id} {value}");
+        assert_eq!(refused(&[setting(id, value)]), error, "{id} {value}");
         assert_eq!(error.code(), code, "{id} {value}");
     }
     let mut payload = 4u16.to_be_bytes().to_vec();
@@ -895,16 +899,25 @@ fn an_acknowledged_table_size_of_0_gets_blocks_from_a_table_of_0_hpack_4_2() {
     assert_eq!(read, Err(Error::Hpack(hpack::Error::MissingUpdate)));
 }
 
-/// The type of each frame in `bytes`, each of which is within `limit`.
-fn kinds(mut bytes: &[u8], limit: usize) -> Vec<u8> {
-    let mut kinds = Vec::new();
-    while !bytes.is_empty() {
-        let length = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]) as usize;
-        assert!(length <= limit, "{length}");
-        kinds.push(bytes[3]);
+/// The type and payload of each whole frame in `bytes`.
+fn split(mut bytes: &[u8]) -> Vec<(u8, &[u8])> {
+    let mut frames = Vec::new();
+    while let Some(head) = bytes.first_chunk::<9>() {
+        let length = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+        frames.push((head[3], &bytes[9..9 + length]));
         bytes = &bytes[9 + length..];
     }
-    kinds
+    frames
+}
+
+/// The type of each frame in `bytes`, each of which is within `limit`.
+fn kinds(bytes: &[u8], limit: usize) -> Vec<u8> {
+    (split(bytes).into_iter())
+        .map(|(kind, payload)| {
+            assert!(payload.len() <= limit, "{}", payload.len());
+            kind
+        })
+        .collect()
 }
 
 // The h2 crate.
@@ -1125,7 +1138,10 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
                 let mut out = Vec::new();
                 while let Some(frame) = reader.frame().expect("our reader") {
                     match &frame {
-                        Frame::Settings(_) => writer.write(&Frame::SettingsAck, &mut out),
+                        Frame::Settings(settings) => {
+                            writer.write(&Frame::SettingsAck, &mut out);
+                            writer.apply(settings);
+                        }
                         Frame::Headers { stream: 1, .. } => {
                             let response = Frame::Headers {
                                 stream: 1,
@@ -1137,9 +1153,10 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
                                 end_stream: false,
                             };
                             writer.write(&response, &mut out);
+                            // One frame, past the default frame size.
                             let data = Frame::Data {
                                 stream: 1,
-                                data: b"hello".to_vec(),
+                                data: vec![b'h'; 20_000],
                                 padding: Some(9),
                                 end_stream: true,
                             };
@@ -1161,7 +1178,14 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
             read
         });
 
-        let (client, connection) = h2::client::handshake(client_io)
+        // Our writer applies these once it acknowledges them, by section
+        // 6.5.3. `h2` refuses a frame past its SETTINGS_MAX_FRAME_SIZE, and
+        // a table size update past its SETTINGS_HEADER_TABLE_SIZE, but not
+        // a block that leaves out the update.
+        let (client, connection) = (h2::client::Builder::new())
+            .header_table_size(0)
+            .max_frame_size(1 << 15)
+            .handshake::<_, &'static [u8]>(client_io)
             .await
             .expect("client handshake");
         let driver = tokio::spawn(async move {
@@ -1195,7 +1219,7 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
     });
     assert_eq!(status, http::StatusCode::OK);
     assert_eq!(big, 30_000);
-    assert_eq!(body, b"hello");
+    assert_eq!(body, vec![b'h'; 20_000]);
     assert_eq!(refused, Some(h2::Reason::REFUSED_STREAM));
     // The client acknowledged our SETTINGS and answered our PING.
     assert!(read.contains(&Frame::SettingsAck), "{read:?}");
@@ -1230,33 +1254,23 @@ fn h2_goaway(frames: &[Vec<u8>]) -> Option<u32> {
         let mut sent = Vec::new();
         client_io.read_to_end(&mut sent).await.expect("read");
         server.await.expect("server");
-        let mut bytes = &sent[..];
-        while let Some(head) = bytes.first_chunk::<9>() {
-            let length = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
-            let payload = &bytes[9..9 + length];
-            if head[3] == GOAWAY {
-                return Some(u32::from_be_bytes(payload[4..8].try_into().unwrap()));
-            }
-            bytes = &bytes[9 + length..];
-        }
-        None
+        (split(&sent).into_iter())
+            .find(|&(kind, _)| kind == GOAWAY)
+            .map(|(_, payload)| u32::from_be_bytes(payload[4..8].try_into().unwrap()))
     })
 }
 
-/// `h2` departs from RFC 9113 in the cases this leaves out. It sends a
-/// PROTOCOL_ERROR for every frame its parser refuses, where sections 6.4,
-/// 6.5, 6.7, 6.8, and 6.9 say FRAME_SIZE_ERROR, and section 6.5.2 says
+/// `h2` departs from RFC 9113 in most of the cases this leaves out. It
+/// sends a PROTOCOL_ERROR for every frame its parser refuses, where sections
+/// 6.4, 6.5, 6.7, 6.8, and 6.9 say FRAME_SIZE_ERROR, and section 6.5.2 says
 /// FLOW_CONTROL_ERROR. It sends a PROTOCOL_ERROR for a block that HPACK
 /// refuses, where section 4.3 says COMPRESSION_ERROR. It sends a
 /// COMPRESSION_ERROR for a joined block past its list limit, which HPACK
-/// never decoded.
+/// never decoded. The rest can't be compared: `h2` sends no GOAWAY for a
+/// wrong preface, keeps the connection for headers past its list limit but
+/// within 4 times it, and as a server is never pushed to.
 #[test]
 fn each_error_has_the_code_an_h2_server_sends() {
-    let setting = |id: u16, value: u32| {
-        let mut payload = id.to_be_bytes().to_vec();
-        payload.extend(value.to_be_bytes());
-        frame(SETTINGS, 0, 0, &payload)
-    };
     // Thirty user-agent headers of 100 bytes, each a literal of name index
     // 58, take 30 * 142, past the 4 times the limit that `h2` allows.
     let mut user_agents = Vec::new();

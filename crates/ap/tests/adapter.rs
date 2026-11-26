@@ -497,8 +497,8 @@ fn reserved_errors(agent: &str, lines: &str) -> Vec<agentfile::Error> {
 }
 
 /// The variables the adapter for `harness` keeps, one per line, each after
-/// why: `ap` or the adapter sets it, the harness reads it for sign-in, or
-/// `AUTH key` reads it.
+/// the reason it is kept: `set` when `ap` or the adapter sets it, `sign-in`
+/// when the harness reads it for sign-in, and `key` when `AUTH key` reads it.
 fn reserved_variables(harness: agentfile::Harness) -> String {
     let reserved = ap::adapter::reserved(harness);
     let mut lines = String::new();
@@ -515,7 +515,7 @@ fn reserved_variables(harness: agentfile::Harness) -> String {
 }
 
 #[test]
-fn each_adapter_keeps_the_certificate_variables() {
+fn each_adapter_keeps_its_variables() {
     golden(
         "reserved.txt",
         reserved_variables(agentfile::Harness::Claude).as_bytes(),

@@ -4,7 +4,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod common;
@@ -2765,4 +2765,72 @@ fn a_change_to_a_marked_paragraph_is_listed() {
             .contains("\n## SPEC.md\n\n### A\n\n- [Change a marked paragraph](https://github.com/o/r/pull/9)\n  - Changed:\n    - Was: One.\n    - Now: Uno.\n"),
         "{report}"
     );
+}
+
+/// Between its checks, the nightly job lets a bench that waits for the
+/// activity lock go first. The journey's one step waits at a FIFO, so the test
+/// knows the job holds the lock, and keeps the turnstile, as a bench does,
+/// before the step ends. Mutation testing comes later, and writes
+/// `mutants-calls` when it runs.
+#[test]
+fn nightly_lets_a_waiting_bench_go_between_its_checks() {
+    let name = "bench-between";
+    let bin = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("nightly")
+        .join(name)
+        .join("bin");
+    let (ready, go) = (bin.join("ready"), bin.join("go"));
+    let journey = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"meets\"\nmilestone = \"m\"\nneeds = []\nscript = \"harness/journey/meet.sh\"\n";
+    let meets = format!(
+        "#!/bin/sh\necho > '{}'\nread _ < '{}'\n",
+        ready.display(),
+        go.display()
+    );
+    let repo = Repo::with(
+        name,
+        "fn main() {}\n",
+        &[
+            ("harness/journey.toml", journey),
+            ("harness/journey/meet.sh", &meets),
+        ],
+    );
+    repo.set_mutants("exit 0\n");
+    repo.touch(&["ap"]);
+    common::fifo(&ready);
+    common::fifo(&go);
+    let mut nightly = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("nightly")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    common::meet(&ready, false);
+    let lock = |name: &str| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(repo.root.join(".git/xtask").join(name))
+            .unwrap()
+    };
+    let turnstile = lock("turnstile.lock");
+    turnstile.lock().unwrap();
+    common::meet(&go, true);
+    let activity = lock("activity.lock");
+    let (taken, held) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        activity.lock().unwrap();
+        let _ = taken.send(activity);
+    });
+    let Ok(bench) = held.recv_timeout(common::LIMIT) else {
+        let _ = nightly.kill();
+        let _ = nightly.wait();
+        panic!("the job kept the activity lock after the journey");
+    };
+    assert!(
+        !repo.bin.join("mutants-calls").exists(),
+        "mutation testing ran before the bench"
+    );
+    drop((bench, turnstile));
+    assert!(nightly.wait().unwrap().code().is_some());
+    assert!(repo.bin.join("mutants-calls").exists());
 }

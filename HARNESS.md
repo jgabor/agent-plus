@@ -375,6 +375,15 @@ holds up a bench. A nested `xtask`
 inherits its parent's place, and the kernel frees a place when its holder
 exits. The places live beside the activity lock.
 
+A proof under the merge slot waits for a place apart from the queue, and gets
+the next one that frees, because every merge waits for it. Before each
+package, a run of the tests with a place of its own lets waiting work go
+first. It gives its place to a proof under the slot that waits for one, or
+lets go of the activity lock while a bench waits for it. Then it takes back
+what it let go: the place first, then the lock through the turnstile. The
+nightly job does the same between its checks. A proof under the slot keeps
+both, and so does a run whose parent passed its place down.
+
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
 matching, and device input from the guest. A target for code with an oracle
 compares the two, and a difference fails like a crash. An oracle kept as a
@@ -804,9 +813,10 @@ xtask proves it, so that it can't pass by changing its judge. The xtask of its
 rebased tree proves it too, through its `prove` command, so that the record says
 what `main` will measure after the merge. It must pass both, and its record is
 its own xtask's. Merging accepts what either accepts, and the comment marks what
-only `main`'s accepts. A PR that changes a file xtask reads together with the
-code that reads it, or how `prove` is called, still has to be staged: teach the
-reader first, and change the file in a later PR.
+only `main`'s accepts. The second proof keeps the place of the first, unless
+the first ran a bench, which gives the place up. A PR that changes a file xtask
+reads together with the code that reads it, or how `prove` is called, still has
+to be staged: teach the reader first, and change the file in a later PR.
 
 1. `merge` refuses a PR unless its issue has `auto:merge`. All three commands
    refuse a PR that comes from a fork, doesn't close exactly one issue, doesn't
@@ -884,8 +894,9 @@ The timeout stops while `main`'s xtask waits to take the slot again, because
 the slot is let go as the merge starts that xtask.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's own
 xtask starts its proof, so each proof gets all of it. The PR's own xtask can't
-start it again. It stops while a proof waits for a place, and starts again once
-the proof has one. It also stops while the proof's bench waits to hold the
+start it again. It stops while a proof waits for a place, and then for a
+shared hold of the activity lock, and starts again once the proof has both.
+It also stops while the proof's bench waits to hold the
 activity lock alone, because other work holds that lock for as long as it runs,
 and then goes on from where it stopped. A PR's own xtask can't stop the timeout
 either. It tells `main`'s xtask when its bench waits, and the timeout stops only

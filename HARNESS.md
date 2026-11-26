@@ -750,16 +750,21 @@ a parent is the owner's.
 2. Read the issue, the sentences it names, and the base scores.
 3. Write the check, and record it failing.
 4. Make the smallest change that passes.
-5. Run the gate, and the bench if a budget can be affected. When the gate
+5. Tidy what it changed: one copy of each thing, and nothing left unused.
+6. Run the gate, and the bench if a budget can be affected. When the gate
    says the spec count is level, add a `Hill: none, <reason>` line to the PR
    body before `merge`, unless the journey or a budget rises.
-6. If a floor failed, or no count rose and the PR has no `Hill: none` line,
+7. If a floor failed, or no count rose and the PR has no `Hill: none` line,
    revert and try again, within the attempt limit. Past the limit, park the
    issue.
-7. Get a review, within the round limit, from the first reviewer that isn't
+8. Get a review, within the round limit, from the first reviewer that isn't
    blocked.
-8. Open the PR, and wait for checks and reviews.
-9. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
+9. Open the PR. `xtask/gate` is its only check, the worker's own `merge` or
+   `prepare` posts it, and no bot reviews the repository, so the worker waits
+   for neither.
+10. Merge if the label is `auto:merge`. Otherwise park with the PR ready.
+11. Remove the worktree and its local branch with `cargo xtask remove`, after
+    a merge, or after parking with `land-needed` because `prepare` passed.
 
 A worker that another issue blocks, and not a question for the owner, files
 that issue if it doesn't exist, and adds `Blocked by` to its own. It parks
@@ -767,13 +772,14 @@ its status and removes `in-progress`, with no `answer-needed`. The issue is
 Blocked, and the first dispatch after the other issue closes continues it on
 its branch. The planner gives the other issue a label by adopting it.
 
-A worker on a Mac does steps 1 to 4 and 7, with the checks that run there,
+A worker on a Mac does steps 1 to 5 and 8, with the checks that run there,
 because the gate needs Linux, KVM, and systemd. It then opens the PR with its
-proof and its review, parks its status comment, and removes `host:macos` and
-`in-progress`. The issue is Available on its branch, so the next dispatch on
-Linux starts a worker that takes it over, runs the gate, and merges or
-prepares the PR. That worker keeps the Mac's proof, as AGENTS.md says. Only
-the gate on Linux decides a merge, so no merge slot spans machines.
+proof and its review, parks its status comment, removes `host:macos` and
+`in-progress`, and removes its worktree as step 11 does. The issue is
+Available on its branch, so the next dispatch on Linux starts a worker that
+takes it over, runs the gate, and merges or prepares the PR. That worker keeps
+the Mac's proof, as AGENTS.md says. Only the gate on Linux decides a merge, so
+no merge slot spans machines.
 
 Model selection escalates in a fixed order: improve the brief, raise the
 effort, then change the model. Reviewers use a different provider from the
@@ -1183,7 +1189,6 @@ GitHub.
 | Bench | Exclusive hold of the activity lock |
 | Merge | Exclusive merge slot |
 | Refresh | One run at a time, and the merge slot from each PR's proof to its squash |
-| GitHub API | One watcher per PR |
 
 | Setting | Initial value |
 |---|---|

@@ -268,28 +268,28 @@ fn run_agent(
     let share::Servers { started, serving } =
         share::start(exe, &roots, &names, Some(record.as_fd()))
             .map_err(fail("can't start the share server"))?;
+    let mut command = Command::new(exe);
     let share_sockets = (started.iter())
-        .map(|server| share::inheritable(server.socket.as_fd()))
+        .map(|server| share::inheritable(&mut command, server.socket.as_fd()))
         .collect::<io::Result<Vec<_>>>()
         .map_err(fail("can't start the share server"))?;
     let mut servers: Vec<Child> = started.into_iter().map(|server| server.process).collect();
-    // Made after the share servers start, so that only the run process
-    // inherits it.
-    let link = share::inheritable(network_link.as_fd())
+    let link = share::inheritable(&mut command, network_link.as_fd())
         .map_err(fail("can't start the network process"))?;
     drop(network_link);
     // Your keys have a pair of their own, so a harness that doesn't read
     // them holds back nothing else.
     let (keys, keys_end) = UnixStream::pair().map_err(fail("can't start the run"))?;
-    let their_keys = share::inheritable(keys_end.as_fd()).map_err(fail("can't start the run"))?;
+    let their_keys =
+        share::inheritable(&mut command, keys_end.as_fd()).map_err(fail("can't start the run"))?;
     drop(keys_end);
-    let their_layers =
-        share::inheritable(held_layers.as_fd()).map_err(fail("can't start the run"))?;
+    let their_layers = share::inheritable(&mut command, held_layers.as_fd())
+        .map_err(fail("can't start the run"))?;
     drop(held_layers);
-    let their_record = share::inheritable(record.as_fd()).map_err(fail("can't start the run"))?;
+    let their_record =
+        share::inheritable(&mut command, record.as_fd()).map_err(fail("can't start the run"))?;
     drop(record);
     drop(network_process);
-    let mut command = Command::new(exe);
     for secret in &names {
         command.env_remove(secret);
     }

@@ -61,7 +61,7 @@ extern "C" fn server_process() {
         let path = CString::new(lines.next().unwrap()).unwrap();
         let changes: Vec<_> = lines.next().unwrap().split(' ').collect();
         let changes = ["fchmod", "futimens", "raise"].map(|change| changes.contains(&change));
-        (share::inheritable(fd).unwrap(), call, path, changes)
+        (fd.try_clone_to_owned().unwrap(), call, path, changes)
     });
     assert!(alone(), "the server's process has threads it doesn't own");
     let status = share::main(&args);
@@ -185,8 +185,11 @@ fn launch(
     namespace: bool,
 ) -> (Child, OwnedFd) {
     let (mine, theirs) = UnixStream::pair().unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
     let inherited: Vec<OwnedFd> = (roots.iter())
-        .map(|(_, root)| share::inheritable(File::open(root).unwrap().as_fd()).unwrap())
+        .map(|(_, root)| {
+            share::inheritable(&mut command, File::open(root).unwrap().as_fd()).unwrap()
+        })
         .collect();
     let mut args = Vec::new();
     for ((words, _), fd) in roots.iter().zip(&inherited) {
@@ -195,7 +198,6 @@ fn launch(
         }
         args.push(fd.as_raw_fd().to_string());
     }
-    let mut command = Command::new(env::current_exe().unwrap());
     command
         .env(ARGS, args.join("\n"))
         .stdin(OwnedFd::from(theirs))
@@ -414,12 +416,12 @@ fn a_confined_server_can_t_unlock_what_it_keeps() {
     fs::write(&record, "").unwrap();
     let locked = File::open(&record).unwrap();
     locked.lock().unwrap();
-    let kept = share::inheritable(locked.as_fd()).unwrap();
-    let root = share::inheritable(File::open(&tree.root).unwrap().as_fd()).unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    let kept = share::inheritable(&mut command, locked.as_fd()).unwrap();
+    let root = share::inheritable(&mut command, File::open(&tree.root).unwrap().as_fd()).unwrap();
     let args = ["keep", &kept.as_raw_fd().to_string(), "ro"].join("\n");
     let args = format!("{args}\n{}", root.as_raw_fd());
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let mut command = Command::new(env::current_exe().unwrap());
     command
         .env(ARGS, args)
         .env(UNLOCK, kept.as_raw_fd().to_string())

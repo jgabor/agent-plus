@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{self, ChecksumCapabilities, Device, DeviceCapabilities, Medium};
+use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
@@ -417,9 +417,9 @@ impl Stack {
 
     /// What `frame` is to the stack. Only a frame the stack can decide on
     /// reaches smoltcp: a flow sent to the stack, or a frame that opens
-    /// none. It parses each header as smoltcp does, so a frame smoltcp would
-    /// refuse opens no flow, though it leaves the checksums to smoltcp. It
-    /// reads past one hop-by-hop header, as smoltcp does. A frame
+    /// none. It parses each header, and checks each checksum, as smoltcp
+    /// does, so a frame smoltcp would refuse opens no flow. It reads past
+    /// one hop-by-hop header, as smoltcp does. A frame
     /// that hides its transport, such as behind any other IPv6 extension
     /// header or in a fragment, or a flow sent to every station, is dropped,
     /// because smoltcp would take it without asking.
@@ -432,7 +432,7 @@ impl Stack {
         if !ours && !to.is_broadcast() && !to.is_multicast() {
             return Seen::Drop;
         }
-        let checksums = ChecksumCapabilities::ignored();
+        let checksums = self.link.capabilities().checksum;
         let (source, destination, protocol, payload): (IpAddr, IpAddr, IpProtocol, &[u8]) =
             match ethernet.ethertype() {
                 EthernetProtocol::Arp => return Seen::Other,

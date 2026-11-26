@@ -295,9 +295,12 @@ fn run_the_checks_of(root: &Path, main: &str, status: &Status) -> Result<Verdict
     let program = keep(&directory.join("bin"), &built, main)?;
     let mut command = process::Command::new(program);
     // That xtask ends what this one posted, which no drop does on an `exec`.
-    if let Some(head) = status.posted() {
-        command.env(POSTED, head);
-    }
+    // What an outer merge posted, as for a merge that the gate's tests run,
+    // isn't this one's.
+    match status.posted() {
+        Some(head) => command.env(POSTED, head),
+        None => command.env_remove(POSTED),
+    };
     let problem = command
         .args(env::args_os().skip(1))
         .current_dir(root)
@@ -490,28 +493,31 @@ impl Status {
         self.said().head = Some(head.to_string());
     }
 
-    fn post(&self, said: &mut Said, state: &str, text: &str) {
+    /// Says whether there was a head to post on.
+    fn post(&self, said: &mut Said, state: &str, text: &str) -> bool {
         if said.head.is_none() {
             match self.gh.armed(self.number) {
                 // A PR that merged or closed keeps what it ended with.
-                Ok(now) if now.state != "OPEN" => return,
+                Ok(now) if now.state != "OPEN" => return false,
                 Ok(now) => said.head = Some(now.head),
                 Err(Problem(message)) => {
                     eprintln!("merge: couldn't post `{GATE}`: {message}");
-                    return;
+                    return false;
                 }
             }
         }
         if let Some(head) = &said.head {
             post_gate(&self.gh, head, state, text);
         }
+        true
     }
 
     fn waits(&self, what: &str) {
         let mut said = self.said();
         said.waiting = true;
-        said.open = true;
-        self.post(&mut said, "pending", &format!("Waiting: {what}"));
+        if self.post(&mut said, "pending", &format!("Waiting: {what}")) {
+            said.open = true;
+        }
     }
 
     /// Once a wait ends, the proof says again what it is doing, if it has

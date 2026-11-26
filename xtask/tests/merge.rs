@@ -1750,12 +1750,42 @@ fn the_xtask_of_main_ends_the_wait_that_the_merge_posted() {
     assert!(ended.contains("targets `release`"), "{ended}");
 }
 
+/// A merge that the gate's tests run inherits the environment of the merge
+/// that runs the gate, and what that merge posted isn't this one's to end.
+#[test]
+fn a_wait_that_an_outer_merge_posted_is_not_this_ones() {
+    let repo = Repo::new("outer-wait");
+    let release = Pr {
+        base: "release",
+        ..Pr::default()
+    };
+    let changed = repo.bin.join("pr-release.json");
+    fs::write(&changed, pr_json(&release, "OPEN")).unwrap();
+    let outer = "0123456789abcdef0123456789abcdef01234567";
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_MERGE_POSTED", outer)
+        .env("RUN_ON", "cargo build --quiet --package xtask")
+        .env(
+            "RUN_COMMAND",
+            format!(
+                "cp '{}' '{}'",
+                changed.display(),
+                repo.bin.join("pr.json").display()
+            ),
+        )
+        .output()
+        .unwrap();
+    assert_refused(&repo, &output, "targets `release`");
+    assert_eq!(posts(&repo), [], "{}", repo.calls());
+}
+
 /// A merged PR keeps the status it merged with, even when a merge of it
 /// waits for the slot.
 #[test]
 fn a_wait_posts_nothing_on_a_merged_pr() {
     let repo = Repo::new("wait-merged");
-    let head = repo.head();
     fs::write(repo.bin.join("merged-9"), "").unwrap();
     repo.set_pr(&Pr {
         state: "MERGED",
@@ -1768,7 +1798,7 @@ fn a_wait_posts_nothing_on_a_merged_pr() {
         "{}",
         stderr(&output)
     );
-    assert_eq!(posts(&repo), [], "{head}");
+    assert_eq!(posts(&repo), [], "{}", repo.calls());
 }
 
 /// Runs `land` while another run holds the merge slot, and lets the slot go

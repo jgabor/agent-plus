@@ -503,6 +503,54 @@ fn nothing_is_applied_in_a_bare_repository() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
+// spec(SHARE): That counts the names along the share's own path on your host, so nothing is applied to your files in a share at or beneath a `.git` directory.
+#[test]
+fn nothing_is_applied_in_a_share_that_is_git() {
+    let scratch = Scratch::sharing("git-root", ".Git");
+    fs::write(scratch.share.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "config", 0o644, b"[core]\n");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "skipped config: it is under .git\n");
+    assert!(!scratch.exists("config"));
+}
+
+// spec(SHARE): That counts the names along the share's own path on your host, so nothing is applied to your files in a share at or beneath a `.git` directory.
+#[test]
+fn nothing_is_applied_in_a_share_beneath_git() {
+    let scratch = Scratch::sharing("git-above", ".GIT/hooks");
+    let share = &scratch.share;
+    // Not what git finds a bare repository by, so only its name keeps it.
+    fs::write(scratch.root.join(".GIT/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(share.join("pre-push"), "#!/bin/sh\n").unwrap();
+    fs::write(share.join("sample"), "#!/bin/sh\n").unwrap();
+    fs::create_dir(share.join("old")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "pre-commit", 0o755, b"#!/bin/sh\nrun\n");
+    change(share, &pending, "pre-push", 0o755, b"#!/bin/sh\nrun\n");
+    delete(share, &pending, "sample");
+    delete(share, &pending, "old");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped pre-commit: it is under .git\n",
+            "skipped pre-push: it is under .git\n",
+            "skipped sample: it is under .git\n",
+        )
+    );
+    assert_eq!(scratch.names(""), ["old", "pre-push", "sample"]);
+    assert_eq!(scratch.read("pre-push"), "#!/bin/sh\n");
+    // Left out on purpose, so none of it stays pending.
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
 // spec(SHARE): Nothing is applied to your files at or beneath a directory that holds `HEAD`, and either `commondir` or both `objects` and `refs`, because that is how git finds a bare repository.
 #[test]
 fn nothing_is_applied_in_a_share_that_is_a_bare_repository() {

@@ -388,7 +388,11 @@ fn a_secret_s_value_comes_only_from_its_host_variable() {
     let mut set = (set.stdin(Stdio::piped()).stderr(Stdio::piped()))
         .spawn()
         .unwrap();
-    set.stdin.take().unwrap().write_all(b"tok-1\n").unwrap();
+    // `ap` may exit before it reads, which closes the pipe.
+    match set.stdin.take().unwrap().write_all(b"tok-1\n") {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => panic!("{error}"),
+        _ => {}
+    }
     let set = set.wait_with_output().unwrap();
     assert_eq!(set.status.code(), Some(1), "{set:?}");
     let said = String::from_utf8_lossy(&set.stderr);

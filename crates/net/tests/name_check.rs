@@ -302,6 +302,50 @@ fn traffic_that_is_neither_tls_nor_http_passes() {
     passes(b"\x00\x01\x02");
 }
 
+/// What a mail client sends before its TLS starts.
+const STARTTLS: &[u8] = b"EHLO\texample.com\r\nSTARTTLS\r\n";
+
+/// `text`, and then a client hello for `server`.
+fn after(text: &[u8], server: &str) -> Vec<u8> {
+    [text, &hello(server)].concat()
+}
+
+// spec(NETWORK): On a connection that starts with text, TLS that starts where the text ends, as it does after `STARTTLS`, gets the same name check as TLS from the first byte.
+// spec(NETWORK): The text ends at its first control character other than tab, carriage return, or line feed.
+#[test]
+fn tls_where_text_ends_gets_the_hello_check() {
+    passes(&after(STARTTLS, NAME));
+    passes(&after(STARTTLS, "127.0.0.1"));
+    refused_after(&after(STARTTLS, "other.example"), STARTTLS);
+    // XMPP's TLS starts after a tag, with no line end, and a first line
+    // that doesn't read as a request.
+    let xmpp = b"<stream:stream><starttls/>";
+    refused_after(&after(xmpp, "other.example"), xmpp);
+    // Empty lines before a hello are text too.
+    refused_after(&after(b"\r\n", "other.example"), b"\r\n");
+    // A hello cut off holds, as one from the first byte does.
+    let cut = after(STARTTLS, NAME);
+    let (out, result, holding) = fed(&cut[..cut.len() - 1], 3);
+    assert_eq!((&out[..], result, holding), (STARTTLS, Ok(()), true));
+    // Where the proxy decrypts every TLS, TLS where text ends is refused.
+    let mut check = NameCheck::without_later_tls(NAME);
+    let mut out = Vec::new();
+    assert_eq!(check.feed(&after(STARTTLS, NAME), &mut out), Err(Refused));
+    assert_eq!(out, STARTTLS);
+    let mut check = NameCheck::without_later_tls(NAME);
+    assert_eq!(check.feed(&hello(NAME), &mut Vec::new()), Ok(()));
+}
+
+// spec(NETWORK): On a host without URL rules, TLS that starts after the control character that ends a connection's text, as PostgreSQL's does, is neither checked nor decrypted, and a client can end its text on purpose with a control character that its server ignores.
+#[test]
+fn tls_after_text_that_ended_otherwise_passes_unread() {
+    let ssl_request = b"\x00\x00\x00\x08\x04\xd2\x16\x2f";
+    passes(&after(ssl_request, "other.example"));
+    passes(&after(b"EHLO example.com\r\n\x00\r\n", "other.example"));
+    // A client can end its text on purpose.
+    passes(&after(b"NOOP \x01\r\nSTARTTLS\r\n", "other.example"));
+}
+
 #[test]
 fn a_first_line_that_never_ends_is_refused() {
     let mut input = b"GET /".to_vec();

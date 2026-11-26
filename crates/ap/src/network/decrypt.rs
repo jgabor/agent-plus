@@ -133,7 +133,7 @@ pub(super) enum Reads {
     /// A `+` rule that allows its host has a narrower `-` rule beneath it,
     /// so every TLS connection is decrypted, and each request on it must
     /// name the host. A bound host's requests get its secrets too. Anything
-    /// else gets the name check.
+    /// else gets the name check, which refuses TLS that starts after it.
     Hosts,
     /// Its host is a hidden secret's bound host, and nothing else. Only TLS
     /// whose server name names the host is decrypted, and each request on
@@ -444,7 +444,10 @@ impl Decrypted {
     /// Passes the guest's bytes without decrypting, through the name check
     /// if `by_name`.
     fn passing(&mut self, by_name: bool) {
-        let check = by_name.then(|| Box::new(NameCheck::new(&self.name)));
+        let check = by_name.then(|| match self.reads {
+            Reads::Hosts => Box::new(NameCheck::without_later_tls(&self.name)),
+            _ => Box::new(NameCheck::new(&self.name)),
+        });
         self.stage = Stage::Passing(check);
         self.allowed = true;
     }

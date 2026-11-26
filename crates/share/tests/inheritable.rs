@@ -5,40 +5,27 @@
 #![cfg(target_os = "linux")]
 
 use std::env;
-use std::fs::{self, File};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
-use std::path::PathBuf;
-use std::process::{Child, Command};
-
-/// A program that holds still until the test kills it.
-fn waiting() -> Command {
-    let mut command = Command::new("sleep");
-    command.arg("60");
-    command
-}
-
-/// What `process`'s descriptor `fd` is open to, if it is open.
-fn opened(process: &Child, fd: RawFd) -> Option<PathBuf> {
-    fs::read_link(format!("/proc/{}/fd/{fd}", process.id())).ok()
-}
+use std::fs::File;
+use std::os::fd::{AsFd, AsRawFd};
+use std::process::Command;
 
 #[test]
 fn a_copy_reaches_only_the_program_it_was_made_for() {
     let path = env::current_exe().unwrap();
     let file = File::open(&path).unwrap();
-    let mut command = waiting();
-    let copy = share::inheritable(&mut command, file.as_fd()).unwrap();
-    let number = copy.as_raw_fd();
-
-    // `spawn` returns once each program has replaced the process it forked.
-    let mut other = waiting().spawn().unwrap();
-    let mut made_for = command.spawn().unwrap();
-    drop(copy);
-    let held = (opened(&made_for, number), opened(&other, number));
-    for process in [&mut other, &mut made_for] {
-        process.kill().unwrap();
-        process.wait().unwrap();
+    let mut made_for = Command::new("sh");
+    let copy = share::inheritable(&mut made_for, file.as_fd()).unwrap();
+    // Each program checks its own descriptor once it runs, so its exec has
+    // closed what closes on exec, and its loader has closed what it opened.
+    let holds = format!("test /proc/self/fd/{} -ef \"$0\"", copy.as_raw_fd());
+    let mut other = Command::new("sh");
+    for command in [&mut made_for, &mut other] {
+        command.env("LC_ALL", "C").arg("-c").arg(&holds).arg(&path);
     }
 
-    assert_eq!(held, (Some(path), None));
+    let other = other.status().unwrap();
+    let made_for = made_for.status().unwrap();
+    drop(copy);
+
+    assert_eq!((made_for.success(), other.success()), (true, false));
 }

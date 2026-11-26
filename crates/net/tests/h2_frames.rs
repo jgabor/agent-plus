@@ -28,6 +28,17 @@ const END_HEADERS: u8 = 0x4;
 const PADDED: u8 = 0x8;
 const PRIORITY_FLAG: u8 = 0x20;
 
+const HEADER_TABLE_SIZE: u16 = 0x1;
+const ENABLE_PUSH: u16 = 0x2;
+const MAX_FRAME_SIZE: u16 = 0x5;
+
+// Error codes, by section 7.
+const PROTOCOL_ERROR: u32 = 0x1;
+const FLOW_CONTROL_ERROR: u32 = 0x3;
+const FRAME_SIZE_ERROR: u32 = 0x6;
+const COMPRESSION_ERROR: u32 = 0x9;
+const ENHANCE_YOUR_CALM: u32 = 0xb;
+
 /// A frame's bytes, by section 4.1.
 fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     let length = payload.len() as u32;
@@ -153,6 +164,19 @@ fn a_frame_past_settings_max_frame_size_is_an_error_from_its_header_4_2() {
     // The header alone says it is too long.
     reader.push(&frame(DATA, 0, 1, &vec![0; 16385])[..9]);
     assert_eq!(reader.frame(), Err(Error::FrameSize));
+    assert_eq!(Error::FrameSize.code(), FRAME_SIZE_ERROR);
+}
+
+#[test]
+fn an_acknowledged_max_frame_size_is_the_readers_limit_4_2() {
+    let mut reader = Reader::client(LIST_LIMIT);
+    reader.push(&start());
+    assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
+    reader.apply(&[(MAX_FRAME_SIZE, 1 << 15)]);
+    reader.push(&frame(DATA, 0, 1, &vec![0; 1 << 15]));
+    assert!(matches!(reader.frame(), Ok(Some(Frame::Data { .. }))));
+    reader.push(&frame(DATA, 0, 1, &vec![0; (1 << 15) + 1])[..9]);
+    assert_eq!(reader.frame(), Err(Error::FrameSize));
 }
 
 #[test]
@@ -186,18 +210,29 @@ fn the_reserved_bit_of_a_stream_id_is_ignored_4_1() {
 #[test]
 fn a_header_block_that_hpack_refuses_is_an_error_4_3() {
     let frames = [frame(HEADERS, END_HEADERS, 1, &[0x80])];
-    assert_eq!(refused(&frames), Error::Hpack(hpack::Error::Index));
+    let error = refused(&frames);
+    assert_eq!(error, Error::Hpack(hpack::Error::Index));
+    assert_eq!(error.code(), COMPRESSION_ERROR);
 }
 
+/// A header list past the list limit asks more of the reader than it gives,
+/// by section 10.5, whether the joined block is too long or the headers it
+/// decodes to are.
 #[test]
-fn a_header_block_past_the_list_limit_is_an_error_4_3() {
+fn a_header_block_past_the_list_limit_is_enhance_your_calm_10_5() {
     let mut reader = Reader::client(100);
     let mut bytes = start();
     bytes.extend(frame(HEADERS, 0, 1, &[0x00; 60]));
     bytes.extend(frame(CONTINUATION, 0, 1, &[0x00; 60]));
     reader.push(&bytes);
     assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
-    assert_eq!(reader.frame(), Err(Error::Hpack(hpack::Error::ListSize)));
+    assert_eq!(reader.frame(), Err(Error::ListSize));
+    assert_eq!(Error::ListSize.code(), ENHANCE_YOUR_CALM);
+    // Three bytes of :method GET take 3 * 42, by section 4.1 of RFC 7541.
+    let mut reader = Reader::client(100);
+    reader.push(&started(&[frame(HEADERS, END_HEADERS, 1, &[0x82; 3])]));
+    assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
+    assert_eq!(reader.frame(), Err(Error::ListSize));
 }
 
 #[test]
@@ -229,6 +264,24 @@ fn after_an_error_every_later_byte_is_refused() {
     reader.push(&frame(PING, 0, 0, &[0; 8]));
     assert_eq!(reader.frame(), Err(Error::StreamId));
     assert_eq!(reader.frame(), Err(Error::StreamId));
+}
+
+/// Every error but a bad SETTINGS_INITIAL_WINDOW_SIZE, a frame's size, a
+/// block HPACK refuses, and a list past its limit is a PROTOCOL_ERROR, by
+/// sections 3.4, 5.1.1, 6, and 8.4.
+#[test]
+fn each_other_error_is_a_protocol_error_7() {
+    for error in [
+        Error::Preface,
+        Error::Padding,
+        Error::StreamId,
+        Error::Settings,
+        Error::WindowUpdate,
+        Error::Continuation,
+        Error::Push,
+    ] {
+        assert_eq!(error.code(), PROTOCOL_ERROR, "{error:?}");
+    }
 }
 
 // Section 6.1, DATA.
@@ -415,19 +468,20 @@ fn settings_on_a_stream_are_an_error_6_5() {
 
 #[test]
 fn a_bad_settings_value_is_an_error_6_5_2() {
-    for (id, value) in [
+    for (id, value, error, code) in [
         // SETTINGS_ENABLE_PUSH
-        (2u16, 2u32),
+        (2u16, 2u32, Error::Settings, PROTOCOL_ERROR),
         // SETTINGS_INITIAL_WINDOW_SIZE
-        (4, 0x8000_0000),
+        (4, 0x8000_0000, Error::InitialWindowSize, FLOW_CONTROL_ERROR),
         // SETTINGS_MAX_FRAME_SIZE
-        (5, 16383),
-        (5, 1 << 24),
+        (5, 16383, Error::Settings, PROTOCOL_ERROR),
+        (5, 1 << 24, Error::Settings, PROTOCOL_ERROR),
     ] {
         let mut payload = id.to_be_bytes().to_vec();
         payload.extend(value.to_be_bytes());
         let frames = [frame(SETTINGS, 0, 0, &payload)];
-        assert_eq!(refused(&frames), Error::Settings, "{id} {value}");
+        assert_eq!(refused(&frames), error, "{id} {value}");
+        assert_eq!(error.code(), code, "{id} {value}");
     }
     let mut payload = 4u16.to_be_bytes().to_vec();
     payload.extend(0x7fff_ffffu32.to_be_bytes());
@@ -515,6 +569,26 @@ fn push_promise_padding_past_the_payload_is_an_error_6_6() {
 fn push_promise_too_short_for_its_promised_stream_is_an_error_6_6() {
     let frames = [frame(PUSH_PROMISE, END_HEADERS, 1, &[0, 0, 2])];
     assert_eq!(from_server(&frames), Err(Error::FrameSize));
+}
+
+#[test]
+fn once_disabled_push_is_acknowledged_push_promise_is_an_error_6_6() {
+    let push = |promised: u8| frame(PUSH_PROMISE, END_HEADERS, 1, &[0, 0, 0, promised]);
+    let mut reader = Reader::server(LIST_LIMIT);
+    reader.push(&frame(SETTINGS, 0, 0, &[]));
+    reader.push(&push(2));
+    assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
+    // A server may push until it acknowledges SETTINGS_ENABLE_PUSH of 0.
+    assert!(matches!(
+        reader.frame(),
+        Ok(Some(Frame::PushPromise { .. }))
+    ));
+    reader.push(&frame(SETTINGS, ACK, 0, &[]));
+    reader.push(&push(4));
+    assert_eq!(reader.frame(), Ok(Some(Frame::SettingsAck)));
+    reader.apply(&[(ENABLE_PUSH, 0)]);
+    assert_eq!(reader.frame(), Err(Error::Push));
+    assert_eq!(Error::Push.code(), PROTOCOL_ERROR);
 }
 
 #[test]
@@ -744,18 +818,89 @@ fn a_large_header_block_is_written_across_continuation_frames() {
     };
     let mut bytes = start();
     Writer::new().write(&frame, &mut bytes);
-    let kinds = kinds(&bytes[start().len()..]);
+    let kinds = kinds(&bytes[start().len()..], 16384);
     assert_eq!(kinds, [HEADERS, CONTINUATION, CONTINUATION]);
     assert_eq!(read(&bytes), Ok(vec![Frame::Settings(vec![]), frame]));
 }
 
-/// The type of each frame in `bytes`, each of which is within the default
-/// SETTINGS_MAX_FRAME_SIZE.
-fn kinds(mut bytes: &[u8]) -> Vec<u8> {
+#[test]
+fn the_writer_writes_up_to_an_acknowledged_max_frame_size_4_2() {
+    let mut headers = request("/big");
+    headers.push(header("x-big", &"a".repeat(30_000)));
+    let frames = [
+        Frame::Headers {
+            stream: 1,
+            headers,
+            priority: None,
+            end_stream: false,
+        },
+        Frame::Data {
+            stream: 1,
+            data: vec![7; 1 << 15],
+            padding: None,
+            end_stream: true,
+        },
+    ];
+    let mut writer = Writer::new();
+    writer.apply(&[(MAX_FRAME_SIZE, 1 << 15)]);
+    let mut bytes = start();
+    for frame in &frames {
+        writer.write(frame, &mut bytes);
+    }
+    let kinds = kinds(&bytes[start().len()..], 1 << 15);
+    assert_eq!(kinds, [HEADERS, DATA]);
+    let mut reader = Reader::client(LIST_LIMIT);
+    reader.push(&bytes);
+    assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
+    reader.apply(&[(MAX_FRAME_SIZE, 1 << 15)]);
+    assert_eq!(reader.frame(), Ok(Some(frames[0].clone())));
+    assert_eq!(reader.frame(), Ok(Some(frames[1].clone())));
+}
+
+/// A peer's SETTINGS_HEADER_TABLE_SIZE of 0, once acknowledged, empties the
+/// table, and each block after says so first, by section 4.2 of RFC 7541.
+#[test]
+fn an_acknowledged_table_size_of_0_gets_blocks_from_a_table_of_0_hpack_4_2() {
+    let headers = |path| Frame::Headers {
+        stream: 1,
+        headers: request(path),
+        priority: None,
+        end_stream: true,
+    };
+    let frames = [headers("/a"), headers("/a"), headers("/b")];
+    let written = |writer: &mut Writer| {
+        let mut bytes = start();
+        for frame in &frames {
+            writer.write(frame, &mut bytes);
+        }
+        bytes
+    };
+    let reader = || {
+        let mut reader = Reader::client(LIST_LIMIT);
+        reader.push(&start());
+        assert_eq!(reader.frame(), Ok(Some(Frame::Settings(vec![]))));
+        reader.apply(&[(HEADER_TABLE_SIZE, 0)]);
+        reader
+    };
+    let mut writer = Writer::new();
+    writer.apply(&[(HEADER_TABLE_SIZE, 0)]);
+    let bytes = written(&mut writer);
+    // The first block starts with a dynamic table size update to 0.
+    assert_eq!(bytes[start().len() + 9], 0x20);
+    let read = read_with(reader(), &bytes[start().len()..]);
+    assert_eq!(read, Ok(frames.to_vec()));
+    // A reader that has a table of 0 refuses a block that doesn't say so.
+    let bytes = written(&mut Writer::new());
+    let read = read_with(reader(), &bytes[start().len()..]);
+    assert_eq!(read, Err(Error::Hpack(hpack::Error::MissingUpdate)));
+}
+
+/// The type of each frame in `bytes`, each of which is within `limit`.
+fn kinds(mut bytes: &[u8], limit: usize) -> Vec<u8> {
     let mut kinds = Vec::new();
     while !bytes.is_empty() {
         let length = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]) as usize;
-        assert!(length <= 16384, "{length}");
+        assert!(length <= limit, "{length}");
         kinds.push(bytes[3]);
         bytes = &bytes[9 + length..];
     }
@@ -936,7 +1081,7 @@ fn an_h2_clients_requests_read_as_the_h2_server_reads_them() {
     let (seen, sent) = through_h2(&paths);
     assert_eq!(seen.len(), 3);
     // The long path takes more than one frame before the rewrite.
-    let continuations = (kinds(&sent[PREFACE.len()..]).iter())
+    let continuations = (kinds(&sent[PREFACE.len()..], 16384).iter())
         .filter(|&&kind| kind == CONTINUATION)
         .count();
     assert!(continuations >= 4, "{continuations}");
@@ -1061,6 +1206,90 @@ fn an_h2_client_reads_the_frames_our_writer_writes() {
         }),
         "{read:?}"
     );
+}
+
+const H2_LIMIT: usize = 1000;
+
+/// The code of the GOAWAY an `h2` server sends after a client's preface
+/// and empty SETTINGS, then `frames`, with a list limit of `H2_LIMIT`.
+fn h2_goaway(frames: &[Vec<u8>]) -> Option<u32> {
+    runtime().block_on(async {
+        let (mut client_io, server_io) = duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut builder = h2::server::Builder::new();
+            builder.max_header_list_size(H2_LIMIT as u32);
+            let mut connection = builder
+                .handshake::<_, &'static [u8]>(server_io)
+                .await
+                .ok()?;
+            while let Some(Ok(_)) = connection.accept().await {}
+            Some(())
+        });
+        client_io.write_all(&started(frames)).await.expect("write");
+        client_io.shutdown().await.expect("shutdown");
+        let mut sent = Vec::new();
+        client_io.read_to_end(&mut sent).await.expect("read");
+        server.await.expect("server");
+        let mut bytes = &sent[..];
+        while let Some(head) = bytes.first_chunk::<9>() {
+            let length = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+            let payload = &bytes[9..9 + length];
+            if head[3] == GOAWAY {
+                return Some(u32::from_be_bytes(payload[4..8].try_into().unwrap()));
+            }
+            bytes = &bytes[9 + length..];
+        }
+        None
+    })
+}
+
+/// `h2` departs from RFC 9113 in the cases this leaves out. It sends a
+/// PROTOCOL_ERROR for every frame its parser refuses, where sections 6.4,
+/// 6.5, 6.7, 6.8, and 6.9 say FRAME_SIZE_ERROR, and section 6.5.2 says
+/// FLOW_CONTROL_ERROR. It sends a PROTOCOL_ERROR for a block that HPACK
+/// refuses, where section 4.3 says COMPRESSION_ERROR. It sends a
+/// COMPRESSION_ERROR for a joined block past its list limit, which HPACK
+/// never decoded.
+#[test]
+fn each_error_has_the_code_an_h2_server_sends() {
+    let setting = |id: u16, value: u32| {
+        let mut payload = id.to_be_bytes().to_vec();
+        payload.extend(value.to_be_bytes());
+        frame(SETTINGS, 0, 0, &payload)
+    };
+    // Thirty user-agent headers of 100 bytes, each a literal of name index
+    // 58, take 30 * 142, past the 4 times the limit that `h2` allows.
+    let mut user_agents = Vec::new();
+    for _ in 0..30 {
+        user_agents.extend([0x0f, 58 - 15, 100]);
+        user_agents.extend([b'a'; 100]);
+    }
+    let cases = [
+        vec![frame(DATA, 0, 1, &vec![0; 16385])],
+        vec![frame(DATA, 0, 0, b"x")],
+        vec![frame(HEADERS, PADDED | END_HEADERS, 1, &[9, 0x82])],
+        vec![frame(HEADERS, END_HEADERS, 1, &user_agents)],
+        vec![frame(HEADERS, 0, 1, &[0x82]), frame(PING, 0, 0, &[0; 8])],
+        vec![frame(CONTINUATION, END_HEADERS, 1, &[0x82])],
+        vec![frame(RST_STREAM, 0, 0, &[0; 4])],
+        vec![setting(2, 2)],
+        vec![setting(5, 16383)],
+        vec![setting(5, 1 << 24)],
+        vec![frame(SETTINGS, 0, 1, &[])],
+        vec![frame(PUSH_PROMISE, END_HEADERS, 1, &[0, 0, 0, 2])],
+        vec![frame(PING, 0, 1, &[0; 8])],
+        vec![frame(GOAWAY, 0, 1, &[0; 8])],
+        vec![frame(WINDOW_UPDATE, 0, 0, &[0; 4])],
+    ];
+    for frames in cases {
+        let reader = Reader::client(H2_LIMIT);
+        let error = read_with(reader, &started(&frames)).expect_err("refused");
+        assert_eq!(
+            Some(error.code()),
+            h2_goaway(&frames),
+            "{error:?} {frames:x?}"
+        );
+    }
 }
 
 #[test]

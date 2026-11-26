@@ -5,7 +5,8 @@
 //! comes from the guest, so the reader is strict: a frame that RFC 9113
 //! calls a connection error is an error, never a guess. After an error, the
 //! reader refuses every later byte. Streams and flow control are the
-//! caller's.
+//! caller's, and so is telling the reader and the writer which SETTINGS
+//! each side has acknowledged.
 
 use crate::hpack::{self, Decoder, Encoder, Header};
 
@@ -13,7 +14,6 @@ use crate::hpack::{self, Decoder, Encoder, Header};
 pub const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// SETTINGS_MAX_FRAME_SIZE before SETTINGS change it, by section 6.5.2.
-/// The reader and the writer keep it.
 const MAX_FRAME_SIZE: usize = 1 << 14;
 /// HPACK's table size before SETTINGS change it, by section 6.5.2.
 const TABLE_SIZE: usize = 4096;
@@ -36,6 +36,7 @@ const END_HEADERS: u8 = 0x4;
 const PADDED: u8 = 0x8;
 const PRIORITY_FLAG: u8 = 0x20;
 
+const HEADER_TABLE_SIZE: u16 = 0x1;
 const ENABLE_PUSH: u16 = 0x2;
 const INITIAL_WINDOW_SIZE: u16 = 0x4;
 const MAX_FRAME_SIZE_SETTING: u16 = 0x5;
@@ -102,7 +103,8 @@ pub struct Priority {
     pub weight: u8,
 }
 
-/// Why the reader refused a connection.
+/// Why the reader refused a connection. `code` is the error code of the
+/// GOAWAY that says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The client's preface isn't the string, or the first frame isn't
@@ -119,18 +121,49 @@ pub enum Error {
     /// A stream id of 0 on a frame that needs a stream, or another on one
     /// that is for the connection, or a promised stream id of 0.
     StreamId,
-    /// A setting's value that section 6.5.2 doesn't allow.
+    /// A setting's value that section 6.5.2 doesn't allow, but for
+    /// SETTINGS_INITIAL_WINDOW_SIZE.
     Settings,
+    /// A SETTINGS_INITIAL_WINDOW_SIZE past 2^31 - 1, by section 6.5.2.
+    InitialWindowSize,
     /// An increment of 0 on the connection, by section 6.9.
     WindowUpdate,
     /// A frame inside a header block other than its CONTINUATION, or a
     /// CONTINUATION outside one, by section 6.10.
     Continuation,
-    /// A PUSH_PROMISE from a client, by section 8.4.
+    /// A PUSH_PROMISE from a client, by section 8.4, or from a server once
+    /// it has acknowledged SETTINGS_ENABLE_PUSH of 0, by section 6.6.
     Push,
-    /// HPACK refused a header block, by section 4.3. A joined block longer
-    /// than the list limit is `ListSize`.
+    /// HPACK refused a header block, by section 4.3. It is never
+    /// `hpack::Error::ListSize`.
     Hpack(hpack::Error),
+    /// A joined header block longer than the list limit, or headers that
+    /// take more than it. Section 10.5 lets the reader refuse that as load.
+    ListSize,
+}
+
+impl Error {
+    /// The error code, by section 7.
+    pub fn code(self) -> u32 {
+        const PROTOCOL_ERROR: u32 = 0x1;
+        const FLOW_CONTROL_ERROR: u32 = 0x3;
+        const FRAME_SIZE_ERROR: u32 = 0x6;
+        const COMPRESSION_ERROR: u32 = 0x9;
+        const ENHANCE_YOUR_CALM: u32 = 0xb;
+        match self {
+            Error::FrameSize => FRAME_SIZE_ERROR,
+            Error::InitialWindowSize => FLOW_CONTROL_ERROR,
+            Error::Hpack(_) => COMPRESSION_ERROR,
+            Error::ListSize => ENHANCE_YOUR_CALM,
+            Error::Preface
+            | Error::Padding
+            | Error::StreamId
+            | Error::Settings
+            | Error::WindowUpdate
+            | Error::Continuation
+            | Error::Push => PROTOCOL_ERROR,
+        }
+    }
 }
 
 /// Reads the frames of one direction of one connection.
@@ -147,6 +180,9 @@ pub struct Reader {
 /// What the reader knows of the connection.
 struct State {
     from_server: bool,
+    /// Whether a server may push, until it acknowledges that it may not.
+    push: bool,
+    max_frame_size: usize,
     /// Whether the first SETTINGS frame has come.
     settings: bool,
     decoder: Decoder,
@@ -192,12 +228,30 @@ impl Reader {
             preface: if from_server { PREFACE.len() } else { 0 },
             state: State {
                 from_server,
+                push: from_server,
+                max_frame_size: MAX_FRAME_SIZE,
                 settings: false,
                 decoder: Decoder::new(TABLE_SIZE, list_limit),
                 list_limit,
                 open: None,
             },
             failed: None,
+        }
+    }
+
+    /// Applies the settings the caller sent, once the frame that
+    /// acknowledges them has come: SETTINGS_HEADER_TABLE_SIZE,
+    /// SETTINGS_ENABLE_PUSH, and SETTINGS_MAX_FRAME_SIZE, by section 6.5.3.
+    /// It ignores the rest, and takes each value to be one the reader
+    /// accepts.
+    pub fn apply(&mut self, settings: &[(u16, u32)]) {
+        for &(id, value) in settings {
+            match id {
+                HEADER_TABLE_SIZE => self.state.decoder.set_table_limit(value as usize),
+                ENABLE_PUSH => self.state.push = self.state.from_server && value == 1,
+                MAX_FRAME_SIZE_SETTING => self.state.max_frame_size = value as usize,
+                _ => {}
+            }
         }
     }
 
@@ -248,7 +302,7 @@ impl Reader {
                 return Ok(None);
             };
             let length = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
-            if length > MAX_FRAME_SIZE {
+            if length > self.state.max_frame_size {
                 return Err(Error::FrameSize);
             }
             let Some(payload) = rest[HEAD..].get(..length) else {
@@ -342,7 +396,7 @@ impl State {
                 }
             }
             PUSH_PROMISE => {
-                if !self.from_server {
+                if !self.push {
                     return Err(Error::Push);
                 }
                 on_stream()?;
@@ -401,7 +455,9 @@ impl State {
             let allowed = match id {
                 // A server never enables push.
                 ENABLE_PUSH => value == 0 || (value == 1 && !self.from_server),
-                INITIAL_WINDOW_SIZE => value <= STREAM_MASK,
+                INITIAL_WINDOW_SIZE if value > STREAM_MASK => {
+                    return Err(Error::InitialWindowSize);
+                }
                 MAX_FRAME_SIZE_SETTING => (1 << 14..1 << 24).contains(&value),
                 _ => true,
             };
@@ -433,14 +489,17 @@ impl State {
     fn extend(&mut self, flags: u8, fragment: &[u8]) -> Result<Option<Frame>, Error> {
         let open = self.open.as_mut().expect("an open block");
         if open.block.len() + fragment.len() > self.list_limit {
-            return Err(Error::Hpack(hpack::Error::ListSize));
+            return Err(Error::ListSize);
         }
         open.block.extend_from_slice(fragment);
         if flags & END_HEADERS == 0 {
             return Ok(None);
         }
         let open = self.open.take().expect("an open block");
-        let headers = self.decoder.decode(&open.block).map_err(Error::Hpack)?;
+        let headers = (self.decoder.decode(&open.block)).map_err(|error| match error {
+            hpack::Error::ListSize => Error::ListSize,
+            error => Error::Hpack(error),
+        })?;
         let stream = open.stream;
         Ok(Some(match open.kind {
             Opened::Headers {
@@ -503,13 +562,14 @@ fn priority(fields: &[u8; 5]) -> Priority {
     }
 }
 
-/// Writes the frames of one direction of one connection, within the
-/// default SETTINGS_MAX_FRAME_SIZE. It splits a header block across
-/// CONTINUATION frames where it needs to, and pads nothing but DATA. It
-/// panics on any other frame that doesn't fit, so the caller splits DATA,
-/// and keeps SETTINGS and GOAWAY within one frame.
+/// Writes the frames of one direction of one connection, within the peer's
+/// SETTINGS_MAX_FRAME_SIZE. It splits a header block across CONTINUATION
+/// frames where it needs to, and pads nothing but DATA. It panics on any
+/// other frame that doesn't fit, so the caller splits DATA, and keeps
+/// SETTINGS and GOAWAY within one frame.
 pub struct Writer {
     encoder: Encoder,
+    max_frame_size: usize,
 }
 
 impl Default for Writer {
@@ -522,11 +582,27 @@ impl Writer {
     pub fn new() -> Writer {
         Writer {
             encoder: Encoder::new(TABLE_SIZE),
+            max_frame_size: MAX_FRAME_SIZE,
+        }
+    }
+
+    /// Applies the peer's settings, once the caller has written the frame
+    /// that acknowledges them: SETTINGS_HEADER_TABLE_SIZE and
+    /// SETTINGS_MAX_FRAME_SIZE, by section 6.5.3. It ignores the rest, and
+    /// takes each value to be one the reader accepts.
+    pub fn apply(&mut self, settings: &[(u16, u32)]) {
+        for &(id, value) in settings {
+            match id {
+                HEADER_TABLE_SIZE => self.encoder.set_table_limit(value as usize),
+                MAX_FRAME_SIZE_SETTING => self.max_frame_size = value as usize,
+                _ => {}
+            }
         }
     }
 
     /// Appends `frame` to `out`.
     pub fn write(&mut self, frame: &Frame, out: &mut Vec<u8>) {
+        let max = self.max_frame_size;
         let flag = |set: bool, flag: u8| if set { flag } else { 0 };
         match frame {
             Frame::Data {
@@ -538,7 +614,7 @@ impl Writer {
                 let flags = flag(*end_stream, END_STREAM) | flag(padding.is_some(), PADDED);
                 let padding = padding.map(usize::from);
                 let length = data.len() + padding.map_or(0, |padding| padding + 1);
-                head(out, length, DATA, flags, *stream);
+                head(out, max, length, DATA, flags, *stream);
                 if let Some(padding) = padding {
                     out.push(padding as u8);
                     out.extend_from_slice(data);
@@ -561,21 +637,21 @@ impl Writer {
                 self.block(out, HEADERS, flags, *stream, &fields, headers);
             }
             Frame::Priority { stream, priority } => {
-                head(out, 5, PRIORITY, 0, *stream);
+                head(out, max, 5, PRIORITY, 0, *stream);
                 priority_fields(out, priority);
             }
             Frame::RstStream { stream, code } => {
-                head(out, 4, RST_STREAM, 0, *stream);
+                head(out, max, 4, RST_STREAM, 0, *stream);
                 out.extend(code.to_be_bytes());
             }
             Frame::Settings(settings) => {
-                head(out, settings.len() * 6, SETTINGS, 0, 0);
+                head(out, max, settings.len() * 6, SETTINGS, 0, 0);
                 for (id, value) in settings {
                     out.extend(id.to_be_bytes());
                     out.extend(value.to_be_bytes());
                 }
             }
-            Frame::SettingsAck => head(out, 0, SETTINGS, ACK, 0),
+            Frame::SettingsAck => head(out, max, 0, SETTINGS, ACK, 0),
             Frame::PushPromise {
                 stream,
                 promised,
@@ -585,7 +661,7 @@ impl Writer {
                 self.block(out, PUSH_PROMISE, 0, *stream, &fields, headers);
             }
             Frame::Ping { ack, data } => {
-                head(out, 8, PING, flag(*ack, ACK), 0);
+                head(out, max, 8, PING, flag(*ack, ACK), 0);
                 out.extend(data);
             }
             Frame::GoAway {
@@ -593,13 +669,13 @@ impl Writer {
                 code,
                 debug,
             } => {
-                head(out, 8 + debug.len(), GOAWAY, 0, 0);
+                head(out, max, 8 + debug.len(), GOAWAY, 0, 0);
                 out.extend(last_stream.to_be_bytes());
                 out.extend(code.to_be_bytes());
                 out.extend_from_slice(debug);
             }
             Frame::WindowUpdate { stream, increment } => {
-                head(out, 4, WINDOW_UPDATE, 0, *stream);
+                head(out, max, 4, WINDOW_UPDATE, 0, *stream);
                 out.extend(increment.to_be_bytes());
             }
         }
@@ -617,12 +693,14 @@ impl Writer {
         fields: &[u8],
         headers: &[Header],
     ) {
+        let max = self.max_frame_size;
         let mut block = Vec::new();
         self.encoder.encode(headers, &mut block);
-        let (first, mut rest) = block.split_at(block.len().min(MAX_FRAME_SIZE - fields.len()));
+        let (first, mut rest) = block.split_at(block.len().min(max - fields.len()));
         let end = |rest: &[u8]| if rest.is_empty() { END_HEADERS } else { 0 };
         head(
             out,
+            max,
             fields.len() + first.len(),
             kind,
             flags | end(rest),
@@ -631,19 +709,19 @@ impl Writer {
         out.extend_from_slice(fields);
         out.extend_from_slice(first);
         while !rest.is_empty() {
-            let (fragment, after) = rest.split_at(rest.len().min(MAX_FRAME_SIZE));
+            let (fragment, after) = rest.split_at(rest.len().min(max));
             rest = after;
-            head(out, fragment.len(), CONTINUATION, end(rest), stream);
+            head(out, max, fragment.len(), CONTINUATION, end(rest), stream);
             out.extend_from_slice(fragment);
         }
     }
 }
 
-/// Appends a frame header, by section 4.1. A longer frame is a bug in the
-/// caller, and would desync the connection, so it panics.
-fn head(out: &mut Vec<u8>, length: usize, kind: u8, flags: u8, stream: u32) {
+/// Appends a frame header, by section 4.1. A frame longer than `max` is a
+/// bug in the caller, and would desync the connection, so it panics.
+fn head(out: &mut Vec<u8>, max: usize, length: usize, kind: u8, flags: u8, stream: u32) {
     assert!(
-        length <= MAX_FRAME_SIZE,
+        length <= max,
         "a frame of {length} bytes is past SETTINGS_MAX_FRAME_SIZE"
     );
     out.extend(&(length as u32).to_be_bytes()[1..]);

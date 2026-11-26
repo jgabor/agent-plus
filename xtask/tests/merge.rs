@@ -1645,7 +1645,10 @@ fn a_merge_waits_for_the_merge_slot() {
     assert!(!calls.contains("git worktree add"), "{calls}");
     assert!(!calls.contains("git rebase"), "{calls}");
     let before = repo.head();
-    let waiting = (before.clone(), "pending Waiting: the merge slot".to_string());
+    let waiting = (
+        before.clone(),
+        "pending Waiting: the merge slot".to_string(),
+    );
     assert_eq!(posts(&repo), [waiting.clone()]);
     held.unlock().unwrap();
     let status = child.wait().unwrap();
@@ -1684,6 +1687,11 @@ fn the_pr_is_read_again_after_the_slot() {
         assert!(Instant::now() < deadline, "{}", repo.calls());
         thread::sleep(Duration::from_millis(10));
     }
+    let waiting = "pending Waiting: the merge slot";
+    while !posts(&repo).iter().any(|(_, said)| said == waiting) {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
     repo.set_pr(&Pr {
         base: "release",
         ..Pr::default()
@@ -1691,6 +1699,10 @@ fn the_pr_is_read_again_after_the_slot() {
     held.unlock().unwrap();
     let output = child.wait_with_output().unwrap();
     assert_refused(&repo, &output, "targets `release`");
+    // What it waited for doesn't stay on the PR.
+    let ended = last_post(&repo);
+    assert!(ended.starts_with("failure "), "{ended}");
+    assert!(ended.contains("targets `release`"), "{ended}");
 }
 
 /// Waits until the merge has removed both refs of its check before the slot,
@@ -2623,7 +2635,10 @@ fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str
     };
     // Once the wait ends, the proof says again what it does.
     let said: Vec<String> = posts(repo).into_iter().map(|(_, said)| said).collect();
-    let after = said.iter().position(|said| said == waiting).map(|at| &said[at + 1]);
+    let after = said
+        .iter()
+        .position(|said| said == waiting)
+        .map(|at| &said[at + 1]);
     assert_eq!(after, Some(&format!("pending {bench_from}")), "{said:?}");
     Output {
         status,

@@ -10,7 +10,6 @@ use crate::accepts::{
 use crate::forge::{Gh, PullRequest};
 use crate::lock::{self, Hold};
 use crate::{Problem, Verdict, base, bench, ledger, waits, workspace};
-use std::cell::Cell;
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -21,12 +20,14 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 /// How a proof ends that passed, and then an error stopped, as GitHub can.
 pub const PROVEN_THEN_STOPPED: &str = "Proven, then stopped by an error";
+/// How a merge ends that its supervisor stopped at the timeout.
+pub const STOPPED_AT_THE_TIMEOUT: &str = "Stopped at the timeout";
 /// Why a proof failed when the change may be fine.
 pub const MAIN_MOVED: &str =
     "`main` moved during the merge, so this head wasn't tested on it. Run it again";
@@ -90,7 +91,7 @@ fn sequence(
     thread: Option<&str>,
 ) -> Result<Verdict, Problem> {
     if !is_worker() {
-        supervise();
+        supervise(pr);
     }
     let command = mode.command();
     let number: u64 = pr
@@ -103,6 +104,7 @@ fn sequence(
         )));
     }
     let gh = Gh::new(&root);
+    let status = Status::watched(&root, number);
     if mode != Mode::Land {
         match decide(&gh, number, mode, thread)? {
             Decision::Refused(why) => return refuse(&why),
@@ -120,21 +122,29 @@ fn sequence(
     // the `exec`, and the timeout has started by then.
     tell_supervisor(WAITING)?;
     let slot = lock::merge_slot(&root, || {
+        status.waits("the merge slot");
         eprintln!("{command}: PR {number} waits for the merge slot, which another run holds");
     })?;
+    status.goes_on();
     report_slot()?;
     Tree::sweep(&root)?;
     let (pr, issue) = match decide(&gh, number, mode, thread)? {
         Decision::Merged => {
+            status.close();
             Tree::clear(&root, &Tree::path(&root, number)?);
             println!("merge: PR {number} is already merged");
             return Ok(Verdict::Pass);
         }
-        Decision::Refused(why) => return refuse(&why),
+        // The PR changed while it waited for the slot.
+        Decision::Refused(why) => {
+            status.stops(&why);
+            return refuse(&why);
+        }
         Decision::Ready { pr, issue } => (pr, issue),
     };
 
     let fetched = fetch(&root, &pr.head_ref)?;
+    status.on(&fetched.branch);
     // After the slot and the fetch, because a merge during the wait can change
     // the checks.
     if env::var(CHECKS_OF).ok().as_deref() != Some(fetched.main.as_str()) {
@@ -143,7 +153,7 @@ fn sequence(
     let tree = Tree::create(&root, number, &fetched.branch)?;
     // Nothing was pushed, so this is the head that the PR shows.
     let unproven = |why: &str| {
-        post_gate(&gh, &fetched.branch, "failure", why);
+        status.failed(why);
         refuse(why)
     };
     let kept = if keep_budgets {
@@ -171,7 +181,8 @@ fn sequence(
         kept: kept.as_ref(),
         slot: Some(&slot),
     };
-    let mut status = Status::begin(&gh, &fetched.branch);
+    // The lint is the first check that takes long.
+    status.proving("lint");
     let starting = |check: &str| status.proving(check);
     let mut proof = match prove(&tree.path, &scoring, &starting, &tell_supervisor)? {
         Ok(proof) => proof,
@@ -183,7 +194,7 @@ fn sequence(
     let place = proof.place.take();
     if accepts::proves_with_its_own(&tree.path, &fetched.main, mode)? {
         status.proving("its own xtask");
-        match prove_with_its_own(&tree.path, &scoring, place)? {
+        match prove_with_its_own(&tree.path, &scoring, place, &status)? {
             Ok(own) => proof = own.after(proof),
             Err(failed) => {
                 status.failed(&format!("Failed in its own xtask: {}", failed.join(", ")));
@@ -196,7 +207,7 @@ fn sequence(
     let Proof {
         record, accepted, ..
     } = proof;
-    status.proven.set(true);
+    status.proven();
 
     if let Some(why) = again(|| changed_during_proof(&gh, &root, &scoring, &fetched.main))? {
         status.failed(&why);
@@ -216,7 +227,7 @@ fn sequence(
     // A push that landed but failed all the same is up to date the second
     // time.
     again(|| base::git_text(&tree.path, &["push", "-q", &lease, "origin", &target]))?;
-    status.head = recorded.clone();
+    status.on(&recorded);
     let changed = base::git_text(&tree.path, &["diff", "--name-only", &gated, &recorded])?;
     if changed.trim() != path {
         return Err(Problem(format!(
@@ -392,56 +403,156 @@ pub fn post_gate(gh: &Gh, commit: &str, state: &str, said: &str) {
     }
 }
 
-/// The `xtask/gate` of one proof: what the proof is doing, and then how it
-/// ended. A proof that ends without saying how was stopped by an error.
-struct Status<'a> {
-    gh: &'a Gh,
-    /// The head that the PR shows, which the push replaces.
-    head: String,
-    ended: Cell<bool>,
-    /// Whether the proof passed, so that what stops it after is no fault of
-    /// the change.
-    proven: Cell<bool>,
+/// The `xtask/gate` of one merge: what it waits for, what its proof is doing,
+/// and then how it ended. A merge that posted a `pending`, and ends without
+/// saying how, was stopped by an error. A wait for a lock reaches it from
+/// `lock`, which tells it as the wait starts and ends.
+struct Status {
+    gh: Gh,
+    number: u64,
+    said: Mutex<Said>,
 }
 
-impl<'a> Status<'a> {
-    /// The lint is the first check that takes long.
-    fn begin(gh: &'a Gh, head: &str) -> Status<'a> {
-        let status = Status {
-            gh,
-            head: head.to_string(),
-            ended: Cell::new(false),
-            proven: Cell::new(false),
-        };
-        status.proving("lint");
+#[derive(Default)]
+struct Said {
+    /// The head that the PR shows, which the push replaces. Until the fetch,
+    /// it is read from GitHub when a post first needs it.
+    head: Option<String>,
+    /// What the proof is doing, which it says again once a wait ends.
+    phase: Option<String>,
+    waiting: bool,
+    /// Whether a `pending` went up that nothing has ended yet.
+    open: bool,
+    /// Whether the proof passed, so that what stops it after is no fault of
+    /// the change.
+    proven: bool,
+}
+
+impl Status {
+    fn new(root: &Path, number: u64) -> Status {
+        Status {
+            gh: Gh::new(root),
+            number,
+            said: Mutex::default(),
+        }
+    }
+
+    /// A status that hears this process's waits for a place and the activity
+    /// lock.
+    fn watched(root: &Path, number: u64) -> Arc<Status> {
+        let status = Arc::new(Status::new(root, number));
+        let watched = Arc::downgrade(&status);
+        lock::watch(Box::new(move |wait| {
+            let Some(status) = watched.upgrade() else {
+                return;
+            };
+            match wait {
+                Some(lock::Wait::Place) => status.waits("a place"),
+                Some(lock::Wait::Activity) => status.waits("the activity lock"),
+                None => status.goes_on(),
+            }
+        }));
         status
     }
 
+    fn said(&self) -> std::sync::MutexGuard<'_, Said> {
+        self.said.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The head that the PR shows from now on.
+    fn on(&self, head: &str) {
+        self.said().head = Some(head.to_string());
+    }
+
+    fn post(&self, said: &mut Said, state: &str, text: &str) {
+        if said.head.is_none() {
+            match self.gh.armed(self.number) {
+                Ok(now) => said.head = Some(now.head),
+                Err(Problem(message)) => {
+                    eprintln!("merge: couldn't post `{GATE}`: {message}");
+                    return;
+                }
+            }
+        }
+        if let Some(head) = &said.head {
+            post_gate(&self.gh, head, state, text);
+        }
+    }
+
+    fn waits(&self, what: &str) {
+        let mut said = self.said();
+        said.waiting = true;
+        said.open = true;
+        self.post(&mut said, "pending", &format!("Waiting: {what}"));
+    }
+
+    /// Once a wait ends, the proof says again what it is doing, if it has
+    /// begun.
+    fn goes_on(&self) {
+        let mut said = self.said();
+        if !std::mem::take(&mut said.waiting) {
+            return;
+        }
+        if let Some(phase) = said.phase.clone() {
+            self.post(&mut said, "pending", &format!("Proving: {phase}"));
+        }
+    }
+
     fn proving(&self, phase: &str) {
-        post_gate(self.gh, &self.head, "pending", &format!("Proving: {phase}"));
+        let mut said = self.said();
+        said.phase = Some(phase.to_string());
+        said.waiting = false;
+        said.open = true;
+        self.post(&mut said, "pending", &format!("Proving: {phase}"));
+    }
+
+    fn proven(&self) {
+        self.said().proven = true;
     }
 
     fn failed(&self, why: &str) {
-        self.ended.set(true);
-        post_gate(self.gh, &self.head, "failure", why);
+        let mut said = self.said();
+        said.open = false;
+        self.post(&mut said, "failure", why);
+    }
+
+    /// Ends a `pending` that a wait posted, saying why the merge stops.
+    fn stops(&self, why: &str) {
+        if self.said().open {
+            self.failed(why);
+        }
+    }
+
+    /// Leaves what is posted, as for a PR that merged meanwhile.
+    fn close(&self) {
+        self.said().open = false;
     }
 
     /// A green that can't be posted is a problem, because the PR can't merge.
     fn passed(&self, score: &str) -> Result<(), Problem> {
+        let mut said = self.said();
+        let head = said
+            .head
+            .clone()
+            .ok_or_else(|| Problem("there is no head to post on".to_string()))?;
         let link = run_url();
         again(|| {
             self.gh
-                .post_status(&self.head, GATE, "success", Some(score), link.as_deref())
+                .post_status(&head, GATE, "success", Some(score), link.as_deref())
         })?;
-        self.ended.set(true);
+        said.open = false;
         Ok(())
     }
 }
 
-impl Drop for Status<'_> {
+impl Drop for Status {
     fn drop(&mut self) {
-        if !self.ended.get() {
-            self.failed(if self.proven.get() {
+        let (open, proven) = {
+            let said = self.said();
+            (said.open, said.proven)
+        };
+        if open {
+            self.failed(if proven {
                 PROVEN_THEN_STOPPED
             } else {
                 "Stopped by an error"
@@ -502,8 +613,8 @@ fn tell_supervisor(report: u8) -> Result<(), Problem> {
 /// ends, however it ends. So nothing the merge started outlives it, even a
 /// command that ignores its parent's exit. Only `gh pr merge` leaves the
 /// group, so that it keeps the slot until it finishes.
-fn supervise() -> ! {
-    match supervised() {
+fn supervise(pr: &str) -> ! {
+    match supervised(pr) {
         Ok(code) => process::exit(code),
         Err(Problem(message)) => {
             eprintln!("error: {message}");
@@ -512,7 +623,7 @@ fn supervise() -> ! {
     }
 }
 
-fn supervised() -> Result<i32, Problem> {
+fn supervised(pr: &str) -> Result<i32, Problem> {
     let couldnt = |what: &str, e: io::Error| Problem(format!("couldn't {what}: {e}"));
     let (reports, report) = io::pipe().map_err(|e| couldnt("make a pipe", e))?;
     let program = env::current_exe().map_err(|e| couldnt("find this program", e))?;
@@ -551,6 +662,12 @@ fn supervised() -> Result<i32, Problem> {
     }
     if timed_out.load(Ordering::SeqCst) {
         eprintln!("merge: stopped at the {seconds} second timeout. Run it again to restart");
+        // The worker is gone, so this is the head that the PR shows.
+        match (pr.parse(), workspace::root()) {
+            (Ok(number), Ok(root)) => Status::new(&root, number).failed(STOPPED_AT_THE_TIMEOUT),
+            (_, Err(Problem(message))) => eprintln!("merge: couldn't post `{GATE}`: {message}"),
+            (Err(_), _) => {}
+        }
         return Ok(1);
     }
     // Dies as the worker did, so that a killed merge looks killed.
@@ -996,6 +1113,7 @@ fn prove_with_its_own(
     tree: &Path,
     scoring: &Scoring,
     place: Option<Hold>,
+    status: &Status,
 ) -> Result<Result<Proof, Vec<String>>, Problem> {
     // Each proof can take most of the timeout, so its own gets a new one once
     // it has a place. The PR's code can't renew the timeout, so the place it
@@ -1037,9 +1155,9 @@ fn prove_with_its_own(
         .spawn()
         .map_err(|e| Problem(format!("couldn't run its own xtask: {e}")))?;
     drop(command);
-    let status = relay(&mut child, reports, tree)?;
-    if !matches!(status.code(), Some(0 | 1)) {
-        return Err(Problem(format!("its own xtask stopped: {status}")));
+    let ended = relay(&mut child, reports, tree, status)?;
+    if !matches!(ended.code(), Some(0 | 1)) {
+        return Err(Problem(format!("its own xtask stopped: {ended}")));
     }
     let result = own.join("result");
     let text = fs::read_to_string(&result)
@@ -1053,7 +1171,7 @@ fn prove_with_its_own(
             failed.push(check.to_string());
         }
     }
-    if !status.success() {
+    if !ended.success() {
         return Ok(Err(failed));
     }
     let record = ledger::read(tree, scoring.issue as usize)?;
@@ -1064,18 +1182,19 @@ fn prove_with_its_own(
     }))
 }
 
-/// Tells the supervisor that the bench of the PR's own xtask waits for the
-/// activity lock, for as long as the PR's xtask says so and this one sees for
-/// itself that the bench waits for work that shares it. The PR's xtask can
-/// say nothing else to the supervisor. Returns once it exits. On an error, it
-/// stops the PR's xtask, and the timeout runs again.
+/// Tells the supervisor and `status` that the bench of the PR's own xtask
+/// waits for the activity lock, for as long as the PR's xtask says so and
+/// this one sees for itself that the bench waits for work that shares it. The
+/// PR's xtask can say nothing else to the supervisor. Returns once it exits.
+/// On an error, it stops the PR's xtask, and the timeout runs again.
 fn relay(
     child: &mut process::Child,
     reports: io::PipeReader,
     tree: &Path,
+    status: &Status,
 ) -> Result<process::ExitStatus, Problem> {
     let mut stopped = false;
-    let ended = listen(child, reports, tree, &mut stopped);
+    let ended = listen(child, reports, tree, status, &mut stopped);
     if stopped {
         let told = tell_supervisor(GOING);
         if ended.is_ok() {
@@ -1095,6 +1214,7 @@ fn listen(
     child: &mut process::Child,
     reports: io::PipeReader,
     tree: &Path,
+    status: &Status,
     stopped: &mut bool,
 ) -> Result<process::ExitStatus, Problem> {
     let directory = lock::directory(tree)?;
@@ -1123,6 +1243,11 @@ fn listen(
         let waits = open && claimed && lock::bench_waits(&directory)?;
         if waits != *stopped {
             tell_supervisor(if waits { WAITING } else { GOING })?;
+            if waits {
+                status.waits("the activity lock");
+            } else {
+                status.goes_on();
+            }
             *stopped = waits;
         }
         if !open {

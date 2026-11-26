@@ -1674,14 +1674,10 @@ fn same_http2(input: &[u8], passed: &[u8], allows: &[&str], refused: bool) {
     let (theirs, stopped) = served_http2(passed);
     let (sent, _) = served_http2(input);
     let paths: Vec<&str> = theirs.iter().map(|served| &served.path[..]).collect();
-    // The server drops a path's fragment, as the rules do.
-    let wanted: Vec<&str> = (allows.iter())
-        .map(|&path| path.split('#').next().unwrap_or_default())
-        .collect();
-    let last = wanted.len().saturating_sub(usize::from(refused));
+    let last = allows.len().saturating_sub(usize::from(refused));
     let ordered = match stopped {
-        true => wanted.starts_with(&paths),
-        false => paths == wanted || paths == wanted[..last],
+        true => allows.starts_with(&paths),
+        false => paths == allows || paths == allows[..last],
     };
     let named = theirs.iter().all(|served| {
         let mut names = served.authority.iter().chain(&served.hosts).peekable();
@@ -1840,6 +1836,7 @@ fn net_input(input: &str) -> usize {
             // The path `decide` matches URL rules against is one too.
             if let Some(ours) = net::request_path(target) {
                 assert!(path.starts_with('/'), "{target:?}: accepted {ours:?}");
+                assert!(!target.contains('#'), "{target:?}: accepted {ours:?}");
                 same_path(path, Some(&ours));
             }
             if let Some(normal) = net::normalize_path(target) {
@@ -2879,10 +2876,10 @@ mod tests {
             "/",
             "/a/",
             "/jgabor/agent-plus?tab=readme",
-            "/%6agabor/agent%2Dplus#top",
+            "/%6agabor/agent%2Dplus",
             "/%41%3a%e2%82%ac",
         ] {
-            let path = target.split(['?', '#']).next().unwrap_or_default();
+            let path = target.split('?').next().unwrap_or_default();
             let ours = net::request_path(target).expect(target);
             same_path(path, Some(&ours));
         }
@@ -3089,15 +3086,16 @@ mod tests {
     }
 
     #[test]
-    fn a_path_h2_reads_without_its_fragment_is_the_path_decided() {
+    fn a_path_with_a_fragment_is_refused() {
+        // h2 reads this path as `/allowed`, but a lenient server may not.
         let input = concat!(
             preface!(),
             "\0\0\0\x04\0\0\0\0\0",
             "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed#/",
         );
-        assert!(http2_check_input(input));
+        assert!(!http2_check_input(input));
         let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
-        assert_eq!(paths(&served_http2(&http2_passed(&input)).0), ["/allowed"]);
+        assert!(paths(&served_http2(&http2_passed(&input)).0).is_empty());
     }
 
     #[test]

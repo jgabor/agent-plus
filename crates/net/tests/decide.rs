@@ -284,6 +284,22 @@ fn a_url_rule_covers_only_its_own_paths() {
     }
 }
 
+// spec(NETWORK): Downloads that redirect to another host, such as GitHub release assets, need a rule for that host too.
+#[test]
+fn a_download_that_redirects_needs_a_rule_for_the_host_it_redirects_to() {
+    let rule = "+https://github.com/jgabor/agent-plus";
+    let rules = format!("NETWORK -\nNETWORK {rule}\n");
+    // GitHub answers a release download with a redirect to another host.
+    let download = "https://github.com/jgabor/agent-plus/releases/download/v0.1.0/ap";
+    let asset = "https://release-assets.githubusercontent.com/github-production-release-asset/1";
+    decides(&rules, request(download), ALLOW, rule);
+    decides(&rules, request(asset), DENY, "default");
+    let assets = "+release-assets.githubusercontent.com";
+    let rules = format!("{rules}NETWORK {assets}\n");
+    decides(&rules, request(download), ALLOW, rule);
+    decides(&rules, request(asset), ALLOW, assets);
+}
+
 // spec(NETWORK): Request paths are normalized (RFC 3986) before matching.
 #[test]
 fn request_paths_are_normalized_before_matching() {

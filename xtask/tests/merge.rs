@@ -1668,6 +1668,84 @@ fn a_merge_waits_for_the_merge_slot() {
     );
 }
 
+/// A second merge waits for the slot while the first builds the xtask of
+/// `main`. The first lets the slot go to run that xtask, which takes it again,
+/// and the second doesn't take it in between.
+#[test]
+fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
+    let repo = Repo::new("turn");
+    repo.other_pr(10, "8-y", &Pr::default());
+    let first_head = repo.head();
+    let second_head = repo.head_of("8-y");
+    let building = repo.bin.join("building");
+    let go = repo.bin.join("go");
+    // Bounded, so that a failed test leaves no merge waiting for good.
+    let pause = format!(
+        ": > '{}'; n=0; until [ -f '{}' ] || [ $n -ge 600 ]; do sleep 0.1; n=$((n+1)); done",
+        building.display(),
+        go.display()
+    );
+    let first = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "build --quiet --package xtask")
+        .env("RUN_COMMAND", pause)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !building.exists() {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut second = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let errors = BufReader::new(second.stderr.take().unwrap());
+    let (said, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in errors.lines() {
+            let Ok(line) = line else { break };
+            if said.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let waits = "merge: PR 10 waits for the merge slot, which another run holds";
+    let mut heard = Vec::new();
+    while !heard.iter().any(|line| line == waits) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) => heard.push(line),
+            Err(_) => panic!("the second merge never waited: {heard:?}"),
+        }
+    }
+    fs::write(&go, "").unwrap();
+    let first = first.wait_with_output().unwrap();
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let second = second.wait_with_output().unwrap();
+    heard.extend(lines.try_iter());
+    assert_eq!(second.status.code(), Some(0), "{heard:?}");
+    let mut pending: Vec<String> = posts(&repo)
+        .into_iter()
+        .filter(|(_, said)| said.starts_with("pending"))
+        .map(|(commit, _)| commit)
+        .collect();
+    pending.dedup();
+    let calls = repo.calls();
+    assert_eq!(pending, [first_head, second_head], "{calls}");
+    // The second does nothing under the slot until the first has merged.
+    let slot_fetch = "+refs/heads/8-y:refs/remotes/origin/8-y";
+    let started = calls.find(slot_fetch).expect(&calls);
+    let merged = calls.find("gh pr merge 9 ").expect(&calls);
+    assert!(merged < started, "{calls}");
+}
+
 #[test]
 fn the_pr_is_read_again_after_the_slot() {
     let repo = Repo::new("read-again");

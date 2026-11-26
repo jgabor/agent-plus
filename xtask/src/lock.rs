@@ -30,6 +30,9 @@ const PLACES_OVERRIDE: &str = "XTASK_PLACES";
 /// Kept by the merge slot's holder while it waits for a place, which every
 /// other run lets it have first.
 const AHEAD: &str = "ahead.lock";
+/// Kept by a merge while the xtask of `main` that it runs takes the slot
+/// again, which every other merge lets it have first.
+const TURN: &str = "turn.lock";
 
 /// What a take waits for, when it can't have its lock at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,7 +174,7 @@ impl Hold {
             return Ok(());
         }
         let shared = self.activity.any();
-        if waits_ahead(&self.directory)? {
+        if kept(&self.directory, AHEAD)? {
             self.activity = Held::No;
             self.place = Held::No;
             self.place = Held::Own(take_place(&self.directory, places()?, false)?);
@@ -301,24 +304,46 @@ pub fn bench_waits(directory: &Path) -> Result<bool, Problem> {
 /// Held while a claim reads and writes GitHub, so that two claims on this
 /// machine can't interleave. Rules on the comments cover anything else.
 pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {
-    slot(root, "claim.lock", || {})
+    slot(&directory(root)?, "claim.lock", || {})
 }
 
 /// Held for a whole merge, so that only one runs at a time and each is tested
 /// on top of the last. `waiting` runs before a wait, if another run holds it.
-pub fn merge_slot(root: &Path, waiting: impl FnOnce()) -> Result<Hold, Problem> {
-    slot(root, "merge.lock", waiting)
+/// While a merge keeps its turn, another that gets the slot lets it go, and
+/// waits for the turn to end. The merge whose turn it is passes `ahead`.
+pub fn merge_slot(root: &Path, ahead: bool, waiting: impl FnOnce()) -> Result<Hold, Problem> {
+    let directory = directory(root)?;
+    let mut waiting = Some(waiting);
+    let mut wait = || waiting.take().map_or((), |waiting| waiting());
+    loop {
+        let slot = slot(&directory, "merge.lock", &mut wait)?;
+        if ahead || !kept(&directory, TURN)? {
+            return Ok(slot);
+        }
+        drop(slot);
+        wait();
+        open(&directory, TURN)?
+            .lock_shared()
+            .map_err(|e| Problem(format!("couldn't wait for {TURN}: {e}")))?;
+    }
+}
+
+/// Kept by a merge from the slot to its proof, while the xtask of `main` that
+/// it runs takes the slot again, so that no other merge takes it in between.
+/// The merge holds the slot while it takes this, and no merge waits for this
+/// while it holds the slot.
+pub fn merge_turn(root: &Path) -> Result<Hold, Problem> {
+    slot(&directory(root)?, TURN, || {})
 }
 
 /// Held for a whole response to a failing gate, so that two can't share the
 /// tree its bisect checks commits out in, or file the same issue.
 pub fn response_slot(root: &Path) -> Result<Hold, Problem> {
-    slot(root, "nightly.lock", || {})
+    slot(&directory(root)?, "nightly.lock", || {})
 }
 
-fn slot(root: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem> {
-    let directory = directory(root)?;
-    let file = open(&directory, name)?;
+fn slot(directory: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem> {
+    let file = open(directory, name)?;
     let couldnt = |e| Problem(format!("couldn't take {name}: {e}"));
     match file.try_lock() {
         Ok(()) => {}
@@ -328,7 +353,7 @@ fn slot(root: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem
         }
         Err(TryLockError::Error(e)) => return Err(couldnt(e)),
     }
-    let mut hold = Hold::new(&directory);
+    let mut hold = Hold::new(directory);
     hold.files.push(file);
     Ok(hold)
 }
@@ -432,7 +457,7 @@ fn take_place(directory: &Path, count: usize, ahead: bool) -> Result<File, Probl
     take(&turn, false, Wait::Place, &mut waiting).map_err(couldnt)?;
     loop {
         let place = free_place(directory, count, &mut waiting)?;
-        if ahead || !waits_ahead(directory)? {
+        if ahead || !kept(directory, AHEAD)? {
             return Ok(place);
         }
         drop(place);
@@ -477,12 +502,13 @@ fn free_place(
         .map_err(|_| Problem("couldn't take a place: every wait failed".to_string()))
 }
 
-/// Whether the merge slot's holder waits for a place.
-fn waits_ahead(directory: &Path) -> Result<bool, Problem> {
-    match open(directory, AHEAD)?.try_lock_shared() {
+/// Whether something keeps the lock on `name`: the merge slot's holder, which
+/// waits for a place, or a merge that keeps its turn.
+fn kept(directory: &Path, name: &str) -> Result<bool, Problem> {
+    match open(directory, name)?.try_lock_shared() {
         Ok(()) => Ok(false),
         Err(TryLockError::WouldBlock) => Ok(true),
-        Err(TryLockError::Error(e)) => Err(Problem(format!("couldn't read {AHEAD}: {e}"))),
+        Err(TryLockError::Error(e)) => Err(Problem(format!("couldn't read {name}: {e}"))),
     }
 }
 

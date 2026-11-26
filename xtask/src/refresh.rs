@@ -236,7 +236,7 @@ enum Landed {
 /// that was proven.
 fn merge_if_armed(root: &Path, gh: &Gh, pr: &OpenPr, head: &str) -> Result<Landed, Problem> {
     let number = pr.number;
-    let slot = lock::merge_slot(root, || {})?;
+    let slot = lock::merge_slot(root, false, || {})?;
     let now = gh.armed(number)?;
     // GitHub's own auto-merge can get there first, and then GitHub closes
     // the PR's issues itself.

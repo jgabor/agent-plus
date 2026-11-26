@@ -129,7 +129,10 @@ Draft model: `claude-fable-5-2`, at effort `high`
     - `Definition of done` names the journey step, the budget, or the exact SPEC
       sentences that prove it.
     - `Touches` names real paths in backticks, so that the queue can tell which
-      issues overlap.
+      issues overlap. It names the files the issue changes when they are
+      known, and a directory only when the work spans it or creates it. When
+      the issue changes one section of a Markdown file, it names the section
+      by the heading's link anchor, such as `SPEC.md#network`.
     - A sub-issue that adds a crate, or writes code a crate could do, puts the
       measurement and the oracle in its `Definition of done`, as Crates and our
       own code in AGENTS.md says.

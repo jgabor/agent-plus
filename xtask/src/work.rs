@@ -230,15 +230,28 @@ fn references(body: &str, phrase: &str) -> Vec<u64> {
         .collect()
 }
 
+/// Whether two `Touches` entries overlap: one path is a prefix of the other,
+/// in whole parts, and they don't name two different sections of a file. A
+/// section follows the path after `#`, as the heading's link anchor.
 fn overlap(first: &str, second: &str) -> bool {
-    let parts = |path: &'_ str| -> Vec<String> {
-        path.split('/')
+    let split = |entry: &'_ str| -> (Vec<String>, String) {
+        let (path, section) = entry
+            .split_once('#')
+            .filter(|(path, _)| !path.is_empty())
+            .unwrap_or((entry, ""));
+        let parts = path
+            .split('/')
             .filter(|part| !part.is_empty())
             .map(str::to_string)
-            .collect()
+            .collect();
+        (parts, section.to_string())
     };
-    let (first, second) = (parts(first), parts(second));
+    let ((first, first_section), (second, second_section)) = (split(first), split(second));
     first.iter().zip(&second).all(|(a, b)| a == b)
+        && (first != second
+            || first_section.is_empty()
+            || second_section.is_empty()
+            || first_section.eq_ignore_ascii_case(&second_section))
 }
 
 fn any_overlap(first: &[String], second: &[String]) -> bool {
@@ -1058,6 +1071,46 @@ mod tests {
         assert!(overlap("a/b", "a/b/c"));
         assert!(overlap("a/", "a"));
         assert!(!overlap("a/bc", "a/b"));
+    }
+
+    #[test]
+    fn a_section_overlaps_its_file_but_no_other_section() {
+        assert!(overlap("SPEC.md", "SPEC.md#network"));
+        assert!(overlap("SPEC.md#share", "SPEC.md"));
+        assert!(overlap("SPEC.md#network", "SPEC.md#network"));
+        assert!(overlap("SPEC.md#network", "SPEC.md#NETWORK"));
+        assert!(overlap("harness/", "harness/tasks/planner.md#steps"));
+        assert!(!overlap("SPEC.md#network", "SPEC.md#share"));
+        assert!(!overlap("SPEC.md#network", "HARNESS.md#network"));
+        assert!(!overlap("#901", "crates/a"));
+    }
+
+    #[test]
+    fn a_held_section_blocks_only_its_file_and_itself() {
+        for (mine_touches, held, claimable) in [
+            ("SPEC.md#share", "SPEC.md#network", true),
+            ("SPEC.md#share", "SPEC.md", false),
+            ("SPEC.md#share", "SPEC.md#share", false),
+            ("SPEC.md", "SPEC.md#network", false),
+        ] {
+            let mut mine = issue(vec![]);
+            mine.body = format!("## Touches\n`{mine_touches}`\n");
+            let mut other = held_by("other");
+            other.number = 2;
+            other.body = format!("## Touches\n`{held}`\n");
+            let forge = Fake::new(vec![mine, other]);
+            let entries = next(&forge, NOW, Host::Linux, &HashMap::new()).unwrap();
+            assert_eq!(
+                entries.iter().any(|e| e.issue == 7),
+                claimable,
+                "{mine_touches} {held}"
+            );
+            assert_eq!(
+                matches!(try_claim(&forge), Claim::Won { .. }),
+                claimable,
+                "{mine_touches} {held}"
+            );
+        }
     }
 
     #[test]

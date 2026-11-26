@@ -42,5 +42,9 @@ decisions and label it. Only the owner adds an `auto:*` label.
      that measures it first, and names the oracle, as Crates and our own code
      in AGENTS.md says.
    - `## Touches`: the paths in backticks that the sub-issues will change.
+     Name the files when they are known, and a directory only when the work
+     spans it or creates it. When the work changes one section of a Markdown
+     file, name the section by the heading's link anchor, such as
+     `SPEC.md#network`.
    - The line `Milestone: <name>.`, on its own, last.
 5. Say the number of the issue you filed, then stop.

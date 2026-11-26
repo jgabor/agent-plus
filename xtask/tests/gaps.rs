@@ -85,30 +85,34 @@ fn gaps(root: &Path, args: &[&str]) -> Output {
 /// needs it, so `gaps` skips both.
 const PAID: &str = "[[milestone]]\nname = \"Paid\"\nsummary = \"s\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Paid\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Paid\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Later on\"\nneeds = []\nscript = \"harness/journey/bad.sh\"\n";
 
-/// A fake `gh` that lists the issues in `issues.json` beside it.
+/// A fake `gh` that lists the open issues in `issues.json` beside it.
 const GH: &str = r#"#!/bin/sh
 d="$(dirname "$0")"
-case "$1 $2" in
-  "issue list") cat "$d/issues.json" ;;
+case "$*" in
+  "issue list --state open "*) cat "$d/issues.json" ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 "#;
 
-fn gaps_with_details(root: &Path, body: &str) -> Output {
+/// Runs `gaps` with these open issues on GitHub, each a number, a title, and
+/// a body.
+fn gaps_with_issues(root: &Path, issues: &[(u64, &str, &str)]) -> Output {
     let bin = root.with_extension("bin");
     if bin.exists() {
         fs::remove_dir_all(&bin).unwrap();
     }
     fs::create_dir_all(&bin).unwrap();
     common::write_tool(&bin.join("gh"), GH);
-    let body = body.replace('\n', "\\n");
-    fs::write(
-        bin.join("issues.json"),
-        format!(
-            "[{{\"number\":7,\"state\":\"OPEN\",\"title\":\"Roadmap details\",\"body\":\"{body}\",\"labels\":[],\"url\":\"https://github.com/o/r/issues/7\",\"parent\":null}}]\n"
-        ),
-    )
-    .unwrap();
+    let rows: Vec<String> = issues
+        .iter()
+        .map(|(number, title, body)| {
+            let body = body.replace('\r', "\\r").replace('\n', "\\n");
+            format!(
+                "{{\"number\":{number},\"state\":\"OPEN\",\"title\":\"{title}\",\"body\":\"{body}\",\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null}}"
+            )
+        })
+        .collect();
+    fs::write(bin.join("issues.json"), format!("[{}]\n", rows.join(","))).unwrap();
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("gaps")
         .current_dir(root)
@@ -117,6 +121,10 @@ fn gaps_with_details(root: &Path, body: &str) -> Output {
         .env_remove("XTASK_ACTIVITY_HELD")
         .output()
         .unwrap()
+}
+
+fn gaps_with_details(root: &Path, body: &str) -> Output {
+    gaps_with_issues(root, &[(7, "Roadmap details", body)])
 }
 
 fn stdout(output: &Output) -> String {
@@ -241,7 +249,9 @@ fn a_stray_argument_exits_2() {
 #[test]
 fn a_step_that_spends_passes_when_the_nightly_job_passed_it() {
     let root = repository("paid-pass", &[("harness/journey.toml", PAID)]);
-    let details = "### 1. Paid\n\nSteps:\n\n- [x] Step 1: first\n- [x] Step 2: second\n\n### 2. Later on\n\nSteps:\n\n- [ ] Step 3: third (fails)\n";
+    // An edit on the website saves its line ends as `\r\n`. A step that
+    // doesn't spend is one that `gaps` runs, so its own result counts.
+    let details = "### 1. Paid\r\n\r\nSteps:\r\n\r\n- [x] Step 1: first\r\n- [x] Step 2: second\r\n\r\n### 2. Later on\r\n\r\nSteps:\r\n\r\n- [x] Step 3: third\r\n";
     let output = gaps_with_details(&root, details);
     assert_eq!(
         output.status.code(),
@@ -266,8 +276,28 @@ fn a_step_that_spends_is_a_gap_unless_the_nightly_job_passed_it() {
         "- [ ] Step 1: first (fails)\n- [ ] Step 2: second (skipped)\n",
         "- [x] Step 1: first\n- [ ] Step 2: second (fails)\n",
         "- [x] Step 1: renamed\n- [x] Step 2: second\n",
+        "- [x] Step 9: first\n- [x] Step 2: second\n",
     ] {
         let text = stdout(&gaps_with_details(&root, details));
         assert!(text.starts_with("milestone Paid\n"), "{details:?}\n{text}");
+    }
+}
+
+/// Only the open issue titled `Roadmap details` is the nightly job's record,
+/// and a repository without one has no step that spends passing.
+#[test]
+fn only_the_details_issue_says_a_step_that_spends_passed() {
+    let root = repository("paid-other", &[("harness/journey.toml", PAID)]);
+    let ticked = "- [x] Step 1: first\n- [x] Step 2: second\n";
+    for issues in [&[][..], &[(3, "Something else", ticked)][..]] {
+        let output = gaps_with_issues(&root, issues);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = stdout(&output);
+        assert!(text.starts_with("milestone Paid\n"), "{issues:?}\n{text}");
     }
 }

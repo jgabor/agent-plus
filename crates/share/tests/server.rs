@@ -569,6 +569,53 @@ fn a_known_node_the_host_moves_outside_the_root_shows_no_attributes() {
     fs::set_permissions(away, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The file size that `GETATTR` on `node` answers with, or its error.
+fn size_of(guest: &mut Guest, node: u64) -> Result<u64, i32> {
+    match guest.call(GETATTR, node, &[0; 16]) {
+        (0, out) => Ok(u64::from_le_bytes(out[24..32].try_into().unwrap())),
+        (error, _) => Err(error),
+    }
+}
+
+// spec(SHARE): The agent sees only what is under the share's root.
+#[test]
+fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
+    let tree = Tree::new("file-moved-out");
+    let mut guest = Guest::new(&tree.root);
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+    // Its directory stays beneath the root, and the file goes alone.
+    let away = tree.base.join("outside/nested.txt");
+    fs::rename(tree.root.join("dir/nested.txt"), &away).unwrap();
+    fs::write(&away, CANARY).unwrap();
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
+    // Moved back beneath the root by another name, it shows them again, as
+    // a file the host renames there does.
+    fs::rename(&away, tree.root.join("dir/renamed.txt")).unwrap();
+    let size = CANARY.len() as u64;
+    assert_eq!(size_of(&mut guest, nested), Ok(size));
+    fs::rename(tree.root.join("dir/renamed.txt"), tree.root.join("moved.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, nested), Ok(size));
+    // A file share's file shows nothing once it is outside the share.
+    let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadOnly);
+    let hello = guest.walk("hello.txt").unwrap();
+    let away = tree.base.join("outside/hello.txt");
+    fs::rename(tree.root.join("hello.txt"), &away).unwrap();
+    fs::write(&away, CANARY).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
+}
+
+#[test]
+fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() {
+    let tree = Tree::new("unlinked-open");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    guest.open(nested, 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+}
+
 #[test]
 fn a_write_never_reaches_a_directory_the_host_moves_outside_the_root() {
     let tree = Tree::new("rw-moved-out");

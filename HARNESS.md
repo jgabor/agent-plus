@@ -797,12 +797,13 @@ fetched, it builds the xtask of the fetched `main` in a worktree of its own,
 and runs the sequence again in that xtask, which fetches again. If `main` has
 moved by then, it builds again. Before the command lets the slot go to run
 that xtask, it takes a second lock, its turn, and keeps it until that xtask
-ends. Another merge that gets the slot during a turn lets it go, and waits for
-the turn to end, so the command keeps its place from the slot to its proof.
-Nothing that a merge starts inherits the slot or the turn, except `gh pr
-merge`. The rebase and the proof run in another worktree, whose path is padded
-to 160 bytes. That is longer than a worker's worktree, and shorter than a `#!`
-line may be, so a check that passes only in a short path fails here too.
+ends. Another merge, or a refresh, that gets the slot during a turn lets it
+go, and waits for the turn to end, so the command keeps its place from the slot
+to its proof. Nothing that a merge starts inherits the slot or the turn, except
+`gh pr merge`, which keeps the slot. The rebase and the proof run in another
+worktree, whose path is padded to 160 bytes. That is longer than a worker's
+worktree, and shorter than a `#!` line may be, so a check that passes only in a
+short path fails here too.
 
 These worktrees, and the tree the bench builds its base in, are kept in the
 system's temp directory, or in `/var/tmp` when only that one is on a disk,

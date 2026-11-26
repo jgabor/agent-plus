@@ -45,7 +45,7 @@ pub const SLOT: u8 = b's';
 pub const WAITING: u8 = b'w';
 pub const GOING: u8 = b'g';
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
-/// or of the worker itself once it runs the xtask of `main`.
+/// or of the xtask of `main` that the worker runs, which names itself.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 /// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
 /// reaches only the supervisor's process group. Only the supervisor holds the
@@ -631,8 +631,9 @@ fn again<T>(mut call: impl FnMut() -> Result<T, Problem>) -> Result<T, Problem> 
 }
 
 /// Whether this process is the worker that a supervisor started. The variable
-/// names the worker's parent, or the worker itself once it runs the xtask of
-/// `main`, so it means nothing to a merge that the worker's own tests start.
+/// names the worker's parent, or the xtask of `main` that the worker runs,
+/// which names itself. So it means nothing to a merge that the worker's own
+/// tests start.
 fn is_worker() -> bool {
     let ids = [std::os::unix::process::parent_id(), process::id()];
     env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))

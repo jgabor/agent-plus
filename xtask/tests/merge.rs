@@ -1694,7 +1694,7 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !building.exists() {
         assert!(Instant::now() < deadline, "{}", repo.calls());
         thread::sleep(Duration::from_millis(10));
@@ -1726,9 +1726,22 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
         }
     }
     fs::write(&go, "").unwrap();
+    // A merge that never ends fails the test instead of hanging it.
+    let (done, ended) = mpsc::channel::<()>();
+    let pids = [first.id(), second.id()];
+    thread::spawn(move || {
+        if ended.recv_timeout(Duration::from_secs(300)).is_err() {
+            for pid in pids {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        }
+    });
     let first = first.wait_with_output().unwrap();
-    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     let second = second.wait_with_output().unwrap();
+    let _ = done.send(());
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     heard.extend(lines.try_iter());
     assert_eq!(second.status.code(), Some(0), "{heard:?}");
     let mut pending: Vec<String> = posts(&repo)

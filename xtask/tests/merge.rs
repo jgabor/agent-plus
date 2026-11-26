@@ -4427,6 +4427,69 @@ fn a_refresh_keeps_a_pr_whose_head_it_can_not_read_after_the_proof() {
     assert_eq!(calls.matches("gh pr comment 9").count(), 2, "{calls}");
 }
 
+/// A proof that accepts something new turns auto-merge off, and that call
+/// gets a second try too.
+#[test]
+fn a_refresh_turns_auto_merge_off_when_the_first_try_fails() {
+    let repo = falling("refresh-disarm-once");
+    repo.approved(&["it changes `.github/workflows/x.yml`"]);
+
+    let output = repo.refresh_failing_once("--disable-auto");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let head = repo.head();
+    let calls = repo.calls();
+    assert_eq!(
+        calls.matches("gh pr merge 9 --disable-auto").count(),
+        2,
+        "{calls}"
+    );
+    assert!(repo.bin.join("disarmed-9").exists());
+    let off = calls.rfind("gh pr merge 9 --disable-auto").unwrap();
+    assert!(
+        off < calls.find(&status(&head, "success")).expect(&calls),
+        "{calls}"
+    );
+    assert!(!calls.contains(&merged(9, &head)), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+}
+
+/// A call that turned auto-merge off can fail all the same, and the second
+/// try finds it off.
+#[test]
+fn a_refresh_reads_auto_merge_again_before_it_turns_it_off_again() {
+    let repo = falling("refresh-disarmed-anyway");
+    repo.approved(&["it changes `.github/workflows/x.yml`"]);
+    let disarmed = format!(
+        ": > '{}'; {SOMETHING_WENT_WRONG}",
+        repo.bin.join("disarmed-9").display()
+    );
+
+    let output = repo.refresh_running("--disable-auto", &disarmed);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let head = repo.head();
+    let calls = repo.calls();
+    assert_eq!(
+        calls.matches("gh pr merge 9 --disable-auto").count(),
+        1,
+        "{calls}"
+    );
+    assert_eq!(last_post(&repo), format!("success {GREEN}"));
+    assert!(!calls.contains(&merged(9, &head)), "{calls}");
+    assert!(!calls.contains("/labels/"), "{calls}");
+}
+
 /// A comment call can fail after GitHub took the comment.
 #[test]
 fn a_comment_that_was_posted_is_not_posted_again() {

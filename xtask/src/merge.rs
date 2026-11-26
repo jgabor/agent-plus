@@ -445,7 +445,7 @@ const AGAIN: Duration = Duration::from_secs(2);
 /// GitHub can fail a call that it takes a moment later. Once the proof has
 /// passed, each call that can fail this way gets a second try, so the call
 /// must be safe to make twice.
-pub fn again<T>(mut call: impl FnMut() -> Result<T, Problem>) -> Result<T, Problem> {
+fn again<T>(mut call: impl FnMut() -> Result<T, Problem>) -> Result<T, Problem> {
     call().or_else(|Problem(why)| {
         eprintln!("merge: {why}, so it is tried again");
         thread::sleep(AGAIN);

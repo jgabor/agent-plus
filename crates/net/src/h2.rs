@@ -4,9 +4,12 @@
 //! continue, and the block is decoded by HPACK. Every frame the proxy reads
 //! comes from the guest, so the reader is strict: a frame that RFC 9113
 //! calls a connection error is an error, never a guess. After an error, the
-//! reader refuses every later byte. Streams and flow control are the
-//! caller's, and so is telling the reader and the writer which SETTINGS
-//! each side has acknowledged.
+//! reader refuses every later byte. A `Connection` keeps each stream's
+//! state and both sides' flow-control windows, by sections 5.1 and 6.9.
+//! Telling each of them which SETTINGS each side has acknowledged is the
+//! caller's.
+
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::hpack::{self, Decoder, Encoder, Header};
 
@@ -38,6 +41,7 @@ const PRIORITY_FLAG: u8 = 0x20;
 
 const HEADER_TABLE_SIZE: u16 = 0x1;
 const ENABLE_PUSH: u16 = 0x2;
+const MAX_CONCURRENT_STREAMS: u16 = 0x3;
 const INITIAL_WINDOW_SIZE: u16 = 0x4;
 const MAX_FRAME_SIZE_SETTING: u16 = 0x5;
 
@@ -90,7 +94,7 @@ pub enum Frame {
         debug: Vec<u8>,
     },
     /// Section 6.9. An increment of 0 on a stream is a stream error, which
-    /// is the caller's.
+    /// `Connection` refuses.
     WindowUpdate { stream: u32, increment: u32 },
 }
 
@@ -103,8 +107,8 @@ pub struct Priority {
     pub weight: u8,
 }
 
-/// Why the reader refused a connection. `code` is the error code of the
-/// GOAWAY that says so.
+/// Why the reader or a `Connection` refused a frame. `code` is the error
+/// code of the GOAWAY or RST_STREAM that says so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The client's preface isn't the string, or the first frame isn't
@@ -119,14 +123,17 @@ pub enum Error {
     /// sections 6.1, 6.2, and 6.6.
     Padding,
     /// A stream id of 0 on a frame that needs a stream, or another on one
-    /// that is for the connection, or a promised stream id of 0.
+    /// that is for the connection, or a promised stream id of 0. Or HEADERS
+    /// from a client on a stream id that is even, or not above the last
+    /// stream it opened, by section 5.1.1.
     StreamId,
     /// A setting's value that section 6.5.2 doesn't allow, but for
     /// SETTINGS_INITIAL_WINDOW_SIZE.
     Settings,
     /// A SETTINGS_INITIAL_WINDOW_SIZE past 2^31 - 1, by section 6.5.2.
     InitialWindowSize,
-    /// An increment of 0 on the connection, by section 6.9.
+    /// An increment of 0, by section 6.9. On a stream, it is a stream
+    /// error.
     WindowUpdate,
     /// A frame inside a header block other than its CONTINUATION, or a
     /// CONTINUATION outside one, by section 6.10.
@@ -140,6 +147,21 @@ pub enum Error {
     /// A joined header block longer than the list limit, or headers that
     /// take more than it. Section 10.5 lets the reader refuse that as load.
     ListSize,
+    /// A frame other than HEADERS or PRIORITY on a stream that is idle, by
+    /// section 5.1. A server that never pushes has every even stream idle.
+    Idle,
+    /// DATA or HEADERS on a stream after the client ended it, a stream
+    /// error by section 5.1. On a closed stream, it is a connection error,
+    /// which section 5.1 allows.
+    StreamClosed,
+    /// HEADERS that open a stream past SETTINGS_MAX_CONCURRENT_STREAMS, a
+    /// stream error by section 5.1.2.
+    RefusedStream,
+    /// DATA past a flow-control window, by section 6.9.1, or a
+    /// WINDOW_UPDATE or a change to SETTINGS_INITIAL_WINDOW_SIZE that takes
+    /// a window past 2^31 - 1, by sections 6.9.1 and 6.9.2. On a stream's
+    /// window, but for a change of SETTINGS, it is a stream error.
+    FlowControl,
 }
 
 impl Error {
@@ -147,15 +169,20 @@ impl Error {
     pub fn code(self) -> u32 {
         const PROTOCOL_ERROR: u32 = 0x1;
         const FLOW_CONTROL_ERROR: u32 = 0x3;
+        const STREAM_CLOSED: u32 = 0x5;
         const FRAME_SIZE_ERROR: u32 = 0x6;
+        const REFUSED_STREAM: u32 = 0x7;
         const COMPRESSION_ERROR: u32 = 0x9;
         const ENHANCE_YOUR_CALM: u32 = 0xb;
         match self {
             Error::FrameSize => FRAME_SIZE_ERROR,
-            Error::InitialWindowSize => FLOW_CONTROL_ERROR,
+            Error::InitialWindowSize | Error::FlowControl => FLOW_CONTROL_ERROR,
+            Error::StreamClosed => STREAM_CLOSED,
+            Error::RefusedStream => REFUSED_STREAM,
             Error::Hpack(_) => COMPRESSION_ERROR,
             Error::ListSize => ENHANCE_YOUR_CALM,
-            Error::Preface
+            Error::Idle
+            | Error::Preface
             | Error::Padding
             | Error::StreamId
             | Error::Settings
@@ -612,9 +639,8 @@ impl Writer {
                 end_stream,
             } => {
                 let flags = flag(*end_stream, END_STREAM) | flag(padding.is_some(), PADDED);
+                head(out, max, flow_length(data, *padding), DATA, flags, *stream);
                 let padding = padding.map(usize::from);
-                let length = data.len() + padding.map_or(0, |padding| padding + 1);
-                head(out, max, length, DATA, flags, *stream);
                 if let Some(padding) = padding {
                     out.push(padding as u8);
                     out.extend_from_slice(data);
@@ -729,8 +755,471 @@ fn head(out: &mut Vec<u8>, max: usize, length: usize, kind: u8, flags: u8, strea
     out.extend(stream.to_be_bytes());
 }
 
+/// The length of a DATA frame's payload, which flow control counts: the
+/// data, the padding, and the Pad Length byte, by section 6.1.
+fn flow_length(data: &[u8], padding: Option<u8>) -> usize {
+    data.len() + padding.map_or(0, |padding| usize::from(padding) + 1)
+}
+
 fn priority_fields(out: &mut Vec<u8>, priority: &Priority) {
     let exclusive = if priority.exclusive { !STREAM_MASK } else { 0 };
     out.extend((priority.dependency | exclusive).to_be_bytes());
     out.push(priority.weight);
+}
+
+/// The window of a new connection and its streams, by section 6.9.2.
+const WINDOW: i64 = 65_535;
+/// The largest a window can be, by section 6.9.1.
+const MAX_WINDOW: i64 = STREAM_MASK as i64;
+/// How many of the streams it reset a `Connection` remembers.
+const RESETS: usize = 64;
+
+/// What a frame means for its stream, by section 5.1.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// HEADERS that open a stream: a request.
+    Request {
+        stream: u32,
+        headers: Vec<Header>,
+        end_stream: bool,
+    },
+    /// HEADERS on a stream that is open, which section 8.1 calls trailers.
+    /// Trailers without `end_stream` are malformed, by section 8.1, which
+    /// is the caller's to refuse.
+    Trailers {
+        stream: u32,
+        headers: Vec<Header>,
+        end_stream: bool,
+    },
+    /// DATA, without its padding. The caller says when it has consumed it.
+    Data {
+        stream: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    },
+    /// RST_STREAM: the client closed the stream.
+    Reset { stream: u32, code: u32 },
+    /// A frame for the connection, which the caller answers: SETTINGS,
+    /// which the connection has applied and the caller acknowledges, the
+    /// acknowledgement of the caller's SETTINGS, PING, or GOAWAY.
+    Connection(Frame),
+}
+
+/// Why a `Connection` refused a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// A stream error, by section 5.4.2. The connection has closed the
+    /// stream, and the caller writes RST_STREAM with the error's code,
+    /// without asking `Connection::send`.
+    Stream { stream: u32, error: Error },
+    /// A connection error, by section 5.4.1. The caller writes GOAWAY with
+    /// the error's code, and the connection refuses every later frame.
+    Connection(Error),
+}
+
+/// The streams of one connection, from the server's side, and both sides'
+/// flow-control windows. It does no I/O. The caller gives it each frame the
+/// `Reader` reads, and each HEADERS, DATA, and RST_STREAM it writes.
+///
+/// It discards what comes on a stream it reset, as section 5.1 says, for
+/// the last `RESETS` of them. Past that, a frame on an older one is refused
+/// as on any closed stream.
+pub struct Connection {
+    /// The streams that are open or half-closed.
+    streams: BTreeMap<u32, Stream>,
+    /// The streams it reset, newest last.
+    resets: VecDeque<u32>,
+    /// The highest stream id the client has opened.
+    last: u32,
+    max_streams: usize,
+    /// SETTINGS_INITIAL_WINDOW_SIZE: the server's once acknowledged, and
+    /// the client's.
+    receive_initial: i64,
+    send_initial: i64,
+    /// The connection's windows: what the client may send, and what the
+    /// server may.
+    receive: i64,
+    send: i64,
+    /// What the connection's receive window has to get back.
+    unannounced: i64,
+    failed: Option<Error>,
+}
+
+struct Stream {
+    receive: i64,
+    send: i64,
+    unannounced: i64,
+    /// Whether the client has ended the stream, and whether the server has.
+    remote_end: bool,
+    local_end: bool,
+}
+
+/// What a stream id is to the connection.
+enum Known {
+    Live,
+    Reset,
+    Closed,
+    Idle,
+}
+
+impl Default for Connection {
+    fn default() -> Connection {
+        Connection::new()
+    }
+}
+
+impl Connection {
+    pub fn new() -> Connection {
+        Connection {
+            streams: BTreeMap::new(),
+            resets: VecDeque::new(),
+            last: 0,
+            max_streams: usize::MAX,
+            receive_initial: WINDOW,
+            send_initial: WINDOW,
+            receive: WINDOW,
+            send: WINDOW,
+            unannounced: 0,
+            failed: None,
+        }
+    }
+
+    /// Applies the settings the caller sent, once the frame that
+    /// acknowledges them has come: SETTINGS_MAX_CONCURRENT_STREAMS and
+    /// SETTINGS_INITIAL_WINDOW_SIZE, by sections 5.1.2 and 6.9.2. It
+    /// ignores the rest, and takes each value to be one the reader accepts.
+    pub fn apply(&mut self, settings: &[(u16, u32)]) {
+        for &(id, value) in settings {
+            match id {
+                MAX_CONCURRENT_STREAMS => self.max_streams = value as usize,
+                INITIAL_WINDOW_SIZE => {
+                    let change = i64::from(value) - self.receive_initial;
+                    for stream in self.streams.values_mut() {
+                        stream.receive += change;
+                    }
+                    self.receive_initial = i64::from(value);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// What `frame`, from the client, means for its stream, or None if it
+    /// means nothing the caller acts on.
+    pub fn receive(&mut self, frame: Frame) -> Result<Option<Event>, Refused> {
+        if let Some(error) = self.failed {
+            return Err(Refused::Connection(error));
+        }
+        let read = self.read(frame);
+        if let Err(Refused::Connection(error)) = read {
+            self.failed = Some(error);
+        }
+        read
+    }
+
+    fn read(&mut self, frame: Frame) -> Result<Option<Event>, Refused> {
+        let refuse = |error| Err(Refused::Connection(error));
+        match frame {
+            Frame::Headers {
+                stream,
+                headers,
+                end_stream,
+                ..
+            } => self.headers(stream, headers, end_stream),
+            Frame::Data {
+                stream,
+                data,
+                padding,
+                end_stream,
+            } => self.data(stream, data, padding, end_stream),
+            Frame::Priority { .. } => Ok(None),
+            Frame::RstStream { stream, code } => match self.known(stream) {
+                Known::Idle => refuse(Error::Idle),
+                Known::Live => {
+                    self.streams.remove(&stream);
+                    Ok(Some(Event::Reset { stream, code }))
+                }
+                Known::Reset | Known::Closed => Ok(None),
+            },
+            Frame::WindowUpdate { stream, increment } => self.window_update(stream, increment),
+            Frame::Settings(settings) => {
+                for &(id, value) in &settings {
+                    if id != INITIAL_WINDOW_SIZE {
+                        continue;
+                    }
+                    let change = i64::from(value) - self.send_initial;
+                    for stream in self.streams.values_mut() {
+                        stream.send += change;
+                        if stream.send > MAX_WINDOW {
+                            return refuse(Error::FlowControl);
+                        }
+                    }
+                    self.send_initial = i64::from(value);
+                }
+                Ok(Some(Event::Connection(Frame::Settings(settings))))
+            }
+            Frame::PushPromise { .. } => refuse(Error::Push),
+            frame => Ok(Some(Event::Connection(frame))),
+        }
+    }
+
+    fn known(&self, stream: u32) -> Known {
+        if self.streams.contains_key(&stream) {
+            Known::Live
+        } else if self.resets.contains(&stream) {
+            Known::Reset
+        } else if !stream.is_multiple_of(2) && stream <= self.last {
+            Known::Closed
+        } else {
+            Known::Idle
+        }
+    }
+
+    fn headers(
+        &mut self,
+        stream: u32,
+        headers: Vec<Header>,
+        end_stream: bool,
+    ) -> Result<Option<Event>, Refused> {
+        match self.known(stream) {
+            Known::Idle if stream.is_multiple_of(2) => Err(Refused::Connection(Error::StreamId)),
+            Known::Idle => {
+                self.last = stream;
+                if self.streams.len() >= self.max_streams {
+                    return self.refuse(stream, Error::RefusedStream);
+                }
+                let opened = Stream {
+                    receive: self.receive_initial,
+                    send: self.send_initial,
+                    unannounced: 0,
+                    remote_end: false,
+                    local_end: false,
+                };
+                self.streams.insert(stream, opened);
+                if end_stream {
+                    self.end(stream, true);
+                }
+                Ok(Some(Event::Request {
+                    stream,
+                    headers,
+                    end_stream,
+                }))
+            }
+            Known::Live => {
+                if self.streams[&stream].remote_end {
+                    return self.refuse(stream, Error::StreamClosed);
+                }
+                if end_stream {
+                    self.end(stream, true);
+                }
+                Ok(Some(Event::Trailers {
+                    stream,
+                    headers,
+                    end_stream,
+                }))
+            }
+            Known::Reset => Ok(None),
+            Known::Closed => Err(Refused::Connection(Error::StreamId)),
+        }
+    }
+
+    fn data(
+        &mut self,
+        stream: u32,
+        data: Vec<u8>,
+        padding: Option<u8>,
+        end_stream: bool,
+    ) -> Result<Option<Event>, Refused> {
+        let length = flow_length(&data, padding) as i64;
+        let padding = length - data.len() as i64;
+        match self.known(stream) {
+            Known::Idle => return Err(Refused::Connection(Error::Idle)),
+            Known::Closed => return Err(Refused::Connection(Error::StreamClosed)),
+            Known::Reset | Known::Live => {}
+        }
+        // Even DATA that is refused counts toward the connection's window,
+        // by section 6.9.
+        if length > self.receive {
+            return Err(Refused::Connection(Error::FlowControl));
+        }
+        self.receive -= length;
+        let Some(open) = self.streams.get_mut(&stream) else {
+            self.unannounced += length;
+            return Ok(None);
+        };
+        // An empty DATA frame needs no window, by section 6.9.1.
+        if open.remote_end || length > open.receive.max(0) {
+            self.unannounced += length;
+            let error = match open.remote_end {
+                true => Error::StreamClosed,
+                false => Error::FlowControl,
+            };
+            return self.refuse(stream, error);
+        }
+        open.receive -= length;
+        open.unannounced += padding;
+        self.unannounced += padding;
+        if end_stream {
+            self.end(stream, true);
+        }
+        Ok(Some(Event::Data {
+            stream,
+            data,
+            end_stream,
+        }))
+    }
+
+    fn window_update(&mut self, stream: u32, increment: u32) -> Result<Option<Event>, Refused> {
+        let increment = i64::from(increment);
+        if stream == 0 {
+            if increment == 0 {
+                return Err(Refused::Connection(Error::WindowUpdate));
+            }
+            self.send += increment;
+            if self.send > MAX_WINDOW {
+                return Err(Refused::Connection(Error::FlowControl));
+            }
+            return Ok(None);
+        }
+        match self.known(stream) {
+            Known::Idle => return Err(Refused::Connection(Error::Idle)),
+            Known::Reset | Known::Closed => return Ok(None),
+            Known::Live => {}
+        }
+        if increment == 0 {
+            return self.refuse(stream, Error::WindowUpdate);
+        }
+        let open = self.streams.get_mut(&stream).expect("a live stream");
+        open.send += increment;
+        if open.send > MAX_WINDOW {
+            return self.refuse(stream, Error::FlowControl);
+        }
+        Ok(None)
+    }
+
+    /// Closes `stream` for a stream error.
+    fn refuse(&mut self, stream: u32, error: Error) -> Result<Option<Event>, Refused> {
+        self.reset(stream);
+        Err(Refused::Stream { stream, error })
+    }
+
+    fn reset(&mut self, stream: u32) {
+        self.streams.remove(&stream);
+        if self.resets.len() == RESETS {
+            self.resets.pop_front();
+        }
+        self.resets.push_back(stream);
+    }
+
+    /// Ends one side of a live stream, and closes it once both have ended.
+    fn end(&mut self, stream: u32, remote: bool) {
+        let open = self.streams.get_mut(&stream).expect("a live stream");
+        if remote {
+            open.remote_end = true;
+            // The client sends nothing more, so it needs no window back.
+            open.unannounced = 0;
+        } else {
+            open.local_end = true;
+        }
+        if open.remote_end && open.local_end {
+            self.streams.remove(&stream);
+        }
+    }
+
+    /// Says that the caller has consumed `bytes` of the DATA on `stream`,
+    /// so the client can have that much window back.
+    pub fn consumed(&mut self, stream: u32, bytes: usize) {
+        let bytes = bytes as i64;
+        self.unannounced += bytes;
+        if let Some(open) = self.streams.get_mut(&stream)
+            && !open.remote_end
+        {
+            open.unannounced += bytes;
+        }
+    }
+
+    /// The WINDOW_UPDATE frames the caller writes now. A window gets back
+    /// what was consumed of it once that is half its initial size, so the
+    /// client can keep sending and the updates aren't small.
+    pub fn updates(&mut self) -> Vec<Frame> {
+        let due = |initial: i64| (initial / 2).max(1);
+        let mut updates = Vec::new();
+        if self.unannounced >= due(WINDOW) {
+            updates.push(Frame::WindowUpdate {
+                stream: 0,
+                increment: self.unannounced as u32,
+            });
+            self.receive += self.unannounced;
+            self.unannounced = 0;
+        }
+        for (&stream, open) in &mut self.streams {
+            if open.unannounced >= due(self.receive_initial) {
+                updates.push(Frame::WindowUpdate {
+                    stream,
+                    increment: open.unannounced as u32,
+                });
+                open.receive += open.unannounced;
+                open.unannounced = 0;
+            }
+        }
+        updates
+    }
+
+    /// How many bytes of DATA the server may send on `stream` now, by
+    /// section 6.9.1. It counts padding and the Pad Length byte.
+    pub fn window(&self, stream: u32) -> usize {
+        match self.streams.get(&stream) {
+            Some(open) if !open.local_end => open.send.min(self.send).max(0) as usize,
+            _ => 0,
+        }
+    }
+
+    /// Takes a frame the server writes: HEADERS, DATA, or RST_STREAM. It
+    /// says whether the caller may write it, which it may unless its stream
+    /// is idle or closed, or the server has ended it, by section 5.1. The
+    /// client can close a stream at any time. A RST_STREAM for a stream
+    /// error is written without asking, because the connection has closed
+    /// that stream. Every other frame may be written. DATA past `window` is
+    /// a bug in the caller, so it panics.
+    #[must_use]
+    pub fn send(&mut self, frame: &Frame) -> bool {
+        let (stream, end_stream) = match frame {
+            Frame::Headers {
+                stream, end_stream, ..
+            } => (*stream, *end_stream),
+            Frame::Data {
+                stream, end_stream, ..
+            } => (*stream, *end_stream),
+            Frame::RstStream { stream, .. } => {
+                let open = self.streams.contains_key(stream);
+                if open {
+                    self.reset(*stream);
+                }
+                return open;
+            }
+            _ => return true,
+        };
+        if !self
+            .streams
+            .get(&stream)
+            .is_some_and(|open| !open.local_end)
+        {
+            return false;
+        }
+        if let Frame::Data { data, padding, .. } = frame {
+            let length = flow_length(data, *padding);
+            let window = self.window(stream);
+            assert!(
+                length <= window,
+                "DATA of {length} bytes is past the window of {window}"
+            );
+            let open = self.streams.get_mut(&stream).expect("an open stream");
+            open.send -= length as i64;
+            self.send -= length as i64;
+        }
+        if end_stream {
+            self.end(stream, false);
+        }
+        true
+    }
 }

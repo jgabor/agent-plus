@@ -204,7 +204,7 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
             "`record` describes a commit, so run it at the top of a git repository".to_string(),
         ));
     }
-    let hold = lock::testing(&root)?;
+    let mut hold = lock::testing(&root)?;
     let changed = changes(&root)?;
     if !changed.is_empty() {
         return Err(Problem(format!(
@@ -214,7 +214,7 @@ pub fn record(issue: &str, pr: &str) -> Result<Verdict, Problem> {
     }
     let commit = base::git_text(&root, &["rev-parse", "HEAD"])?;
 
-    let results = testrun::run(&root, &hold)?;
+    let results = testrun::run(&root, &mut hold)?;
     let score = score::compute(&root, &results)?;
     let (passing, steps) = journey::count(&root)?;
     let scores = Scores {

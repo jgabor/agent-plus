@@ -231,9 +231,9 @@ pub fn prove(
     telling(WAITING)?;
     let place = lock::place(tree)?;
     telling(SLOT)?;
-    let hold = place.share()?;
+    let mut hold = place.share()?;
     let merging = Merging { prepare, starting };
-    let (failed, score) = gate::check(tree, &hold, Some(&merging))?;
+    let (failed, score) = gate::check(tree, &mut hold, Some(&merging))?;
     if !failed.is_empty() {
         return Ok(Err(failed));
     }

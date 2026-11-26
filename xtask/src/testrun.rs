@@ -24,12 +24,16 @@ impl Results {
     }
 }
 
-pub fn run(root: &Path, hold: &Hold) -> Result<Results, Problem> {
+pub fn run(root: &Path, hold: &mut Hold) -> Result<Results, Problem> {
     run_except(root, hold, None)
 }
 
 /// Runs every package's tests but those of `left_out`.
-pub fn run_except(root: &Path, hold: &Hold, left_out: Option<&str>) -> Result<Results, Problem> {
+pub fn run_except(
+    root: &Path,
+    hold: &mut Hold,
+    left_out: Option<&str>,
+) -> Result<Results, Problem> {
     let mut results = Results {
         by_test: HashMap::new(),
         all_passed: true,
@@ -46,12 +50,13 @@ pub fn run_except(root: &Path, hold: &Hold, left_out: Option<&str>) -> Result<Re
 /// the result. `CC` and `CXX` point at a program that fails, as in the gate.
 /// The package's build and tests share one memory limit, and a test that goes
 /// over it is killed, which fails the run. In a merge, our input is the pipe
-/// to the supervisor, which the tests mustn't reach. Says whether the
-/// package's tests passed.
+/// to the supervisor, which the tests mustn't reach. Each package lets
+/// waiting work go first, as `Hold::between` says. Says whether the package's
+/// tests passed.
 pub fn run_package(
     root: &Path,
     package: &str,
-    hold: &Hold,
+    hold: &mut Hold,
     results: &mut Results,
 ) -> Result<bool, Problem> {
     if !hold.has_place() {
@@ -59,6 +64,7 @@ pub fn run_package(
             "a run of the tests needs a place. Take its hold with `lock::testing`".to_string(),
         ));
     }
+    hold.between()?;
     let arguments = ["test", "--package", package, "--locked", "--no-fail-fast"];
     let mut command = limit::scope("cargo", &arguments, None)?;
     command

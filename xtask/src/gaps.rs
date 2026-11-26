@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 /// promise that only a `t2` check proves.
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::testing(&root)?;
-    let results = testrun::run(&root, &hold)?;
+    let mut hold = lock::testing(&root)?;
+    let results = testrun::run(&root, &mut hold)?;
     let score = score::compute(&root, &results)?;
     score::report_findings(&score);
     let verdict = if score.findings.is_empty() {

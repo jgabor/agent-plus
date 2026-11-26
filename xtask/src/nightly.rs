@@ -39,8 +39,10 @@ pub fn run() -> Result<Verdict, Problem> {
     // `main` with itself only measures it, which is why the bench comes first,
     // on the quietest machine.
     let mut checks = vec![("bench", state(bench::compare(&root, Some(""), &|_| Ok(()))))];
-    let hold = lock::testing(&root)?;
-    let (gated, t2, score) = match gate::check(&root, &hold, None) {
+    // Between its checks, the job lets waiting work go first, as each run of
+    // the tests does between packages.
+    let mut hold = lock::testing(&root)?;
+    let (gated, t2, score) = match gate::check(&root, &mut hold, None) {
         Ok((failed, score)) => (
             state(Ok(gate::verdict(&failed))),
             t2(&root, Some(&failed)),
@@ -50,17 +52,21 @@ pub fn run() -> Result<Verdict, Problem> {
     };
     checks.push(("gate", gated));
     checks.push(("t2", t2));
+    hold.between()?;
     checks.push(("release", release(&root)));
     // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
+    hold.between()?;
     let walked = paid_keys().and_then(|keys| journey::outcomes(&root, &keys));
     checks.push(("journey", state(journey_holds(&root, &walked))));
+    hold.between()?;
     checks.push((
         "fuzz",
         fuzz::run(&root, &hold, deadline)
             .transpose()
             .map_or(SKIP, state),
     ));
+    hold.between()?;
     let mutated = mutation::run(&root, &hold, deadline).transpose();
     checks.push(("mutation", mutated.map_or(SKIP, state)));
     drop(hold);

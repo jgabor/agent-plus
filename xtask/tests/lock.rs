@@ -549,3 +549,138 @@ fn tests_run_by_score_inherit_its_hold() {
     let output = xtask(&root, &["score"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stdout), "spec 1 of 1\n");
 }
+
+/// How long a test waits for what it expects before it fails. A run that is
+/// slow to get there only makes it wait longer.
+const LIMIT: Duration = Duration::from_secs(120);
+
+/// Opens a FIFO, which waits for the other side to open it too, so neither
+/// side needs a sleep. A reader reads until the writer closes it. Fails the
+/// test if the other side never comes.
+fn meet(path: &Path, write: bool) {
+    let path = path.to_path_buf();
+    let (met, done) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        if write {
+            fs::write(&path, "").unwrap();
+        } else {
+            fs::read(&path).unwrap();
+        }
+        let _ = met.send(());
+    });
+    assert!(
+        done.recv_timeout(LIMIT).is_ok(),
+        "nothing met this test at the FIFO"
+    );
+}
+
+/// Takes the lock on another thread, and gives it back once it holds it, or
+/// `None` at the limit.
+fn take(file: File) -> Option<File> {
+    let (taken, held) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        file.lock().unwrap();
+        let _ = taken.send(file);
+    });
+    held.recv_timeout(LIMIT).ok()
+}
+
+/// A workspace of two packages, whose tests run a package at a time. The tests
+/// of whichever runs first say so at the FIFO `ready`, and then wait at `go`.
+/// The second package's tests write `second`.
+fn two_packages(name: &str) -> PathBuf {
+    let root = workspace(name);
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"3\"\n",
+    )
+    .unwrap();
+    for fifo in ["ready", "go"] {
+        let made = Command::new("mkfifo")
+            .arg(root.join(fifo))
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+    let test = format!(
+        "#[test]\nfn takes_turns() {{\n    let marks = std::path::Path::new({:?});\n    if std::fs::File::create_new(marks.join(\"first\")).is_ok() {{\n        std::fs::write(marks.join(\"ready\"), \"\").unwrap();\n        std::fs::read(marks.join(\"go\")).unwrap();\n    }} else {{\n        std::fs::write(marks.join(\"second\"), \"\").unwrap();\n    }}\n}}\n",
+        root.display().to_string()
+    );
+    for package in ["a", "b"] {
+        fs::create_dir_all(root.join(package).join("src")).unwrap();
+        fs::write(
+            root.join(package).join("Cargo.toml"),
+            format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join(package).join("src/lib.rs"), &test).unwrap();
+    }
+    let lockfile = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(lockfile.success());
+    root
+}
+
+/// `xtask score`, which runs each package's tests, in a host with this many
+/// places.
+fn score(root: &Path, places: usize) -> Child {
+    xtask(root, &["score"])
+        .env(PLACES_ENV, places.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Stops a run that kept what the test waited for, so the test can fail.
+fn kept(mut run: Child, what: &str) -> ! {
+    let _ = run.kill();
+    let _ = run.wait();
+    panic!("{what}");
+}
+
+#[test]
+fn a_test_run_lets_a_waiting_bench_go_between_packages() {
+    let root = two_packages("bench-between");
+    let run = score(&root, 2);
+    meet(&root.join("ready"), false);
+    let pending = turnstile(&root);
+    pending.lock().unwrap();
+    meet(&root.join("go"), true);
+    let Some(bench) = take(activity(&root)) else {
+        kept(run, "the run kept the activity lock for its next package");
+    };
+    assert!(
+        !root.join("second").exists(),
+        "the next package ran before the bench"
+    );
+    drop((bench, pending));
+    let mut run = run;
+    assert!(run.wait().unwrap().success());
+    assert!(root.join("second").exists());
+}
+
+/// The merge slot's holder keeps `ahead.lock` while it waits for a place.
+#[test]
+fn a_test_run_gives_its_place_to_the_merge_slots_holder_between_packages() {
+    let root = two_packages("place-between");
+    let run = score(&root, 1);
+    meet(&root.join("ready"), false);
+    let ahead = lock_file(&root, "ahead.lock");
+    ahead.lock().unwrap();
+    meet(&root.join("go"), true);
+    let Some(place) = take(lock_file(&root, "place-0.lock")) else {
+        kept(run, "the run kept its place for its next package");
+    };
+    assert!(
+        !root.join("second").exists(),
+        "the next package ran before the merge slot's holder had the place"
+    );
+    drop((place, ahead));
+    let mut run = run;
+    assert!(run.wait().unwrap().success());
+    assert!(root.join("second").exists());
+}

@@ -28,8 +28,8 @@ pub struct Score {
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::testing(&root)?;
-    let results = testrun::run(&root, &hold)?;
+    let mut hold = lock::testing(&root)?;
+    let results = testrun::run(&root, &mut hold)?;
     let score = compute(&root, &results)?;
     report_findings(&score);
     let (proven, promises) = (score.proven, score.promises.len());

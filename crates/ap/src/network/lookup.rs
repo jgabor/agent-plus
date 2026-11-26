@@ -211,15 +211,13 @@ impl Asker {
         Ok(id)
     }
 
-    /// The next answer, if one has come.
+    /// The next answer, if one has come. Once `ap run` has ended, it is an
+    /// error of the kind [`io::ErrorKind::UnexpectedEof`].
     pub(super) fn answer(&mut self) -> io::Result<Option<(u32, Vec<IpAddr>)>> {
         let mut buffer = [0; LONGEST];
         match super::proxy::recv(self.socket.as_raw_fd(), &mut buffer)? {
             None => Ok(None),
-            Some(0) => Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "`ap run` stopped answering lookups",
-            )),
+            Some(0) => Err(io::ErrorKind::UnexpectedEof.into()),
             Some(len) => Ok(read_answer(&buffer[..len])),
         }
     }

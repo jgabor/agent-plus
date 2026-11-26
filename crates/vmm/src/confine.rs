@@ -356,10 +356,10 @@ fn share_times_rules(socket: RawFd) -> Vec<Rule> {
 
 /// The calls the network process makes while it passes the guest's frames
 /// through its stack. It has one thread, so it starts none. It reads and
-/// writes frames on `link`, waits on it, and writes to standard error. It
-/// writes to standard output too, a socket to `ap run`, where it reports
-/// what it blocked. It makes no socket, so nothing it does reaches past the
-/// link and `ap run`.
+/// writes frames on `link`, waits on it, and writes to standard error, where
+/// a panic says the id of the thread that panicked. It writes to standard
+/// output too, a socket to `ap run`, where it reports what it blocked. It
+/// makes no socket, so nothing it does reaches past the link and `ap run`.
 fn network_rules(link: RawFd) -> Vec<Rule> {
     let mut rules = vec![Rule::AllowIf(RECVFROM, 0, vec![link as u32])];
     rules.extend(network_common_rules(link));
@@ -406,6 +406,8 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
         Allow(RT_SIGACTION),
         Allow(RT_SIGRETURN),
         Allow(SIGALTSTACK),
+        // A panic says which thread panicked.
+        Allow(GETTID),
         Allow(EXIT),
         Allow(EXIT_GROUP),
     ]
@@ -1124,6 +1126,60 @@ mod tests {
         assert_eq!(
             connecting_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
             RET_KILL_PROCESS
+        );
+    }
+
+    /// Set in the process that
+    /// [`a_confined_network_process_reports_its_panic`] starts, which
+    /// confines itself.
+    const PANICKING_VARIABLE: &str = "VMM_CONFINED_PANIC";
+    /// What the confined process's panic says.
+    const PANIC: &str = "a confined network process panicked";
+    /// The status the confined process exits with once its panic unwinds,
+    /// as a Rust program's does.
+    const PANICKED: i32 = 101;
+
+    unsafe extern "C" {
+        fn _exit(status: c_int) -> !;
+    }
+
+    /// The process that [`a_confined_network_process_reports_its_panic`]
+    /// starts. It runs before the test harness, so that it is the process's
+    /// only thread, as the network process is in `ap`.
+    #[used]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    static PANICKING_PROCESS: extern "C" fn() = panicking_process;
+
+    extern "C" fn panicking_process() {
+        if std::env::var_os(PANICKING_VARIABLE).is_none() {
+            return;
+        }
+        confine_network(0).unwrap();
+        let unwound = std::panic::catch_unwind(|| panic!("{PANIC}")).is_err();
+        // SAFETY: `_exit` ends the process at once.
+        unsafe { _exit(if unwound { PANICKED } else { 0 }) };
+    }
+
+    /// A panic says which thread panicked, which takes the thread's id. The
+    /// network process panics when it can't write to its standard error,
+    /// which can be a terminal that closed. Only Linux runs the process
+    /// before the test harness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_confined_network_process_reports_its_panic() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(PANICKING_VARIABLE, "1")
+            // A backtrace reads this program's file.
+            .env_remove("RUST_BACKTRACE")
+            .env_remove("RUST_LIB_BACKTRACE")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.code() == Some(PANICKED) && stderr.contains(PANIC),
+            "{:?}\n{stderr}",
+            output.status
         );
     }
 

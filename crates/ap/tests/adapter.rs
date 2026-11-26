@@ -752,7 +752,9 @@ fn auth_appears_once_and_auth_key_works_under_either_harness() {
         let source = format!("AGENT {agent}\nOS minimal\nAUTH key\n");
         let instructions = agentfile::parse_for(&source, ap::adapter::reserved).unwrap();
         let settings = agentfile::Settings::read(&instructions).unwrap();
-        let sign_in = ap::adapter::sign_in(settings.agent.harness, Auth::Key).unwrap();
+        let auth = agentfile::Secrets::read(&instructions).unwrap().auth;
+        assert_eq!(auth, Some(Auth::Key), "{agent}");
+        let sign_in = ap::adapter::sign_in(settings.agent.harness, auth.unwrap()).unwrap();
         assert_eq!(sign_in.variable, key, "{agent}");
         let twice = format!("{source}AUTH login\n");
         let errors = agentfile::parse_for(&twice, ap::adapter::reserved).unwrap_err();

@@ -245,7 +245,7 @@ impl Proxy {
     }
 
     /// Passes frames between `link` and `stack` until the link's other end
-    /// closes.
+    /// closes, or `ap run`'s end of the lookups does.
     pub fn serve(
         &mut self,
         link: &File,
@@ -271,7 +271,11 @@ impl Proxy {
                     }
                 }
             }
-            self.answers(stack, now)?;
+            match self.answers(stack, now) {
+                // `ap run` ended, which ends the run.
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+                answered => answered?,
+            }
             self.connects(stack, &ready, now);
             self.accept(stack, now);
             self.checks(stack, now);
@@ -1172,5 +1176,22 @@ mod tests {
         // name check alone.
         let closed = "NETWORK -\nNETWORK +github.com\n";
         assert!(read(closed, "github.com") == (Check::Name, true));
+    }
+
+    /// `ap run` holds the other end of the socket the proxy asks for
+    /// lookups on, so it ending ends the run, and the proxy with it. The
+    /// network process says something only when its proxy fails.
+    #[test]
+    fn the_proxy_ends_without_failing_when_ap_run_ends_first() {
+        let instructions = agentfile::parse("AGENT claude\nNETWORK +\n").unwrap();
+        let network = Network::read(&instructions).unwrap();
+        let (guest, link) = super::super::link().unwrap();
+        let (ap_run, lookups) = super::super::link().unwrap();
+        drop(ap_run);
+        let mut resolver = super::super::resolver_for(&network, &[], None).unwrap();
+        let mut proxy = Proxy::new(network, Vec::new(), UnixDatagram::from(lookups));
+        let served = proxy.serve(&File::from(link), &mut super::super::stack(), &mut resolver);
+        assert!(served.is_ok(), "{served:?}");
+        drop(guest);
     }
 }

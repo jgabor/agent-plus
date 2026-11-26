@@ -95,13 +95,6 @@ impl Hold {
         self
     }
 
-    /// For the merge slot's holder: one of the places, ahead of every run that
-    /// queues for one. It keeps the place to the end, because other work can
-    /// only slow a proof under the slot, which every merge waits for.
-    pub fn place_ahead(&self) -> Result<Hold, Problem> {
-        place_in(&self.directory, true)
-    }
-
     /// Between two parts of a run, such as two packages' tests, lets others
     /// go first. When the merge slot's holder waits for a place, it gets this
     /// one, and when a bench waits for the activity lock, it gets that. Then
@@ -163,29 +156,28 @@ fn shared_activity(directory: &Path) -> Result<Held, Problem> {
 
 /// For a run of the tests: a place, and then a shared hold.
 pub fn testing(root: &Path) -> Result<Hold, Problem> {
-    place(root)?.share()
+    place(root, None)?.share()
 }
 
 /// One of the places, which a caller then shares with `Hold::share`. A merge
 /// waits for its place apart from the rest, so that the wait doesn't count
-/// against its timeout.
-pub fn place(root: &Path) -> Result<Hold, Problem> {
-    place_in(&directory(root)?, false)
-}
-
-fn place_in(directory: &Path, ahead: bool) -> Result<Hold, Problem> {
-    let mut hold = Hold::new(directory);
-    hold.ahead = ahead;
-    if inherited(PLACE_INHERITED, directory) {
+/// against its timeout. The holder of the merge slot, which it passes as
+/// `slot`, gets its place ahead of every run that waits for one, and keeps
+/// it to the end, because every merge waits for a proof under the slot.
+pub fn place(root: &Path, slot: Option<&Hold>) -> Result<Hold, Problem> {
+    let directory = directory(root)?;
+    let mut hold = Hold::new(&directory);
+    hold.ahead = slot.is_some();
+    if inherited(PLACE_INHERITED, &directory) {
         hold.place = Held::Inherited;
         return Ok(hold);
     }
-    if inherited(INHERITED, directory) {
+    if inherited(INHERITED, &directory) {
         return Err(Problem(
             "the tests can't wait for a place under a hold without one, because a pending bench would wait for them".to_string(),
         ));
     }
-    hold.place = Held::Own(take_place(directory, places()?, ahead)?);
+    hold.place = Held::Own(take_place(&directory, places()?, hold.ahead)?);
     Ok(hold)
 }
 

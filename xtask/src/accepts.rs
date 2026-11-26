@@ -6,6 +6,7 @@
 use crate::forge::{Forge, Gh, PullRequest};
 use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
+use crate::lock::Hold;
 use crate::merge::{GOING, SLOT, WAITING};
 use crate::{Problem, Verdict, base, bench, journey, lock, waits, work};
 use std::collections::BTreeMap;
@@ -199,19 +200,26 @@ pub struct Scoring<'a> {
     pub gated: &'a str,
     /// The record whose budgets stand in for a bench.
     pub kept: Option<&'a Record>,
+    /// The merge slot, when this process holds it, so that the proof's place
+    /// comes ahead of every run that waits for one.
+    pub slot: Option<&'a Hold>,
 }
 
 /// What the proof earned, and what merging it accepts.
 pub struct Proof {
     pub record: Record,
     pub accepted: Vec<String>,
+    /// The place the proof ran in, which a proof of the PR's own xtask keeps,
+    /// unless a bench gave it up.
+    pub place: Option<Hold>,
 }
 
 /// Runs the gate, the journey, and any bench on the rebased head, saying which
 /// it is on, and returns the record they earn. If any check failed, the merge
 /// must stop, and the reasons have been printed. `telling` hears what the
-/// supervisor does: when the wait for a place starts and ends, and when the
-/// bench's wait to hold the activity lock alone does.
+/// supervisor does: when the wait for a place and a shared hold of the
+/// activity lock starts and ends, and when the bench's wait to hold the lock
+/// alone does.
 pub fn prove(
     tree: &Path,
     scoring: &Scoring,
@@ -229,9 +237,9 @@ pub fn prove(
         return Ok(Err(failed));
     }
     telling(WAITING)?;
-    let place = lock::place(tree)?;
-    telling(SLOT)?;
+    let place = lock::place(tree, scoring.slot)?;
     let mut hold = place.share()?;
+    telling(SLOT)?;
     let merging = Merging { prepare, starting };
     let (failed, score) = gate::check(tree, &mut hold, Some(&merging))?;
     if !failed.is_empty() {
@@ -239,15 +247,18 @@ pub fn prove(
     }
     starting("journey");
     let (passing, steps) = journey::count(tree)?;
-    drop(hold);
+    let mut place = Some(hold.keep_place());
 
     // The base of a revert may be what doesn't build, and a revert puts back a
     // tree that was already measured.
     let revert = prepare && base::is_exact_revert(tree, &commit)?;
     let benched = !revert && scoring.kept.is_none() && budget_can_change(tree, &commit)?;
     if benched {
+        // The bench holds the lock alone, and other runs can use the place
+        // until then.
+        place = None;
         starting("bench");
-        // Having a place started the timeout again, for this proof. The
+        // Having the lock started the timeout again, for this proof. The
         // bench's wait only stops it, so that the proof gets it once.
         let waiting = |waiting| telling(if waiting { WAITING } else { GOING });
         if bench::compare(tree, Some(&pr.body), &waiting)? == Verdict::Fail {
@@ -289,7 +300,11 @@ pub fn prove(
         accepted
             .push("an exact revert, so it can remove checks, and the bench didn't run".to_string());
     }
-    Ok(Ok(Proof { record, accepted }))
+    Ok(Ok(Proof {
+        record,
+        accepted,
+        place,
+    }))
 }
 
 /// What fails a proof before its gate runs, comparing `head` with `commit`:

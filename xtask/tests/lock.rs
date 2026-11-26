@@ -10,6 +10,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
+mod common;
+
 const HOLD_ENV: &str = "XTASK_ACTIVITY_HELD";
 const PLACE_ENV: &str = "XTASK_PLACE_HELD";
 const PLACES_ENV: &str = "XTASK_PLACES";
@@ -550,30 +552,6 @@ fn tests_run_by_score_inherit_its_hold() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "spec 1 of 1\n");
 }
 
-/// How long a test waits for what it expects before it fails. A run that is
-/// slow to get there only makes it wait longer.
-const LIMIT: Duration = Duration::from_secs(120);
-
-/// Opens a FIFO, which waits for the other side to open it too, so neither
-/// side needs a sleep. A reader reads until the writer closes it. Fails the
-/// test if the other side never comes.
-fn meet(path: &Path, write: bool) {
-    let path = path.to_path_buf();
-    let (met, done) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        if write {
-            fs::write(&path, "").unwrap();
-        } else {
-            fs::read(&path).unwrap();
-        }
-        let _ = met.send(());
-    });
-    assert!(
-        done.recv_timeout(LIMIT).is_ok(),
-        "nothing met this test at the FIFO"
-    );
-}
-
 /// Takes the lock on another thread, and gives it back once it holds it, or
 /// `None` at the limit.
 fn take(file: File) -> Option<File> {
@@ -582,7 +560,7 @@ fn take(file: File) -> Option<File> {
         file.lock().unwrap();
         let _ = taken.send(file);
     });
-    held.recv_timeout(LIMIT).ok()
+    held.recv_timeout(common::LIMIT).ok()
 }
 
 /// A workspace of two packages, whose tests run a package at a time. The tests
@@ -596,11 +574,7 @@ fn two_packages(name: &str) -> PathBuf {
     )
     .unwrap();
     for fifo in ["ready", "go"] {
-        let made = Command::new("mkfifo")
-            .arg(root.join(fifo))
-            .status()
-            .unwrap();
-        assert!(made.success());
+        common::fifo(&root.join(fifo));
     }
     let test = format!(
         "#[test]\nfn takes_turns() {{\n    let marks = std::path::Path::new({:?});\n    if std::fs::File::create_new(marks.join(\"first\")).is_ok() {{\n        std::fs::write(marks.join(\"ready\"), \"\").unwrap();\n        std::fs::read(marks.join(\"go\")).unwrap();\n    }} else {{\n        std::fs::write(marks.join(\"second\"), \"\").unwrap();\n    }}\n}}\n",
@@ -646,10 +620,10 @@ fn kept(mut run: Child, what: &str) -> ! {
 fn a_test_run_lets_a_waiting_bench_go_between_packages() {
     let root = two_packages("bench-between");
     let run = score(&root, 2);
-    meet(&root.join("ready"), false);
+    common::meet(&root.join("ready"), false);
     let pending = turnstile(&root);
     pending.lock().unwrap();
-    meet(&root.join("go"), true);
+    common::meet(&root.join("go"), true);
     let Some(bench) = take(activity(&root)) else {
         kept(run, "the run kept the activity lock for its next package");
     };
@@ -668,10 +642,10 @@ fn a_test_run_lets_a_waiting_bench_go_between_packages() {
 fn a_test_run_gives_its_place_to_the_merge_slots_holder_between_packages() {
     let root = two_packages("place-between");
     let run = score(&root, 1);
-    meet(&root.join("ready"), false);
+    common::meet(&root.join("ready"), false);
     let ahead = lock_file(&root, "ahead.lock");
     ahead.lock().unwrap();
-    meet(&root.join("go"), true);
+    common::meet(&root.join("go"), true);
     let Some(place) = take(lock_file(&root, "place-0.lock")) else {
         kept(run, "the run kept its place for its next package");
     };

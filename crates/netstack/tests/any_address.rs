@@ -921,9 +921,9 @@ fn edited(frame: &[u8], bad: bool, edit: impl FnOnce(&mut [u8])) -> Vec<u8> {
 }
 
 /// `frame`, a TCP or UDP frame, from another `source` port and to another
-/// `destination` port, with its checksum filled, or spoiled if `bad`.
-fn with_ports(frame: &[u8], source: u16, destination: u16, bad: bool) -> Vec<u8> {
-    edited(frame, bad, |transport| {
+/// `destination` port.
+fn with_ports(frame: &[u8], source: u16, destination: u16) -> Vec<u8> {
+    edited(frame, false, |transport| {
         transport[..2].copy_from_slice(&source.to_be_bytes());
         transport[2..4].copy_from_slice(&destination.to_be_bytes());
     })
@@ -950,6 +950,13 @@ fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
             Ipv4Packet::new_unchecked(&mut wrong[14..]).fill_checksum();
         }
         refused.push(("wrong version", wrong));
+        refused.push(("bad checksum", edited(frame, true, |_| {})));
+        if let [0x08, 0x00] = frame[12..14] {
+            let mut header = frame.clone();
+            // The IPv4 header checksum.
+            header[24] ^= 0xff;
+            refused.push(("bad IPv4 header checksum", header));
+        }
     }
     for syn in &syns {
         let first_option = |length: u8| {
@@ -964,8 +971,8 @@ fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
         refused.extend([
             ("MSS of the wrong length", first_option(3)),
             ("option past the header", first_option(0xff)),
-            ("SYN from port 0", with_ports(syn, 0, 443, false)),
-            ("SYN to port 0", with_ports(syn, 49152, 0, false)),
+            ("SYN from port 0", with_ports(syn, 0, 443)),
+            ("SYN to port 0", with_ports(syn, 49152, 0)),
             (
                 "SYN with FIN",
                 edited(syn, false, |tcp| {
@@ -981,7 +988,7 @@ fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
         ]);
     }
     for datagram in &datagrams {
-        refused.push(("datagram to port 0", with_ports(datagram, 40000, 0, false)));
+        refused.push(("datagram to port 0", with_ports(datagram, 40000, 0)));
     }
     let now = Instant::now();
     // Each frame, as the guest sent it, is asked about.
@@ -1012,46 +1019,35 @@ fn half_open_connections_and_held_syns_stay_within_their_limit() {
     let syn = syn_frame(to);
     let now = Instant::now();
     for verdict in [Verdict::Take, Verdict::Hold] {
-        for bad in [false, true] {
-            let mut stack = introduced();
-            let mut asked = Vec::new();
-            for port in 0..200 {
-                let frame = with_ports(&syn, 30000 + port, 443, bad);
-                stack.receive_holding(&frame, now, |flow| {
-                    asked.push(*flow);
-                    verdict
-                });
-                assert!(stack.sockets() <= 64, "{verdict:?}, bad {bad}");
-                assert!(stack.held() <= 64, "{verdict:?}, bad {bad}");
-            }
-            // A taken SYN with a bad checksum opens nothing, so each new
-            // one is asked about.
-            let expected = if bad && verdict == Verdict::Take {
-                200
-            } else {
-                64
-            };
-            assert_eq!(asked.len(), expected, "{verdict:?}, bad {bad}");
-            while stack.transmit().is_some() {}
-            // A SYN past the limit isn't asked about, and gets no answer.
-            if !bad || verdict == Verdict::Hold {
-                let frame = with_ports(&syn, 29999, 443, bad);
-                stack.receive_holding(&frame, now, |flow| panic!("asked about {flow:?}"));
-                assert!(stack.transmit().is_none(), "{verdict:?}, bad {bad}");
-            }
-            // Once one is freed, the next SYN is asked about again.
-            match verdict {
-                Verdict::Hold => stack.release(asked[0], false, now),
-                _ => stack.abandon(asked[0]),
-            }
-            stack.poll(now);
-            let mut again = 0;
-            stack.receive_holding(&with_ports(&syn, 29998, 443, bad), now, |_| {
-                again += 1;
-                Verdict::Refuse
+        let mut stack = introduced();
+        let mut asked = Vec::new();
+        for port in 0..200 {
+            let frame = with_ports(&syn, 30000 + port, 443);
+            stack.receive_holding(&frame, now, |flow| {
+                asked.push(*flow);
+                verdict
             });
-            assert_eq!(again, 1, "{verdict:?}, bad {bad}");
+            assert!(stack.sockets() <= 64, "{verdict:?}");
+            assert!(stack.held() <= 64, "{verdict:?}");
         }
+        assert_eq!(asked.len(), 64, "{verdict:?}");
+        while stack.transmit().is_some() {}
+        // A SYN past the limit isn't asked about, and gets no answer.
+        let frame = with_ports(&syn, 29999, 443);
+        stack.receive_holding(&frame, now, |flow| panic!("asked about {flow:?}"));
+        assert!(stack.transmit().is_none(), "{verdict:?}");
+        // Once one is freed, the next SYN is asked about again.
+        match verdict {
+            Verdict::Hold => stack.release(asked[0], false, now),
+            _ => stack.abandon(asked[0]),
+        }
+        stack.poll(now);
+        let mut again = 0;
+        stack.receive_holding(&with_ports(&syn, 29998, 443), now, |_| {
+            again += 1;
+            Verdict::Refuse
+        });
+        assert_eq!(again, 1, "{verdict:?}");
     }
 }
 
@@ -1061,33 +1057,31 @@ fn udp_ports_stay_within_their_limit() {
     let to = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53);
     let datagram = datagram_frame(to);
     let now = Instant::now();
-    for bad in [false, true] {
-        let mut stack = stack();
-        let mut asked = 0;
-        for port in 0..100 {
-            let frame = with_ports(&datagram, 40000, 1000 + port, bad);
-            stack.receive(&frame, now, |_| {
-                asked += 1;
-                true
-            });
-            assert!(stack.sockets() <= 32, "bad {bad}");
-        }
-        assert_eq!(asked, 32, "bad {bad}");
-        assert_eq!(stack.sockets(), 32, "bad {bad}");
-        // A port already open still takes datagrams.
-        while stack.recv_datagram().is_some() {}
-        stack.receive(&with_ports(&datagram, 40000, 1000, false), now, |_| true);
-        assert!(stack.recv_datagram().is_some(), "bad {bad}");
-        // Once one is freed, a datagram to a new port is asked about again.
-        stack.unbind(1001);
-        let mut again = 0;
-        stack.receive(&with_ports(&datagram, 40000, 2000, false), now, |_| {
-            again += 1;
+    let mut stack = stack();
+    let mut asked = 0;
+    for port in 0..100 {
+        let frame = with_ports(&datagram, 40000, 1000 + port);
+        stack.receive(&frame, now, |_| {
+            asked += 1;
             true
         });
-        assert_eq!(again, 1, "bad {bad}");
-        assert!(stack.recv_datagram().is_some(), "bad {bad}");
+        assert!(stack.sockets() <= 32);
     }
+    assert_eq!(asked, 32);
+    assert_eq!(stack.sockets(), 32);
+    // A port already open still takes datagrams.
+    while stack.recv_datagram().is_some() {}
+    stack.receive(&with_ports(&datagram, 40000, 1000), now, |_| true);
+    assert!(stack.recv_datagram().is_some());
+    // Once one is freed, a datagram to a new port is asked about again.
+    stack.unbind(1001);
+    let mut again = 0;
+    stack.receive(&with_ports(&datagram, 40000, 2000), now, |_| {
+        again += 1;
+        true
+    });
+    assert_eq!(again, 1);
+    assert!(stack.recv_datagram().is_some());
 }
 
 /// The guest's ICMP or ICMPv6 echo request to `to`, as `ping` sends it.

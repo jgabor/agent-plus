@@ -1,9 +1,9 @@
 //! Feeds generated text to the code that reads untrusted input, and stops at
 //! the first panic. It needs no fuzzing engine, so it builds on stable. Where
-//! httparse, hyper, iri-string, `git`, or `sha1sum` does the same job, a
-//! target compares the two. miniz_oxide compresses the loose objects that
-//! `crates/git` and `git` both read. Those crates are pure Rust, so the fuzzer
-//! adds no C to the tree. A run is reproduced by passing its seed again.
+//! httparse, hyper, iri-string, smoltcp, `git`, or `sha1sum` does the same
+//! job, a target compares the two. miniz_oxide compresses the loose objects
+//! that `crates/git` and `git` both read. Those crates are pure Rust, so the
+//! fuzzer adds no C to the tree. A run is reproduced by passing its seed again.
 
 #![forbid(unsafe_code)]
 
@@ -34,7 +34,45 @@ struct Target {
     words: &'static [&'static str],
 }
 
-const TARGETS: [Target; 12] = [
+/// The Ethernet header of a frame from the guest to the stack, in front of
+/// an IPv4 packet.
+macro_rules! to_stack_v4 {
+    () => {
+        "\x02ap\0\0\x02\x02ap\0\0\x0f\x08\0"
+    };
+}
+
+/// The same, in front of an IPv6 packet.
+macro_rules! to_stack_v6 {
+    () => {
+        "\x02ap\0\0\x02\x02ap\0\0\x0f\u{86}\u{dd}"
+    };
+}
+
+/// The guest asks who has the gateway's IPv4 address, and so tells the
+/// stack its own MAC address.
+macro_rules! arp_request {
+    () => {
+        concat!(
+            "\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\x02ap\0\0\x0f\x08\x06",
+            "\0\x01\x08\0\x06\x04\0\x01\x02ap\0\0\x0f\x0a\0\x02\x0f\0\0\0\0\0\0\x0a\0\x02\x02",
+        )
+    };
+}
+
+/// The same over IPv6: a neighbor solicitation for the gateway's address.
+macro_rules! neighbor_solicitation {
+    () => {
+        concat!(
+            "33\u{ff}\0\0\x02\x02ap\0\0\x0f\u{86}\u{dd}",
+            "`\0\0\0\0 :\u{ff}",
+            "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15\u{ff}\x02\0\0\0\0\0\0\0\0\0\x01\u{ff}\0\0\x02",
+            "\u{87}\0,Q\0\0\0\0\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x02\x01\x01\x02ap\0\0\x0f",
+        )
+    };
+}
+
+const TARGETS: [Target; 13] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -577,6 +615,129 @@ const TARGETS: [Target; 12] = [
             "\x16\x03\x01",
         ],
     },
+    Target {
+        name: "frames",
+        check: |input| {
+            frames_input(input);
+        },
+        corpus: &[
+            "",
+            arp_request!(),
+            // A SYN over IPv4, taken, then a second later a datagram, taken.
+            concat!(
+                arp_request!(),
+                "\u{100}",
+                to_stack_v4!(),
+                "E\0\0,\0\x01\0\0@\x068\u{e2}\x0a\0\x02\x0f]\u{b8}\u{d8}\x22",
+                "\u{9c}@\x01\u{bb}\0\0\x03\u{e8}\0\0\0\0`\x02\u{fa}\u{f0}\u{b9}h\0\0",
+                "\x02\x04\x05\u{b4}",
+                "\u{3f80}",
+                to_stack_v4!(),
+                "E\0\0\x1e\0\x01\0\0@\x11l\u{be}\x0a\0\x02\x0f\x01\x01\x01\x01",
+                "\u{9c}A\x005\0\x0a\u{ec}\u{e9}",
+                "hi",
+            ),
+            // A SYN over IPv6, held, then a datagram, refused, and the SYN
+            // released, taken.
+            concat!(
+                neighbor_solicitation!(),
+                "\u{100}",
+                to_stack_v6!(),
+                "`\0\0\0\0\x18\x06@",
+                "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15&\x06G\0\0\0\0\0\0\0\0\0\0\0\x11\x11",
+                "\u{9c}B\x01\u{bb}\0\0\x03\u{e8}\0\0\0\0`\x02\u{fa}\u{f0}\x0f\u{c2}\0\0",
+                "\x02\x04\x05\u{b4}",
+                "\u{102}",
+                to_stack_v6!(),
+                "`\0\0\0\0\x0a\x11@",
+                "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15&\x06G\0\0\0\0\0\0\0\0\0\0\0\x11\x11",
+                "\u{9c}C\x005\0\x0a\x0fj",
+                "hi",
+                "\u{10d}",
+            ),
+            // A SYN behind a hop-by-hop header that holds padding, refused.
+            concat!(
+                neighbor_solicitation!(),
+                "\u{100}",
+                to_stack_v6!(),
+                "`\0\0\0\0 \0@",
+                "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15&\x06G\0\0\0\0\0\0\0\0\0\0\0\x11\x11",
+                "\x06\0\x01\x04\0\0\0\0",
+                "\u{9c}D\x01\u{bb}\0\0\x03\u{e8}\0\0\0\0`\x02\u{fa}\u{f0}\x0f\u{c0}\0\0",
+                "\x02\x04\x05\u{b4}",
+                "\u{101}",
+            ),
+            // The first fragment of a datagram.
+            concat!(
+                to_stack_v4!(),
+                "E\0\0$\0\x01 \0@\x11L\u{b8}\x0a\0\x02\x0f\x01\x01\x01\x01",
+                "\u{9c}E\x005\0\x10\u{84}n",
+                "12345678",
+            ),
+            // A SYN to another MAC address.
+            concat!(
+                "\x02ap\0\0\u{99}\x02ap\0\0\x0f\x08\0",
+                "E\0\0,\0\x01\0\0@\x068\u{e2}\x0a\0\x02\x0f]\u{b8}\u{d8}\x22",
+                "\u{9c}F\x01\u{bb}\0\0\x03\u{e8}\0\0\0\0`\x02\u{fa}\u{f0}\u{b9}b\0\0",
+                "\x02\x04\x05\u{b4}",
+            ),
+            // Truncated headers: Ethernet, ARP, IPv4, IPv6, hop-by-hop, TCP,
+            // and UDP.
+            concat!(
+                "\x02ap\0\0\x02\x02ap\0",
+                "\u{100}",
+                "\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\x02ap\0\0\x0f\x08\x06",
+                "\0\x01\x08\0\x06\x04\0\x01\x02ap\0",
+                "\u{100}",
+                to_stack_v4!(),
+                "E\0\0,\0\x01\0\0@\x068\u{e2}",
+                "\u{100}",
+                to_stack_v6!(),
+                "`\0\0\0\0\x18\x06@\u{fd}ap\0\0\0\0\0\0\0\0\0",
+                "\u{100}",
+                to_stack_v6!(),
+                "`\0\0\0\0\x04\0@",
+                "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15&\x06G\0\0\0\0\0\0\0\0\0\0\0\x11\x11",
+                "\x06\0\x01\x04",
+                "\u{100}",
+                to_stack_v4!(),
+                "E\0\0\x1e\0\x01\0\0@\x068\u{f0}\x0a\0\x02\x0f]\u{b8}\u{d8}\x22",
+                "\u{9c}G\x01\u{bb}\0\0\x03\u{e8}\0\0",
+                "\u{100}",
+                to_stack_v4!(),
+                "E\0\0\x18\0\x01\0\0@\x11l\u{c4}\x0a\0\x02\x0f\x01\x01\x01\x01",
+                "\u{9c}H\x005",
+            ),
+        ],
+        words: &[
+            // Endings: a take, a refusal, a hold, a release taken, a release
+            // refused, a second, and ten.
+            "\u{100}",
+            "\u{101}",
+            "\u{102}",
+            "\u{10c}",
+            "\u{104}",
+            "\u{3f80}",
+            "\u{27200}",
+            "\x02ap\0\0\x02\x02ap\0\0\x0f",
+            "\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}\u{ff}",
+            "\x08\0",
+            "\x08\x06",
+            "\u{86}\u{dd}",
+            "E\0",
+            "`\0\0\0",
+            "\x06",
+            "\x11",
+            "\0",
+            "\x01",
+            "\x02",
+            "\x03",
+            "\x10",
+            "\x12",
+            " \0",
+            "\u{ff}",
+        ],
+    },
 ];
 
 /// The TLS client hello in the name check's corpus.
@@ -687,6 +848,231 @@ fn dns_input(input: &str) -> bool {
     assert_eq!(answer.get(4..6), Some(&[0, 1][..]), "{answer:?}");
     assert_eq!(resolver.answer(query), Some(answer));
     true
+}
+
+/// Plays a guest on the link of a stack built as the network process
+/// builds it, with a fixed seed. Each character up to U+00FF is a byte of a
+/// frame, and each past it ends one. Less U+0100, an ending's low two bits
+/// say whether the caller takes, refuses, or holds a flow the frame opens,
+/// and 3 takes it too. Bit 2 releases the connection held longest, taken if
+/// bit 3 is set. The rest is how many milliseconds pass before the stack
+/// polls. The last frame needs no ending. Panics if smoltcp's wire parsing
+/// reads a flow the stack asks about as another, or can't read a frame the
+/// stack sends. Returns how many flows it asked about, and frames it sent.
+fn frames_input(input: &str) -> (usize, usize) {
+    use netstack::{Config, Flow, Stack, Verdict};
+    use std::collections::VecDeque;
+    let mut stack = Stack::new(Config {
+        mac: guest::net::GATEWAY_MAC,
+        ipv4: (guest::net::IPV4_GATEWAY, guest::net::IPV4_PREFIX),
+        ipv6: (guest::net::IPV6_GATEWAY, guest::net::IPV6_PREFIX),
+        // So that a run is reproduced by its seed.
+        seed: 0,
+    });
+    let mut now = Instant::now();
+    let mut held = VecDeque::new();
+    let (mut asked, mut sent) = (0, 0);
+    let mut rest = input;
+    loop {
+        let end = rest.find(|c: char| c > '\u{ff}');
+        let frame: Vec<u8> = rest[..end.unwrap_or(rest.len())]
+            .chars()
+            .map(|c| c as u32 as u8)
+            .collect();
+        let ending = end.map(|end| rest[end..].chars().next().expect("a character"));
+        let bits = ending.map_or(0, |c| c as u32 - 0x100);
+        let verdict = match bits & 3 {
+            1 => Verdict::Refuse,
+            2 => Verdict::Hold,
+            _ => Verdict::Take,
+        };
+        stack.receive_holding(&frame, now, |flow| {
+            same_flow(&frame, flow);
+            asked += 1;
+            if let (Verdict::Hold, Flow::Tcp { .. }) = (verdict, flow) {
+                held.push_back(*flow);
+            }
+            verdict
+        });
+        if bits & 4 != 0
+            && let Some(flow) = held.pop_front()
+        {
+            stack.release(flow, bits & 8 != 0, now);
+        }
+        now += Duration::from_millis(u64::from(bits >> 4));
+        stack.poll(now);
+        while let Some(frame) = stack.transmit() {
+            sent_reads(&frame);
+            sent += 1;
+        }
+        let (Some(end), Some(ending)) = (end, ending) else {
+            return (asked, sent);
+        };
+        rest = &rest[end + ending.len_utf8()..];
+    }
+}
+
+/// Panics unless smoltcp's wire parsing reads `frame` as a packet to the
+/// stack's MAC address that opens `flow`. `classify` calls the same parsers,
+/// so this checks the code around them: which headers it reads, the SYN it
+/// looks for, and the addresses and ports it takes. It reads past one
+/// hop-by-hop header, and leaves checksums unchecked.
+fn same_flow(frame: &[u8], flow: &netstack::Flow) {
+    use smoltcp::phy::ChecksumCapabilities;
+    let ignored = ChecksumCapabilities::ignored();
+    assert_eq!(
+        flow_of(frame, &ignored).as_ref(),
+        Some(flow),
+        "smoltcp reads another flow in {frame:x?}"
+    );
+}
+
+/// The flow that smoltcp's wire parsing reads in a frame to the stack's MAC
+/// address: a SYN, or a UDP datagram.
+fn flow_of(frame: &[u8], checksums: &smoltcp::phy::ChecksumCapabilities) -> Option<netstack::Flow> {
+    use smoltcp::wire::{
+        EthernetAddress, EthernetFrame, EthernetRepr, IpProtocol, TcpControl, TcpPacket, TcpRepr,
+        UdpPacket, UdpRepr,
+    };
+    use std::net::{IpAddr, SocketAddr};
+    let ethernet = EthernetFrame::new_checked(frame).ok()?;
+    let repr = EthernetRepr::parse(&ethernet).ok()?;
+    if repr.dst_addr != EthernetAddress(guest::net::GATEWAY_MAC) {
+        return None;
+    }
+    let (protocol, from, to, payload) = ip_of(frame, checksums)?;
+    let at = |ip, port| SocketAddr::new(IpAddr::from(ip), port);
+    match protocol {
+        IpProtocol::Tcp => {
+            let tcp = TcpRepr::parse(
+                &TcpPacket::new_checked(payload).ok()?,
+                &from,
+                &to,
+                checksums,
+            )
+            .ok()?;
+            let syn = tcp.control == TcpControl::Syn && tcp.ack_number.is_none();
+            syn.then(|| netstack::Flow::Tcp {
+                source: at(from, tcp.src_port),
+                destination: at(to, tcp.dst_port),
+            })
+        }
+        IpProtocol::Udp => {
+            let udp = UdpRepr::parse(
+                &UdpPacket::new_checked(payload).ok()?,
+                &from,
+                &to,
+                checksums,
+            )
+            .ok()?;
+            Some(netstack::Flow::Udp {
+                source: at(from, udp.src_port),
+                destination: at(to, udp.dst_port),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The IP packet that smoltcp's wire parsing reads in an Ethernet frame,
+/// with `checksums` checked: its protocol, its addresses, and the bytes
+/// after its header and one hop-by-hop header.
+fn ip_of<'a>(
+    frame: &'a [u8],
+    checksums: &smoltcp::phy::ChecksumCapabilities,
+) -> Option<(
+    smoltcp::wire::IpProtocol,
+    smoltcp::wire::IpAddress,
+    smoltcp::wire::IpAddress,
+    &'a [u8],
+)> {
+    use smoltcp::wire::{
+        EthernetFrame, EthernetProtocol, IpAddress, IpProtocol, Ipv4Packet, Ipv4Repr,
+        Ipv6ExtHeader, Ipv6Packet, Ipv6Repr,
+    };
+    let ethernet = EthernetFrame::new_checked(frame).ok()?;
+    let payload = frame.get(EthernetFrame::<&[u8]>::header_len()..)?;
+    match ethernet.ethertype() {
+        EthernetProtocol::Ipv4 => {
+            let packet = Ipv4Packet::new_checked(payload).ok()?;
+            let repr = Ipv4Repr::parse(&packet, checksums).ok()?;
+            let from = IpAddress::Ipv4(repr.src_addr);
+            Some((
+                repr.next_header,
+                from,
+                repr.dst_addr.into(),
+                packet.payload(),
+            ))
+        }
+        EthernetProtocol::Ipv6 => {
+            let packet = Ipv6Packet::new_checked(payload).ok()?;
+            let repr = Ipv6Repr::parse(&packet).ok()?;
+            let (from, to) = (IpAddress::Ipv6(repr.src_addr), repr.dst_addr.into());
+            let payload = packet.payload();
+            if repr.next_header != IpProtocol::HopByHop {
+                return Some((repr.next_header, from, to, payload));
+            }
+            // The header's length is in units of 8 bytes, less the first.
+            let header = Ipv6ExtHeader::new_checked(payload).ok()?;
+            let behind = payload.get(8 * (usize::from(header.header_len()) + 1)..)?;
+            Some((header.next_header(), from, to, behind))
+        }
+        _ => None,
+    }
+}
+
+/// Panics unless smoltcp's wire parsing reads `frame` as ARP, or as TCP,
+/// UDP, ICMP, or ICMPv6 over IP, from the stack's MAC address, with every
+/// checksum right.
+fn sent_reads(frame: &[u8]) {
+    assert!(
+        sent_parsed(frame).is_some(),
+        "smoltcp can't read a frame the stack sent: {frame:x?}"
+    );
+}
+
+fn sent_parsed(frame: &[u8]) -> Option<()> {
+    use smoltcp::phy::ChecksumCapabilities;
+    use smoltcp::wire::{
+        ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr,
+        Icmpv4Packet, Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpProtocol, TcpPacket,
+        TcpRepr, UdpPacket, UdpRepr,
+    };
+    let checked = ChecksumCapabilities::default();
+    let ethernet = EthernetFrame::new_checked(frame).ok()?;
+    let repr = EthernetRepr::parse(&ethernet).ok()?;
+    if repr.src_addr != EthernetAddress(guest::net::GATEWAY_MAC) {
+        return None;
+    }
+    if repr.ethertype == EthernetProtocol::Arp {
+        let arp = ArpPacket::new_checked(ethernet.payload()).ok()?;
+        return ArpRepr::parse(&arp).ok().map(drop);
+    }
+    let (protocol, from, to, payload) = ip_of(frame, &checked)?;
+    match protocol {
+        IpProtocol::Tcp => {
+            let tcp = TcpPacket::new_checked(payload).ok()?;
+            TcpRepr::parse(&tcp, &from, &to, &checked).ok().map(drop)
+        }
+        IpProtocol::Udp => {
+            let udp = UdpPacket::new_checked(payload).ok()?;
+            UdpRepr::parse(&udp, &from, &to, &checked).ok().map(drop)
+        }
+        IpProtocol::Icmp => {
+            let icmp = Icmpv4Packet::new_checked(payload).ok()?;
+            Icmpv4Repr::parse(&icmp, &checked).ok().map(drop)
+        }
+        IpProtocol::Icmpv6 => {
+            let (IpAddress::Ipv6(from), IpAddress::Ipv6(to)) = (from, to) else {
+                return None;
+            };
+            let icmp = Icmpv6Packet::new_checked(payload).ok()?;
+            Icmpv6Repr::parse(&from, &to, &icmp, &checked)
+                .ok()
+                .map(drop)
+        }
+        _ => None,
+    }
 }
 
 /// Decodes the blocks of `input` on one connection, where each character
@@ -2322,6 +2708,95 @@ mod tests {
         for input in &corpus[1..] {
             assert!(dns_input(input), "{input:?}");
         }
+    }
+
+    #[test]
+    fn the_frames_corpus_opens_flows_and_gets_answers() {
+        let corpus = TARGETS.iter().find(|t| t.name == "frames").unwrap().corpus;
+        let counts: Vec<(usize, usize)> = corpus.iter().map(|input| frames_input(input)).collect();
+        // The ARP request gets a reply. Over IPv4, so does the SYN, which
+        // gets its SYN-ACK again a second later. Over IPv6, the neighbor
+        // solicitation gets an advertisement, the SYN gets nothing until
+        // it is released, and the refused SYN gets a reset. The rest opens
+        // nothing, and gets no answer.
+        assert_eq!(
+            counts,
+            [
+                (0, 0),
+                (0, 1),
+                (2, 3),
+                (2, 2),
+                (1, 2),
+                (0, 0),
+                (0, 0),
+                (0, 0)
+            ]
+        );
+    }
+
+    /// The bytes of the second frame in `input`.
+    fn second_frame(input: &str) -> Vec<u8> {
+        let frame = input.chars().skip_while(|&c| c <= '\u{ff}').skip(1);
+        let frame = frame.take_while(|&c| c <= '\u{ff}');
+        frame.map(|c| c as u32 as u8).collect()
+    }
+
+    /// The frames corpus's IPv4 SYN, and the flow it opens.
+    fn syn() -> (Vec<u8>, netstack::Flow) {
+        let corpus = TARGETS.iter().find(|t| t.name == "frames").unwrap().corpus;
+        let flow = netstack::Flow::Tcp {
+            source: "10.0.2.15:40000".parse().unwrap(),
+            destination: "93.184.216.34:443".parse().unwrap(),
+        };
+        (second_frame(corpus[2]), flow)
+    }
+
+    #[test]
+    fn a_flow_smoltcp_reads_the_same_passes() {
+        let (frame, flow) = syn();
+        same_flow(&frame, &flow);
+    }
+
+    #[test]
+    #[should_panic(expected = "smoltcp")]
+    fn a_flow_smoltcp_reads_differently_is_found() {
+        let (frame, flow) = syn();
+        let netstack::Flow::Tcp {
+            source,
+            mut destination,
+        } = flow
+        else {
+            unreachable!()
+        };
+        destination.set_port(444);
+        same_flow(
+            &frame,
+            &netstack::Flow::Tcp {
+                source,
+                destination,
+            },
+        );
+    }
+
+    /// The frames corpus's IPv4 SYN, as if the stack had sent it.
+    fn sent_syn() -> Vec<u8> {
+        let mut frame = syn().0;
+        frame[6..12].copy_from_slice(&guest::net::GATEWAY_MAC);
+        frame
+    }
+
+    #[test]
+    fn a_sent_frame_smoltcp_reads_passes() {
+        sent_reads(&sent_syn());
+    }
+
+    #[test]
+    #[should_panic(expected = "smoltcp")]
+    fn a_sent_frame_with_a_bad_checksum_is_found() {
+        let mut frame = sent_syn();
+        // The low byte of the TCP checksum.
+        frame[51] ^= 1;
+        sent_reads(&frame);
     }
 
     #[test]

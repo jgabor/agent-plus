@@ -199,6 +199,7 @@ dependencies = [
  "agentfile",
  "ap",
  "git",
+ "guest",
  "httparse",
  "hyper",
  "iri-string",
@@ -206,6 +207,7 @@ dependencies = [
  "net",
  "netstack",
  "share",
+ "smoltcp",
  "vmm",
 ]
 

@@ -29,6 +29,22 @@ const CHECKS: &[Check] = &[
             "warnings",
         ],
     },
+    // Lints the code that only macOS builds, which needn't link, so Linux
+    // can check it.
+    Check {
+        name: "lint-macos",
+        args: &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--target",
+            "aarch64-apple-darwin",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    },
 ];
 
 /// The package that holds the T2 checks.

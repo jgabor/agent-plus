@@ -1406,10 +1406,8 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 
 #[cfg(test)]
 mod tests {
-    use super::{GOING, SLOT, TREE_PATH, WAITING, keep, left_after, long};
-    use std::fs;
+    use super::{GOING, SLOT, TREE_PATH, WAITING, left_after, long};
     use std::path::Path;
-    use std::process::{Command, Stdio};
     use std::time::Duration;
 
     #[test]
@@ -1463,6 +1461,10 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_kept_xtask_stays_while_it_runs() {
+        use super::keep;
+        use std::fs;
+        use std::process::{Command, Stdio};
+
         let bin = std::env::temp_dir().join(format!("xtask-kept-{}", std::process::id()));
         let _ = fs::remove_dir_all(&bin);
         let running = keep(&bin, Path::new("/bin/sh"), "running").unwrap();

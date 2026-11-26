@@ -61,7 +61,13 @@ fn clean_workspace_passes() {
     let output = xtask(&root, &["gate"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let out = stdout(&output);
-    for line in ["pass format", "pass lint", "pass tests", "gate: pass"] {
+    for line in [
+        "pass format",
+        "pass lint",
+        "pass lint-macos",
+        "pass tests",
+        "gate: pass",
+    ] {
         assert!(out.contains(line), "missing {line:?} in {out:?}");
     }
 }
@@ -82,6 +88,17 @@ fn a_lint_warning_fails() {
     let output = xtask(&root, &["gate"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stdout(&output).contains("fail lint"));
+}
+
+#[test]
+fn a_lint_warning_that_only_macos_builds_fails() {
+    let source = "#[cfg(target_os = \"macos\")]\npub fn answer() {\n    let unused = 42;\n}\n";
+    let root = workspace("lint-macos", source);
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("pass lint\n"), "{out:?}");
+    assert!(out.contains("fail lint-macos"), "{out:?}");
 }
 
 #[test]

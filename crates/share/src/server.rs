@@ -680,32 +680,47 @@ impl Share {
 
     /// Refuses a file node that the host has moved out from under the
     /// root. It is beneath it while the name it was found by leads to it,
-    /// and once the host renames it, while the path it has now does. A file
-    /// with no name left, which the agent unlinked while it held it open,
-    /// is nowhere outside either. A path can name a place beneath the root
-    /// that isn't, past the top of a bind mount, so it counts once it leads
-    /// to the file, or reaches a directory with no search permission, where
-    /// the name can't be checked either.
+    /// and once the host renames it, while the path it has now does. A path
+    /// can name a place beneath the root that isn't, past the top of a bind
+    /// mount, so it counts once it leads to the file. In a directory with
+    /// no search permission, where neither can be checked, the path must be
+    /// the directory's and the name. A file with no name left, which the
+    /// agent unlinked while it held it open, counts while its last path was
+    /// beneath the root. A file share's file is the one at its name, as for
+    /// `LOOKUP`.
     fn still_beneath(&self, found: &Node) -> Result<(), i32> {
-        let named = self.served(&found.parent);
-        let named = named.and_then(|()| still_the_file(&found.fd, &found.parent, &found.name));
-        if named.is_ok() || sys::fstat(found.fd.as_fd()).map_err(errno)?.st_nlink == 0 {
-            return Ok(());
+        let served = self.served(&found.parent);
+        let named = served.and_then(|()| still_the_file(&found.fd, &found.parent, &found.name));
+        if named.is_ok() || self.only.is_some() {
+            return named.map(drop);
         }
         let path = |fd: BorrowedFd| {
             let number = CString::new(fd.as_raw_fd().to_string()).map_err(|_| libc::EIO)?;
             sys::readlink(self.descriptors.as_fd(), &number).map_err(errno)
         };
-        let (root, file) = (path(self.root.as_fd())?, path(found.fd.as_fd())?);
+        let file = path(found.fd.as_fd())?;
+        if served.is_ok() && matches!(named, Err(libc::EACCES)) {
+            let there = [
+                &path(found.parent.as_fd())?,
+                &b"/"[..],
+                found.name.to_bytes(),
+            ]
+            .concat();
+            if file == there {
+                return Ok(());
+            }
+        }
+        let root = path(self.root.as_fd())?;
         let root = root.strip_suffix(b"/").unwrap_or(&root);
         let rest = file
             .strip_prefix(root)
             .and_then(|rest| rest.strip_prefix(b"/"));
-        let rest = CString::new(rest.ok_or(libc::ENOENT)?).map_err(|_| libc::ENOENT)?;
-        match still_the_file(&found.fd, &self.root, &rest) {
-            Ok(_) | Err(libc::EACCES) => Ok(()),
-            Err(error) => Err(error),
+        let rest = rest.ok_or(libc::ENOENT)?;
+        if sys::fstat(found.fd.as_fd()).map_err(errno)?.st_nlink == 0 {
+            return Ok(());
         }
+        let rest = CString::new(rest).map_err(|_| libc::ENOENT)?;
+        still_the_file(&found.fd, &self.root, &rest).map(drop)
     }
 
     fn handle(&self, body: &[u8]) -> Result<&Handle, i32> {

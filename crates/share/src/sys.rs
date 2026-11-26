@@ -173,8 +173,12 @@ pub fn readlink(directory: BorrowedFd, name: &CStr) -> io::Result<Vec<u8>> {
             target.as_mut_ptr(),
             target.len(),
         )
-    })?;
-    target.truncate(len as usize);
+    })? as usize;
+    // A target as long as the buffer may have been cut short.
+    if len == target.len() {
+        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    target.truncate(len);
     Ok(target)
 }
 

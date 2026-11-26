@@ -617,12 +617,39 @@ fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
     .unwrap();
     mode(0o0);
     assert_eq!(size_of(&mut guest, inner), Err(ENOENT));
+    // Nor does a name that only another link outside keeps, which leaves
+    // the file's path in it.
     mode(0o755);
-    // A file share's file shows nothing once it is outside the share.
+    fs::write(locked.join("linked.txt"), INSIDE).unwrap();
+    let linked = guest.walk("locked/linked.txt").unwrap();
+    fs::hard_link(
+        locked.join("linked.txt"),
+        tree.base.join("outside/linked.txt"),
+    )
+    .unwrap();
+    fs::remove_file(locked.join("linked.txt")).unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, linked), Err(EACCES));
+    mode(0o755);
+    // Moved outside and then removed there, it has no name left, and still
+    // shows nothing.
+    let hello = guest.walk("hello.txt").unwrap();
+    fs::rename(
+        tree.root.join("hello.txt"),
+        tree.base.join("outside/hello.txt"),
+    )
+    .unwrap();
+    fs::remove_file(tree.base.join("outside/hello.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
+    // A file share's file shows nothing once its name doesn't lead to it,
+    // as it opens.
+    fs::write(tree.root.join("hello.txt"), INSIDE).unwrap();
     let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadOnly);
     let hello = guest.walk("hello.txt").unwrap();
+    fs::rename(tree.root.join("hello.txt"), tree.root.join("renamed.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
     let away = tree.base.join("outside/hello.txt");
-    fs::rename(tree.root.join("hello.txt"), &away).unwrap();
+    fs::rename(tree.root.join("renamed.txt"), &away).unwrap();
     fs::write(&away, CANARY).unwrap();
     assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
 }

@@ -683,7 +683,7 @@ impl Vcpu {
     /// The bytes of a port access, which KVM keeps inside the run area.
     #[allow(
         clippy::mut_from_ref,
-        reason = "the bytes live in the run area that KVM maps, not in `self`"
+        reason = "the bytes are KVM's run area, not `self`, and the one caller holds them only while the vCPU is stopped"
     )]
     fn io_data(&self, io: &IoExit) -> io::Result<&mut [u8]> {
         let len = usize::from(io.size)

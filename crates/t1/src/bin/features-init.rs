@@ -97,9 +97,8 @@ fn main() {
     };
     // `prctl` reads every argument after the option as an `unsigned long`.
     let (on, unused): (c_ulong, c_ulong) = (1, 0);
-    // SAFETY: each argument has the type `prctl` reads, and `filter` points
-    // to a `struct sock_fprog` whose one filter is static, and which outlives
-    // the call.
+    // SAFETY: each argument has the type `prctl` reads, and `filter` is a
+    // `struct sock_fprog` that outlives the call, whose one filter is static.
     let filters = || unsafe {
         prctl(PR_SET_NO_NEW_PRIVS, on, unused, unused, unused) == 0
             && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const filter) == 0

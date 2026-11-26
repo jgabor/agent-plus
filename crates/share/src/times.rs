@@ -62,8 +62,8 @@ impl Times {
         let child = unsafe { libc::fork() };
         match child {
             -1 => return Err(io::Error::last_os_error()),
-            // SAFETY: this is the child, which makes only the system calls
-            // the comment above the fork names, and leaves through `_exit`.
+            // SAFETY: this is the child. As above, it and its own child make
+            // only system calls, allocate nothing, and leave through `_exit`.
             0 => unsafe {
                 let status = match keep_only(socket.min(tree), socket.max(tree)) {
                     false => 1,

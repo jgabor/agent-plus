@@ -249,6 +249,13 @@ fn a_frame_for_a_stream_that_closed_is_not_sent_5_1() {
     assert!(!connection.send(&response(1, false)));
     assert!(!connection.send(&data(1, 0, true)));
     assert!(!connection.send(&Frame::RstStream { stream: 1, code: 0 }));
+    // Nothing more once the server has ended the stream.
+    let mut connection = after(&[headers(1, false)]);
+    assert!(connection.send(&response(1, true)));
+    assert!(!connection.send(&data(1, 0, true)));
+    assert!(!connection.send(&response(1, true)));
+    // An idle stream takes nothing.
+    assert!(!connection.send(&response(3, false)));
     // An open stream takes them, and the last one closes it.
     let mut connection = after(&[headers(1, true)]);
     assert!(connection.send(&response(1, false)));

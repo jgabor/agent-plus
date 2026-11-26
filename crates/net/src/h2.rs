@@ -809,7 +809,8 @@ pub enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
     /// A stream error, by section 5.4.2. The connection has closed the
-    /// stream, and the caller writes RST_STREAM with the error's code.
+    /// stream, and the caller writes RST_STREAM with the error's code,
+    /// without asking `Connection::send`.
     Stream { stream: u32, error: Error },
     /// A connection error, by section 5.4.1. The caller writes GOAWAY with
     /// the error's code, and the connection refuses every later frame.
@@ -1175,11 +1176,11 @@ impl Connection {
 
     /// Takes a frame the server writes: HEADERS, DATA, or RST_STREAM. It
     /// says whether the caller may write it, which it may unless its stream
-    /// is closed, or the server has ended it, by section 5.1. The client
-    /// can close a stream at any time. A RST_STREAM for a stream error is
-    /// written without asking, because the connection has closed that
-    /// stream. Every other frame may be written. DATA past `window` is a
-    /// bug in the caller, so it panics.
+    /// is idle or closed, or the server has ended it, by section 5.1. The
+    /// client can close a stream at any time. A RST_STREAM for a stream
+    /// error is written without asking, because the connection has closed
+    /// that stream. Every other frame may be written. DATA past `window` is
+    /// a bug in the caller, so it panics.
     #[must_use]
     pub fn send(&mut self, frame: &Frame) -> bool {
         let (stream, end_stream) = match frame {

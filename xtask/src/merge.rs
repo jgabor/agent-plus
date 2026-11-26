@@ -45,7 +45,7 @@ pub const SLOT: u8 = b's';
 pub const WAITING: u8 = b'w';
 pub const GOING: u8 = b'g';
 /// Set in the worker that a merge runs in, to the id of the worker's parent,
-/// or of the worker itself once it runs the xtask of `main`.
+/// or of the xtask of `main` that the worker runs, which names itself.
 const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 /// Stops the worker's group when the supervisor dies, as on Ctrl-C, which
 /// reaches only the supervisor's process group. Only the supervisor holds the
@@ -57,6 +57,9 @@ const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
 /// Set in the xtask of `main` that a merge runs, to the head on which the
 /// merge posted a `pending` that nothing has ended yet.
 const POSTED: &str = "XTASK_MERGE_POSTED";
+/// Runs the xtask of `main` in the shell's own process, which it names in
+/// `WORKER_OF`, as it would be named if this merge ran it with `exec`.
+const AS_WORKER: &str = "export XTASK_MERGE_WORKER_OF=$$; exec \"$0\" \"$@\"";
 /// Set in a PR's own xtask, to the id of the xtask of `main` that runs its
 /// `prove` and reads its input.
 const PROVING_FOR: &str = "XTASK_MERGE_PROVING_FOR";
@@ -126,10 +129,11 @@ fn sequence(
             Decision::Merged => {}
         }
     }
-    // The xtask of `main` waits for the slot again, because it is let go on
-    // the `exec`, and the timeout has started by then.
+    // The xtask of `main` takes the slot again, ahead of every other merge,
+    // because the merge that runs it lets it go, and the timeout has started
+    // by then.
     tell_supervisor(WAITING)?;
-    let slot = lock::merge_slot(&root, || {
+    let slot = lock::merge_slot(&root, runs_the_checks_of_main(), || {
         status.waits("the merge slot");
         eprintln!("{command}: PR {number} waits for the merge slot, which another run holds");
     })?;
@@ -156,7 +160,7 @@ fn sequence(
     // After the slot and the fetch, because a merge during the wait can change
     // the checks.
     if env::var(CHECKS_OF).ok().as_deref() != Some(fetched.main.as_str()) {
-        return run_the_checks_of(&root, &fetched.main, &status);
+        return run_the_checks_of(&root, &fetched.main, &status, slot);
     }
     let tree = Tree::create(&root, number, &fetched.branch)?;
     // Nothing was pushed, so this is the head that the PR shows.
@@ -282,8 +286,15 @@ fn sequence(
 /// The checks are those of the xtask that runs them, and the checkout this one
 /// was built from can be anything. So this builds the xtask of `main` and runs
 /// the merge again in it, which takes the slot again. If `main` moves before
-/// that one fetches, it builds again.
-fn run_the_checks_of(root: &Path, main: &str, status: &Status) -> Result<Verdict, Problem> {
+/// that one fetches, it builds again. This keeps the merge's turn until that
+/// xtask ends, so no other merge takes the slot in between, and ends as that
+/// xtask does. The xtask of `main` has its turn kept by the merge that ran it.
+fn run_the_checks_of(
+    root: &Path,
+    main: &str,
+    status: &Status,
+    slot: Hold,
+) -> Result<Verdict, Problem> {
     let directory = bench::temp_outside(root)?.join(format!("xtask-checks-{}", repository(root)?));
     let tree = Tree::at(root, directory.join("tree"), main)?;
     let built = build_xtask(
@@ -293,33 +304,50 @@ fn run_the_checks_of(root: &Path, main: &str, status: &Status) -> Result<Verdict
     )?;
     drop(tree);
     let program = keep(&directory.join("bin"), &built, main)?;
-    let mut command = process::Command::new(program);
-    // That xtask ends what this one posted, which no drop does on an `exec`.
+    let turn = if runs_the_checks_of_main() {
+        None
+    } else {
+        Some(lock::merge_turn(root)?)
+    };
+    drop(slot);
+    let mut command = process::Command::new("sh");
+    // That xtask ends what this one posted, and this one ends with no drop.
     // What an outer merge posted, as for a merge that the gate's tests run,
     // isn't this one's.
     match status.posted() {
         Some(head) => command.env(POSTED, head),
         None => command.env_remove(POSTED),
     };
-    let problem = command
+    let mut checks = command
+        .args(["-c", AS_WORKER])
+        .arg(program)
         .args(env::args_os().skip(1))
         .current_dir(root)
         // Rustup sets this for its children, and it would outrank the
         // toolchain file of the tree that the checks build.
         .env_remove("RUSTUP_TOOLCHAIN")
-        .env(WORKER_OF, process::id().to_string())
         .env(CHECKS_OF, main)
-        .exec();
-    Err(Problem(format!(
-        "couldn't run the xtask of `main`: {problem}"
-    )))
+        .spawn()
+        .map_err(|e| Problem(format!("couldn't run the xtask of `main`: {e}")))?;
+    let ended = checks
+        .wait()
+        .map_err(|e| Problem(format!("couldn't wait for the xtask of `main`: {e}")))?;
+    drop(turn);
+    // The shell's own codes, when it couldn't run that xtask, which then
+    // ended nothing this one posted. No xtask exits with either.
+    if let Some(code @ (126 | 127)) = ended.code() {
+        return Err(Problem(format!(
+            "couldn't run the xtask of `main`: `sh` exited {code}"
+        )));
+    }
+    end_as(ended)
 }
 
 /// A copy of the xtask built from `main`, named by that commit, which no later
 /// build replaces. The next merge builds in the same target while this one
 /// runs, and the checks run this program again by its path. The caller holds
-/// the merge slot, so nothing else writes here, and the slot is let go only
-/// once the copy runs.
+/// the merge slot, so nothing else writes here, and it keeps its turn until
+/// the copy ends.
 fn keep(bin: &Path, built: &Path, main: &str) -> Result<PathBuf, Problem> {
     let problem = |e: io::Error| Problem(format!("couldn't keep {}: {e}", built.display()));
     fs::create_dir_all(bin).map_err(problem)?;
@@ -610,8 +638,9 @@ fn again<T>(mut call: impl FnMut() -> Result<T, Problem>) -> Result<T, Problem> 
 }
 
 /// Whether this process is the worker that a supervisor started. The variable
-/// names the worker's parent, or the worker itself once it runs the xtask of
-/// `main`, so it means nothing to a merge that the worker's own tests start.
+/// names the worker's parent, or the xtask of `main` that the worker runs,
+/// which names itself. So it means nothing to a merge that the worker's own
+/// tests start.
 fn is_worker() -> bool {
     let ids = [std::os::unix::process::parent_id(), process::id()];
     env::var(WORKER_OF).is_ok_and(|named| ids.iter().any(|id| named == id.to_string()))
@@ -691,10 +720,7 @@ fn supervised(pr: &str) -> Result<i32, Problem> {
     let status = worker.wait().map_err(|e| couldnt("wait for the merge", e));
     stop_group(group);
     let status = status?;
-    if let Some(code) = status.code() {
-        return Ok(code);
-    }
-    if timed_out.load(Ordering::SeqCst) {
+    if status.code().is_none() && timed_out.load(Ordering::SeqCst) {
         eprintln!("merge: stopped at the {seconds} second timeout. Run it again to restart");
         // The worker is gone, so this is the head that the PR shows.
         match (pr.parse(), workspace::root()) {
@@ -704,13 +730,21 @@ fn supervised(pr: &str) -> Result<i32, Problem> {
         }
         return Ok(1);
     }
-    // Dies as the worker did, so that a killed merge looks killed.
+    end_as(status)
+}
+
+/// Exits as a child did, and dies as it did if it was killed, so that a
+/// killed merge looks killed.
+fn end_as(status: process::ExitStatus) -> ! {
+    if let Some(code) = status.code() {
+        process::exit(code);
+    }
     let signal = status.signal().unwrap_or(9);
     let _ = process::Command::new("kill")
         .arg(format!("-{signal}"))
         .arg(process::id().to_string())
         .status();
-    Ok(128 + signal)
+    process::exit(128 + signal)
 }
 
 /// Stops the worker's group once the worker has held the slot for the timeout,

@@ -1668,6 +1668,163 @@ fn a_merge_waits_for_the_merge_slot() {
     );
 }
 
+/// A second merge waits for the slot while the first builds the xtask of
+/// `main`. The first lets the slot go to run that xtask, which takes it again,
+/// and the second doesn't take it in between.
+#[test]
+fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
+    let repo = Repo::new("turn");
+    repo.other_pr(10, "8-y", &Pr::default());
+    let first_head = repo.head();
+    let second_head = repo.head_of("8-y");
+    let building = repo.bin.join("building");
+    let go = repo.bin.join("go");
+    // Bounded, so that a failed test leaves no merge waiting for good.
+    let pause = format!(
+        ": > '{}'; n=0; until [ -f '{}' ] || [ $n -ge 600 ]; do sleep 0.1; n=$((n+1)); done",
+        building.display(),
+        go.display()
+    );
+    let first = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "build --quiet --package xtask")
+        .env("RUN_COMMAND", pause)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !building.exists() {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut second = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "10"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let errors = BufReader::new(second.stderr.take().unwrap());
+    let (said, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in errors.lines() {
+            let Ok(line) = line else { break };
+            if said.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let waits = "merge: PR 10 waits for the merge slot, which another run holds";
+    let mut heard = Vec::new();
+    while !heard.iter().any(|line| line == waits) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match lines.recv_timeout(left) {
+            Ok(line) => heard.push(line),
+            Err(_) => panic!("the second merge never waited: {heard:?}"),
+        }
+    }
+    fs::write(&go, "").unwrap();
+    // A merge that never ends fails the test instead of hanging it.
+    let (done, ended) = mpsc::channel::<()>();
+    let pids = [first.id(), second.id()];
+    thread::spawn(move || {
+        if ended.recv_timeout(Duration::from_secs(300)).is_err() {
+            for pid in pids {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+        }
+    });
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+    let _ = done.send(());
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    heard.extend(lines.try_iter());
+    assert_eq!(second.status.code(), Some(0), "{heard:?}");
+    let calls = repo.calls();
+    let mut proving: Vec<String> = posts(&repo)
+        .into_iter()
+        .filter(|(_, said)| said.starts_with("pending Proving:"))
+        .map(|(commit, _)| commit)
+        .collect();
+    proving.dedup();
+    assert_eq!(proving, [first_head, second_head.clone()], "{calls}");
+    // Once, though it let the slot go for the turn.
+    let waited: Vec<(String, String)> = posts(&repo)
+        .into_iter()
+        .filter(|(commit, said)| *commit == second_head && said.starts_with("pending Waiting:"))
+        .collect();
+    let waiting = "pending Waiting: the merge slot".to_string();
+    assert_eq!(waited, [(second_head, waiting)], "{calls}");
+    // The second does nothing under the slot until the first has merged.
+    let slot_fetch = "+refs/heads/8-y:refs/remotes/origin/8-y";
+    let started = calls.find(slot_fetch).expect(&calls);
+    let merged = calls.find("gh pr merge 9 ").expect(&calls);
+    assert!(merged < started, "{calls}");
+}
+
+/// A merge whose xtask of `main` can't start ends the wait it posted, as an
+/// error does.
+#[test]
+fn a_merge_whose_xtask_of_main_cant_start_ends_its_wait() {
+    let repo = Repo::new("cant-start");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    // The stand-in build then leaves a program that nobody can run.
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "build --quiet --package xtask")
+        .env(
+            "RUN_COMMAND",
+            r#"cp() { command cp "$@" && chmod a-x "$2"; }"#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while posts(&repo).is_empty() {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("couldn't run the xtask of `main`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), "failure Stopped by an error");
+}
+
+/// So neither the slot nor the turn outlives a killed merge in a command it
+/// started. Only `gh pr merge` keeps the slot.
+#[test]
+fn a_command_that_a_merge_starts_holds_neither_the_slot_nor_the_turn() {
+    // Before the turn, and in the xtask of `main` after it.
+    for (name, on) in [
+        ("build", "build --quiet --package xtask"),
+        ("gate", "cargo fmt"),
+    ] {
+        let repo = Repo::new(&format!("no-lock-{name}"));
+        let fds = repo.bin.join("fds");
+        let list = format!("ls -l /proc/$$/fd/ > '{}'", fds.display());
+        assert_merged(&repo, &repo.merge_running(on, &list));
+        let open = fs::read_to_string(&fds).unwrap();
+        assert!(open.contains(" -> "), "{name}: {open}");
+        for lock in ["merge.lock", "turn.lock"] {
+            assert!(!open.contains(lock), "{name}: {open}");
+        }
+    }
+}
+
 #[test]
 fn the_pr_is_read_again_after_the_slot() {
     let repo = Repo::new("read-again");
@@ -3689,6 +3846,7 @@ impl Repo {
         self.git(&["checkout", "-q", BRANCH]);
         let json = pr_json(pr, pr.state).replace(BRANCH, branch);
         fs::write(self.bin.join(format!("pr-{number}.json")), json).unwrap();
+        fs::write(self.bin.join(format!("branch-{number}")), branch).unwrap();
     }
 
     /// Adds the record that an earlier `prepare` leaves at the tip of a branch.

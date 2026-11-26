@@ -450,10 +450,13 @@ fn a_confined_ro_server_refuses_every_write_and_still_locks() {
     assert_eq!(guest.call(MKDIR, 1, &[0; 16]).0, EROFS);
     let handle = guest.open(node, 0).unwrap();
     assert_eq!(guest.lock(SETLK, handle, 7, F_RDLCK, 0).0, 0);
+    // It reads where a file the host renamed is now, past its filter.
+    fs::rename(tree.root.join("hello.txt"), tree.root.join("dir/moved.txt")).unwrap();
+    assert_eq!(guest.call(GETATTR, node, &[0; 16]).0, 0);
 
     drop(guest);
     assert!(server.wait().unwrap().success());
-    assert_eq!(fs::read(tree.root.join("hello.txt")).unwrap(), INSIDE);
+    assert_eq!(fs::read(tree.root.join("dir/moved.txt")).unwrap(), INSIDE);
 }
 
 #[test]

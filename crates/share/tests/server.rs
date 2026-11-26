@@ -569,6 +569,127 @@ fn a_known_node_the_host_moves_outside_the_root_shows_no_attributes() {
     fs::set_permissions(away, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+/// The file size that `GETATTR` on `node` answers with, or its error.
+fn size_of(guest: &mut Guest, node: u64) -> Result<u64, i32> {
+    match guest.call(GETATTR, node, &[0; 16]) {
+        (0, out) => Ok(u64::from_le_bytes(out[24..32].try_into().unwrap())),
+        (error, _) => Err(error),
+    }
+}
+
+// spec(SHARE): The agent sees only what is under the share's root.
+#[test]
+fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
+    let tree = Tree::new("file-moved-out");
+    let mut guest = Guest::new(&tree.root);
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+    // Its directory stays beneath the root, and the file goes alone.
+    let away = tree.base.join("outside/nested.txt");
+    fs::rename(tree.root.join("dir/nested.txt"), &away).unwrap();
+    fs::write(&away, CANARY).unwrap();
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
+    // Moved back beneath the root by another name, it shows them again, as
+    // a file the host renames there does.
+    fs::rename(&away, tree.root.join("dir/renamed.txt")).unwrap();
+    let size = CANARY.len() as u64;
+    assert_eq!(size_of(&mut guest, nested), Ok(size));
+    fs::rename(
+        tree.root.join("dir/renamed.txt"),
+        tree.root.join("moved.txt"),
+    )
+    .unwrap();
+    assert_eq!(size_of(&mut guest, nested), Ok(size));
+    // In a directory with no search permission, where its name can't be
+    // checked, its path still shows where it is.
+    let locked = tree.root.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("inner.txt"), INSIDE).unwrap();
+    let inner = guest.walk("locked/inner.txt").unwrap();
+    let mode = |mode| fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, inner), Ok(INSIDE.len() as u64));
+    mode(0o755);
+    fs::rename(
+        locked.join("inner.txt"),
+        tree.base.join("outside/inner.txt"),
+    )
+    .unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, inner), Err(ENOENT));
+    // Nor does a name that only another link outside keeps, which leaves
+    // the file's path in it.
+    mode(0o755);
+    fs::write(locked.join("linked.txt"), INSIDE).unwrap();
+    let linked = guest.walk("locked/linked.txt").unwrap();
+    fs::hard_link(
+        locked.join("linked.txt"),
+        tree.base.join("outside/linked.txt"),
+    )
+    .unwrap();
+    fs::remove_file(locked.join("linked.txt")).unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, linked), Err(EACCES));
+    mode(0o755);
+    // Moved outside and then removed there, it has no name left, and still
+    // shows nothing.
+    let hello = guest.walk("hello.txt").unwrap();
+    fs::rename(
+        tree.root.join("hello.txt"),
+        tree.base.join("outside/hello.txt"),
+    )
+    .unwrap();
+    fs::remove_file(tree.base.join("outside/hello.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
+    // A file share's file shows nothing once its name doesn't lead to it,
+    // as it opens.
+    fs::write(tree.root.join("hello.txt"), INSIDE).unwrap();
+    let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadOnly);
+    let hello = guest.walk("hello.txt").unwrap();
+    fs::rename(tree.root.join("hello.txt"), tree.root.join("renamed.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
+    let away = tree.base.join("outside/hello.txt");
+    fs::rename(tree.root.join("renamed.txt"), &away).unwrap();
+    fs::write(&away, CANARY).unwrap();
+    assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
+}
+
+#[test]
+fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() {
+    let tree = Tree::new("unlinked-open");
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    guest.open(nested, 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+}
+
+// spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the name the agent last reached the file by is removed, if the file has another hard link.
+#[test]
+fn a_linked_file_s_attributes_need_the_name_the_agent_last_reached_it_by() {
+    let tree = Tree::new("linked-unlinked");
+    let other = tree.root.join("dir/other.txt");
+    fs::hard_link(tree.root.join("dir/nested.txt"), &other).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    guest.open(nested, 0).unwrap();
+    assert_eq!(guest.walk("dir/other.txt"), Ok(nested));
+    assert_eq!(guest.remove(UNLINK, dir, b"other.txt"), 0);
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
+    // Reached by its other name, it shows them again, and still does once
+    // the host renames that name within the share.
+    assert_eq!(guest.walk("dir/nested.txt"), Ok(nested));
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+    fs::rename(
+        tree.root.join("dir/nested.txt"),
+        tree.root.join("moved.txt"),
+    )
+    .unwrap();
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+}
+
 #[test]
 fn a_write_never_reaches_a_directory_the_host_moves_outside_the_root() {
     let tree = Tree::new("rw-moved-out");

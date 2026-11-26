@@ -159,21 +159,26 @@ pub fn fstatfs(fd: BorrowedFd) -> io::Result<libc::statfs> {
     Ok(unsafe { stat.assume_init() })
 }
 
-/// The target of the symlink that `fd` is, opened with `O_PATH`.
-pub fn readlink(fd: BorrowedFd) -> io::Result<Vec<u8>> {
+/// The target of the symlink `name` in `directory`, or with an empty
+/// name, of the symlink that `directory` is, opened with `O_PATH`.
+pub fn readlink(directory: BorrowedFd, name: &CStr) -> io::Result<Vec<u8>> {
     let mut target = vec![0; libc::PATH_MAX as usize];
-    // SAFETY: the empty name is NUL-terminated, and `target` has room for
-    // the length passed.
+    // SAFETY: the name is NUL-terminated, and `target` has room for the
+    // length passed.
     let len = check(unsafe {
         libc::syscall(
             libc::SYS_readlinkat,
-            fd.as_raw_fd(),
-            c"".as_ptr(),
+            directory.as_raw_fd(),
+            name.as_ptr(),
             target.as_mut_ptr(),
             target.len(),
         )
-    })?;
-    target.truncate(len as usize);
+    })? as usize;
+    // A target as long as the buffer may have been cut short.
+    if len == target.len() {
+        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    target.truncate(len);
     Ok(target)
 }
 

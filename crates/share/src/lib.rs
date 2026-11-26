@@ -163,6 +163,7 @@ fn start_one(
         };
     }
     command.stdin(OwnedFd::from(theirs)).stdout(Stdio::null());
+    die_with_this_thread(&mut command);
     let process = match read_write {
         true => namespace::spawn(&mut command)?,
         false => command.spawn()?,
@@ -173,6 +174,32 @@ fn start_one(
         socket: OwnedFd::from(mine),
     })
 }
+
+/// Makes the program that `command` starts end when the thread that starts
+/// it does, so a server that ignores the end of its socket still can't
+/// outlive `ap run`. A server that would start after that thread ended
+/// doesn't start.
+#[cfg(target_os = "linux")]
+fn die_with_this_thread(command: &mut Command) {
+    let parent = std::process::id();
+    // SAFETY: the closure runs in the forked child, and makes only system
+    // calls that take and return plain integers.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            match u32::try_from(libc::getppid()) == Ok(parent) {
+                true => Ok(()),
+                false => Err(io::Error::from_raw_os_error(libc::ESRCH)),
+            }
+        });
+    }
+}
+
+/// macOS has no `PR_SET_PDEATHSIG`, and no stand-in for it yet.
+#[cfg(target_os = "macos")]
+fn die_with_this_thread(_command: &mut Command) {}
 
 /// A copy of `fd` that a program this process starts inherits, numbered
 /// past standard error. Make it just before the program starts, and drop

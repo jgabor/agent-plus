@@ -639,9 +639,8 @@ impl Writer {
                 end_stream,
             } => {
                 let flags = flag(*end_stream, END_STREAM) | flag(padding.is_some(), PADDED);
+                head(out, max, flow_length(data, *padding), DATA, flags, *stream);
                 let padding = padding.map(usize::from);
-                let length = data.len() + padding.map_or(0, |padding| padding + 1);
-                head(out, max, length, DATA, flags, *stream);
                 if let Some(padding) = padding {
                     out.push(padding as u8);
                     out.extend_from_slice(data);
@@ -756,6 +755,12 @@ fn head(out: &mut Vec<u8>, max: usize, length: usize, kind: u8, flags: u8, strea
     out.extend(stream.to_be_bytes());
 }
 
+/// The length of a DATA frame's payload, which flow control counts: the
+/// data, the padding, and the Pad Length byte, by section 6.1.
+fn flow_length(data: &[u8], padding: Option<u8>) -> usize {
+    data.len() + padding.map_or(0, |padding| usize::from(padding) + 1)
+}
+
 fn priority_fields(out: &mut Vec<u8>, priority: &Priority) {
     let exclusive = if priority.exclusive { !STREAM_MASK } else { 0 };
     out.extend((priority.dependency | exclusive).to_be_bytes());
@@ -779,6 +784,8 @@ pub enum Event {
         end_stream: bool,
     },
     /// HEADERS on a stream that is open, which section 8.1 calls trailers.
+    /// Trailers without `end_stream` are malformed, by section 8.1, which
+    /// is the caller's to refuse.
     Trailers {
         stream: u32,
         headers: Vec<Header>,
@@ -1022,9 +1029,8 @@ impl Connection {
         padding: Option<u8>,
         end_stream: bool,
     ) -> Result<Option<Event>, Refused> {
-        // Flow control counts the whole payload, by section 6.1.
-        let padding = padding.map_or(0, |padding| i64::from(padding) + 1);
-        let length = data.len() as i64 + padding;
+        let length = flow_length(&data, padding) as i64;
+        let padding = length - data.len() as i64;
         match self.known(stream) {
             Known::Idle => return Err(Refused::Connection(Error::Idle)),
             Known::Closed => return Err(Refused::Connection(Error::StreamClosed)),
@@ -1040,7 +1046,8 @@ impl Connection {
             self.unannounced += length;
             return Ok(None);
         };
-        if open.remote_end || length > open.receive {
+        // An empty DATA frame needs no window, by section 6.9.1.
+        if open.remote_end || length > open.receive.max(0) {
             self.unannounced += length;
             let error = match open.remote_end {
                 true => Error::StreamClosed,
@@ -1166,48 +1173,52 @@ impl Connection {
         }
     }
 
-    /// Takes a frame the server writes: HEADERS and DATA on a stream it
-    /// hasn't ended, or RST_STREAM. It ignores the rest. DATA past
-    /// `window`, or a frame on a stream that isn't open, is a bug in the
-    /// caller, so it panics.
-    pub fn send(&mut self, frame: &Frame) {
+    /// Takes a frame the server writes: HEADERS, DATA, or RST_STREAM. It
+    /// says whether the caller may write it, which it may unless its stream
+    /// is closed, or the server has ended it, by section 5.1. The client
+    /// can close a stream at any time. A RST_STREAM for a stream error is
+    /// written without asking, because the connection has closed that
+    /// stream. Every other frame may be written. DATA past `window` is a
+    /// bug in the caller, so it panics.
+    #[must_use]
+    pub fn send(&mut self, frame: &Frame) -> bool {
         let (stream, end_stream) = match frame {
             Frame::Headers {
                 stream, end_stream, ..
             } => (*stream, *end_stream),
             Frame::Data {
-                stream,
-                data,
-                padding,
-                end_stream,
-            } => {
-                let length = data.len() + padding.map_or(0, |padding| usize::from(padding) + 1);
-                let window = self.window(*stream);
-                assert!(
-                    length <= window,
-                    "DATA of {length} bytes is past the window of {window}"
-                );
-                if let Some(open) = self.streams.get_mut(stream) {
-                    open.send -= length as i64;
-                }
-                self.send -= length as i64;
-                (*stream, *end_stream)
-            }
+                stream, end_stream, ..
+            } => (*stream, *end_stream),
             Frame::RstStream { stream, .. } => {
-                if self.streams.contains_key(stream) {
+                let open = self.streams.contains_key(stream);
+                if open {
                     self.reset(*stream);
                 }
-                return;
+                return open;
             }
-            _ => return,
+            _ => return true,
         };
-        let open = self.streams.get(&stream);
-        assert!(
-            open.is_some_and(|open| !open.local_end),
-            "a frame on stream {stream}, which isn't open"
-        );
+        if !self
+            .streams
+            .get(&stream)
+            .is_some_and(|open| !open.local_end)
+        {
+            return false;
+        }
+        if let Frame::Data { data, padding, .. } = frame {
+            let length = flow_length(data, *padding);
+            let window = self.window(stream);
+            assert!(
+                length <= window,
+                "DATA of {length} bytes is past the window of {window}"
+            );
+            let open = self.streams.get_mut(&stream).expect("an open stream");
+            open.send -= length as i64;
+            self.send -= length as i64;
+        }
         if end_stream {
             self.end(stream, false);
         }
+        true
     }
 }

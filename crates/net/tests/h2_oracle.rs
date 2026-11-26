@@ -103,7 +103,9 @@ async fn echo_server(mut io: DuplexStream, plant: bool) -> Vec<Seen> {
     let mut reader = Reader::client(LIST_LIMIT);
     let mut writer = Writer::new();
     let mut connection = Connection::new();
-    let ours = vec![(MAX_CONCURRENT_STREAMS, 2)];
+    // Four streams of `CLIENT_WINDOW` are past the client's connection window,
+    // so DATA keeps to both, and a fifth request waits for a stream.
+    let ours = vec![(MAX_CONCURRENT_STREAMS, 4)];
     let mut out = Vec::new();
     writer.write(&Frame::Settings(ours.clone()), &mut out);
     io.write_all(&out).await.expect("write");
@@ -161,9 +163,10 @@ async fn echo_server(mut io: DuplexStream, plant: bool) -> Vec<Seen> {
                             priority: None,
                             end_stream: false,
                         };
-                        writer.write(&response, &mut out);
-                        connection.send(&response);
-                        answers.insert(stream, request.body.clone());
+                        if connection.send(&response) {
+                            writer.write(&response, &mut out);
+                            answers.insert(stream, request.body.clone());
+                        }
                     }
                 }
                 Some(Event::Reset { stream, .. }) => {
@@ -199,8 +202,11 @@ async fn echo_server(mut io: DuplexStream, plant: bool) -> Vec<Seen> {
                     padding: None,
                     end_stream: rest.is_empty(),
                 };
+                if !connection.send(&data) {
+                    rest.clear();
+                    break;
+                }
                 writer.write(&data, &mut out);
-                connection.send(&data);
                 if rest.is_empty() {
                     break;
                 }

@@ -198,7 +198,7 @@ fn half_closed_remote_takes_window_update_priority_and_reset_5_1() {
 fn data_on_a_closed_stream_is_a_connection_error_5_1() {
     // Closed by END_STREAM both ways.
     let mut connection = after(&[headers(1, true)]);
-    connection.send(&response(1, true));
+    assert!(connection.send(&response(1, true)));
     // Frames that may cross the one that closed the stream are ignored.
     assert_eq!(connection.receive(window_update(1, 10)), Ok(None));
     assert_eq!(connection.receive(reset(1)), Ok(None));
@@ -218,7 +218,7 @@ fn data_on_a_closed_stream_is_a_connection_error_5_1() {
 #[test]
 fn a_stream_the_server_reset_discards_what_follows_5_1() {
     let mut connection = after(&[headers(1, false)]);
-    connection.send(&Frame::RstStream { stream: 1, code: 0 });
+    assert!(connection.send(&Frame::RstStream { stream: 1, code: 0 }));
     assert_eq!(connection.receive(data(1, 1000, false)), Ok(None));
     assert_eq!(connection.receive(headers(1, true)), Ok(None));
     assert_eq!(connection.receive(window_update(1, 10)), Ok(None));
@@ -240,6 +240,20 @@ fn the_client_resetting_a_stream_closes_it_5_1() {
         }))
     );
     assert_eq!(connection.window(1), 0);
+    assert!(!connection.send(&response(1, false)));
+}
+
+#[test]
+fn a_frame_for_a_stream_that_closed_is_not_sent_5_1() {
+    let mut connection = after(&[headers(1, true), reset(1)]);
+    assert!(!connection.send(&response(1, false)));
+    assert!(!connection.send(&data(1, 0, true)));
+    assert!(!connection.send(&Frame::RstStream { stream: 1, code: 0 }));
+    // An open stream takes them, and the last one closes it.
+    let mut connection = after(&[headers(1, true)]);
+    assert!(connection.send(&response(1, false)));
+    assert!(connection.send(&data(1, 10, true)));
+    assert!(!connection.send(&response(1, false)));
 }
 
 // Section 5.1.1, stream identifiers.
@@ -264,7 +278,7 @@ fn a_stream_id_not_above_the_last_is_a_connection_error_5_1_1() {
     );
     // The last, once it closed.
     let mut connection = after(&[headers(1, true)]);
-    connection.send(&response(1, true));
+    assert!(connection.send(&response(1, true)));
     assert_eq!(
         connection.receive(headers(1, false)),
         connection_error(Error::StreamId)
@@ -296,7 +310,7 @@ fn a_stream_past_max_concurrent_streams_is_refused_5_1_2() {
     // The refused stream is closed, and its DATA is discarded.
     assert_eq!(connection.receive(data(5, 10, true)), Ok(None));
     // A half-closed stream counts, until it closes.
-    connection.send(&response(3, true));
+    assert!(connection.send(&response(3, true)));
     assert!(connection.receive(headers(7, false)).is_ok());
     assert_eq!(
         connection.receive(headers(9, false)),
@@ -404,8 +418,8 @@ fn padding_counts_toward_the_window_6_9_1() {
 fn data_takes_the_window_the_client_gave_6_9_1() {
     let mut connection = after(&[headers(1, false)]);
     assert_eq!(connection.window(1), WINDOW);
-    connection.send(&response(1, false));
-    connection.send(&data(1, 1000, false));
+    assert!(connection.send(&response(1, false)));
+    assert!(connection.send(&data(1, 1000, false)));
     assert_eq!(connection.window(1), WINDOW - 1000);
     // The connection's window is the smaller one now.
     assert!(connection.receive(window_update(1, 500)).is_ok());
@@ -421,17 +435,32 @@ fn data_takes_the_window_the_client_gave_6_9_1() {
 #[should_panic(expected = "window")]
 fn data_past_the_clients_window_is_never_sent_6_9_1() {
     let mut connection = after(&[headers(1, false)]);
-    connection.send(&response(1, false));
-    connection.send(&data(1, WINDOW + 1, false));
+    assert!(connection.send(&response(1, false)));
+    assert!(connection.send(&data(1, WINDOW + 1, false)));
 }
 
 #[test]
 fn an_empty_data_with_end_stream_needs_no_window_6_9_1() {
     let mut connection = after(&[headers(1, true)]);
-    connection.send(&response(1, false));
-    connection.send(&data(1, WINDOW, false));
+    assert!(connection.send(&response(1, false)));
+    assert!(connection.send(&data(1, WINDOW, false)));
     assert_eq!(connection.window(1), 0);
-    connection.send(&data(1, 0, true));
+    assert!(connection.send(&data(1, 0, true)));
+}
+
+#[test]
+fn an_empty_data_with_end_stream_is_taken_past_the_window_6_9_1() {
+    let mut connection = after(&[headers(1, false), data(1, 1000, false)]);
+    // The window is 100 - 1000 now.
+    connection.apply(&[(INITIAL_WINDOW_SIZE, 100)]);
+    assert_eq!(
+        connection.receive(data(1, 0, true)),
+        Ok(Some(Event::Data {
+            stream: 1,
+            data: Vec::new(),
+            end_stream: true,
+        }))
+    );
 }
 
 #[test]
@@ -487,8 +516,8 @@ fn a_stream_the_client_ended_gets_no_window_update_6_9_1() {
 #[test]
 fn the_clients_initial_window_size_changes_each_open_stream_6_9_2() {
     let mut connection = after(&[headers(1, false)]);
-    connection.send(&response(1, false));
-    connection.send(&data(1, 1000, false));
+    assert!(connection.send(&response(1, false)));
+    assert!(connection.send(&data(1, 1000, false)));
     let settings = vec![(INITIAL_WINDOW_SIZE, 500)];
     assert_eq!(
         connection.receive(Frame::Settings(settings.clone())),

@@ -422,7 +422,8 @@ maybe_kill before
   "pr view") case "$*" in
     *autoMergeRequest*) if [ -f "{bin}/merged-$3" ]; then state=MERGED; else state=OPEN; fi
       if [ -f "{bin}/armed-$3" ] && [ ! -f "{bin}/disarmed-$3" ]; then auto='{{"mergeMethod":"SQUASH"}}'; else auto=null; fi
-      head=$('{git}' --git-dir '{origin}' rev-parse "refs/heads/$(cat "{bin}/branch-$3")")
+      branch=$(cat "{bin}/branch-$3" 2>/dev/null || echo '{BRANCH}')
+      head=$('{git}' --git-dir '{origin}' rev-parse "refs/heads/$branch")
       printf '{{"state":"%s","headRefOid":"%s","autoMergeRequest":%s}}\n' "$state" "$head" "$auto" ;;
     *) if [ -f "{bin}/pr-$3.json" ]; then cat "{bin}/pr-$3.json"; elif [ -f '{bin}/merged' ]; then cat '{bin}/pr-merged.json'; else cat '{bin}/pr.json'; fi ;;
   esac ;;
@@ -1643,10 +1644,25 @@ fn a_merge_waits_for_the_merge_slot() {
     assert!(!calls.contains("refs/remotes/origin/"), "{calls}");
     assert!(!calls.contains("git worktree add"), "{calls}");
     assert!(!calls.contains("git rebase"), "{calls}");
+    let before = repo.head();
+    let waiting = (before.clone(), "pending Waiting: the merge slot".to_string());
+    assert_eq!(posts(&repo), [waiting.clone()]);
     held.unlock().unwrap();
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(0), "{heard:?}");
     assert!(repo.bin.join("merged").exists());
+    // The proof then says what it does, as a merge that didn't wait does.
+    let said = |commit: &String, text: &str| (commit.clone(), text.to_string());
+    assert_eq!(
+        posts(&repo),
+        [
+            waiting,
+            said(&before, "pending Proving: lint"),
+            said(&before, "pending Proving: tests"),
+            said(&before, "pending Proving: journey"),
+            said(&repo.head(), "success spec 0 of 2, journey 1 of 1"),
+        ]
+    );
 }
 
 #[test]
@@ -2043,7 +2059,32 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert!(!repo.bin.join("merged").exists());
+    assert_eq!(
+        posts(&repo).pop(),
+        Some((repo.head(), "failure Stopped at the timeout".to_string()))
+    );
     assert_merged(&repo, &repo.merge());
+}
+
+/// The supervisor says that it stopped the merge even when GitHub takes no
+/// status, and the merge ends as it would have.
+#[test]
+fn a_timeout_that_can_not_be_posted_is_still_a_timeout() {
+    let repo = Repo::new("timeout-unposted");
+    fs::write(repo.bin.join("status-fails"), "").unwrap();
+    let output = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("HANG_ON", "cargo fmt")
+        .env("HANG_FOR", "60")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    let said = stderr(&output);
+    let (_, after) = said.split_once("second timeout").expect(&said);
+    assert!(after.contains("couldn't post `xtask/gate`"), "{said}");
+    assert!(!repo.bin.join("merged").exists());
 }
 
 /// A PR's code runs in its builds and tests, whose input mustn't reach the
@@ -2139,8 +2180,21 @@ fn the_wait_for_a_place_does_not_count_against_the_timeout() {
             stderr(&output)
         );
     }
+    assert_eq!(last_post(&repo), "pending Waiting: a place");
     place.unlock().unwrap();
     assert_merged(&repo, &merge.wait_with_output().unwrap());
+    let said: Vec<String> = posts(&repo).into_iter().map(|(_, said)| said).collect();
+    assert_eq!(
+        said,
+        [
+            "pending Proving: lint",
+            "pending Waiting: a place",
+            "pending Proving: lint",
+            "pending Proving: tests",
+            "pending Proving: journey",
+            "success spec 0 of 2, journey 1 of 1",
+        ]
+    );
 }
 
 /// The proof waits for the activity lock once it has its place, as it does
@@ -2193,6 +2247,7 @@ fn the_proofs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
             fs::read_to_string(repo.temp.join("merge.err")).unwrap()
         );
     }
+    assert_eq!(last_post(&repo), "pending Waiting: the activity lock");
     turnstile.unlock().unwrap();
     let status = merge.wait().unwrap();
     let output = Output {
@@ -2201,6 +2256,18 @@ fn the_proofs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
         stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
     };
     assert_merged(&repo, &output);
+    let said: Vec<String> = posts(&repo).into_iter().map(|(_, said)| said).collect();
+    assert_eq!(
+        said[..6],
+        [
+            "pending Proving: lint",
+            "pending Waiting: a place",
+            "pending Proving: lint",
+            "pending Waiting: the activity lock",
+            "pending Proving: lint",
+            "pending Proving: tests",
+        ]
+    );
 }
 
 /// The proof of a PR's own xtask builds it under a shared hold of the activity
@@ -2539,6 +2606,8 @@ fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str
     if merge.try_wait().unwrap().is_some() {
         ended(&mut merge, "the merge didn't wait for the activity lock");
     }
+    let waiting = "pending Waiting: the activity lock";
+    assert_eq!(last_post(repo), waiting);
     activity.unlock().unwrap();
     // The timeout goes on with what the proof left of it, so the bench ends
     // within it, one way or the other.
@@ -2552,6 +2621,10 @@ fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str
         }
         thread::sleep(Duration::from_millis(100));
     };
+    // Once the wait ends, the proof says again what it does.
+    let said: Vec<String> = posts(repo).into_iter().map(|(_, said)| said).collect();
+    let after = said.iter().position(|said| said == waiting).map(|at| &said[at + 1]);
+    assert_eq!(after, Some(&format!("pending {bench_from}")), "{said:?}");
     Output {
         status,
         stdout: fs::read(repo.temp.join("merge.out")).unwrap(),

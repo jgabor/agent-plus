@@ -45,11 +45,11 @@ const MAX_READ: usize = 64 << 20;
 /// which the stack holds.
 const MAX_PATH: usize = 1024;
 /// How large an object of the agent's, a pack index, all its pack
-/// indexes, or a file of its refs may be, in bytes, at most. Zlib inflates
-/// about 1000 to 1, and a sparse file costs almost nothing, so a small file
-/// can say it holds far more than this. It is git's `core.bigFileThreshold`,
-/// above which git stores a blob whole.
-const MAX_OBJECT: usize = 512 << 20;
+/// indexes, a file of its refs, or a file it wrote may be, in bytes, at
+/// most. Zlib inflates about 1000 to 1, and a sparse file costs almost
+/// nothing, so a small file can say it holds far more than this. It is
+/// git's `core.bigFileThreshold`, above which git stores a blob whole.
+pub(super) const MAX_OBJECT: usize = 512 << 20;
 /// The author and committer of the last commit.
 const IDENTITY: &str = "Agent+ <ap@localhost>";
 
@@ -448,8 +448,8 @@ impl<'a> Agent<'a> {
                         &landed,
                         host,
                         ignore,
-                        Some(&self.replacing),
-                        None,
+                        Landing::Branch(&self.replacing),
+                        self.dir,
                         path,
                     )? {
                         Verdict::Change => true,
@@ -466,7 +466,8 @@ impl<'a> Agent<'a> {
             return Ok(match view {
                 View::Yours => head.filter(|_| there),
                 View::Agent(Entry::File { mode }) => {
-                    let data = fs::read(self.dir.join("tree").join(bytes_path(path)))?;
+                    let data = File::open(self.dir.join("tree").join(bytes_path(path)))
+                        .and_then(read_at_most)?;
                     Some((git_mode(*mode), blob(data)))
                 }
                 View::Agent(Entry::Symlink { target }) => Some((SYMLINK, blob(target.clone()))),
@@ -552,8 +553,7 @@ fn check_kind(id: &Id, named: Option<Kind>, kind: Kind) -> Result<(), git::Error
 
 /// The regular file or symlink at `path` beneath `dir`, reached with no
 /// symlink on the way, or `None` if there is neither there. A file longer
-/// than `MAX_OBJECT` is refused before it is read, since a sparse file can
-/// say it is any length.
+/// than `MAX_OBJECT` is refused, as `read_at_most` says.
 fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     let name = CString::new(dir.as_os_str().as_bytes()).map_err(io::Error::other)?;
     let dir = match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
@@ -591,20 +591,29 @@ fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     if !metadata.is_file() {
         return Ok(None);
     }
-    let larger = || io::Error::from(io::ErrorKind::FileTooLarge);
-    if metadata.len() > MAX_OBJECT as u64 {
-        return Err(larger());
-    }
     // The descriptor reads nothing, so the file opens again through it.
     let file = File::open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
-    let mut contents = Vec::new();
+    Ok(Some(Content::File(read_at_most(file)?)))
+}
+
+/// What `file` holds, unless it is longer than `MAX_OBJECT`, which is
+/// refused before it is read, since a sparse file can say it is any
+/// length.
+pub(super) fn read_at_most(file: File) -> io::Result<Vec<u8>> {
+    let larger = || io::Error::from(io::ErrorKind::FileTooLarge);
+    let len = file.metadata()?.len();
+    if len > MAX_OBJECT as u64 {
+        return Err(larger());
+    }
+    // A byte more, so that the read finds the end without growing it.
+    let mut contents = Vec::with_capacity(len as usize + 1);
     // It may have grown since.
     file.take(MAX_OBJECT as u64 + 1)
         .read_to_end(&mut contents)?;
     if contents.len() > MAX_OBJECT {
         return Err(larger());
     }
-    Ok(Some(Content::File(contents)))
+    Ok(contents)
 }
 
 /// `text` with each control character escaped, so that nothing an agent
@@ -837,8 +846,8 @@ impl Share<'_> {
                 &landed,
                 &host,
                 &ignore,
-                Some(&agent.replacing),
-                None,
+                Landing::Branch(&agent.replacing),
+                self.dir,
                 &path,
             )? {
                 Verdict::History | Verdict::Landed => {}

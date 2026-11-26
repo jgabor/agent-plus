@@ -52,16 +52,20 @@ impl Scratch {
         Runs::new(self.store())
     }
 
-    /// Runs `ap` with only `HOME` in its environment and no terminal.
-    fn ap(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_ap"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ap"));
+        command
             .args(args)
             .current_dir(&self.root)
             .env_clear()
             .env("HOME", &self.home)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// Runs `ap` with only `HOME` in its environment and no terminal.
+    fn ap(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
     }
 
     /// Builds an agent named `name`, which the store then has.
@@ -821,6 +825,35 @@ fn a_ref_file_larger_than_the_limit_is_said_first() {
             )
         );
     }
+}
+
+/// From #834: the agent wrote `big`, a byte more than 512 MiB long, and
+/// `huge`, 10 GiB, which cost almost nothing as sparse files, and `limit`,
+/// 512 MiB long. `ap diff` reads only `limit`, within a fixed memory and
+/// time.
+// spec(SHARE): `ap diff` and `ap apply` skip each file the agent wrote that is larger than 512 MiB, say why, and read none of it.
+#[test]
+fn a_file_larger_than_the_limit_gets_a_line_unread() {
+    let scratch = Scratch::new("too-large-file");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::sparse(&pending, "big", (512 << 20) + 1);
+    repo::sparse(&pending, "huge", 10 << 30);
+    repo::sparse(&pending, "limit", 512 << 20);
+
+    let mut command = scratch.command(&["diff", &run]);
+    repo::limit_cpu(&mut command, 5);
+    repo::limit_memory(&mut command, 2 << 30);
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped big: it is larger than 512 MiB\n",
+            "skipped huge: it is larger than 512 MiB\n",
+            "Binary files /dev/null and b/limit differ\n",
+        )
+    );
 }
 
 /// What the agent named, such as a pack, reaches your terminal only with

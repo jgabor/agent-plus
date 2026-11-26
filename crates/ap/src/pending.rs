@@ -1014,17 +1014,16 @@ impl Share<'_> {
             ignored: 0,
             commits,
         };
-        let bare = replacing.is_none().then(|| Bare::new(self.root, &records));
+        let bare;
+        let landing = match &replacing {
+            Some(replacing) => Landing::Branch(replacing),
+            None => {
+                bare = Bare::new(self.root, &records);
+                Landing::Files(&bare)
+            }
+        };
         for path in changed(&records, &host)? {
-            match verdict(
-                &records,
-                &landed,
-                &host,
-                &ignore,
-                replacing.as_ref(),
-                bare.as_ref(),
-                &path,
-            )? {
+            match verdict(&records, &landed, &host, &ignore, landing, self.dir, &path)? {
                 Verdict::History | Verdict::Landed => continue,
                 Verdict::Ignored => {
                     shown.ignored += 1;
@@ -1038,14 +1037,15 @@ impl Share<'_> {
             }
             let theirs = match records.view(&path) {
                 View::Agent(Entry::File { mode }) => {
-                    match fs::read(self.dir.join("tree").join(bytes_path(&path))) {
+                    let file = File::open(self.dir.join("tree").join(bytes_path(&path)));
+                    match file.and_then(branch::read_at_most) {
                         Ok(data) => Theirs::File { mode: *mode, data },
-                        // The agent moved or replaced it since.
+                        // The agent moved, replaced, or grew it since.
                         Err(error)
                             if matches!(
                                 error.raw_os_error(),
                                 Some(libc::ENOENT | libc::EISDIR | libc::ENOTDIR)
-                            ) =>
+                            ) || error.kind() == io::ErrorKind::FileTooLarge =>
                         {
                             return Ok(Err(
                                 "the agent kept changing files while they were read, so try again"
@@ -1094,7 +1094,8 @@ impl Share<'_> {
         let mut changes = Vec::new();
         let bare = Bare::new(self.root, &records);
         for path in changed(&records, &host)? {
-            match verdict(&records, &landed, &host, &ignore, None, Some(&bare), &path)? {
+            let landing = Landing::Files(&bare);
+            match verdict(&records, &landed, &host, &ignore, landing, self.dir, &path)? {
                 Verdict::History | Verdict::Landed => {}
                 Verdict::Ignored => applied.ignored += 1,
                 Verdict::Skipped { why, conflict } => {
@@ -1300,19 +1301,31 @@ impl Replacing {
     }
 }
 
-/// What becomes of the agent's change at `path`. For a branch import,
-/// `branch` holds what the import leaves out where git-ignored files stay.
-/// When the change is applied to your files, `bare` finds the bare
-/// repositories it stays out of.
+/// Where the agent's changes land.
+#[derive(Clone, Copy)]
+enum Landing<'a> {
+    /// A branch, which leaves out what this holds, where git-ignored files
+    /// stay.
+    Branch(&'a Replacing),
+    /// Your files, out of the bare repositories this finds.
+    Files(&'a Bare<'a>),
+}
+
+/// What becomes of the agent's change at `path`, which lands as `landing`
+/// says, from the share's pending directory, `dir`.
 fn verdict(
     records: &Records,
     landed: &BTreeMap<Vec<u8>, Option<Base>>,
     host: &Host,
     ignore: &Gitignore,
-    branch: Option<&Replacing>,
-    bare: Option<&Bare>,
+    landing: Landing,
+    dir: &Path,
     path: &[u8],
 ) -> io::Result<Verdict> {
+    let (branch, bare) = match landing {
+        Landing::Branch(replacing) => (Some(replacing), None),
+        Landing::Files(bare) => (None, Some(bare)),
+    };
     let names: Vec<&[u8]> = path.split(|&byte| byte == b'/').collect();
     if branch.is_some() && names[0] == b".git" {
         return Ok(Verdict::History);
@@ -1363,6 +1376,18 @@ fn verdict(
         if written && replacing.beneath_dir(path) {
             return skipped("it is in a directory that would replace a git-ignored file");
         }
+    }
+    // A file too large to read. It comes after the reasons above, which
+    // `left_at` goes by before it asks. One that can't be measured is left
+    // for its read to report.
+    if let View::Agent(Entry::File { .. }) = records.view(path)
+        && fs::metadata(dir.join("tree").join(bytes_path(path)))
+            .is_ok_and(|m| m.len() > branch::MAX_OBJECT as u64)
+    {
+        return skipped(&format!(
+            "it is larger than {} MiB",
+            branch::MAX_OBJECT >> 20
+        ));
     }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.

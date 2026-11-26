@@ -188,6 +188,25 @@ pub fn limit_cpu(command: &mut Command, seconds: u64) {
     }
 }
 
+/// Limits a command's address space to `bytes`, so that it can't allocate
+/// the length of a sparse file.
+pub fn limit_memory(command: &mut Command, bytes: u64) {
+    // SAFETY: `setrlimit` is async-signal-safe, and touches nothing but the
+    // child.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: bytes,
+                rlim_max: bytes,
+            };
+            match libc::setrlimit(libc::RLIMIT_AS, &limit) {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        });
+    }
+}
+
 /// Writes `data` to `path` in the repository `dir`, and commits it.
 pub fn commit(dir: &Path, path: &str, data: &str, message: &str) -> String {
     let file = dir.join(path);
@@ -296,6 +315,16 @@ pub fn write(pending: &Path, path: &str, mode: u32, data: &[u8]) {
         .open(pending.join("records"))
         .unwrap();
     (records.write_all(format!("FILE \"{path}\" {mode:o}\n").as_bytes())).unwrap();
+}
+
+/// Puts the agent's copy of `path` in the tree, `len` bytes of zeros long,
+/// as a sparse file that costs almost nothing, and records it.
+pub fn sparse(pending: &Path, path: &str, len: u64) {
+    write(pending, path, 0o644, b"");
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(pending.join("tree").join(path));
+    file.unwrap().set_len(len).unwrap();
 }
 
 /// Each commit `rev` reaches, newest first, and each one's contents, as

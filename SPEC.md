@@ -1404,8 +1404,8 @@ AUTH login | key | token
 ```
 
 `AUTH` chooses how the harness signs in. It can appear once, and the adapter
-maps it to that harness's own mechanism, so the line still works after you
-change `AGENT`.
+maps `AUTH key` to that harness's own API key, so an `AUTH key` line still
+works after you change `AGENT`.
 
 ```
 AUTH login

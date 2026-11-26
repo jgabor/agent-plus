@@ -2271,7 +2271,8 @@ fn a_deleted_directory_of_ignored_files_lands_as_committed() {
 /// can't hold a file and a directory at one path. Each directory is in the
 /// last commit as if the agent had deleted it, so the file it deleted
 /// beside the ignored one is gone. A file in place of a directory with no
-/// ignored file in it lands.
+/// ignored file in it lands. From #834: the file in place of `logs` is 10
+/// GiB, sparse, and is skipped for this reason all the same.
 // spec(SHARE): Where the agent's `HEAD` holds a directory with a git-ignored file in it, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why.
 // spec(SHARE): The last commit holds the directory as if the agent had deleted it, so its git-ignored files are as that `HEAD` holds them.
 #[test]
@@ -2306,7 +2307,7 @@ fn a_file_in_place_of_a_directory_with_an_ignored_file_is_skipped() {
     for dir in ["logs", "var/cache", "plain"] {
         delete(share, pending, dir);
     }
-    write(pending, "logs", 0o644, b"one file\n");
+    repo::sparse(pending, "logs", 10 << 30);
     fs::create_dir(pending.join("tree/var")).unwrap();
     link(pending, "var/cache", "../README");
     write(pending, "plain", 0o644, b"plain\n");

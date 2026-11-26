@@ -605,7 +605,8 @@ pub(super) fn read_at_most(file: File) -> io::Result<Vec<u8>> {
     if len > MAX_OBJECT as u64 {
         return Err(larger());
     }
-    let mut contents = Vec::with_capacity(len as usize);
+    // A byte more, so that the read finds the end without growing it.
+    let mut contents = Vec::with_capacity(len as usize + 1);
     // It may have grown since.
     file.take(MAX_OBJECT as u64 + 1)
         .read_to_end(&mut contents)?;

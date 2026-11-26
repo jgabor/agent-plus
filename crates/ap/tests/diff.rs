@@ -833,7 +833,7 @@ fn a_ref_file_larger_than_the_limit_is_said_first() {
 /// time.
 // spec(SHARE): `ap diff` and `ap apply` skip each file the agent wrote that is larger than 512 MiB, say why, and read none of it.
 #[test]
-fn a_file_larger_than_the_limit_is_skipped_unread() {
+fn a_file_larger_than_the_limit_gets_a_line_unread() {
     let scratch = Scratch::new("too-large-file");
     let (run, pending) = scratch.run("notes", 1);
     repo::sparse(&pending, "big", (512 << 20) + 1);

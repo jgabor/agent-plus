@@ -1361,16 +1361,6 @@ fn verdict(
                 return skipped(why);
             }
         }
-        // One that can't be measured is left for its read to report.
-        View::Agent(Entry::File { .. })
-            if fs::metadata(dir.join("tree").join(bytes_path(path)))
-                .is_ok_and(|m| m.len() > branch::MAX_OBJECT as u64) =>
-        {
-            return skipped(&format!(
-                "it is larger than {} MiB",
-                branch::MAX_OBJECT >> 20
-            ));
-        }
         _ => {}
     }
     let written = matches!(
@@ -1386,6 +1376,18 @@ fn verdict(
         if written && replacing.beneath_dir(path) {
             return skipped("it is in a directory that would replace a git-ignored file");
         }
+    }
+    // A file too large to read. It comes after the reasons above, which
+    // `left_at` goes by before it asks. One that can't be measured is left
+    // for its read to report.
+    if let View::Agent(Entry::File { .. }) = records.view(path)
+        && fs::metadata(dir.join("tree").join(bytes_path(path)))
+            .is_ok_and(|m| m.len() > branch::MAX_OBJECT as u64)
+    {
+        return skipped(&format!(
+            "it is larger than {} MiB",
+            branch::MAX_OBJECT >> 20
+        ));
     }
     // A branch import leaves your working tree as it is, so a file you
     // changed too isn't skipped there.

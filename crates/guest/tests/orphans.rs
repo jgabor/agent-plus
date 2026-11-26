@@ -62,6 +62,7 @@ impl Write for FakeChannel {
 #[test]
 fn orphans_of_a_running_program_are_reaped_and_its_status_still_arrives() {
     // PID 1 adopts orphans on its own. A test process has to ask.
+    // SAFETY: the option takes one integer, and reads no memory.
     let result = unsafe { prctl(PR_SET_CHILD_SUBREAPER, 1) };
     assert_eq!(result, 0, "{}", io::Error::last_os_error());
 

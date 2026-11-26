@@ -28,6 +28,8 @@
 //! also kept whole in `<directory>/requests/<n>`, numbered from 1 in the
 //! order each one finished arriving.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};

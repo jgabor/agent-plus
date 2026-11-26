@@ -2,6 +2,8 @@
 //! refs with `packed-refs`. It writes loose objects. It reads and writes only
 //! SHA-1 repositories.
 
+#![forbid(unsafe_code)]
+
 mod pack;
 mod stream;
 

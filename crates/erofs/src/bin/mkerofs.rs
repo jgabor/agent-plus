@@ -4,6 +4,8 @@
 //! symlinks, with their permission bits. Owners and times are zero. A hard
 //! link becomes a copy. A device, FIFO, or socket is refused.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufWriter, Read, Write};

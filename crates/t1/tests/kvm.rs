@@ -144,9 +144,9 @@ fn a_blocked_kick_signal_does_not_defeat_the_timeout() {
         let mut blocked = [0_u64; 16];
         // Signal numbers count from 1, so signal 40 is bit 39.
         blocked[0] = 1 << 39;
-        // SAFETY: both sets are as large as sigset_t on glibc and musl, and
-        // a null old set is allowed.
         assert_eq!(
+            // SAFETY: both sets are as large as sigset_t on glibc and musl,
+            // and a null old set is allowed.
             unsafe { pthread_sigmask(SIG_BLOCK, &blocked, std::ptr::null_mut()) },
             0
         );
@@ -165,8 +165,8 @@ fn a_panic_in_the_port_callback_unwinds_at_once_and_restores_the_signal_mask() {
     std::thread::spawn(move || {
         let mut blocked = [0_u64; 16];
         blocked[0] = 1 << 39;
-        // SAFETY: as in the test above.
         assert_eq!(
+            // SAFETY: as in the test above.
             unsafe { pthread_sigmask(SIG_BLOCK, &blocked, std::ptr::null_mut()) },
             0
         );
@@ -177,8 +177,8 @@ fn a_panic_in_the_port_callback_unwinds_at_once_and_restores_the_signal_mask() {
         assert!(result.is_err());
         let mut current = [0_u64; 16];
         let nothing = [0_u64; 16];
-        // SAFETY: as above. Blocking nothing only reads the current mask.
         assert_eq!(
+            // SAFETY: as above. Blocking nothing only reads the current mask.
             unsafe { pthread_sigmask(SIG_BLOCK, &nothing, &mut current) },
             0
         );

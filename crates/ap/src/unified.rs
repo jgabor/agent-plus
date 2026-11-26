@@ -266,7 +266,10 @@ fn compare(one: &mut Side, two: &mut Side) {
 
 /// Finds where the shortest edit script of a box crosses its middle, or a
 /// good place near it when that costs too much, as `xdl_split` does.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "it keeps the arguments of `xdl_split`, which it follows"
+)]
 fn split(
     one: &Side,
     off1: i64,

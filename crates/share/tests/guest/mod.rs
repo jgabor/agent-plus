@@ -1,7 +1,7 @@
 //! A guest's view of a share: FUSE requests as a guest's kernel, or a
 //! guest that took its kernel over, would send them, and a tree to share.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses only some of this module")]
 
 use share::{Mode, Root, Server};
 use std::collections::BTreeSet;
@@ -523,6 +523,7 @@ pub fn protected_tree(label: &str) -> Tree {
 /// Whether the host can't take a lock of `kind` on the whole file now.
 pub fn host_locked(path: &Path, kind: i16) -> bool {
     let file = File::options().read(true).write(true).open(path).unwrap();
+    // SAFETY: a `struct flock` of zeros is a valid one.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = kind;
     // SAFETY: `lock` is a `struct flock`, which outlives the call.

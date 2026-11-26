@@ -30,8 +30,12 @@ fn count(change: isize) {
     });
 }
 
+// SAFETY: every call passes its arguments to `System` unchanged, and returns
+// what `System` returned. Counting touches no memory that it hands out.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller keeps the contract of `GlobalAlloc`, which is
+        // the contract of `System` too.
         let at = unsafe { System.alloc(layout) };
         if !at.is_null() {
             count(layout.size() as isize);
@@ -40,6 +44,8 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller keeps the contract of `GlobalAlloc`, which is
+        // the contract of `System` too.
         let at = unsafe { System.alloc_zeroed(layout) };
         if !at.is_null() {
             count(layout.size() as isize);
@@ -48,11 +54,15 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn dealloc(&self, at: *mut u8, layout: Layout) {
+        // SAFETY: the caller keeps the contract of `GlobalAlloc`, which is
+        // the contract of `System` too.
         unsafe { System.dealloc(at, layout) };
         count(-(layout.size() as isize));
     }
 
     unsafe fn realloc(&self, at: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        // SAFETY: the caller keeps the contract of `GlobalAlloc`, which is
+        // the contract of `System` too.
         let moved = unsafe { System.realloc(at, layout, size) };
         if !moved.is_null() {
             count(size as isize - layout.size() as isize);

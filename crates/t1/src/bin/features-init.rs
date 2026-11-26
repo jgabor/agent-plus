@@ -85,6 +85,8 @@ fn main() {
     // command in new user, PID, IPC, and network namespaces, and Codex
     // filters its system calls with seccomp.
     for (name, flag) in NAMESPACES {
+        // SAFETY: `unshare` takes only flags, and changes only the child that
+        // `as_nobody` runs it in.
         if as_nobody(|| unsafe { unshare(CLONE_NEWUSER | flag) } == 0) {
             report.push_str(&format!(" {name}"));
         }
@@ -95,6 +97,8 @@ fn main() {
     };
     // `prctl` reads every argument after the option as an `unsigned long`.
     let (on, unused): (c_ulong, c_ulong) = (1, 0);
+    // SAFETY: each argument has the type `prctl` reads, and `filter` is a
+    // `struct sock_fprog` that outlives the call, whose one filter is static.
     let filters = || unsafe {
         prctl(PR_SET_NO_NEW_PRIVS, on, unused, unused, unused) == 0
             && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &raw const filter) == 0
@@ -118,6 +122,9 @@ fn main() {
 /// changes leaves the init as it was. The init has one thread, so the child
 /// that `fork` makes is in a consistent state.
 fn as_nobody(probe: impl Fn() -> bool) -> bool {
+    // SAFETY: the child of a process with one thread can make any call, and
+    // it leaves only through `_exit`. `status` outlives the `waitpid` that
+    // writes it.
     unsafe {
         let pid = fork();
         if pid == 0 {

@@ -11,5 +11,5 @@ ap = { path = "../ap" }
 guest = { path = "../guest" }
 t1 = { path = "../t1" }
 
-[lints.cargo]
-unused_dependencies = "deny"
+[lints]
+workspace = true

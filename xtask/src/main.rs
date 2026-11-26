@@ -1,5 +1,7 @@
 //! The harness program. HARNESS.md defines its commands and exit statuses.
 
+#![forbid(unsafe_code)]
+
 mod accepts;
 mod base;
 mod bench;

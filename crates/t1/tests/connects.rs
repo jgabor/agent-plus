@@ -1316,6 +1316,7 @@ impl Attempt {
                 // a fork.
                 match unsafe { fork() } {
                     -1 => format!("went through: {}", io::Error::last_os_error()),
+                    // SAFETY: this is the child, as above.
                     0 => unsafe { _exit(0) },
                     child => format!("went through: started process {child}"),
                 }

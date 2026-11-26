@@ -9,6 +9,8 @@
 //! connection and datagram it takes, and a [`Pipe`] forwards a connection
 //! to a stream the caller opened.
 
+#![forbid(unsafe_code)]
+
 mod pipe;
 mod resolver;
 

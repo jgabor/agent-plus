@@ -1,7 +1,7 @@
 //! What the tests that build an agent share. Each test crate uses only
 //! some of it.
 
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test binary uses only some of this module")]
 
 pub mod repo;
 

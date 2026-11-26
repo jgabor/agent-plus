@@ -665,7 +665,7 @@ fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() 
     assert_eq!(size_of(&mut guest, nested), Ok(6));
 }
 
-// spec(SHARE): Reading the attributes of a file with another hard link, as `stat` does, fails with a `No such file or directory` error once the name the agent last reached the file by is gone, even while the agent holds it open.
+// spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the name the agent last reached the file by is removed, if the file has another hard link.
 #[test]
 fn a_linked_file_s_attributes_need_the_name_the_agent_last_reached_it_by() {
     let tree = Tree::new("linked-unlinked");
@@ -675,10 +675,18 @@ fn a_linked_file_s_attributes_need_the_name_the_agent_last_reached_it_by() {
     let dir = guest.walk("dir").unwrap();
     let nested = guest.walk("dir/nested.txt").unwrap();
     guest.open(nested, 0).unwrap();
-    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
-    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
-    // Reached by its other name, it shows them again.
     assert_eq!(guest.walk("dir/other.txt"), Ok(nested));
+    assert_eq!(guest.remove(UNLINK, dir, b"other.txt"), 0);
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
+    // Reached by its other name, it shows them again, and still does once
+    // the host renames that name within the share.
+    assert_eq!(guest.walk("dir/nested.txt"), Ok(nested));
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+    fs::rename(
+        tree.root.join("dir/nested.txt"),
+        tree.root.join("moved.txt"),
+    )
+    .unwrap();
     assert_eq!(size_of(&mut guest, nested), Ok(6));
 }
 

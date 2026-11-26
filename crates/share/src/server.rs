@@ -766,7 +766,9 @@ impl Share {
             let node = self.nodes.get_mut(&found).ok_or(libc::EIO)?;
             node.lookups = node.lookups.saturating_add(1);
             if found != ROOT {
-                // A file opens from the name it was last found by.
+                // A file opens from the name it was last found by, and its
+                // descriptor shows where that name is.
+                node.fd = Rc::new(fd);
                 node.parent = directory;
                 node.name = name;
                 if node.place != Place::Fixed {
@@ -1223,6 +1225,7 @@ impl Share {
         else {
             return;
         };
+        node.fd = Rc::new(fd);
         node.parent = Rc::clone(directory);
         node.name = name.to_owned();
         if node.place != Place::Fixed {

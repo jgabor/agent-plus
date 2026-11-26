@@ -1,5 +1,7 @@
 //! A `Vm` that runs nothing, and records what it was asked to run.
 
+#![forbid(unsafe_code)]
+
 use ap::Vm;
 use std::io;
 

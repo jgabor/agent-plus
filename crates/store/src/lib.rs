@@ -5,6 +5,8 @@
 //! decoder is `ruzstd`'s. A frame is a standard zstd frame, and any zstd
 //! decoder reads it.
 
+#![forbid(unsafe_code)]
+
 use std::io::{self, Read};
 
 use ruzstd::decoding::StreamingDecoder;

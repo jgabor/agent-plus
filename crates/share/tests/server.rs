@@ -1055,6 +1055,7 @@ fn file_locks_pass_through_to_the_host() {
 
 /// Takes a lock of `kind` on the whole file, without waiting.
 fn host_lock(file: &File, kind: i16) -> bool {
+    // SAFETY: a `struct flock` of zeros is a valid one.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = kind;
     // SAFETY: as in `host_locked`.

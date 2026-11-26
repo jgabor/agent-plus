@@ -5,6 +5,8 @@
 //! `crates/git` and `git` both read. Those crates are pure Rust, so the fuzzer
 //! adds no C to the tree. A run is reproduced by passing its seed again.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;

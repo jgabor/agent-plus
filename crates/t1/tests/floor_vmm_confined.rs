@@ -87,6 +87,7 @@ impl Attempt {
                 // fork from a process with threads.
                 match unsafe { fork() } {
                     -1 => format!("went through: {}", std::io::Error::last_os_error()),
+                    // SAFETY: this is the child, as above.
                     0 => unsafe { _exit(0) },
                     child => format!("went through: started process {child}"),
                 }

@@ -11,6 +11,8 @@
 //! no inode numbers: an inode's place in the image is its order in a
 //! depth-first walk.
 
+#![forbid(unsafe_code)]
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};

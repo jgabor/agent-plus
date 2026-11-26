@@ -48,6 +48,8 @@ fn orphans() -> Vec<i32> {
 /// Blocks until `pid` has exited, and leaves it for `reap` to collect.
 fn wait_without_reaping(pid: i32) {
     let mut info = [0u64; 16];
+    // SAFETY: `info` is 128 bytes, the size of the `siginfo_t` that the call
+    // writes, and outlives it.
     let result = unsafe {
         waitid(
             P_PID,
@@ -105,6 +107,7 @@ impl Channel for OrphansExit {
 #[test]
 fn orphaned_children_are_reaped_and_leave_no_zombie() {
     // PID 1 adopts orphans on its own. A test process has to ask.
+    // SAFETY: the option takes one integer, and reads no memory.
     let result = unsafe { prctl(PR_SET_CHILD_SUBREAPER, 1) };
     assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
 

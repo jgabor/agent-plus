@@ -12,6 +12,8 @@
 //! [`read_arguments`] are that text form's argument rules, for other records
 //! kept in the same syntax.
 
+#![forbid(unsafe_code)]
+
 mod files;
 pub use files::{Access, Files, Persist, Port, Rule, Share, ShareMode, State, Workdir};
 mod format;

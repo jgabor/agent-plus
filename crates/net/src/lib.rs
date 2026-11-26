@@ -4,6 +4,8 @@
 //! `hpack` module reads and writes HTTP/2's header blocks, and its `h2`
 //! module HTTP/2's frames, for the proxy.
 
+#![forbid(unsafe_code)]
+
 mod check;
 pub mod h2;
 pub mod hpack;

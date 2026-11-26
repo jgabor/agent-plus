@@ -1,12 +1,14 @@
 //! Feeds generated text to the code that reads untrusted input, and stops at
 //! the first panic. It needs no fuzzing engine, so it builds on stable. Where
-//! httparse, hyper, iri-string, smoltcp, `git`, or `sha1sum` does the same
-//! job, a target compares the two. miniz_oxide compresses the loose objects
-//! that `crates/git` and `git` both read. Those crates are pure Rust, so the
-//! fuzzer adds no C to the tree. A run is reproduced by passing its seed again.
+//! httparse, hyper, h2, iri-string, smoltcp, `git`, or `sha1sum` does the
+//! same job, a target compares the two. miniz_oxide compresses the loose
+//! objects that `crates/git` and `git` both read. Those crates are pure Rust,
+//! so the fuzzer adds no C to the tree. A run is reproduced by passing its
+//! seed again.
 
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -14,9 +16,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, ExitCode, Stdio};
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vmm::GuestMemory;
 use vmm::virtio::Transport;
@@ -72,7 +77,14 @@ macro_rules! neighbor_solicitation {
     };
 }
 
-const TARGETS: [Target; 13] = [
+/// The preface that starts what an HTTP/2 client sends.
+macro_rules! preface {
+    () => {
+        "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+    };
+}
+
+const TARGETS: [Target; 14] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -738,6 +750,103 @@ const TARGETS: [Target; 13] = [
             "\u{ff}",
         ],
     },
+    Target {
+        name: "http2-check",
+        check: |input| {
+            http2_check_input(input);
+        },
+        corpus: &[
+            "",
+            // SETTINGS and an ACK, a GET, and a POST whose body has the
+            // length it gives.
+            concat!(
+                preface!(),
+                "\0\0\0\x04\0\0\0\0\0",
+                "\0\0\0\x04\x01\0\0\0\0",
+                "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/a",
+                "\0\0\x13\x01\x04\0\0\0\x03\u{83}\u{87}\u{be}\x04\x0a/allowed/b\x0f\x0d\x013",
+                "\0\0\x03\0\x01\0\0\0\x03abc",
+            ),
+            // A request named by `Host`, whose body comes in padded DATA
+            // and in plain DATA, around a WINDOW_UPDATE and a PING, and
+            // ends with trailers.
+            concat!(
+                preface!(),
+                "\0\0\x06\x04\0\0\0\0\0\0\x04\0\x01\0\0",
+                "\0\0\x21\x01\x04\0\0\0\x01\u{83}\u{87}\x04\x0a/allowed/c\x0f\x17\x10host.ap.internal",
+                "\0\0\x05\0\x08\0\0\0\x01\x02ab\0\0",
+                "\0\0\x04\x08\0\0\0\0\0\0\0\0\x01",
+                "\0\0\x08\x06\0\0\0\0\012345678",
+                "\0\0\x02\0\0\0\0\0\x01cd",
+                "\0\0\x05\x01\x05\0\0\0\x01\0\x01t\x011",
+            ),
+            // A request the guest resets after some of its body, a
+            // PRIORITY, a request in HEADERS and CONTINUATION, and GOAWAY.
+            concat!(
+                preface!(),
+                "\0\0\0\x04\0\0\0\0\0",
+                "\0\0\x20\x01\x04\0\0\0\x01\u{83}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/d",
+                "\0\0\x01\0\0\0\0\0\x01x",
+                "\0\0\x04\x03\0\0\0\0\x01\0\0\0\x08",
+                "\0\0\x05\x02\0\0\0\0\x03\0\0\0\x01\x0f",
+                "\0\0\x03\x01\x01\0\0\0\x03\u{82}\u{87}\u{be}",
+                "\0\0\x0c\x09\x04\0\0\0\x03\x04\x0a/allowed/e",
+                "\0\0\x08\x07\0\0\0\0\0\0\0\0\x03\0\0\0\0",
+            ),
+            // A request the rules allow, one they deny, and one that never
+            // passes.
+            concat!(
+                preface!(),
+                "\0\0\0\x04\0\0\0\0\0",
+                "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/a",
+                "\0\0\x0c\x01\x05\0\0\0\x03\u{82}\u{87}\u{be}\x04\x07/denied",
+                "\0\0\x0f\x01\x05\0\0\0\x05\u{82}\u{87}\u{be}\x04\x0a/allowed/f",
+            ),
+        ],
+        words: &[
+            preface!(),
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\0\x04\x01\0\0\0\0",
+            "\0\0\x0f\x01\x05\0\0\0\x05\u{82}\u{87}\u{be}\x04\x0a/allowed/g",
+            "\0\0\x20\x01\x05\0\0\0\x07\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/h",
+            "\0\0\x03\0\x01\0\0\0\x03abc",
+            "\0\0\x04\x03\0\0\0\0\x03\0\0\0\x08",
+            "\0\0\x04\x08\0\0\0\0\x03\0\0\0\x01",
+            "\0\0",
+            "\x01\x04\0\0\0",
+            "\x01\x05\0\0\0",
+            "\0\x01\0\0\0",
+            "\x09\x04\0\0\0",
+            "\x01\x25\0\0\0",
+            "\x01\x0d\0\0\0",
+            "\u{82}",
+            "\u{83}",
+            "\u{84}",
+            "\u{86}",
+            "\u{87}",
+            "\u{be}",
+            "\x41\x10host.ap.internal",
+            "\x41\x0bexample.com",
+            "\x41\x14host.ap.internal:443",
+            "\x41\x11host.ap.internal.",
+            "\x0f\x17\x10host.ap.internal",
+            "\x04\x0a/allowed/x",
+            "\x04\x07/denied",
+            "\x0f\x0d\x013",
+            "\x0f\x0d\x010",
+            "\0\x02te\x08trailers",
+            "\x20",
+            "/allowed",
+            "/../",
+            "#",
+            "?",
+            "%2F",
+            "\0",
+            "\x01",
+            "\x08",
+            "\u{ff}",
+        ],
+    },
 ];
 
 /// The TLS client hello in the name check's corpus.
@@ -1267,6 +1376,89 @@ fn same_requests(passed: &[u8], ours: &[Framed]) {
     );
 }
 
+/// A stream that a server reads from `bytes`, as far as `fed`, and how far
+/// it got. Once `fed` is past `bytes`, it ends. What the server writes goes
+/// nowhere.
+struct Pipe<'a> {
+    bytes: &'a [u8],
+    fed: Rc<Cell<usize>>,
+    read: Rc<Cell<usize>>,
+}
+
+impl Pipe<'_> {
+    /// The next bytes fed, up to `room` of them, which are then read, or
+    /// none once it ends.
+    fn next(&self, room: usize) -> Poll<&[u8]> {
+        let (read, fed) = (self.read.get(), self.fed.get());
+        let available = fed.min(self.bytes.len());
+        if read == available && fed <= self.bytes.len() {
+            return Poll::Pending;
+        }
+        let end = available.min(read + room);
+        self.read.set(end);
+        Poll::Ready(&self.bytes[read..end])
+    }
+}
+
+impl hyper::rt::Read for Pipe<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let room = buf.remaining();
+        self.next(room).map(|bytes| {
+            buf.put_slice(bytes);
+            Ok(())
+        })
+    }
+}
+
+impl hyper::rt::Write for Pipe<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncRead for Pipe<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.next(buf.remaining()).map(|bytes| {
+            buf.put_slice(bytes);
+            Ok(())
+        })
+    }
+}
+
+impl tokio::io::AsyncWrite for Pipe<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// The requests that hyper's HTTP/1.1 server reads from `passed`, fed to it
 /// one byte at a time, the offset where it stopped reading, if it did, and
 /// the offset where it refused a body, if it did. Since the stream never
@@ -1275,49 +1467,11 @@ fn same_requests(passed: &[u8], ours: &[Framed]) {
 /// A request ends where hyper has read all of its body.
 fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>) {
     use hyper::body::{Body, Bytes, Frame, Incoming};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::convert::Infallible;
-    use std::pin::{Pin, pin};
-    use std::rc::Rc;
-    use std::task::{Context, Poll, Waker};
+    use std::pin::pin;
+    use std::task::Waker;
 
-    /// The stream hyper reads, and how far it got.
-    struct Stream<'a> {
-        passed: &'a [u8],
-        fed: Rc<Cell<usize>>,
-        read: Rc<Cell<usize>>,
-    }
-    impl hyper::rt::Read for Stream<'_> {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            mut buf: hyper::rt::ReadBufCursor<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            let (read, fed) = (self.read.get(), self.fed.get());
-            if read == fed {
-                return Poll::Pending;
-            }
-            let end = fed.min(read + buf.remaining());
-            buf.put_slice(&self.passed[read..end]);
-            self.read.set(end);
-            Poll::Ready(Ok(()))
-        }
-    }
-    impl hyper::rt::Write for Stream<'_> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Poll::Ready(Ok(buf.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
     /// An empty response body.
     struct Nothing;
     impl Body for Nothing {
@@ -1366,8 +1520,8 @@ fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>)
             }
         })
     };
-    let stream = Stream {
-        passed,
+    let stream = Pipe {
+        bytes: passed,
         fed: fed.clone(),
         read: read.clone(),
     };
@@ -1406,27 +1560,11 @@ fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>)
 /// request that the rules deny passed. Returns whether it all passed.
 fn request_check_input(input: &str) -> bool {
     let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
-    let instructions =
-        agentfile::parse("AGENT claude\nNETWORK -\nNETWORK +https://host.ap.internal/allowed\n")
-            .unwrap();
-    let network = agentfile::Network::read(&instructions).unwrap();
-    let allows = |target: &str| {
-        let connection = net::Connection {
-            name: Some("host.ap.internal"),
-            address: std::net::Ipv4Addr::LOCALHOST.into(),
-            port: 443,
-            request: Some(net::Request {
-                scheme: agentfile::Scheme::Https,
-                target,
-            }),
-        };
-        net::proxied(&network, &[], &connection).allows()
-    };
     let checked = |piece: usize| {
         let mut check = net::NameCheck::requests("host.ap.internal");
         let mut passed = Vec::new();
         for chunk in bytes.chunks(piece) {
-            if (check.feed_deciding(chunk, &mut passed, &mut |target| allows(target))).is_err() {
+            if (check.feed_deciding(chunk, &mut passed, &mut |target| allowed(target))).is_err() {
                 return (passed, false);
             }
         }
@@ -1444,7 +1582,7 @@ fn request_check_input(input: &str) -> bool {
     let mut headers = [httparse::EMPTY_HEADER; 128];
     let mut request = httparse::Request::new(&mut headers);
     if let Ok(httparse::Status::Complete(head)) = request.parse(&bytes)
-        && !request.path.is_some_and(allows)
+        && !request.path.is_some_and(allowed)
     {
         assert!(
             whole.0.len() < head,
@@ -1453,6 +1591,213 @@ fn request_check_input(input: &str) -> bool {
         );
     }
     whole.1 && whole.0 == bytes
+}
+
+/// Whether the rules of the request check targets, which allow paths under
+/// `/allowed` on `host.ap.internal`, allow a request for `target` there.
+fn allowed(target: &str) -> bool {
+    static RULES: OnceLock<agentfile::Network> = OnceLock::new();
+    let network = RULES.get_or_init(|| {
+        let rules = "AGENT claude\nNETWORK -\nNETWORK +https://host.ap.internal/allowed\n";
+        agentfile::Network::read(&agentfile::parse(rules).unwrap()).unwrap()
+    });
+    let connection = net::Connection {
+        name: Some("host.ap.internal"),
+        address: std::net::Ipv4Addr::LOCALHOST.into(),
+        port: 443,
+        request: Some(net::Request {
+            scheme: agentfile::Scheme::Https,
+            target,
+        }),
+    };
+    net::proxied(network, &[], &connection).allows()
+}
+
+/// Feeds `input`, as the guest's side of a decrypted HTTP/2 connection to
+/// `host.ap.internal`, to the HTTP/2 request check, whole and in pieces,
+/// under the rules of [`allowed`]. Panics if the two disagree, or unless
+/// the `h2` crate's server reads what passed as the requests the check
+/// allowed. Returns whether it all passed.
+fn http2_check_input(input: &str) -> bool {
+    let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+    let checked = |piece: usize| {
+        let mut check = net::NameCheck::http2("host.ap.internal");
+        let mut passed = Vec::new();
+        let mut asked = Vec::new();
+        let mut decide = |path: &str| {
+            let allows = allowed(path);
+            asked.push((path.to_owned(), allows));
+            allows
+        };
+        let mut fed = Ok(());
+        for chunk in bytes.chunks(piece) {
+            fed = check.feed_deciding(chunk, &mut passed, &mut decide);
+            if fed.is_err() {
+                break;
+            }
+        }
+        let holding = check.holding();
+        (passed, asked, fed, holding)
+    };
+    let whole = checked(bytes.len().max(1));
+    for piece in [1, 1 + bytes.len() % 13] {
+        assert_eq!(checked(piece), whole, "in pieces of {piece}");
+    }
+    let (passed, asked, fed, holding) = whole;
+    let allows: Vec<&str> = (asked.iter())
+        .filter(|(_, allows)| *allows)
+        .map(|(path, _)| &path[..])
+        .collect();
+    same_http2(&bytes, &passed, &allows, fed.is_err());
+    fed.is_ok() && !holding
+}
+
+/// What the `h2` crate's server read of one request: its stream, its
+/// `:authority`, its `Host` values, escaped, its `:path`, and its body.
+#[derive(Debug, PartialEq)]
+struct Served {
+    stream: u32,
+    authority: Option<String>,
+    hosts: Vec<String>,
+    path: String,
+    body: Vec<u8>,
+    /// The guest ended the stream, so the body is whole.
+    ended: bool,
+}
+
+/// Panics unless the `h2` crate's server, reading `passed`, serves the
+/// requests for `allows`, in order, each naming `host.ap.internal`, and
+/// reads each as it reads the same stream from `input`, what the guest
+/// sent. Where the check refused, the last request it allowed may not have
+/// passed. Where the server stopped reading, it serves the first of them.
+fn same_http2(input: &[u8], passed: &[u8], allows: &[&str], refused: bool) {
+    let (theirs, stopped) = served_http2(passed);
+    let (sent, _) = served_http2(input);
+    let paths: Vec<&str> = theirs.iter().map(|served| &served.path[..]).collect();
+    // The server drops a path's fragment, as the rules do.
+    let wanted: Vec<&str> = (allows.iter())
+        .map(|&path| path.split('#').next().unwrap_or_default())
+        .collect();
+    let last = wanted.len().saturating_sub(usize::from(refused));
+    let ordered = match stopped {
+        true => wanted.starts_with(&paths),
+        false => paths == wanted || paths == wanted[..last],
+    };
+    let named = theirs.iter().all(|served| {
+        let mut names = served.authority.iter().chain(&served.hosts).peekable();
+        names.peek().is_some() && names.all(|name| names_host(name.as_bytes()))
+    });
+    let same = theirs.iter().all(|theirs| {
+        let Some(sent) = sent.iter().find(|sent| sent.stream == theirs.stream) else {
+            return true;
+        };
+        let (short, long) = match theirs.body.len() <= sent.body.len() {
+            true => (theirs, sent),
+            false => (sent, theirs),
+        };
+        let whole = !short.ended || short.body.len() == long.body.len();
+        let (authority, hosts) = (&theirs.authority, &theirs.hosts);
+        (authority, hosts, &theirs.path) == (&sent.authority, &sent.hosts, &sent.path)
+            && long.body.starts_with(&short.body)
+            && whole
+    });
+    assert!(
+        ordered && named && same,
+        "{}: crates/net allowed {allows:?}, and h2 served {theirs:?}, stopping {stopped}, of what passed, and {sent:?} of what the guest sent",
+        input.escape_ascii(),
+    );
+}
+
+/// The requests that the `h2` crate's server accepts from `bytes`, fed to
+/// it one byte at a time, then the stream's end, and whether it stopped
+/// reading before that end. It never answers, and allows what the HTTP/2
+/// request check does: frames of any length, and a header table and
+/// header lists as large as a head may be.
+fn served_http2(bytes: &[u8]) -> (Vec<Served>, bool) {
+    use std::pin::pin;
+    use std::task::Waker;
+
+    const HEAD_LIMIT: u32 = 64 * 1024;
+    let fed = Rc::new(Cell::new(0));
+    let read = Rc::new(Cell::new(0));
+    let stream = Pipe {
+        bytes,
+        fed: fed.clone(),
+        read: read.clone(),
+    };
+    let mut handshake = pin!(
+        h2::server::Builder::new()
+            .max_frame_size((1 << 24) - 1)
+            .header_table_size(HEAD_LIMIT)
+            .max_header_list_size(u32::MAX)
+            .initial_window_size((1 << 31) - 1)
+            .initial_connection_window_size((1 << 31) - 1)
+            .handshake::<_, &'static [u8]>(stream)
+    );
+    let mut connection = None;
+    let mut open = true;
+    let mut served: Vec<Served> = Vec::new();
+    // Each body still coming, with the request's index, and the stream's
+    // response, which is kept so that the server doesn't reset the stream.
+    let mut bodies = Vec::new();
+    let mut cx = Context::from_waker(Waker::noop());
+    for end in 0..=bytes.len() + 1 {
+        fed.set(end);
+        // The server has read all it can once it makes no progress for a
+        // few polls in a row.
+        let mut idle = 0;
+        while idle < 4 {
+            let size = |served: &[Served]| served.iter().map(|s| s.body.len()).sum::<usize>();
+            let before = (read.get(), served.len(), size(&served), bodies.len());
+            match &mut connection {
+                None if open => match handshake.as_mut().poll(&mut cx) {
+                    Poll::Ready(Ok(handshaken)) => connection = Some(handshaken),
+                    Poll::Ready(Err(_)) => open = false,
+                    Poll::Pending => {}
+                },
+                Some(accepting) if open => match accepting.poll_accept(&mut cx) {
+                    Poll::Ready(Some(Ok((request, respond)))) => {
+                        let escaped = |value: &[u8]| value.escape_ascii().to_string();
+                        let uri = request.uri();
+                        served.push(Served {
+                            stream: respond.stream_id().as_u32(),
+                            authority: uri.authority().map(|a| a.as_str().to_owned()),
+                            hosts: (request.headers().get_all("host").iter())
+                                .map(|value| escaped(value.as_bytes()))
+                                .collect(),
+                            path: (uri.path_and_query())
+                                .map_or(String::new(), |path| path.as_str().to_owned()),
+                            body: Vec::new(),
+                            ended: false,
+                        });
+                        bodies.push((served.len() - 1, request.into_body(), respond));
+                    }
+                    Poll::Ready(_) => open = false,
+                    Poll::Pending => {}
+                },
+                _ => {}
+            }
+            bodies.retain_mut(|(at, body, _)| match body.poll_data(&mut cx) {
+                Poll::Ready(Some(Ok(data))) => {
+                    served[*at].body.extend_from_slice(&data);
+                    let _ = body.flow_control().release_capacity(data.len());
+                    true
+                }
+                Poll::Ready(Some(Err(_))) => false,
+                Poll::Ready(None) => {
+                    served[*at].ended = true;
+                    false
+                }
+                Poll::Pending => true,
+            });
+            let after = (read.get(), served.len(), size(&served), bodies.len());
+            idle = if after == before { idle + 1 } else { 0 };
+        }
+        if !open {
+            return (served, end <= bytes.len());
+        }
+    }
+    (served, false)
 }
 
 /// Decides each `> <name> <address> <port> [<scheme> <target>]` line, with
@@ -2699,6 +3044,134 @@ mod tests {
         ] {
             assert!(!request_check_input(denied), "{denied:?}");
         }
+    }
+
+    fn http2_corpus() -> Vec<Vec<u8>> {
+        let target = TARGETS.iter().find(|t| t.name == "http2-check").unwrap();
+        let bytes = |input: &str| input.chars().map(|c| c as u32 as u8).collect();
+        target.corpus.iter().map(|input| bytes(input)).collect()
+    }
+
+    fn http2_passed(input: &[u8]) -> Vec<u8> {
+        let mut check = net::NameCheck::http2("host.ap.internal");
+        let mut passed = Vec::new();
+        let _ = check.feed_deciding(input, &mut passed, &mut allowed);
+        passed
+    }
+
+    fn paths(served: &[Served]) -> Vec<&str> {
+        served.iter().map(|served| &served.path[..]).collect()
+    }
+
+    #[test]
+    fn the_http2_check_corpus_passes_and_h2_serves_it() {
+        let target = TARGETS.iter().find(|t| t.name == "http2-check").unwrap();
+        let passes: Vec<bool> = target.corpus.iter().map(|i| http2_check_input(i)).collect();
+        assert_eq!(passes, [true, true, true, true, false]);
+        let corpus = http2_corpus();
+        let served: Vec<_> = (corpus.iter())
+            .map(|input| served_http2(&http2_passed(input)))
+            .collect();
+        assert_eq!(paths(&served[1].0), ["/allowed/a", "/allowed/b"]);
+        assert_eq!(served[1].0[1].body, b"abc");
+        assert_eq!(paths(&served[2].0), ["/allowed/c"]);
+        assert_eq!(served[2].0[0].authority, None);
+        assert_eq!(served[2].0[0].hosts, ["host.ap.internal"]);
+        assert_eq!(served[2].0[0].body, b"abcd");
+        assert!(served[2].0[0].ended);
+        assert_eq!(paths(&served[3].0), ["/allowed/d", "/allowed/e"]);
+        assert_eq!(served[3].0[0].body, b"x");
+        assert!(!served[3].0[0].ended);
+        assert_eq!(paths(&served[4].0), ["/allowed/a"]);
+        // The guest's GOAWAY closes the connection.
+        let stopped: Vec<bool> = served.iter().map(|(_, stopped)| *stopped).collect();
+        assert_eq!(stopped, [false, false, false, true, false]);
+    }
+
+    #[test]
+    fn a_path_h2_reads_without_its_fragment_is_the_path_decided() {
+        let input = concat!(
+            preface!(),
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed#/",
+        );
+        assert!(http2_check_input(input));
+        let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+        assert_eq!(paths(&served_http2(&http2_passed(&input)).0), ["/allowed"]);
+    }
+
+    #[test]
+    fn requests_are_compared_by_stream() {
+        // h2 resets the guest's stream 1, which depends on itself, but not
+        // what passes, since the check drops its priority.
+        let input = concat!(
+            preface!(),
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\x25\x01\x25\0\0\0\x01\0\0\0\x01\x10",
+            "\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/a",
+            "\0\0\x20\x01\x05\0\0\0\x03\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/b",
+        );
+        assert!(http2_check_input(input));
+        let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+        assert_eq!(paths(&served_http2(&input).0), ["/allowed/b"]);
+        let passed = served_http2(&http2_passed(&input)).0;
+        assert_eq!(paths(&passed), ["/allowed/a", "/allowed/b"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "h2 served")]
+    fn a_request_h2_serves_and_the_check_denied_is_found() {
+        let input = &http2_corpus()[4];
+        same_http2(input, input, &["/allowed/a"], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "h2 served")]
+    fn a_request_the_check_allowed_and_h2_never_serves_is_found() {
+        let input = &http2_corpus()[1];
+        same_http2(
+            input,
+            &http2_passed(input),
+            &["/allowed/a", "/allowed/b", "/allowed/c"],
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "h2 served")]
+    fn requests_h2_serves_in_another_order_are_found() {
+        let input = &http2_corpus()[1];
+        same_http2(
+            input,
+            &http2_passed(input),
+            &["/allowed/b", "/allowed/a"],
+            false,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "h2 served")]
+    fn a_body_h2_reads_otherwise_is_found() {
+        let input = &http2_corpus()[1];
+        let mut passed = http2_passed(input);
+        let at = passed.len() - 1;
+        passed[at] = b'x';
+        same_http2(input, &passed, &["/allowed/a", "/allowed/b"], false);
+    }
+
+    #[test]
+    #[should_panic(expected = "h2 served")]
+    fn a_request_for_another_host_is_found() {
+        let input = &http2_corpus()[1];
+        let from = b"host.ap.internal";
+        let at = input.windows(from.len()).position(|w| w == from).unwrap();
+        let input = [&input[..at], b"host.ap.external", &input[at + from.len()..]].concat();
+        let mut check = net::NameCheck::http2("host.ap.external");
+        let mut passed = Vec::new();
+        check
+            .feed_deciding(&input, &mut passed, &mut |_| true)
+            .unwrap();
+        same_http2(&input, &passed, &["/allowed/a", "/allowed/b"], false);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 /// How long a test waits for what it expects before it fails. A run that is
 /// slow to get there only makes it wait longer.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
 pub const LIMIT: Duration = Duration::from_secs(120);
 
 /// Writes an executable that a test can run at once. A child process does the
@@ -81,7 +81,7 @@ pub fn each<T: Sync>(items: &[T], case: impl Fn(&T) + Sync) {
 }
 
 /// Makes a FIFO, where a test and what it runs can wait for each other.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
 pub fn fifo(path: &Path) {
     let made = Command::new("mkfifo").arg(path).status().unwrap();
     assert!(made.success(), "{}", path.display());
@@ -90,7 +90,7 @@ pub fn fifo(path: &Path) {
 /// Opens a FIFO, which waits for the other side to open it too, so neither
 /// side needs a sleep. A reader reads until the writer closes it. Fails the
 /// test if the other side never comes.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
 pub fn meet(path: &Path, write: bool) {
     let path = path.to_path_buf();
     let (met, done) = mpsc::channel();
@@ -109,7 +109,7 @@ pub fn meet(path: &Path, write: bool) {
 }
 
 /// Whether something holds a lock on the file at `path`, shared or alone.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
 pub fn locked(path: &Path) -> bool {
     let file = OpenOptions::new()
         .create(true)
@@ -125,7 +125,7 @@ pub fn locked(path: &Path) -> bool {
 }
 
 /// Returns once `ready` is true, or fails the test with `why` at the limit.
-#[allow(dead_code)]
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
 pub fn wait_until(why: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + LIMIT;
     while !ready() {

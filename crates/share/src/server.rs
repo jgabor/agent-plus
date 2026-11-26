@@ -25,6 +25,7 @@ use std::ffi::{CStr, CString, OsStr};
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, PathBuf};
 use std::rc::Rc;
 
@@ -316,6 +317,10 @@ struct Share {
     /// with `O_PATH`. The share shows that file alone, and no other the
     /// name comes to lead to.
     only: Option<(CString, OwnedFd)>,
+    /// `/proc/self/fd`, opened with `O_PATH` before the process is
+    /// confined, so the server can read where a file it holds is now. The
+    /// root already leads there, by `..`, so it reaches nothing more.
+    descriptors: OwnedFd,
     nodes: BTreeMap<u64, Node>,
     /// The node each host file has, by device and inode.
     known: BTreeMap<(u64, u64), u64>,
@@ -561,6 +566,11 @@ impl Share {
                 Some((name, fd))
             }
         };
+        let descriptors = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+            .open("/proc/self/fd")?
+            .into();
         let root = Rc::new(root);
         let node = Node {
             fd: Rc::clone(&root),
@@ -578,6 +588,7 @@ impl Share {
             owner,
             read_only,
             only,
+            descriptors,
             nodes: BTreeMap::from([(ROOT, node)]),
             known: BTreeMap::from([((stat.st_dev, stat.st_ino), ROOT)]),
             handles: BTreeMap::new(),
@@ -656,18 +667,45 @@ impl Share {
         Ok(())
     }
 
-    /// A node's attributes, while it is beneath the root. A file is checked
-    /// by the directory it was found in, because a file the agent holds
-    /// open can have no name left.
+    /// A node's attributes, while it is beneath the root.
     fn getattr(&self, node: u64) -> Answer {
         let found = self.node(node)?;
-        let directory = match is(found.mode, libc::S_IFDIR) {
-            true => &found.fd,
-            false => &found.parent,
-        };
-        self.served(directory)?;
+        match is(found.mode, libc::S_IFDIR) {
+            true => self.served(&found.fd)?,
+            false => self.still_beneath(found)?,
+        }
         let stat = sys::fstat(found.fd.as_fd()).map_err(errno)?;
         Ok(attr_out(&stat, self.owner))
+    }
+
+    /// Refuses a file node that the host has moved out from under the
+    /// root. It is beneath it while the name it was found by leads to it,
+    /// and once the host renames it, while the path it has now does. A file
+    /// with no name left, which the agent unlinked while it held it open,
+    /// is nowhere outside either. A path can name a place beneath the root
+    /// that isn't, past the top of a bind mount, so it counts once it leads
+    /// to the file, or reaches a directory with no search permission, where
+    /// the name can't be checked either.
+    fn still_beneath(&self, found: &Node) -> Result<(), i32> {
+        let named = self.served(&found.parent);
+        let named = named.and_then(|()| still_the_file(&found.fd, &found.parent, &found.name));
+        if named.is_ok() || sys::fstat(found.fd.as_fd()).map_err(errno)?.st_nlink == 0 {
+            return Ok(());
+        }
+        let path = |fd: BorrowedFd| {
+            let number = CString::new(fd.as_raw_fd().to_string()).map_err(|_| libc::EIO)?;
+            sys::readlink(self.descriptors.as_fd(), &number).map_err(errno)
+        };
+        let (root, file) = (path(self.root.as_fd())?, path(found.fd.as_fd())?);
+        let root = root.strip_suffix(b"/").unwrap_or(&root);
+        let rest = file
+            .strip_prefix(root)
+            .and_then(|rest| rest.strip_prefix(b"/"));
+        let rest = CString::new(rest.ok_or(libc::ENOENT)?).map_err(|_| libc::ENOENT)?;
+        match still_the_file(&found.fd, &self.root, &rest) {
+            Ok(_) | Err(libc::EACCES) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn handle(&self, body: &[u8]) -> Result<&Handle, i32> {
@@ -874,7 +912,7 @@ impl Share {
         if !is(found.mode, libc::S_IFLNK) {
             return Err(libc::EINVAL);
         }
-        sys::readlink(found.fd.as_fd()).map_err(errno)
+        sys::readlink(found.fd.as_fd(), c"").map_err(errno)
     }
 
     fn statfs(&self) -> Answer {
@@ -1479,8 +1517,8 @@ fn parse(bytes: &[u8]) -> Option<Request<'_>> {
 }
 
 /// `name` in `directory`, opened with `O_PATH`, or `ESTALE` unless it is
-/// still a file share's `file`, which a file the host put in its place
-/// isn't.
+/// still `file`, such as a file share's, which a file the host put in its
+/// place isn't.
 fn still_the_file(file: &OwnedFd, directory: &OwnedFd, name: &CStr) -> Result<OwnedFd, i32> {
     let flags = libc::O_PATH | libc::O_NOFOLLOW;
     let found = sys::open_beneath(directory.as_fd(), name, flags).map_err(errno)?;

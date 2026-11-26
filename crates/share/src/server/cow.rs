@@ -696,7 +696,7 @@ fn copy_tree(
                 copied.insert(inner, seen(&stat));
             }
             libc::S_IFLNK => {
-                let target = sys::readlink(entry.as_fd())?;
+                let target = sys::readlink(entry.as_fd(), c"")?;
                 let target =
                     CString::new(target).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
                 sys::symlinkat(&target, to, &name)?;
@@ -1018,7 +1018,7 @@ impl Cow {
                             Entry::File { mode }
                         }
                         libc::S_IFLNK => Entry::Symlink {
-                            target: sys::readlink(lower.as_fd()).map_err(errno)?,
+                            target: sys::readlink(lower.as_fd(), c"").map_err(errno)?,
                         },
                         _ => Entry::Special {
                             mode: stat.st_mode,
@@ -1333,7 +1333,7 @@ impl Cow {
         match (&view.entry, &view.lower) {
             (Some(Entry::Symlink { target }), _) => Ok(target.clone()),
             (None, Some(lower)) if is(view.stat()?.st_mode, libc::S_IFLNK) => {
-                sys::readlink(lower.as_fd()).map_err(errno)
+                sys::readlink(lower.as_fd(), c"").map_err(errno)
             }
             _ => Err(libc::EINVAL),
         }

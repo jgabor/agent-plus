@@ -594,8 +594,30 @@ fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
     fs::rename(&away, tree.root.join("dir/renamed.txt")).unwrap();
     let size = CANARY.len() as u64;
     assert_eq!(size_of(&mut guest, nested), Ok(size));
-    fs::rename(tree.root.join("dir/renamed.txt"), tree.root.join("moved.txt")).unwrap();
+    fs::rename(
+        tree.root.join("dir/renamed.txt"),
+        tree.root.join("moved.txt"),
+    )
+    .unwrap();
     assert_eq!(size_of(&mut guest, nested), Ok(size));
+    // In a directory with no search permission, where its name can't be
+    // checked, its path still shows where it is.
+    let locked = tree.root.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("inner.txt"), INSIDE).unwrap();
+    let inner = guest.walk("locked/inner.txt").unwrap();
+    let mode = |mode| fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, inner), Ok(INSIDE.len() as u64));
+    mode(0o755);
+    fs::rename(
+        locked.join("inner.txt"),
+        tree.base.join("outside/inner.txt"),
+    )
+    .unwrap();
+    mode(0o0);
+    assert_eq!(size_of(&mut guest, inner), Err(ENOENT));
+    mode(0o755);
     // A file share's file shows nothing once it is outside the share.
     let mut guest = Guest::file(&tree.root, "hello.txt", Mode::ReadOnly);
     let hello = guest.walk("hello.txt").unwrap();

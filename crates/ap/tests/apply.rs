@@ -354,10 +354,11 @@ fn a_file_you_changed_too_is_reported_and_stays_pending() {
     assert_eq!(scratch.read("mine.txt"), "yours, again\n");
 }
 
-/// From #857: the records name only the directory the agent removed or
-/// replaced, and you change a file beneath it in place, and add one deeper
-/// down. Neither moves the directory's own times, and the agent never saw
-/// either one, so each is reported and stays pending.
+/// From #857: you change a file in place beneath a directory the agent
+/// removed, and add one deeper down, beneath a directory its records name
+/// nothing of, as they do with a directory it replaced. Neither moves the
+/// times of the directory above, so each is reported and stays pending,
+/// and a file you didn't change is deleted.
 // spec(SHARE): A file you changed or added beneath a directory after the agent removed or replaced it is not applied, `ap apply` reports it, and it stays pending.
 #[test]
 fn a_file_you_changed_beneath_a_directory_the_agent_removed_stays_pending() {
@@ -365,9 +366,12 @@ fn a_file_you_changed_beneath_a_directory_the_agent_removed_stays_pending() {
     let share = &scratch.share;
     fs::create_dir_all(share.join("logs/sub")).unwrap();
     fs::write(share.join("logs/notes.txt"), "notes\n").unwrap();
+    fs::write(share.join("logs/old.txt"), "old\n").unwrap();
     fs::create_dir_all(share.join("cache/sub")).unwrap();
     let (run, pending) = scratch.run("notes", 1);
-    delete(share, &pending, "logs");
+    for path in ["logs/notes.txt", "logs/old.txt", "logs"] {
+        delete(share, &pending, path);
+    }
     change(share, &pending, "cache", 0o644, b"a file\n");
     fs::write(share.join("logs/notes.txt"), "yours, again\n").unwrap();
     fs::write(share.join("logs/sub/new.txt"), "new\n").unwrap();
@@ -392,12 +396,16 @@ fn a_file_you_changed_beneath_a_directory_the_agent_removed_stays_pending() {
     assert_eq!(diff.status.code(), Some(0), "{}", stderr(&diff));
     let cache = "diff --git a/cache b/cache\nnew file mode 100644\n\
                  --- /dev/null\n+++ b/cache\n@@ -0,0 +1 @@\n+a file\n";
-    assert_eq!(stdout(&diff), format!("{cache}{skipped}"));
+    let old = "diff --git a/logs/old.txt b/logs/old.txt\ndeleted file mode 100644\n\
+               --- a/logs/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n";
+    let (before, after) = skipped.split_at(skipped.find("skipped logs/sub").unwrap());
+    assert_eq!(stdout(&diff), format!("{cache}{before}{old}{after}"));
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert_eq!(yours(&output), skipped);
     assert_eq!(scratch.read("logs/notes.txt"), "yours, again\n");
     assert_eq!(scratch.read("logs/sub/new.txt"), "new\n");
     assert_eq!(scratch.read("cache/sub/new.txt"), "new\n");
+    assert!(!scratch.exists("logs/old.txt"));
     // They stay pending, and stay as they were.
     let output = scratch.ap(&["apply", &run]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));

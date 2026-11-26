@@ -807,7 +807,7 @@ impl Host {
         &self,
         records: &Records,
         landed: &BTreeMap<Vec<u8>, Option<Base>>,
-        kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>,
+        kept: &BTreeMap<Vec<u8>, Option<Base>>,
     ) {
         for path in records.entries.keys().rev() {
             let View::Agent(Entry::Dir { mode, .. }) = records.view(path) else {
@@ -1105,7 +1105,7 @@ impl Share<'_> {
                         // One you put there since has no record, so you
                         // had no file there before.
                         let base = records.bases.get(&path).copied().flatten();
-                        kept.insert(path.clone(), Some(base));
+                        kept.insert(path.clone(), base);
                     }
                     report.insert(path, out);
                 }
@@ -1166,7 +1166,7 @@ impl Share<'_> {
             report.insert(path.clone(), out);
             // Your file is as it was, so a later `ap apply` can try again.
             let now = host.stat(&path).ok().flatten();
-            kept.insert(path, Some(now.as_ref().map(Base::of)));
+            kept.insert(path, now.as_ref().map(Base::of));
         }
         host.journal = None;
         let landed = self.read(LANDED)?.bases;
@@ -1183,7 +1183,7 @@ impl Share<'_> {
         &self,
         records: &Records,
         landed: &BTreeMap<Vec<u8>, Option<Base>>,
-        kept: &BTreeMap<Vec<u8>, Option<Option<Base>>>,
+        kept: &BTreeMap<Vec<u8>, Option<Base>>,
     ) -> io::Result<()> {
         let mut out = Vec::new();
         let mut files = BTreeSet::new();
@@ -1205,9 +1205,7 @@ impl Share<'_> {
                     entry_record(&mut out, dir, &entry);
                 }
             }
-            if let Some(base) = base {
-                base_record(&mut out, path, base.as_ref());
-            }
+            base_record(&mut out, path, base.as_ref());
             let entry = match records.view(path) {
                 View::Agent(entry) => entry.clone(),
                 _ => Entry::Deleted,

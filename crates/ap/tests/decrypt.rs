@@ -1143,12 +1143,15 @@ fn a_destination_whose_certificate_the_roots_don_t_trust_is_refused() {
     let mut tls = Guest::http1(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed"));
     assert!(answer.is_ok(), "{answer:?}");
-    // Not, and nothing reaches it.
+    // Not, and nothing reaches it, whether the guest's hello waits for the
+    // destination's handshake, as it does when it offers HTTP/2, or not.
     let mut guest = Guest::new(&rules, Vec::new(), port);
-    let handle = guest.connect();
-    let mut tls = Guest::http1(&guest.authority.clone());
-    let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/untrusted"));
-    assert!(answer.is_err(), "{answer:?}");
+    for offered in [&[&b"http/1.1"[..]][..], &[b"h2", b"http/1.1"]] {
+        let handle = guest.connect();
+        let mut tls = Guest::tls_offering(&guest.authority.clone(), offered);
+        let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/untrusted"));
+        assert!(answer.is_err(), "{answer:?}");
+    }
     assert_eq!(settled(&seen), ["GET /allowed HTTP/1.1 (http/1.1)"]);
 }
 

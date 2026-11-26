@@ -372,6 +372,29 @@ fn http2_trailers_end_their_stream_and_carry_no_pseudo_header_field() {
 }
 
 #[test]
+fn the_client_cancelling_a_stream_it_ended_reaches_the_server() {
+    let reset = Frame::RstStream {
+        stream: 1,
+        code: 0x8,
+    };
+    let update = Frame::WindowUpdate {
+        stream: 1,
+        increment: 100,
+    };
+    let input = client(&[
+        headers(1, request("/allowed"), true),
+        update.clone(),
+        reset.clone(),
+    ]);
+    let passed = fed(&input, 64);
+    assert_eq!(passed.fed, Ok(()));
+    assert_eq!(
+        passed.frames[1..],
+        [headers(1, request("/allowed"), true), update, reset]
+    );
+}
+
+#[test]
 fn the_server_is_asked_never_to_push() {
     let input = client(&[Frame::Settings(vec![(ENABLE_PUSH, 1), (0x99, 7)])]);
     let passed = fed(&input, 64);

@@ -407,15 +407,11 @@ fn head(
                 false => return Err(Refused),
             }
         }
-        (None, Some(length)) if lengths.next().is_none() => {
-            let digits = !length.is_empty() && length.iter().all(u8::is_ascii_digit);
-            let length = std::str::from_utf8(length).ok().filter(|_| digits);
-            match length.and_then(|length| length.parse().ok()) {
-                Some(0) => Http::Head,
-                Some(length) => Http::Body(length),
-                None => return Err(Refused),
-            }
-        }
+        (None, Some(length)) if lengths.next().is_none() => match content_length(length) {
+            Some(0) => Http::Head,
+            Some(length) => Http::Body(length),
+            None => return Err(Refused),
+        },
         (None, None) => Http::Head,
         _ => return Err(Refused),
     };
@@ -491,10 +487,13 @@ impl Http2 {
         out: &mut Vec<u8>,
         allows: &mut dyn FnMut(&str) -> bool,
     ) -> Result<(), Refused> {
-        let update = match frame {
+        // What the client tells the server of a stream that has closed on
+        // the client's side, which the server still has open.
+        let unseen = match frame {
             Frame::WindowUpdate { stream, increment } => {
                 Some(Frame::WindowUpdate { stream, increment })
             }
+            Frame::RstStream { stream, code } => Some(Frame::RstStream { stream, code }),
             _ => None,
         };
         let padding = match &frame {
@@ -577,8 +576,8 @@ impl Http2 {
             },
             Some(Event::Connection(frame)) => frame,
             // PRIORITY, which RFC 9113 deprecates, goes no further.
-            None => match update {
-                Some(update) => update,
+            None => match unseen {
+                Some(unseen) => unseen,
                 None => return Ok(()),
             },
         };
@@ -687,10 +686,7 @@ fn http2_request(
     let mut lengths = named(b"content-length");
     let length = match (lengths.next(), lengths.next()) {
         (None, _) => None,
-        (Some(length), None) if !length.is_empty() && length.iter().all(u8::is_ascii_digit) => {
-            let length = std::str::from_utf8(length).map_err(|_| Refused)?;
-            Some(length.parse().map_err(|_| Refused)?)
-        }
+        (Some(length), None) => Some(content_length(length).ok_or(Refused)?),
         _ => return Err(Refused),
     };
     let path = std::str::from_utf8(path).map_err(|_| Refused)?;
@@ -698,6 +694,13 @@ fn http2_request(
         true => Ok(length),
         false => Err(Refused),
     }
+}
+
+/// The length in a `Content-Length` value, which must be digits alone.
+fn content_length(value: &[u8]) -> Option<u64> {
+    let digits = !value.is_empty() && value.iter().all(u8::is_ascii_digit);
+    let value = std::str::from_utf8(value).ok().filter(|_| digits)?;
+    value.parse().ok()
 }
 
 /// Whether `header` may be in a body's trailers: a well-formed field, and

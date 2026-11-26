@@ -849,6 +849,11 @@ reader first, and change the file in a later PR.
 7. Squash-merge with `--match-head-commit`, delete the branch, and release the
    slot.
 
+GitHub can fail a call that it takes a moment later. So once the proof has
+passed, each call in steps 5 and 6 that can fail is tried once more, two
+seconds later, and a comment that a failed call posted all the same isn't
+posted again.
+
 The description of `xtask/gate` says what the proof is doing, and then how it
 ended:
 
@@ -862,6 +867,7 @@ ended:
 | A check of the PR's own xtask failed | `failure` | As `Failed in its own xtask: journey` |
 | The branch doesn't rebase, or the PR or `main` changed during the proof | `failure` | Why, in its first 140 characters |
 | An error stopped the proof | `failure` | `Stopped by an error` |
+| An error stopped it after the proof passed | `failure` | `Proven, then stopped by an error` |
 
 The status goes on the head that GitHub shows for the PR: the fetched head
 until the push, and the new head after it. So proving a green PR again turns
@@ -956,14 +962,21 @@ the runner's user map ids in a user namespace. The
 5. Try every PR, and exit 1 if any failed. A failed `prepare` posts `failure`
    and says why. If it ended with neither a `success` nor a `failure` on the
    PR's head, as at the merge timeout, `refresh` posts `failure` as `Not
-   proven`.
+   proven`. It posts nothing if it can't read the head's status.
 6. A proof that failed only because `main` moved keeps `land-needed`, and the
-   next run proves it again. A failure that `prepare` gave in words came from
-   the PR and git: the tip has no record, the branch doesn't rebase, or the PR
-   changed during the proof. `refresh` takes each of those as the change's, and
-   proves nothing on `main` for it. After the first failure of any other kind,
-   which is a failed check, `Stopped by an error`, or `Not proven`, `refresh`
-   runs its own gate on the newest `main`, in a tree of its own, once per run.
+   next run proves it again. So does a proof that passed and was then stopped,
+   as by a GitHub call that failed twice, which `refresh` doesn't take as the
+   change's. `prepare` pushes only after the proof passes, so `refresh` takes a
+   head that moved during the proof the same way, even when GitHub took no
+   status for it. A head that someone else pushed during the proof moved too,
+   and nothing proved it. A PR whose head or status `refresh` can't read after
+   the proof keeps `land-needed` too. A failure that `prepare` gave in words
+   came from the PR and git: the tip has no record, the branch doesn't rebase,
+   or what the PR says changed during the proof. `refresh` takes each of those
+   as the change's, and proves nothing on `main` for it. After the first
+   failure of any other kind, which is a failed check, `Stopped by an error`,
+   or `Not proven`, `refresh` runs its own gate on the newest `main`, in a tree
+   of its own, once per run.
    That gate gets the merge timeout, which here counts its wait for a place too.
    It is stopped there, with every command it started, and that counts as a
    `main` that fails. It is stopped the same way when the refresh itself stops.

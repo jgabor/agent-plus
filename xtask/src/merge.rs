@@ -24,6 +24,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How a proof ends that passed, and then an error stopped, as GitHub can.
+pub const PROVEN_THEN_STOPPED: &str = "Proven, then stopped by an error";
 /// Why a proof failed when the change may be fine.
 pub const MAIN_MOVED: &str =
     "`main` moved during the merge, so this head wasn't tested on it. Run it again";
@@ -187,8 +189,9 @@ fn sequence(
         }
     }
     let Proof { record, accepted } = proof;
+    status.proven.set(true);
 
-    if let Some(why) = changed_during_proof(&gh, &root, &scoring, &fetched.main)? {
+    if let Some(why) = again(|| changed_during_proof(&gh, &root, &scoring, &fetched.main))? {
         status.failed(&why);
         return refuse(&why);
     }
@@ -203,7 +206,9 @@ fn sequence(
         pr.head_ref, fetched.branch
     );
     let target = format!("HEAD:refs/heads/{}", pr.head_ref);
-    base::git_text(&tree.path, &["push", "-q", &lease, "origin", &target])?;
+    // A push that landed but failed all the same is up to date the second
+    // time.
+    again(|| base::git_text(&tree.path, &["push", "-q", &lease, "origin", &target]))?;
     status.head = recorded.clone();
     let changed = base::git_text(&tree.path, &["diff", "--name-only", &gated, &recorded])?;
     if changed.trim() != path {
@@ -214,9 +219,19 @@ fn sequence(
     }
     // The comment comes first, so that a green PR always has it.
     if !accepted.is_empty() {
-        let earlier = gh.acceptances(number)?;
-        gh.comment_on_pr(number, &acceptance(&recorded, &accepted))?;
-        hold_back(&gh, number, command, &earlier, &accepted)?;
+        let earlier = again(|| gh.acceptances(number))?;
+        let body = acceptance(&recorded, &accepted);
+        again(|| {
+            // A call that failed can have posted it all the same.
+            let posted = accepts::acceptances(&gh.acceptances(number)?);
+            if posted.iter().any(|(at, _)| *at == recorded) {
+                return Ok(());
+            }
+            gh.comment_on_pr(number, &body)
+        })?;
+        // It only reads, and turns auto-merge off if it is on, so it can run
+        // twice.
+        again(|| hold_back(&gh, number, command, &earlier, &accepted))?;
     }
     status.passed(&format!(
         "spec {} of {}, journey {} of {}",
@@ -373,6 +388,9 @@ struct Status<'a> {
     /// The head that the PR shows, which the push replaces.
     head: String,
     ended: Cell<bool>,
+    /// Whether the proof passed, so that what stops it after is no fault of
+    /// the change.
+    proven: Cell<bool>,
 }
 
 impl<'a> Status<'a> {
@@ -382,6 +400,7 @@ impl<'a> Status<'a> {
             gh,
             head: head.to_string(),
             ended: Cell::new(false),
+            proven: Cell::new(false),
         };
         status.proving("lint");
         status
@@ -398,13 +417,11 @@ impl<'a> Status<'a> {
 
     /// A green that can't be posted is a problem, because the PR can't merge.
     fn passed(&self, score: &str) -> Result<(), Problem> {
-        self.gh.post_status(
-            &self.head,
-            GATE,
-            "success",
-            Some(score),
-            run_url().as_deref(),
-        )?;
+        let link = run_url();
+        again(|| {
+            self.gh
+                .post_status(&self.head, GATE, "success", Some(score), link.as_deref())
+        })?;
         self.ended.set(true);
         Ok(())
     }
@@ -413,9 +430,27 @@ impl<'a> Status<'a> {
 impl Drop for Status<'_> {
     fn drop(&mut self) {
         if !self.ended.get() {
-            self.failed("Stopped by an error");
+            self.failed(if self.proven.get() {
+                PROVEN_THEN_STOPPED
+            } else {
+                "Stopped by an error"
+            });
         }
     }
+}
+
+/// How long a call that failed after the proof waits for its second try.
+const AGAIN: Duration = Duration::from_secs(2);
+
+/// GitHub can fail a call that it takes a moment later. Once the proof has
+/// passed, each call that can fail this way gets a second try, so the call
+/// must be safe to make twice.
+fn again<T>(mut call: impl FnMut() -> Result<T, Problem>) -> Result<T, Problem> {
+    call().or_else(|Problem(why)| {
+        eprintln!("merge: {why}, so it is tried again");
+        thread::sleep(AGAIN);
+        call()
+    })
 }
 
 /// Whether this process is the worker that a supervisor started. The variable

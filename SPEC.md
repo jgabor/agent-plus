@@ -1670,6 +1670,9 @@ attributes, because those can run commands.
     the branch import, says why, and everything stays pending. They do the
     same when the agent's pack indexes are larger than 512 MiB in all,
     before they read one.
+  - `ap diff` and `ap apply` skip each file the agent wrote that is larger
+    than 512 MiB, say why, and read none of it. The last commit holds that
+    path as the agent's `HEAD` holds it.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and

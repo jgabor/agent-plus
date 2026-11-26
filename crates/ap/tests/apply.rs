@@ -2502,6 +2502,74 @@ fn a_ref_file_larger_than_the_limit_stays_pending() {
     }
 }
 
+/// From #834: the agent wrote `big`, a byte more than 512 MiB long, and
+/// `huge`, 10 GiB, which cost almost nothing as sparse files, and `notes`.
+/// `ap apply` applies `notes` alone, within a fixed memory and time, and
+/// nothing stays pending.
+// spec(SHARE): `ap diff` and `ap apply` skip each file the agent wrote that is larger than 512 MiB, say why, and read none of it.
+#[test]
+fn a_file_larger_than_the_limit_is_skipped_unread() {
+    let scratch = Scratch::new("too-large-file");
+    let (run, pending) = scratch.run("notes", 1);
+    repo::sparse(&pending, "big", (512 << 20) + 1);
+    repo::sparse(&pending, "huge", 10 << 30);
+    write(&pending, "notes", 0o644, b"notes\n");
+
+    let mut command = scratch.command(&["apply", &run]);
+    repo::limit_cpu(&mut command, 5);
+    repo::limit_memory(&mut command, 2 << 30);
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped big: it is larger than 512 MiB\n",
+            "skipped huge: it is larger than 512 MiB\n",
+        )
+    );
+    assert_eq!(scratch.names(""), ["notes"]);
+    assert_eq!(scratch.read("notes"), "notes\n");
+    assert!(!scratch.runs().has_pending(&run).unwrap());
+}
+
+/// From #834: the agent wrote `README`, which its `HEAD` holds, a byte more
+/// than 512 MiB long, and `huge`, 10 GiB, which cost almost nothing as
+/// sparse files, and `notes`. The last commit holds `README` as that
+/// `HEAD` does, no `huge`, and `notes`, and `ap apply` makes it within a
+/// fixed memory and time.
+// spec(SHARE): `ap diff` and `ap apply` skip each file the agent wrote that is larger than 512 MiB, say why, and read none of it.
+// spec(SHARE): The last commit holds that path as the agent's `HEAD` holds it.
+#[test]
+fn a_file_larger_than_the_limit_is_left_out_of_the_last_commit() {
+    let repository = Repository::new("too-large-file-commit", true, &[]);
+    let (share, pending) = (repository.share(), &repository.pending);
+    record(pending, &base(share, "README"));
+    repo::sparse(pending, "README", (512 << 20) + 1);
+    repo::sparse(pending, "huge", 10 << 30);
+    write(pending, "notes", 0o644, b"notes\n");
+    fs::write(repository.guest.join("notes"), "notes\n").unwrap();
+    let tree = repository.tree_after(&[&["add", "notes"]]);
+
+    let path = std::env::var_os("PATH").unwrap();
+    let mut command = repository.scratch.command(&["apply", &repository.run]);
+    repo::limit_cpu(command.env("PATH", path), 5);
+    repo::limit_memory(&mut command, 2 << 30);
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        concat!(
+            "skipped README: it is larger than 512 MiB\n",
+            "skipped huge: it is larger than 512 MiB\n",
+        )
+    );
+    let branch = format!("{}^{{tree}}", repository.branch());
+    assert_eq!(repo::run(share, &["rev-parse", &branch]), tree);
+    assert!(repository.scratch.runs().list_pending().unwrap().is_empty());
+}
+
 /// From #714: the agent's `HEAD` holds a file 1024 bytes long beneath
 /// `deep`, or one a byte longer beneath `deep1`. Beneath a directory the
 /// agent deleted, `ap apply` reads the first, and refuses the second.

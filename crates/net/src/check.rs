@@ -2,8 +2,10 @@
 //! connection shows without decrypting must agree with the name it is
 //! attributed to. It reads the guest's bytes as they come. A TLS client
 //! hello must name the attributed name, if it names any. Plain HTTP must
-//! name it in every request's `Host` header. Anything else passes on the
-//! attribution alone. On a connection the proxy decrypts, it reads HTTP/1.1
+//! name it in every request's `Host` header. Text is read line by line, and
+//! TLS that starts a line, as it does after `STARTTLS`, gets the same check
+//! as TLS from the first byte. Anything else passes on the attribution
+//! alone. On a connection the proxy decrypts, it reads HTTP/1.1
 //! the same way, and HTTP/2 request by request.
 
 use std::collections::BTreeMap;
@@ -32,6 +34,9 @@ pub struct NameCheck {
     state: State,
     /// A request whose `Host` names another host passes.
     any_host: bool,
+    /// TLS that starts after text gets the hello check. Otherwise it is
+    /// refused.
+    later_tls: bool,
 }
 
 /// The connection showed a name that disagrees, or bytes that can't be
@@ -47,6 +52,9 @@ enum State {
     Tls(Box<Acceptor>, usize),
     /// Plain HTTP, at this point of a request.
     Http(Http),
+    /// Text, which passes as it comes, and whose next byte starts a line if
+    /// this is true.
+    Text(bool),
     /// HTTP/2, which the guest and the server agreed inside TLS.
     Http2(Box<Http2>),
     /// Everything else passes unread.
@@ -77,6 +85,18 @@ impl NameCheck {
             held: Vec::new(),
             state: State::First,
             any_host: false,
+            later_tls: true,
+        }
+    }
+
+    /// A check as [`NameCheck::new`]'s, for a connection to `name` whose TLS
+    /// the proxy decrypts, and whose first byte isn't TLS. It refuses TLS
+    /// that starts after text, because the proxy decrypts TLS only from a
+    /// connection's first byte.
+    pub fn without_later_tls(name: &str) -> NameCheck {
+        NameCheck {
+            later_tls: false,
+            ..NameCheck::new(name)
         }
     }
 
@@ -180,6 +200,26 @@ impl NameCheck {
                     }
                     agreed
                 }
+                State::Text(start) => match lines(&self.held, *start) {
+                    // What came before the TLS passes.
+                    Lines::Tls(at) => {
+                        out.extend(self.held.drain(..at));
+                        if !self.later_tls {
+                            return Err(Refused);
+                        }
+                        self.state = State::Tls(Box::default(), 0);
+                        true
+                    }
+                    Lines::Other => {
+                        self.state = State::Passing;
+                        true
+                    }
+                    Lines::Text(start) => {
+                        out.append(&mut self.held);
+                        self.state = State::Text(start);
+                        return Ok(());
+                    }
+                },
                 State::Http2(http2) => {
                     let fed = http2.feed(&self.held, &self.name, out, allows);
                     self.held.clear();
@@ -210,7 +250,11 @@ impl NameCheck {
     pub fn holding(&self) -> bool {
         !self.held.is_empty()
             || match &self.state {
-                State::Http(Http::Head) | State::First | State::Passing | State::Refused => false,
+                State::Http(Http::Head)
+                | State::First
+                | State::Text(_)
+                | State::Passing
+                | State::Refused => false,
                 State::Http2(http2) => http2.reader.holding(),
                 State::Tls(..) | State::Http(_) => true,
             }
@@ -242,14 +286,14 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
     };
     let line = &held[start..];
     // A request line starts with a method, or with the whitespace that a
-    // lenient server skips. Anything else passes at once, as a binary
-    // protocol's first bytes do.
+    // lenient server skips. Anything else is text, or passes at once, as a
+    // binary protocol's first bytes do.
     let method = line.iter().take_while(|&&byte| token(byte)).count();
     match line.get(method) {
         // Vertical tab too, which `is_ascii_whitespace` leaves out.
         Some(byte) if byte.is_ascii_whitespace() || *byte == 0x0b => {}
         None => return short(),
-        Some(_) => return Ok(Some(State::Passing)),
+        Some(_) => return Ok(Some(State::Text(true))),
     }
     let Some(end) = line.iter().position(|&byte| byte == b'\n') else {
         return short();
@@ -259,8 +303,32 @@ fn first(held: &[u8]) -> Result<Option<State>, Refused> {
     let version = (line[..end].windows(5)).any(|window| window.eq_ignore_ascii_case(b"http/"));
     Ok(Some(match version {
         true => State::Http(Http::Head),
-        false => State::Passing,
+        false => State::Text(true),
     }))
+}
+
+/// What `held` holds, read as text whose first byte starts a line if
+/// `start`.
+enum Lines {
+    /// TLS, which starts a line at this byte.
+    Tls(usize),
+    /// A byte that isn't text, after which nothing is read.
+    Other,
+    /// Text alone, and whether the next byte starts a line.
+    Text(bool),
+}
+
+fn lines(held: &[u8], mut start: bool) -> Lines {
+    for (at, &byte) in held.iter().enumerate() {
+        if start && byte == 0x16 {
+            return Lines::Tls(at);
+        }
+        if byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n') {
+            return Lines::Other;
+        }
+        start = matches!(byte, b'\r' | b'\n');
+    }
+    Lines::Text(start)
 }
 
 /// Gives `acceptor` the bytes held that it hasn't read, and reads the

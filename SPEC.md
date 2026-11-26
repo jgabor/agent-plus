@@ -2043,7 +2043,9 @@ allow one.
   body whose length a server could read another way. When the guest sends
   nothing first, as in protocols where the server speaks first, the proxy
   connects after a quarter of a second, and checks the guest's first bytes
-  when they come.
+  when they come. On a connection that starts with text, TLS that starts a
+  line, as it does after `STARTTLS`, gets the same name check as TLS from
+  the first byte.
 - **Decryption.** The proxy decrypts TLS, with the per-run certificate
   authority, only where it must.
   - on hosts with URL rules, because the rules need the request path
@@ -2064,8 +2066,11 @@ allow one.
   request on a reused HTTP/2 connection (`:authority`). On a host with URL
   rules, traffic that isn't HTTP is denied. TLS that the proxy decrypts and
   that doesn't carry HTTP is denied, because the proxy can't check the names
-  in it. A request that the rules deny
-  never reaches the server, and the proxy resets the connection it came on.
+  in it. On a host that the proxy decrypts for a rule, TLS that starts after
+  plain text, as it does after `STARTTLS`, is denied, because the proxy
+  decrypts TLS only from a connection's first byte. A request that the rules
+  deny never reaches the server, and the proxy resets the connection it came
+  on.
   The proxy connects to the server before the first request, but nothing
   the server sends reaches the guest until the rules allow a request. The
   proxy reads what the guest sends, and what the server answers passes
@@ -2109,6 +2114,10 @@ allow one.
     for other names it serves, including names the policy denies: other
     names on its certificate, or other sites behind the same shared front,
     such as a CDN.
+  - On a connection that starts with neither TLS nor HTTP, the proxy reads
+    nothing after a control character other than tab, carriage return, or
+    line feed, so TLS that starts after one, as PostgreSQL's does, is neither
+    checked nor decrypted.
   - `NETWORK` covers only the agent's own connections. The agent can ask
     an agent it may call to connect for it (see [POLICY](#policy)), and a
     harness's hosted tools, such as web search, run on the vendor's servers,

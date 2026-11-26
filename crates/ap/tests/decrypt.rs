@@ -1575,6 +1575,73 @@ fn greeter() -> (u16, Seen) {
     (port, seen)
 }
 
+/// A destination that reads `before` in plain, and then serves TLS with
+/// `config` from the next byte, as a server does after `STARTTLS`. It
+/// answers requests as [`destination`]'s does.
+fn tls_after(before: &'static [u8], config: Arc<ServerConfig>) -> (u16, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Seen::default();
+    let noted = Arc::clone(&seen);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let (config, noted) = (Arc::clone(&config), Arc::clone(&noted));
+            thread::spawn(move || {
+                stream.set_read_timeout(Some(WAIT)).unwrap();
+                let mut plain = vec![0; before.len()];
+                if stream.read_exact(&mut plain).is_err() || plain != before {
+                    return;
+                }
+                let server = ServerConnection::new(config).unwrap();
+                let mut stream = rustls::StreamOwned::new(server, stream);
+                answer(&mut stream, &noted, |_| "tls after plain".to_owned());
+            });
+        }
+    });
+    (port, seen)
+}
+
+// spec(NETWORK): On a host that the proxy decrypts for a rule, TLS that starts after plain text, as it does after `STARTTLS`, is denied, because the proxy decrypts TLS only from a connection's first byte.
+#[test]
+fn tls_after_plain_text_is_denied_on_a_host_the_proxy_decrypts() {
+    let (root, config) = server();
+    let (port, seen) = tls_after(b"STARTTLS\r\n", config);
+    let broader = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -gist.{NAME}\n");
+    let url = format!("NETWORK -\nNETWORK +http://{NAME}:{port}/after\n");
+    for rules in [broader, url] {
+        let mut guest = Guest::new(&rules, vec![root.clone()], port);
+        let handle = guest.connect();
+        send_raw(&mut guest, handle, b"STARTTLS\r\n");
+        let mut tls = Guest::http1(&root);
+        let answer = guest.exchange(handle, Some(&mut tls), &get("/after"));
+        assert_eq!(answer, Err("reset".to_owned()), "{rules}");
+    }
+    assert_eq!(settled(&seen), [] as [String; 0]);
+}
+
+// spec(NETWORK): On a connection that starts with neither TLS nor HTTP, the proxy reads nothing after a control character other than tab, carriage return, or line feed, so TLS that starts after one, as PostgreSQL's does, is neither checked nor decrypted.
+#[test]
+fn tls_after_bytes_that_aren_t_text_is_not_decrypted() {
+    const SSL_REQUEST: &[u8] = b"\x00\x00\x00\x08\x04\xd2\x16\x2f";
+    let (root, config) = server();
+    let (port, seen) = tls_after(SSL_REQUEST, config);
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -gist.{NAME}\n");
+    let mut guest = Guest::new(&rules, Vec::new(), port);
+    let handle = guest.connect();
+    send_raw(&mut guest, handle, SSL_REQUEST);
+    // The guest sees the destination's own certificate, and a request for
+    // the narrower name reaches it.
+    let mut tls = Guest::http1(&root);
+    let gist = format!("GET /b HTTP/1.1\r\nHost: gist.{NAME}\r\n\r\n");
+    let answer = guest.exchange(handle, Some(&mut tls), gist.as_bytes());
+    assert!(
+        answer.as_ref().is_ok_and(|a| a.ends_with("\r\n\r\n/b")),
+        "{answer:?}"
+    );
+    assert_eq!(settled(&seen), ["GET /b HTTP/1.1 (tls after plain)"]);
+}
+
 // spec(NETWORK): The proxy connects to the server before the first request, but nothing the server sends reaches the guest until the rules allow a request.
 // spec(NETWORK): The proxy reads what the guest sends, and what the server answers passes unread.
 #[test]

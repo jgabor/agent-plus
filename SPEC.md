@@ -1664,10 +1664,12 @@ attributes, because those can run commands.
     entry, `ap diff`'s first line says why, and `ap apply` refuses the
     branch import, says why, and everything stays pending.
   - `ap diff` and `ap apply` read none of the agent's objects or pack
-    indexes larger than 512 MiB. At a larger one, `ap diff`'s first line
-    says why, and `ap apply` refuses the branch import, says why, and
-    everything stays pending. They do the same when the agent's pack
-    indexes are larger than 512 MiB in all, before they read one.
+    indexes larger than 512 MiB. Nor do they read the agent's `HEAD`, one
+    of its loose refs, or its `packed-refs` when it is larger than that. At
+    a larger one, `ap diff`'s first line says why, and `ap apply` refuses
+    the branch import, says why, and everything stays pending. They do the
+    same when the agent's pack indexes are larger than 512 MiB in all,
+    before they read one.
   - Otherwise, changed, added, and deleted files are applied to your files,
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and

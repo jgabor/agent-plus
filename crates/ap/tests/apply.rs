@@ -2462,6 +2462,36 @@ fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
     }
 }
 
+/// From #832: the agent's `refs/heads/main`, a loose ref, or its
+/// `packed-refs`, once its git packed its refs, is 10 GiB long, which costs
+/// almost nothing as a sparse file. `ap apply` refuses each before it
+/// reads it, within a fixed time.
+// spec(SHARE): Nor do they read the agent's `HEAD`, one of its loose refs, or its `packed-refs` when it is larger than that.
+// spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_ref_file_larger_than_the_limit_stays_pending() {
+    for file in ["refs/heads/main", "packed-refs"] {
+        let name = file.replace('/', "-");
+        let repository = Repository::new(&format!("too-large-{name}"), true, &[]);
+        repository.commit("a", "a\n");
+        if file == "packed-refs" {
+            repo::run(&repository.guest, &["pack-refs", "--all"]);
+            record(&repository.pending, "DELETE \".git/refs/heads/main\"");
+        }
+        repository.land();
+        let path = repository.pending.join("tree/.git").join(file);
+        let opened = fs::OpenOptions::new().write(true).open(path);
+        opened.unwrap().set_len(10 << 30).unwrap();
+        let before = repository.objects_and_refs();
+
+        let output = repository.apply_within(2);
+
+        let error = format!("the agent's .git/{file} is larger than the limit");
+        let error = format!("{error}, so everything stays pending");
+        repository.stays_pending(&output, &error, &before);
+    }
+}
+
 /// From #714: the agent's `HEAD` holds a file 1024 bytes long beneath
 /// `deep`, or one a byte longer beneath `deep1`. Beneath a directory the
 /// agent deleted, `ap apply` reads the first, and refuses the second.

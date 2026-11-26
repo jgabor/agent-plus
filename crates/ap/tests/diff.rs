@@ -646,7 +646,13 @@ fn a_history_that_can_t_be_read_still_shows_the_files() {
 /// The first line `ap diff` prints, within 20 seconds of CPU time, once the
 /// agent's git has run `commit` on a clone of your repository, and the
 /// agent has deleted `deleted`, and written a file at `written`.
-fn first_line(name: &str, commit: impl Fn(&Path), deleted: &str, written: Option<&str>) -> String {
+fn first_line(
+    name: &str,
+    commit: impl Fn(&Path),
+    landed: impl Fn(&Path),
+    deleted: &str,
+    written: Option<&str>,
+) -> String {
     let scratch = Scratch::new(name);
     let share = &scratch.share;
     repo::run(share, &["init", "-q"]);
@@ -657,6 +663,7 @@ fn first_line(name: &str, commit: impl Fn(&Path), deleted: &str, written: Option
     repo::guest(share, &guest);
     commit(&guest);
     repo::land(&guest, share, &pending);
+    landed(&pending);
     record(&pending, &format!("DELETE \"{deleted}\""));
     if let Some(written) = written {
         write(&pending, written, 0o644, b"a file\n");
@@ -720,6 +727,7 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
         let first = first_line(
             &format!("too-many-{name}-{replaced}"),
             commit,
+            |_| (),
             name,
             written,
         );
@@ -742,7 +750,7 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_replaced_is_said_first() {
 #[test]
 fn a_head_with_a_name_git_refuses_is_said_first() {
     let commit = |guest: &Path| repo::commit_named(guest, b"");
-    let first = first_line("named-empty", commit, "gone", Some("notes"));
+    let first = first_line("named-empty", commit, |_| (), "gone", Some("notes"));
     assert_eq!(
         first,
         "branch ap/notes/<run>: its commits can't be counted: the agent's HEAD holds a tree entry with a name that git refuses"
@@ -761,7 +769,7 @@ fn an_object_larger_than_the_limit_is_said_first() {
         let commit = |guest: &Path| {
             *blob.borrow_mut() = repo::commit_zeros(guest, "big", (512 << 20) + 1, loose);
         };
-        let first = first_line(&format!("too-large-{loose}"), commit, "gone", None);
+        let first = first_line(&format!("too-large-{loose}"), commit, |_| (), "gone", None);
         let blob = blob.borrow();
         let why = match loose {
             true => format!("{blob} is larger than the limit"),
@@ -770,6 +778,40 @@ fn an_object_larger_than_the_limit_is_said_first() {
         let expected = "branch ap/notes/<run>: its commits can't be counted: ";
         assert!(first.starts_with(expected), "{first}");
         assert!(first.ends_with(&why), "{first}");
+    }
+}
+
+/// From #832: the agent's `refs/heads/main`, a loose ref, or its
+/// `packed-refs`, once its git packed its refs, is 10 GiB long, which costs
+/// almost nothing as a sparse file. `ap diff` says why on the first line,
+/// before it reads it, within a fixed time.
+// spec(SHARE): Nor do they read the agent's `HEAD`, one of its loose refs, or its `packed-refs` when it is larger than that.
+// spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+#[test]
+fn a_ref_file_larger_than_the_limit_is_said_first() {
+    for file in ["refs/heads/main", "packed-refs"] {
+        let commit = |guest: &Path| {
+            repo::commit(guest, "a", "a\n", "write a");
+            if file == "packed-refs" {
+                repo::run(guest, &["pack-refs", "--all"]);
+            }
+        };
+        let landed = |pending: &Path| {
+            if file == "packed-refs" {
+                record(pending, "DELETE \".git/refs/heads/main\"");
+            }
+            let path = pending.join("tree/.git").join(file);
+            let opened = fs::OpenOptions::new().write(true).open(path);
+            opened.unwrap().set_len(10 << 30).unwrap();
+        };
+        let name = format!("too-large-{}", file.replace('/', "-"));
+        let first = first_line(&name, commit, landed, "gone", None);
+        assert_eq!(
+            first,
+            format!(
+                "branch ap/notes/<run>: its commits can't be counted: the agent's .git/{file} is larger than the limit"
+            )
+        );
     }
 }
 

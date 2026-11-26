@@ -90,7 +90,9 @@ fn a_lint_warning_fails() {
     assert!(stdout(&output).contains("fail lint"));
 }
 
+/// Only a host that isn't macOS passes the first lint.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_lint_warning_that_only_macos_builds_fails() {
     let source = "#[cfg(target_os = \"macos\")]\npub fn answer() {\n    let unused = 42;\n}\n";
     let root = workspace("lint-macos", source);
@@ -115,7 +117,8 @@ fn every_check_runs_after_a_failure() {
     let root = workspace("all", "pub fn  answer( ) -> u32 { 42 }\n");
     let out = stdout(&xtask(&root, &["gate"]));
     assert!(out.contains("fail format"), "{out:?}");
-    assert!(out.contains("pass lint"), "{out:?}");
+    assert!(out.contains("pass lint\n"), "{out:?}");
+    assert!(out.contains("pass lint-macos"), "{out:?}");
     assert!(out.contains("pass tests"), "{out:?}");
 }
 

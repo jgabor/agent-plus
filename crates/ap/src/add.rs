@@ -383,7 +383,7 @@ fn permissions(stat: &libc::stat) -> u16 {
     // `st_mode` is a `u32` on Linux, and already a `u16` on macOS.
     #[cfg(target_os = "linux")]
     let mode = stat.st_mode as u16;
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     let mode = stat.st_mode;
     mode & PERMISSIONS
 }

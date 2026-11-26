@@ -1649,7 +1649,7 @@ fn a_merge_waits_for_the_merge_slot() {
         before.clone(),
         "pending Waiting: the merge slot".to_string(),
     );
-    assert_eq!(posts(&repo), [waiting.clone()]);
+    assert_eq!(posts(&repo), std::slice::from_ref(&waiting));
     held.unlock().unwrap();
     let status = child.wait().unwrap();
     assert_eq!(status.code(), Some(0), "{heard:?}");

@@ -366,6 +366,7 @@ fn another_harness_names_a_host_that_approved_rules_allow_only_in_part() {
         "NETWORK -\nNETWORK +codex.test\nNETWORK -https://codex.test/x\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test\n",
         "NETWORK -\nNETWORK +codex.test\nNETWORK -sign-in.codex.test:80\n",
+        "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -x.sign-in.codex.test\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -https://sign-in.codex.test/x\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -10.0.0.0/8\n",
         "NETWORK -\nNETWORK +sign-in.codex.test\nNETWORK -[::]/0:22\n",

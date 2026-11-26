@@ -25,7 +25,7 @@ const MIN_DELTA: usize = 4;
 
 /// A pack, with its index read into memory.
 pub(crate) struct Pack {
-    index: Vec<u8>,
+    pub(crate) index: Vec<u8>,
     count: usize,
     file: File,
     /// Where the pack's checksum starts, after its last entry.

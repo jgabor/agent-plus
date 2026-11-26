@@ -425,9 +425,10 @@ impl Repository {
     /// deltas is applied one delta at a time, so reading an object holds no
     /// more than a piece of its file, its base, one delta, and itself. A
     /// file read whole, a pack index, `packed-refs`, or a loose ref, is
-    /// refused as corrupt when it is longer than `limit` too. Without a
-    /// limit, an object can be as large as its header says, and a file as
-    /// long as it says.
+    /// refused as corrupt when it is longer than `limit` too, and so are
+    /// the pack indexes, before any is read, when they are longer than
+    /// that in all. Without a limit, an object can be as large as its
+    /// header says, and a file as long as it says.
     pub fn with_limit(self, limit: usize) -> Repository {
         Repository { limit, ..self }
     }
@@ -511,9 +512,29 @@ impl Repository {
             }
         }
         indexes.sort();
+        // Every index with a pack is measured before any is read, since a
+        // sparse file can say it is any length.
+        let mut all: u64 = 0;
+        for index in &indexes {
+            if open(&index.with_extension("pack"))?.is_some()
+                && let Some((_, len)) = open(index)?
+            {
+                all = all.saturating_add(len);
+            }
+        }
+        if all > self.limit as u64 {
+            let why = "are larger than the limit in all";
+            return Err(corrupt(format!("the pack indexes in {} {why}", dir.display())));
+        }
+        // An index may have grown since, so each is read within what the
+        // ones before it left.
+        let mut left = self.limit;
         let mut packs = Vec::new();
         for index in indexes {
-            packs.extend(Pack::open(&index, self.limit)?);
+            if let Some(pack) = Pack::open(&index, left)? {
+                left -= pack.index.len();
+                packs.push(pack);
+            }
         }
         Ok(self.packs.get_or_init(|| packs))
     }

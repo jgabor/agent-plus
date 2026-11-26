@@ -298,3 +298,39 @@ fn sparse_refs_are_refused_before_they_are_read() {
     let read = Repository::at(&git).find_ref("refs/heads/loose").unwrap();
     assert_eq!(read, Some(Target::Object(id(1))));
 }
+
+#[test]
+fn pack_indexes_larger_than_the_limit_in_all_are_refused_before_one_is_read() {
+    let root = scratch("indexes");
+    plant_pack(&root, &[(id(1), whole(3, b"four"))]);
+    let git = root.join(".git");
+    let dir = git.join("objects/pack");
+    let planted = dir.join("pack-planted");
+    let indexes: Vec<PathBuf> = (0..20)
+        .map(|n| {
+            let pack = dir.join(format!("pack-{n:02}"));
+            fs::copy(planted.with_extension("pack"), pack.with_extension("pack")).unwrap();
+            fs::copy(planted.with_extension("idx"), pack.with_extension("idx")).unwrap();
+            pack.with_extension("idx")
+        })
+        .collect();
+    fs::remove_file(planted.with_extension("pack")).unwrap();
+    fs::remove_file(planted.with_extension("idx")).unwrap();
+    let each = fs::metadata(&indexes[0]).unwrap().len() as usize;
+    // Each index is within the limit, and together they are as long as it.
+    let all = each * indexes.len();
+    let read = Repository::at(&git).with_limit(all).object(&id(1));
+    assert_eq!(read.unwrap().unwrap().data, b"four");
+    // A byte less, and the reader holds less than the limit.
+    let (result, held) = peak(|| Repository::at(&git).with_limit(all - 1).object(&id(1)));
+    assert_corrupt(result);
+    assert!(held < all - 1, "held {held} bytes");
+    // Sparse, each is half the limit long, and none is read.
+    for index in &indexes {
+        let file = fs::OpenOptions::new().write(true).open(index).unwrap();
+        file.set_len(LIMIT as u64 / 2).unwrap();
+    }
+    let (result, held) = peak(|| Repository::at(&git).with_limit(LIMIT).object(&id(1)));
+    assert_corrupt(result);
+    assert!(held < LIMIT / 2, "held {held} bytes");
+}

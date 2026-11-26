@@ -203,6 +203,7 @@ dependencies = [
  "ap",
  "git",
  "guest",
+ "h2",
  "httparse",
  "hyper",
  "iri-string",
@@ -211,6 +212,7 @@ dependencies = [
  "netstack",
  "share",
  "smoltcp",
+ "tokio",
  "vmm",
 ]
 

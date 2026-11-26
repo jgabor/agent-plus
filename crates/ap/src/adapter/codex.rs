@@ -44,7 +44,10 @@
 //! and 0.172.0 applied a patch outside the workspace with no review. So in
 //! `auto` the adapter turns the feature off, as it is by default, and the
 //! table goes with it. Codex 0.146.0 and later know the feature, and none
-//! from 0.137.0 to 0.172.0 warns about the override.
+//! from 0.137.0 to 0.172.0 warns about the override. A trusted project's
+//! `model_catalog_json` can still turn the classifier on, with its own
+//! threshold and instructions, because a catalog's `guardian` policy skips
+//! the feature.
 //!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An

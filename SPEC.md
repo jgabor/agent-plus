@@ -1005,8 +1005,8 @@ default is `auto`.
   `[auto_review]`, such as `policy`, so a project can't turn the reviewer
   off or give it instructions with those keys.
 - With `auto`, the Codex adapter also keeps `features.guardianv2` off, as
-  it is by default, so a project can't turn on the classifier that lets
-  Codex approve an action without asking the reviewer.
+  it is by default, so a project can't use that key to turn on the
+  classifier that lets Codex approve an action without asking the reviewer.
 - With `read`, `ask`, `edit`, or `auto`, when the working directory is a
   share, a rule in its `.codex/rules` that allows a command lets Codex run
   that command outside its sandbox without asking.

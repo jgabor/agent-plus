@@ -745,6 +745,26 @@ fn each_adapter_signs_in_with_a_key_and_claude_code_with_a_token() {
     assert!(claude::SIGN_IN.contains(&claude::TOKEN));
 }
 
+// spec(AUTH): It can appear once, and the adapter maps `AUTH key` to that harness's own API key, so an `AUTH key` line still works after you change `AGENT`.
+#[test]
+fn auth_appears_once_and_auth_key_works_under_either_harness() {
+    for (agent, key) in [("claude", "ANTHROPIC_API_KEY"), ("codex", "CODEX_API_KEY")] {
+        let source = format!("AGENT {agent}\nOS minimal\nAUTH key\n");
+        let instructions = agentfile::parse_for(&source, ap::adapter::reserved).unwrap();
+        let settings = agentfile::Settings::read(&instructions).unwrap();
+        let auth = agentfile::Secrets::read(&instructions).unwrap().auth;
+        assert_eq!(auth, Some(Auth::Key), "{agent}");
+        let sign_in = ap::adapter::sign_in(settings.agent.harness, auth.unwrap()).unwrap();
+        assert_eq!(sign_in.variable, key, "{agent}");
+        let twice = format!("{source}AUTH login\n");
+        let errors = agentfile::parse_for(&twice, ap::adapter::reserved).unwrap_err();
+        let lines: Vec<usize> = errors.iter().map(|error| error.line).collect();
+        assert_eq!(lines, [4], "{twice:?}: {errors:?}");
+        let message = &errors[0].message;
+        assert!(message.contains("`AUTH` can appear only once"), "{message}");
+    }
+}
+
 // spec(AUTH): The adapter never turns off a sign-in method the harness offers.
 #[test]
 fn no_adapter_output_limits_how_the_harness_signs_in() {

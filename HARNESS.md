@@ -950,13 +950,23 @@ was none. The head in that line doesn't count. A count that fell is covered by
 a fall at least as big, on any `main`, and a reason is the same whichever xtask
 found it.
 
-A workflow runs `cargo xtask refresh` when a PR's auto-merge is armed, when
-an issue gets `land-needed`, and on every push to `main`, one run at a time,
-with the workflow and `xtask` of `main`. GitHub-hosted x86_64 runners can
-run the VMM, once a udev rule opens KVM and a systemd user session is
-started. The `runner-setup` action in `.github/actions/` does both, and lets
-the runner's user map ids in a user namespace. The
-[runner gate](#runner-gate) uses it too, so a fix for the runner lands in both.
+`cargo xtask refresh` runs on the owner's Linux machine, in a checkout of its
+own at `~/agent-plus-refresh`. That checkout is a worktree of the repository
+that the workers' worktrees come from, so the refresh and every worker's merge
+take one merge slot. A systemd user timer in `harness/refresh/` starts it every
+five minutes, and its service moves the checkout to the newest `main` first,
+so the refresh runs the `xtask` of `main`. The owner turns the timer on, as
+[Owner actions](#owner-actions) says, and no agent installs or starts it. A
+refresh that starts while another runs proves nothing, and exits 0. A refresh
+that finds no PR to prove only reads GitHub, so it is cheap to run often.
+
+For each PR it goes on to prove or merge, the refresh takes the merge slot.
+If another run holds it, the refresh says that it waits for it, and posts that
+on a queued PR. Then it takes the slot's turn, and keeps it until it is done
+with the PR. The PR's `prepare` runs in that turn, and takes the slot ahead of
+every other merge, as the xtask of `main` does in a merge. The refresh takes
+the slot back the same way for the squash. So no merge moves `main` between a
+PR's proof and its squash. The refresh lets both go before it proves `main`.
 
 1. Find each open PR whose issue has `land-needed` and whose auto-merge is
    armed, oldest first. Every other PR, and its status, is left alone.
@@ -965,22 +975,20 @@ the runner's user map ids in a user namespace. The
    PRs are proven before it: `Queued, next`, `Queued, 1 PR ahead`, or
    `Queued, 2 PRs ahead`.
 3. Run `cargo xtask prepare <pr> --keep-budgets` for each as its own process.
-   It runs no bench, because a shared runner can't measure a budget. The new
-   record reads the sizes of the pinned layer and kernel from the rebased
-   tree, as every record does, so it follows a pin that `main` changed. It
-   keeps the reason and the other budget values of the record at the tip of
-   the branch, and `prepare` fails if the tip has none.
+   It runs no bench. The new record reads the sizes of the pinned layer and
+   kernel from the rebased tree, as every record does, so it follows a pin
+   that `main` changed. It keeps the reason and the other budget values of the
+   record at the tip of the branch, and `prepare` fails if the tip has none.
 4. Once a PR's head has `success`, `refresh` squashes it, if its auto-merge is
    still armed, its head is the one that was proven, it still closes the issue
    this run found it with, and no review requests changes. Any other PR stays
    open. A merge moves `main`, so the PRs after it are checked against the new
    `main`. After the squash, `refresh` removes `land-needed` from the PR and its
-   issue, because GitHub starts no workflow for a merge made with the workflow's
-   own token. Then it closes the issue as completed, which GitHub leaves open
-   after such a merge. It tries each of these steps, even when one fails. The
-   PR merged all the same, so its row says `merged`, and `refresh` names each
-   label or issue left behind on stderr, and exits 1. The next run lists only
-   open PRs, so it can't retry them.
+   issue, so that it waits for no workflow to do it. Then it closes the issue as
+   completed, in case GitHub didn't. It tries each of these steps, even when
+   one fails. The PR merged all the same, so its row says `merged`, and
+   `refresh` names each label or issue left behind on stderr, and exits 1. The
+   next run lists only open PRs, so it can't retry them.
    A PR whose proof in this run accepts what the approval doesn't cover isn't
    merged, and it and its issue keep `land-needed`. GitHub merges an armed PR
    once it is green, so its `prepare` turned auto-merge off before posting
@@ -1008,9 +1016,9 @@ the runner's user map ids in a user namespace. The
    It is stopped there, with every command it started, and that counts as a
    `main` that fails. It is stopped the same way when the refresh itself stops.
    So a run where every PR is proven pays nothing more. If `main` fails too, the
-   fault is the runner's or `main`'s. Then no PR that failed that way in the run
-   loses `land-needed` or gets a comment, and `refresh` names what failed on
-   stderr and in the run's summary, and exits 1. Otherwise the failure is the
+   fault is the machine's or `main`'s. Then no PR that failed that way in the
+   run loses `land-needed` or gets a comment, and `refresh` names what failed
+   on stderr and in the run's summary, and exits 1. Otherwise the failure is the
    change's. For a failure that is the change's, `refresh` removes `land-needed`
    from the PR and its issue, so the dispatcher restarts the issue. It tries
    each one, even when one fails, and names each failure. Then it comments on
@@ -1035,19 +1043,20 @@ rest are proven on the newer `main`.
 ### Runner gate
 
 Some faults show only on a GitHub-hosted runner, such as a uid that isn't
-1000, an AppArmor rule, a small socket buffer, or a slower machine. Without
-this workflow, only the refresh runs our tests there, so such a fault waits
-until some unrelated PR is armed, and that PR pays for it.
+1000, an AppArmor rule, a small socket buffer, or a slower machine. Nothing
+else runs our tests there.
 
 So `runner-gate.yml` runs `cargo xtask gate` on a GitHub-hosted runner at each
-push to `main`, after the `runner-setup` action that the refresh uses. It finds
-such a fault within one merge of the commit that brought it, and it blocks no
-PR. The gate on the owner's machines still decides every merge.
+push to `main`. GitHub-hosted x86_64 runners can run the VMM, once a udev rule
+opens KVM and a systemd user session is started. The `runner-setup` action in
+`.github/actions/` does both first, and lets the runner's user map ids in a
+user namespace. The gate finds such a fault within one merge of the commit
+that brought it, and it blocks no PR. The gate on the owner's machines still
+decides every merge.
 
 - The job that runs the gate has a token that can only read. It posts no
   `xtask/gate` status, and it merges and labels nothing.
-- Its concurrency group is its own, so it never holds or replaces a refresh.
-  A newer push replaces a run that is queued, not one that runs.
+- A newer push replaces a run that is queued, not one that runs.
 - The gate gets the merge timeout, because a hang is one of the faults it is
   for. A gate that runs out of time fails. The job has a longer limit, for the
   steps before the gate, and a job that reaches it files no issue.
@@ -1173,6 +1182,7 @@ GitHub.
 | Test runs and `cargo xtask run` | A place, then a shared hold of the activity lock |
 | Bench | Exclusive hold of the activity lock |
 | Merge | Exclusive merge slot |
+| Refresh | One run at a time, and the merge slot from each PR's proof to its squash |
 | GitHub API | One watcher per PR |
 
 | Setting | Initial value |
@@ -1183,6 +1193,7 @@ GitHub.
 | Merge slots | 1 |
 | Places for test runs | 2 per repository |
 | Dispatch period | 10 minutes |
+| Refresh period | 5 minutes |
 | Planning period | 1 hour |
 | Nightly time | 03:00 local |
 | Triage time | 06:00 local |
@@ -1247,6 +1258,25 @@ start to fail on timing, lower the worker slots on Linux to 4.
   `cargo xtask prepare <pr>` from its own branch instead, as the
   [merge sequence](#merge-sequence) says.
 - Turn the scheduled tasks on.
+- Turn the [refresh](#refresh) on, once, on the Linux machine whose repository
+  the workers' worktrees come from. Replace `<repository>` with the path of
+  its main checkout:
+
+  ```sh
+  git -C <repository> fetch origin main
+  git -C <repository> worktree add --detach ~/agent-plus-refresh origin/main
+  cd ~/agent-plus-refresh/harness/refresh
+  systemctl --user link "$PWD/agent-plus-refresh.service"
+  systemctl --user enable --now "$PWD/agent-plus-refresh.timer"
+  ```
+
+  It merges with your `gh` sign-in, and commits its records as your git user.
+  The service names `git` and `cargo` with no directory, so systemd looks for
+  them in `/usr/local/bin` and `/usr/bin`. The refresh finds `gh` on the path
+  that `systemctl --user show-environment` prints.
+  It runs while your user's systemd does, so `loginctl enable-linger` keeps it
+  running when you are signed out. After a change to its units on `main`, run
+  `systemctl --user daemon-reload`.
 - Set up the [paid checks](#check-tiers): create the Claude Console workspace
   and its monthly spend limit, a service account scoped to it, and a key with
   an expiry. Do the same with an OpenAI project. Put the keys in

@@ -1677,9 +1677,34 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
     repo.other_pr(10, "8-y", &Pr::default());
     let first_head = repo.head();
     let second_head = repo.head_of("8-y");
+    let (first, second, heard) = merge_ten_during(&repo, &["merge", "9"]);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    assert_eq!(second.status.code(), Some(0), "{heard:?}");
+    let calls = repo.calls();
+    let mut proving: Vec<String> = posts(&repo)
+        .into_iter()
+        .filter(|(_, said)| said.starts_with("pending Proving:"))
+        .map(|(commit, _)| commit)
+        .collect();
+    proving.dedup();
+    assert_eq!(proving, [first_head, second_head.clone()], "{calls}");
+    // Once, though it let the slot go for the turn.
+    let waited: Vec<(String, String)> = posts(&repo)
+        .into_iter()
+        .filter(|(commit, said)| *commit == second_head && said.starts_with("pending Waiting:"))
+        .collect();
+    let waiting = "pending Waiting: the merge slot".to_string();
+    assert_eq!(waited, [(second_head, waiting)], "{calls}");
+    assert_merged_after(&calls, 9);
+}
+
+/// Runs `xtask` with `first`, which pauses at its build of the xtask of
+/// `main`, starts `merge 10` then, and lets `first` go on once that merge says
+/// it waits for the slot. Gives back how each ended, and what the merge said.
+fn merge_ten_during(repo: &Repo, first: &[&str]) -> (Output, Output, Vec<String>) {
     let building = repo.bin.join("building");
     let go = repo.bin.join("go");
-    // Bounded, so that a failed test leaves no merge waiting for good.
+    // Bounded, so that a failed test leaves nothing waiting for good.
     let pause = format!(
         ": > '{}'; n=0; until [ -f '{}' ] || [ $n -ge 600 ]; do sleep 0.1; n=$((n+1)); done",
         building.display(),
@@ -1687,7 +1712,7 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
     );
     let first = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
+        .args(first)
         .env("RUN_ON", "build --quiet --package xtask")
         .env("RUN_COMMAND", pause)
         .stdout(Stdio::piped())
@@ -1722,11 +1747,11 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
         let left = deadline.saturating_duration_since(Instant::now());
         match lines.recv_timeout(left) {
             Ok(line) => heard.push(line),
-            Err(_) => panic!("the second merge never waited: {heard:?}"),
+            Err(_) => panic!("merge 10 never waited: {heard:?}"),
         }
     }
     fs::write(&go, "").unwrap();
-    // A merge that never ends fails the test instead of hanging it.
+    // A run that never ends fails the test instead of hanging it.
     let (done, ended) = mpsc::channel::<()>();
     let pids = [first.id(), second.id()];
     thread::spawn(move || {
@@ -1741,28 +1766,17 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
     let first = first.wait_with_output().unwrap();
     let second = second.wait_with_output().unwrap();
     let _ = done.send(());
-    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     heard.extend(lines.try_iter());
-    assert_eq!(second.status.code(), Some(0), "{heard:?}");
-    let calls = repo.calls();
-    let mut proving: Vec<String> = posts(&repo)
-        .into_iter()
-        .filter(|(_, said)| said.starts_with("pending Proving:"))
-        .map(|(commit, _)| commit)
-        .collect();
-    proving.dedup();
-    assert_eq!(proving, [first_head, second_head.clone()], "{calls}");
-    // Once, though it let the slot go for the turn.
-    let waited: Vec<(String, String)> = posts(&repo)
-        .into_iter()
-        .filter(|(commit, said)| *commit == second_head && said.starts_with("pending Waiting:"))
-        .collect();
-    let waiting = "pending Waiting: the merge slot".to_string();
-    assert_eq!(waited, [(second_head, waiting)], "{calls}");
-    // The second does nothing under the slot until the first has merged.
-    let slot_fetch = "+refs/heads/8-y:refs/remotes/origin/8-y";
-    let started = calls.find(slot_fetch).expect(&calls);
-    let merged = calls.find("gh pr merge 9 ").expect(&calls);
+    (first, second, heard)
+}
+
+/// Merge 10 does nothing under the slot until PR `number` has merged.
+#[track_caller]
+fn assert_merged_after(calls: &str, number: u64) {
+    let started = calls
+        .find("+refs/heads/8-y:refs/remotes/origin/8-y")
+        .expect(calls);
+    let merged = calls.find(&format!("gh pr merge {number} ")).expect(calls);
     assert!(merged < started, "{calls}");
 }
 
@@ -4143,7 +4157,7 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
 }
 
-/// A runner that can't prove `main` either says nothing about the PR, so the
+/// A machine that can't prove `main` either says nothing about the PR, so the
 /// refresh hands no PR back, and the next run proves them again.
 #[test]
 fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
@@ -4190,7 +4204,7 @@ fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
     // Once per run, however many PRs fail.
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
     let said = stderr(&output);
-    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    let why = "refresh: `main` can't be proven on this machine: Failed: format";
     assert!(said.contains(why), "{said}");
     let calls = repo.calls();
     for number in [5, 8, 9, 7] {
@@ -4200,14 +4214,14 @@ fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
     assert!(!calls.contains("--disable-auto"), "{calls}");
     let summary = fs::read_to_string(&summary).unwrap();
     assert!(
-        summary.contains("`main` can't be proven on the runner: Failed: format"),
+        summary.contains("`main` can't be proven on this machine: Failed: format"),
         "{summary}"
     );
 }
 
-/// A gate of `main` that hangs would hold the refresh for as long as its job
-/// may run. It stops at the merge timeout, with what it started, and that is
-/// a `main` the runner can't prove.
+/// A gate of `main` that hangs would hold the refresh, and every refresh after
+/// it, for good. It stops at the merge timeout, with what it started, and that is
+/// a `main` the machine can't prove.
 #[test]
 fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     let repo = Repo::new("refresh-main-hangs");
@@ -4245,7 +4259,7 @@ fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     assert!(started.elapsed() < Duration::from_secs(30), "{output:?}");
     let said = stderr(&output);
     let why =
-        "refresh: `main` can't be proven on the runner: its gate ran past the 10 second timeout";
+        "refresh: `main` can't be proven on this machine: its gate ran past the 10 second timeout";
     assert!(said.contains(why), "{said}");
     // The timeout stopped the hang, and not a gate that was only slow.
     assert!(repo.bin.join("hung").exists(), "{said}");
@@ -4352,7 +4366,7 @@ fn a_refresh_runs_nothing_from_a_fork() {
     assert!(calls.contains(&status(&head, "pending")), "{calls}");
     let unproven = format!("{} -f description=Not proven\n", status(&head, "failure"));
     assert!(calls.contains(&unproven), "{calls}");
-    // Only `main` is checked out, to tell the runner's faults from the PR's.
+    // Only `main` is checked out, to tell the machine's faults from the PR's.
     let added: Vec<&str> = calls
         .lines()
         .filter(|l| l.contains("worktree add"))
@@ -4511,7 +4525,7 @@ fn a_refresh_that_can_not_prove_main_still_hands_back_a_pr_refused_in_words() {
     let out = stdout(&output);
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
     let said = stderr(&output);
-    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    let why = "refresh: `main` can't be proven on this machine: Failed: format";
     assert!(said.contains(why), "{said}");
     let calls = repo.calls();
     for number in [5, 8] {
@@ -4641,6 +4655,132 @@ fn a_refresh_proves_an_armed_pr_that_is_up_to_date_but_not_green() {
         "{}",
         repo.calls()
     );
+}
+
+impl Repo {
+    /// A refresh of PR 9, behind `main` and armed, with its issue waiting.
+    fn armed_behind(name: &str) -> Repo {
+        let repo = Repo::new(name);
+        repo.prepared(BRANCH, 7, "");
+        repo.advance_main("later.txt", "x\n");
+        repo.set_open_prs(&[listed(9, BRANCH, &repo.head(), 7, false)]);
+        repo.set_land_needed(&[7]);
+        repo.git(&["checkout", "-q", "main"]);
+        repo
+    }
+
+    /// Holds a lock in the repository's lock directory, as another run would.
+    fn hold(&self, name: &str) -> fs::File {
+        let directory = self.root.join(".git/xtask");
+        fs::create_dir_all(&directory).unwrap();
+        let held = fs::File::create(directory.join(name)).unwrap();
+        held.lock().unwrap();
+        held
+    }
+}
+
+/// The refresh takes the merge slot before it proves a PR, as a worker's merge
+/// does, so one lock orders both.
+#[test]
+fn a_refresh_waits_for_the_merge_slot() {
+    let repo = Repo::armed_behind("refresh-slot");
+    let head = repo.head();
+    let held = repo.hold("merge.lock");
+    let said = repo.temp.join("refresh.err");
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .arg("refresh")
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let waits = "refresh: PR 9 waits for the merge slot, which another run holds\n";
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(&said).unwrap().contains(waits) {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    // It says so before it waits, so give it time to go on if it didn't wait.
+    thread::sleep(Duration::from_millis(500));
+    let calls = repo.calls();
+    assert!(!calls.contains("gh pr view"), "{calls}");
+    assert!(!calls.contains("git worktree add"), "{calls}");
+    let said_on = |text: &str| (head.clone(), text.to_string());
+    assert_eq!(
+        posts(&repo),
+        [
+            said_on("pending Queued, next"),
+            said_on("pending Waiting: the merge slot")
+        ]
+    );
+    held.unlock().unwrap();
+    let mut output = child.wait_with_output().unwrap();
+    output.stderr = fs::read(&said).unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+}
+
+/// A worker's merge that comes during the refresh's proof waits until the
+/// refresh has squashed the PR it proved, so no merge moves `main` between the
+/// proof and its squash.
+#[test]
+fn a_refresh_keeps_the_merge_slot_from_its_proof_to_its_squash() {
+    let repo = Repo::armed_behind("refresh-turn");
+    repo.other_pr(10, "8-y", &Pr::default());
+    repo.git(&["checkout", "-q", "main"]);
+    let (refreshed, merged_ten, heard) = merge_ten_during(&repo, &["refresh"]);
+    assert_eq!(
+        refreshed.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&refreshed),
+        stderr(&refreshed)
+    );
+    assert_eq!(merged_ten.status.code(), Some(0), "{heard:?}");
+    assert_merged_after(&repo.calls(), 9);
+}
+
+/// A timer can start a refresh while the last one still proves, and so can the
+/// owner. The second one leaves everything to the first.
+#[test]
+fn a_refresh_that_starts_while_another_runs_proves_nothing() {
+    let repo = Repo::armed_behind("refresh-twice");
+    let _held = repo.hold("refresh.lock");
+    repo.forget_calls();
+    let output = repo.xtask(&["refresh"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert_eq!(
+        out, "refresh: another refresh runs, so this one proves nothing\n",
+        "{out}"
+    );
+    let calls = repo.calls();
+    assert!(!calls.contains("gh "), "{calls}");
+    assert!(!calls.contains("fetch"), "{calls}");
+}
+
+/// A timer runs the refresh often, so a run with nothing to prove costs only
+/// what it reads from GitHub.
+#[test]
+fn a_refresh_with_no_pr_to_prove_proves_nothing() {
+    let repo = Repo::new("refresh-none");
+    repo.set_open_prs(&[]);
+    repo.set_land_needed(&[]);
+    repo.git(&["checkout", "-q", "main"]);
+    repo.forget_calls();
+    let output = repo.xtask(&["refresh"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let calls = repo.calls();
+    for call in ["cargo build", "cargo test", "fetch", "worktree", "statuses"] {
+        assert!(!calls.contains(call), "{calls}");
+    }
 }
 
 /// The owner can take the approval back during the proof.

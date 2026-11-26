@@ -348,9 +348,10 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
     }
     let mut child = limit::scope(program, arguments, None)?;
     hold.pass_to(&mut child);
-    let status = child
-        .status()
-        .map_err(|e| Problem(format!("couldn't run `systemd-run`: {e}")))?;
+    let status = child.status().map_err(|e| {
+        let launcher = child.get_program().to_string_lossy();
+        Problem(format!("couldn't run `{launcher}`: {e}"))
+    })?;
     Ok(if status.success() {
         Verdict::Pass
     } else {

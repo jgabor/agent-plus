@@ -1,8 +1,10 @@
 //! Runs `xtask run`, and plays the part of a bench by locking the same files.
 
+#[cfg(target_os = "linux")]
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -153,11 +155,28 @@ fn a_command_that_cannot_start_is_a_problem() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("no-such-program-here"));
 }
 
+/// macOS has nothing that limits the memory of a whole process tree, so the
+/// command runs without a limit, and the run says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_macos_a_run_says_it_has_no_memory_limit() {
+    let root = workspace("memory-macos");
+    let output = run(&root, &["sh", "-c", "echo ran"]);
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("without a memory limit"),
+        "{output:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
 /// Allocates about 256 MiB and stops, so that without a limit it says so and
 /// exits 0 instead of taking the machine with it.
 const ALLOCATE: &str =
     "x=aaaaaaaa; i=0; while [ $i -lt 25 ]; do x=$x$x; i=$((i+1)); done; echo survived";
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_command_over_the_memory_limit_is_killed_and_xtask_fails() {
     let root = workspace("memory");
@@ -169,6 +188,7 @@ fn a_command_over_the_memory_limit_is_killed_and_xtask_fails() {
     assert_eq!(output.status.code(), Some(1));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_command_under_the_memory_limit_is_left_alone() {
     let root = workspace("memory-roomy");
@@ -180,6 +200,7 @@ fn a_command_under_the_memory_limit_is_left_alone() {
     assert_eq!(output.status.code(), Some(0));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn an_empty_memory_limit_is_a_problem() {
     let root = workspace("memory-empty");
@@ -192,6 +213,7 @@ fn an_empty_memory_limit_is_a_problem() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("XTASK_MEMORY_MAX"));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn without_a_user_session_nothing_runs() {
     let root = workspace("no-session");
@@ -206,14 +228,17 @@ fn without_a_user_session_nothing_runs() {
 
 /// A slice of the user manager for one test, stopped when the test ends. A
 /// slice outlives the scopes in it, and a dash in its name would nest it.
+#[cfg(target_os = "linux")]
 struct Slice(String);
 
+#[cfg(target_os = "linux")]
 impl Slice {
     fn new(test: &str) -> Self {
         Slice(format!("xtask_{test}_{}.slice", std::process::id()))
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for Slice {
     fn drop(&mut self) {
         let _ = Command::new("systemctl")
@@ -223,10 +248,12 @@ impl Drop for Slice {
 }
 
 /// Prints the cgroup of the job, and then of `xtask`, which started it.
+#[cfg(target_os = "linux")]
 const CGROUPS: &str = "cut -d: -f3 /proc/self/cgroup; cut -d: -f3 /proc/$PPID/cgroup";
 
 /// Limits set on the caller's slice must reach the job, so it can't land in
 /// the user manager's `app.slice` instead.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_job_stays_in_the_slice_of_its_caller() {
     let root = workspace("slice");
@@ -275,7 +302,10 @@ fn a_script_whose_interpreter_is_missing_is_a_problem() {
 }
 
 /// The kernel ends the interpreter's name at a NUL, takes it as bytes, and
-/// runs a script whose name is cut off at 256 bytes with `sh` instead.
+/// runs a script whose name is cut off at 256 bytes with `sh` instead. The
+/// kernel on macOS starts none of these, and its file systems refuse a name
+/// that isn't UTF-8.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_script_the_kernel_can_start_is_left_alone() {
     let root = workspace("odd-interpreters");

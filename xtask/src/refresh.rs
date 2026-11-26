@@ -211,14 +211,14 @@ pub fn run() -> Result<Verdict, Problem> {
             );
             continue;
         }
-        // A runner that can't prove `main` says nothing about the PR.
-        if runner_could_cause(&why)
+        // A machine that can't prove `main` says nothing about the PR.
+        if machine_could_cause(&why)
             && main_proof
                 .get_or_insert_with(|| prove_main(&root, actions))
                 .is_err()
         {
             println!(
-                "refresh: PR {} keeps `{LAND_NEEDED}`, because `main` can't be proven on the runner either",
+                "refresh: PR {} keeps `{LAND_NEEDED}`, because `main` can't be proven on this machine either",
                 pr.number
             );
             continue;
@@ -229,7 +229,7 @@ pub fn run() -> Result<Verdict, Problem> {
     }
     let mut table = summary(&rows);
     if let Some(Err(why)) = &main_proof {
-        let said = format!("`main` can't be proven on the runner: {why}");
+        let said = format!("`main` can't be proven on this machine: {why}");
         eprintln!("refresh: {said}");
         table.push_str(&format!("\n{said}\n"));
     }
@@ -299,14 +299,14 @@ fn merge_if_armed(gh: &Gh, pr: &OpenPr, head: &str, slot: &Hold) -> Result<Lande
     }
     // Every step gets a try, so this doesn't stop at the first failure.
     let mut left = Vec::new();
-    // A merge with the workflow's token starts no `mirror-labels` run.
+    // So that the merge waits for no `mirror-labels` run.
     let labeled = pr.closing_issues.iter().map(|n| ("issue", *n));
     for (kind, number) in labeled.chain([("PR", number)]) {
         if let Err(Problem(message)) = gh.remove_label(number, LAND_NEEDED) {
             left.push(format!("{kind} {number} keeps `{LAND_NEEDED}`: {message}"));
         }
     }
-    // Nor does GitHub close the issues of a PR that such a merge lands.
+    // Nor for GitHub to close the issues of the PR, which it may not.
     if close {
         for number in &pr.closing_issues {
             if let Err(Problem(message)) = gh.close_issue(*number) {
@@ -388,11 +388,11 @@ fn hand_back(
 
 const NOT_PROVEN: &str = "Not proven";
 
-/// Whether a fault of the runner or of `main` could have failed the proof,
+/// Whether a fault of this machine or of `main` could have failed the proof,
 /// by what `xtask/gate` says: a check failed, an error or the timeout stopped
 /// the proof, or it ended without a result. Anything else is a refusal that `prepare` gave
 /// in words, from the PR and git, which `refresh` takes as the change's.
-fn runner_could_cause(why: &str) -> bool {
+fn machine_could_cause(why: &str) -> bool {
     why.starts_with("Failed: ")
         || why.starts_with("Failed in its own xtask: ")
         || why == "Stopped by an error"
@@ -498,7 +498,7 @@ fn current_head(root: &Path, pr: &OpenPr) -> Option<String> {
 /// Runs the gate on the newest `main`, in a tree of its own, and says what
 /// failed if it didn't pass.
 fn prove_main(root: &Path, actions: bool) -> Result<(), String> {
-    println!("refresh: proving `main`, to tell a fault of the runner from the PR's");
+    println!("refresh: proving `main`, to tell a fault of this machine from the PR's");
     if actions {
         println!("::group::`main`");
     }
@@ -510,8 +510,8 @@ fn prove_main(root: &Path, actions: bool) -> Result<(), String> {
 }
 
 /// How long the gate of `main` may run, which is the merge timeout. A PR's
-/// proof stops there, and a gate that hangs on the runner would otherwise hold
-/// the refresh for as long as its job may run.
+/// proof stops there, and a gate that hangs would otherwise hold the refresh,
+/// and every refresh after it, for good.
 const MAIN_SECONDS: u64 = 30 * 60;
 /// Replaces the merge timeout, and this one with it.
 const MAIN_SECONDS_OVERRIDE: &str = "XTASK_MERGE_TIMEOUT_SECONDS";
@@ -636,7 +636,7 @@ fn prepare(root: &Path, number: u64, turn: &Hold) -> Result<bool, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{NOT_PROVEN, Row, escaped, queued, runner_could_cause, summary, took};
+    use super::{NOT_PROVEN, Row, escaped, machine_could_cause, queued, summary, took};
     use crate::merge;
     use std::time::Duration;
 
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_check_or_an_error_can_be_the_runners_fault() {
+    fn only_a_check_or_an_error_can_be_the_machines_fault() {
         for why in [
             "Failed: lint, tests",
             "Failed in its own xtask: journey",
@@ -656,7 +656,7 @@ mod tests {
             merge::STOPPED_AT_THE_TIMEOUT,
             NOT_PROVEN,
         ] {
-            assert!(runner_could_cause(why), "{why}");
+            assert!(machine_could_cause(why), "{why}");
         }
         for why in [
             "the tip of PR 9 has no ledger record, so there are no budgets to keep",
@@ -665,7 +665,7 @@ mod tests {
             "Failed",
             merge::MAIN_MOVED,
         ] {
-            assert!(!runner_could_cause(why), "{why}");
+            assert!(!machine_could_cause(why), "{why}");
         }
     }
 

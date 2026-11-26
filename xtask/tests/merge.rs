@@ -4143,7 +4143,7 @@ fn a_failed_refresh_turns_that_pr_red_and_goes_on_to_the_next() {
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
 }
 
-/// A runner that can't prove `main` either says nothing about the PR, so the
+/// A machine that can't prove `main` either says nothing about the PR, so the
 /// refresh hands no PR back, and the next run proves them again.
 #[test]
 fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
@@ -4190,7 +4190,7 @@ fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
     // Once per run, however many PRs fail.
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
     let said = stderr(&output);
-    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    let why = "refresh: `main` can't be proven on this machine: Failed: format";
     assert!(said.contains(why), "{said}");
     let calls = repo.calls();
     for number in [5, 8, 9, 7] {
@@ -4200,14 +4200,14 @@ fn a_refresh_that_can_not_prove_main_hands_no_pr_back() {
     assert!(!calls.contains("--disable-auto"), "{calls}");
     let summary = fs::read_to_string(&summary).unwrap();
     assert!(
-        summary.contains("`main` can't be proven on the runner: Failed: format"),
+        summary.contains("`main` can't be proven on this machine: Failed: format"),
         "{summary}"
     );
 }
 
-/// A gate of `main` that hangs would hold the refresh for as long as its job
-/// may run. It stops at the merge timeout, with what it started, and that is
-/// a `main` the runner can't prove.
+/// A gate of `main` that hangs would hold the refresh, and every refresh after
+/// it, for good. It stops at the merge timeout, with what it started, and that is
+/// a `main` the machine can't prove.
 #[test]
 fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     let repo = Repo::new("refresh-main-hangs");
@@ -4245,7 +4245,7 @@ fn a_refresh_whose_gate_of_main_hangs_stops_it_at_the_timeout() {
     assert!(started.elapsed() < Duration::from_secs(30), "{output:?}");
     let said = stderr(&output);
     let why =
-        "refresh: `main` can't be proven on the runner: its gate ran past the 10 second timeout";
+        "refresh: `main` can't be proven on this machine: its gate ran past the 10 second timeout";
     assert!(said.contains(why), "{said}");
     // The timeout stopped the hang, and not a gate that was only slow.
     assert!(repo.bin.join("hung").exists(), "{said}");
@@ -4352,7 +4352,7 @@ fn a_refresh_runs_nothing_from_a_fork() {
     assert!(calls.contains(&status(&head, "pending")), "{calls}");
     let unproven = format!("{} -f description=Not proven\n", status(&head, "failure"));
     assert!(calls.contains(&unproven), "{calls}");
-    // Only `main` is checked out, to tell the runner's faults from the PR's.
+    // Only `main` is checked out, to tell the machine's faults from the PR's.
     let added: Vec<&str> = calls
         .lines()
         .filter(|l| l.contains("worktree add"))
@@ -4511,7 +4511,7 @@ fn a_refresh_that_can_not_prove_main_still_hands_back_a_pr_refused_in_words() {
     let out = stdout(&output);
     assert_eq!(out.matches("refresh: proving `main`").count(), 1, "{out}");
     let said = stderr(&output);
-    let why = "refresh: `main` can't be proven on the runner: Failed: format";
+    let why = "refresh: `main` can't be proven on this machine: Failed: format";
     assert!(said.contains(why), "{said}");
     let calls = repo.calls();
     for number in [5, 8] {

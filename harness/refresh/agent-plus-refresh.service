@@ -1,0 +1,13 @@
+# Runs `cargo xtask refresh` in a checkout of its own: a worktree of the
+# repository that every worker's worktree comes from, so that it takes the same
+# merge slot. Each run moves the checkout to the newest `main` first. HARNESS.md
+# says how the owner turns it on.
+[Unit]
+Description=Agent+ refresh, which proves and merges the PRs the owner approved
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/agent-plus-refresh
+ExecStartPre=git fetch -q origin main
+ExecStartPre=git checkout -q --detach FETCH_HEAD
+ExecStart=cargo xtask refresh

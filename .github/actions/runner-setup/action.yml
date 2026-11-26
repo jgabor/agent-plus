@@ -1,6 +1,6 @@
-# Readies a GitHub-hosted runner for our tests. The refresh and the runner gate
-# both use it, so a fix for the runner lands in both. A job checks out the
-# repository before it uses this, and it runs this from that checkout.
+# Readies a GitHub-hosted runner for our tests, for the runner gate. A job
+# checks out the repository before it uses this, and it runs this from that
+# checkout.
 name: runner-setup
 description: Opens KVM, lets the runner's user map ids, and starts a systemd user session
 

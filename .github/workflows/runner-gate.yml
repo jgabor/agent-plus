@@ -15,8 +15,7 @@ on:
 permissions: {}
 
 # A newer push replaces a run that is still queued, not one that runs. That
-# loses nothing, because the newer run tests a newer `main`. The group is its
-# own, so this workflow never holds or replaces a refresh.
+# loses nothing, because the newer run tests a newer `main`.
 concurrency:
   group: runner-gate
   cancel-in-progress: false
@@ -34,7 +33,6 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      # The same setup as the refresh.
       - uses: ./.github/actions/runner-setup
       # The merge timeout, because a hang is one of the faults this job is
       # for. A step that runs out of time fails, so the report below runs.

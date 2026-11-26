@@ -1,0 +1,10 @@
+# Starts the refresh every five minutes. A refresh that still runs then goes
+# on, and the timer starts no second one.
+[Unit]
+Description=Start the Agent+ refresh every five minutes
+
+[Timer]
+OnCalendar=*:0/5
+
+[Install]
+WantedBy=timers.target

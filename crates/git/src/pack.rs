@@ -25,7 +25,7 @@ const MIN_DELTA: usize = 4;
 
 /// A pack, with its index read into memory.
 pub(crate) struct Pack {
-    index: Vec<u8>,
+    pub(crate) index: Vec<u8>,
     count: usize,
     file: File,
     /// Where the pack's checksum starts, after its last entry.
@@ -43,10 +43,8 @@ impl Pack {
     /// The pack beside the index at `idx`, or `None` if there is no pack.
     pub(crate) fn open(idx: &Path, limit: usize) -> Result<Option<Pack>, Error> {
         let name = idx.display().to_string();
-        let file = match File::open(idx.with_extension("pack")) {
-            Ok(file) => file,
-            Err(e) if crate::is_missing(&e) => return Ok(None),
-            Err(e) => return Err(e.into()),
+        let Some((file, len)) = crate::open(&idx.with_extension("pack"))? else {
+            return Ok(None);
         };
         let Some(index) = crate::read(idx, limit)? else {
             return Ok(None);
@@ -74,7 +72,6 @@ impl Pack {
         if index.len() < least || index.len() > most || (index.len() - least) % 8 != 0 {
             return Err(bad("has the wrong length"));
         }
-        let len = file.metadata()?.len();
         let pack_bad =
             |why: &str| corrupt(format!("{} {why}", idx.with_extension("pack").display()));
         if len < PACK_HEADER + 20 {

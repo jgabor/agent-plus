@@ -313,9 +313,8 @@ fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Error> {
     let Some((file, len)) = open(path)? else {
         return Ok(None);
     };
-    let larger = || corrupt(format!("{} is larger than the limit", path.display()));
     if len > limit as u64 {
-        return Err(larger());
+        return Err(larger(path));
     }
     // It may have grown since.
     let mut bytes = Vec::with_capacity(len as usize);
@@ -323,11 +322,16 @@ fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Error> {
         .take((limit as u64).saturating_add(1))
         .read_to_end(&mut bytes)
     {
-        Ok(_) if bytes.len() > limit => Err(larger()),
+        Ok(_) if bytes.len() > limit => Err(larger(path)),
         Ok(_) => Ok(Some(bytes)),
         Err(e) if is_missing(&e) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Why the file at `path` is refused.
+fn larger(path: &Path) -> Error {
+    corrupt(format!("{} is larger than the limit", path.display()))
 }
 
 /// A loose object's zlib stream, inflated as far as its header. It is
@@ -425,9 +429,10 @@ impl Repository {
     /// deltas is applied one delta at a time, so reading an object holds no
     /// more than a piece of its file, its base, one delta, and itself. A
     /// file read whole, a pack index, `packed-refs`, or a loose ref, is
-    /// refused as corrupt when it is longer than `limit` too. Without a
-    /// limit, an object can be as large as its header says, and a file as
-    /// long as it says.
+    /// refused as corrupt when it is longer than `limit` too, and so are
+    /// the pack indexes, before any is read, when they are longer than
+    /// that in all. Without a limit, an object can be as large as its
+    /// header says, and a file as long as it says.
     pub fn with_limit(self, limit: usize) -> Repository {
         Repository { limit, ..self }
     }
@@ -511,9 +516,35 @@ impl Repository {
             }
         }
         indexes.sort();
+        // Every index with a pack is measured before any is read, since a
+        // sparse file can say it is any length.
+        let mut all: u64 = 0;
+        for index in &indexes {
+            if open(&index.with_extension("pack"))?.is_some()
+                && let Some((_, len)) = open(index)?
+            {
+                if len > self.limit as u64 {
+                    return Err(larger(index));
+                }
+                all = all.saturating_add(len);
+            }
+        }
+        if all > self.limit as u64 {
+            let why = "are larger than the limit in all";
+            return Err(corrupt(format!(
+                "the pack indexes in {} {why}",
+                dir.display()
+            )));
+        }
+        // An index may have grown since, so each is read within what the
+        // ones before it left.
+        let mut left = self.limit;
         let mut packs = Vec::new();
         for index in indexes {
-            packs.extend(Pack::open(&index, self.limit)?);
+            if let Some(pack) = Pack::open(&index, left)? {
+                left -= pack.index.len();
+                packs.push(pack);
+            }
         }
         Ok(self.packs.get_or_init(|| packs))
     }

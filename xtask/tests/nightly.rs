@@ -2704,18 +2704,29 @@ fn nightly_ends_a_report_with_changes_at_its_checks() {
 }
 
 /// An earlier report that asked for a reaction is a report like any other.
-/// Nothing reads its reactions, and nothing lists it.
+/// The next one starts after it, nothing reads its reactions, and nothing
+/// lists it.
 #[test]
 fn the_report_reads_no_reactions() {
     let repo = Repo::new("reactions");
+    let earlier = Recorded {
+        issue: 1,
+        pr: 2,
+        ..CLEAN
+    };
+    repo.merge("Reported (#2)", 3, &earlier);
+    let reported = repo.short("HEAD");
     repo.merge("Add a thing (#9)", 2, &CLEAN);
     repo.set_issues(REPORT_ISSUE);
     repo.set_report_comments(&[(
         "o",
-        "# Nightly report for `1111111`\n\nWords.\n\nMark this report read by reacting with :eyes:.\n",
+        &format!(
+            "# Nightly report for `{reported}`\n\nWords.\n\nMark this report read by reacting with :eyes:.\n"
+        ),
     )]);
     let report = repo.report();
-    assert!(!report.contains("1111111"), "{report}");
+    assert!(report.contains("<summary>Merged: 1</summary>"), "{report}");
+    assert!(!report.contains(&reported), "{report}");
     let calls = repo.calls();
     assert!(!calls.iter().any(|c| c.contains("reactions")), "{calls:?}");
 }

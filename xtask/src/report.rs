@@ -2,7 +2,7 @@
 //! issues.
 
 use crate::bench;
-use crate::forge::{Comment, Forge, Gh, OpenIssue};
+use crate::forge::{Forge, Gh, OpenIssue};
 use crate::json::quoted;
 use crate::ledger::{self, Record};
 use crate::work::PARKED;
@@ -127,40 +127,10 @@ fn start_after(
     issues: &[OpenIssue],
     counts: fn(&str) -> bool,
 ) -> Result<String, Problem> {
-    let number = issues
-        .iter()
-        .find(|issue| issue.title == ISSUE_TITLE)
-        .map(|issue| issue.number);
-    start_from(root, &reports(gh, number)?, counts)
-}
-
-/// The `git log` argument that limits it to what no report has covered yet.
-fn start_from(
-    root: &Path,
-    reports: &Option<Reports>,
-    counts: fn(&str) -> bool,
-) -> Result<String, Problem> {
-    Ok(match last_reported(root, reports, counts)? {
+    Ok(match last_reported(root, gh, issues, counts)? {
         Some(commit) => format!("^{commit}"),
         None => WINDOW.to_string(),
     })
-}
-
-/// The report issue's comments, and the owner, whose comments are the reports.
-struct Reports {
-    comments: Vec<Comment>,
-    owner: String,
-}
-
-/// Nothing without a report issue.
-fn reports(gh: &Gh, number: Option<u64>) -> Result<Option<Reports>, Problem> {
-    let Some(number) = number else {
-        return Ok(None);
-    };
-    Ok(Some(Reports {
-        comments: gh.issue(number)?.comments,
-        owner: gh.owner()?,
-    }))
 }
 
 pub fn build(root: &Path) -> Result<Report, Problem> {
@@ -193,12 +163,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
     report.url = gh.repo_url()?;
-    let number = issues
-        .iter()
-        .find(|issue| issue.title == ISSUE_TITLE)
-        .map(|issue| issue.number);
-    let reports = reports(&gh, number)?;
-    let start = start_from(root, &reports, |_| true)?;
+    let start = start_after(root, &gh, &issues, |_| true)?;
     let log = base::git_text(root, &["log", &start, "--format=%H %h %s", "HEAD"])?;
     // Each commit, and what names it: its PR, or the commit when it has no
     // record.
@@ -453,16 +418,19 @@ fn sections(text: &str) -> Vec<(String, String)> {
 /// count, and anything but a commit in this history means there's no report.
 fn last_reported(
     root: &Path,
-    reports: &Option<Reports>,
+    gh: &Gh,
+    issues: &[OpenIssue],
     counts: fn(&str) -> bool,
 ) -> Result<Option<String>, Problem> {
-    let Some(Reports { comments, owner }) = reports else {
+    let Some(issue) = issues.iter().find(|issue| issue.title == ISSUE_TITLE) else {
         return Ok(None);
     };
+    let comments = gh.issue(issue.number)?.comments;
+    let owner = gh.owner()?;
     let newest = comments
         .iter()
         .rev()
-        .filter(|comment| &comment.author == owner && counts(&comment.body))
+        .filter(|comment| comment.author == owner && counts(&comment.body))
         .find_map(|comment| comment.body.strip_prefix(HEADING)?.split('`').next());
     let Some(commit) = newest else {
         return Ok(None);

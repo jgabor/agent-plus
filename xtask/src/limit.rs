@@ -263,6 +263,16 @@ mod tests {
         assert_eq!(Deadline::from(start, 10, 30).limit_at(at(0), 5), None);
     }
 
+    /// Only a scope can hold a time limit if `xtask` dies, so a job with one
+    /// doesn't start on macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_a_job_with_a_time_limit_is_refused() {
+        let none: [&str; 0] = [];
+        assert!(super::scope("true", &none, Some(1)).is_err());
+        assert!(super::scope("true", &none, None).is_ok());
+    }
+
     #[test]
     fn only_a_process_under_a_user_manager_can_inherit_its_slice() {
         for (cgroup, inherits) in [

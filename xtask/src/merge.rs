@@ -54,6 +54,9 @@ const WORKER_OF: &str = "XTASK_MERGE_WORKER_OF";
 const WATCHER: &str = "read _; env kill -STOP -- \"-$1\"; env kill -KILL -- \"-$1\"";
 /// Set in a merge that runs the xtask of `main`, to that `main`.
 const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
+/// Set in the xtask of `main` that a merge runs, to the head on which the
+/// merge posted a `pending` that nothing has ended yet.
+const POSTED: &str = "XTASK_MERGE_POSTED";
 /// Set in a PR's own xtask, to the id of the xtask of `main` that runs its
 /// `prove` and reads its input.
 const PROVING_FOR: &str = "XTASK_MERGE_PROVING_FOR";
@@ -107,7 +110,12 @@ fn sequence(
     let status = Status::watched(&root, number);
     if mode != Mode::Land {
         match decide(&gh, number, mode, thread)? {
-            Decision::Refused(why) => return refuse(&why),
+            // In `main`'s xtask, the PR can have changed since the merge
+            // posted a wait.
+            Decision::Refused(why) => {
+                status.stops(&why);
+                return refuse(&why);
+            }
             // `main`'s xtask, which a merge runs next, checks under the slot.
             Decision::Ready { pr, issue } if !runs_the_checks_of_main() => {
                 if fails_before_the_slot(&root, &gh, number, &pr, issue, mode)? {
@@ -148,7 +156,7 @@ fn sequence(
     // After the slot and the fetch, because a merge during the wait can change
     // the checks.
     if env::var(CHECKS_OF).ok().as_deref() != Some(fetched.main.as_str()) {
-        return run_the_checks_of(&root, &fetched.main);
+        return run_the_checks_of(&root, &fetched.main, &status);
     }
     let tree = Tree::create(&root, number, &fetched.branch)?;
     // Nothing was pushed, so this is the head that the PR shows.
@@ -275,7 +283,7 @@ fn sequence(
 /// was built from can be anything. So this builds the xtask of `main` and runs
 /// the merge again in it, which takes the slot again. If `main` moves before
 /// that one fetches, it builds again.
-fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
+fn run_the_checks_of(root: &Path, main: &str, status: &Status) -> Result<Verdict, Problem> {
     let directory = bench::temp_outside(root)?.join(format!("xtask-checks-{}", repository(root)?));
     let tree = Tree::at(root, directory.join("tree"), main)?;
     let built = build_xtask(
@@ -285,7 +293,12 @@ fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
     )?;
     drop(tree);
     let program = keep(&directory.join("bin"), &built, main)?;
-    let problem = process::Command::new(program)
+    let mut command = process::Command::new(program);
+    // That xtask ends what this one posted, which no drop does on an `exec`.
+    if let Some(head) = status.posted() {
+        command.env(POSTED, head);
+    }
+    let problem = command
         .args(env::args_os().skip(1))
         .current_dir(root)
         // Rustup sets this for its children, and it would outrank the
@@ -438,9 +451,16 @@ impl Status {
     }
 
     /// A status that hears this process's waits for a place and the activity
-    /// lock.
+    /// lock. In the xtask of `main`, it goes on from what the merge posted.
     fn watched(root: &Path, number: u64) -> Arc<Status> {
         let status = Arc::new(Status::new(root, number));
+        if runs_the_checks_of_main()
+            && let Ok(head) = env::var(POSTED)
+        {
+            let mut said = status.said();
+            said.head = Some(head);
+            said.open = true;
+        }
         let watched = Arc::downgrade(&status);
         lock::watch(Box::new(move |wait| {
             let Some(status) = watched.upgrade() else {
@@ -459,6 +479,12 @@ impl Status {
         self.said.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The head of a `pending` that nothing has ended yet.
+    fn posted(&self) -> Option<String> {
+        let said = self.said();
+        said.head.clone().filter(|_| said.open)
+    }
+
     /// The head that the PR shows from now on.
     fn on(&self, head: &str) {
         self.said().head = Some(head.to_string());
@@ -467,6 +493,8 @@ impl Status {
     fn post(&self, said: &mut Said, state: &str, text: &str) {
         if said.head.is_none() {
             match self.gh.armed(self.number) {
+                // A PR that merged or closed keeps what it ended with.
+                Ok(now) if now.state != "OPEN" => return,
                 Ok(now) => said.head = Some(now.head),
                 Err(Problem(message)) => {
                     eprintln!("merge: couldn't post `{GATE}`: {message}");

@@ -1705,6 +1705,101 @@ fn the_pr_is_read_again_after_the_slot() {
     assert!(ended.contains("targets `release`"), "{ended}");
 }
 
+/// The xtask of `main` ends what the merge posted before it ran that xtask,
+/// as when it refuses a PR that changed while it was built.
+#[test]
+fn the_xtask_of_main_ends_the_wait_that_the_merge_posted() {
+    let repo = Repo::new("wait-then-main-refuses");
+    let release = Pr {
+        base: "release",
+        ..Pr::default()
+    };
+    let changed = repo.bin.join("pr-release.json");
+    fs::write(&changed, pr_json(&release, "OPEN")).unwrap();
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "cargo build --quiet --package xtask")
+        .env(
+            "RUN_COMMAND",
+            format!(
+                "cp '{}' '{}'",
+                changed.display(),
+                repo.bin.join("pr.json").display()
+            ),
+        )
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let waiting = "pending Waiting: the merge slot";
+    while !posts(&repo).iter().any(|(_, said)| said == waiting) {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_refused(&repo, &output, "targets `release`");
+    let ended = last_post(&repo);
+    assert!(ended.starts_with("failure "), "{ended}");
+    assert!(ended.contains("targets `release`"), "{ended}");
+}
+
+/// A merged PR keeps the status it merged with, even when a merge of it
+/// waits for the slot.
+#[test]
+fn a_wait_posts_nothing_on_a_merged_pr() {
+    let repo = Repo::new("wait-merged");
+    let head = repo.head();
+    fs::write(repo.bin.join("merged-9"), "").unwrap();
+    repo.set_pr(&Pr {
+        state: "MERGED",
+        ..Pr::default()
+    });
+    let output = run_while_the_slot_is_held_for_a_moment(&repo);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("waits for the merge slot"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(posts(&repo), [], "{head}");
+}
+
+/// Runs `land` while another run holds the merge slot, and lets the slot go
+/// once `land` says that it waits for it.
+fn run_while_the_slot_is_held_for_a_moment(repo: &Repo) -> Output {
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    let said = repo.temp.join("land.err");
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["land", "9"])
+        .stdout(Stdio::piped())
+        .stderr(fs::File::create(&said).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !fs::read_to_string(&said)
+        .unwrap()
+        .contains("waits for the merge slot")
+    {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    held.unlock().unwrap();
+    let mut output = child.wait_with_output().unwrap();
+    output.stderr = fs::read(&said).unwrap();
+    output
+}
+
 /// Waits until the merge has removed both refs of its check before the slot,
 /// which it does once the check is done.
 #[track_caller]
@@ -2638,7 +2733,7 @@ fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str
     let after = said
         .iter()
         .position(|said| said == waiting)
-        .map(|at| &said[at + 1]);
+        .and_then(|at| said.get(at + 1));
     assert_eq!(after, Some(&format!("pending {bench_from}")), "{said:?}");
     Output {
         status,

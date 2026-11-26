@@ -880,15 +880,16 @@ status:
 | The PR is proven | `success` | The counts, as `spec 417 of 812, journey 7 of 19` |
 | A check failed | `failure` | The checks that failed, as `Failed: lint, tests` |
 | A check of the PR's own xtask failed | `failure` | As `Failed in its own xtask: journey` |
-| The branch doesn't rebase, the PR or `main` changed during the proof, or the PR changed while the merge waited for the slot | `failure` | Why, in its first 140 characters |
-| An error stopped the proof | `failure` | `Stopped by an error` |
+| The branch doesn't rebase, the PR or `main` changed during the proof, or the merge refuses the PR after it posted a wait | `failure` | Why, in its first 140 characters |
+| An error stopped the merge after it posted a `pending` | `failure` | `Stopped by an error` |
 | An error stopped it after the proof passed | `failure` | `Proven, then stopped by an error` |
 | The merge stopped at the merge timeout | `failure` | `Stopped at the timeout` |
 
 The status goes on the head that GitHub shows for the PR: the fetched head
 until the push, and the new head after it. So proving a green PR again turns
 it yellow until the proof ends. Before the fetch, a wait reads that head from
-GitHub. In a GitHub Actions run, each status links to the run. A `pending` or
+GitHub, and posts nothing on a PR that merged or closed. The timeout does the
+same. In a GitHub Actions run, each status links to the run. A `pending` or
 `failure` that can't be posted is reported, and changes nothing else.
 
 A merge past the merge timeout stops, with every command it started, and

@@ -2435,7 +2435,7 @@ fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
         let idx = indexes.first().cloned();
         repository.land();
         if case.starts_with("index") {
-            let each = LARGER / indexes.len() as u64 + 1;
+            let each = (512 << 20) / indexes.len() as u64 + 1;
             for idx in &indexes {
                 let idx = fs::OpenOptions::new().write(true).open(idx);
                 idx.unwrap().set_len(each).unwrap();

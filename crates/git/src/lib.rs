@@ -531,7 +531,10 @@ impl Repository {
         }
         if all > self.limit as u64 {
             let why = "are larger than the limit in all";
-            return Err(corrupt(format!("the pack indexes in {} {why}", dir.display())));
+            return Err(corrupt(format!(
+                "the pack indexes in {} {why}",
+                dir.display()
+            )));
         }
         // An index may have grown since, so each is read within what the
         // ones before it left.

@@ -316,6 +316,10 @@ fn pack_indexes_larger_than_the_limit_in_all_are_refused_before_one_is_read() {
         .collect();
     fs::remove_file(planted.with_extension("pack")).unwrap();
     fs::remove_file(planted.with_extension("idx")).unwrap();
+    // An index with no pack, or with a directory for one, is left out.
+    sparse(&dir.join("pack-zz.idx"), b"");
+    sparse(&dir.join("pack-zy.idx"), b"");
+    fs::create_dir(dir.join("pack-zy.pack")).unwrap();
     let each = fs::metadata(&indexes[0]).unwrap().len() as usize;
     // Each index is within the limit, and together they are as long as it.
     let all = each * indexes.len();

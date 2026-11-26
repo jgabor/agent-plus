@@ -279,6 +279,8 @@ fn a_trusted_codex_projects_model_catalog_reaches_the_reviewer_in_auto() {
             let models = String::from_utf8_lossy(&shown.stdout);
             let run = format!("interactive {interactive}, trusted {trusted}");
             assert_eq!(shown.status.code(), Some(0), "{run}: {shown:?}");
+            // Without the project's catalog, Codex shows its own models.
+            assert!(models.contains(r#""slug":""#), "{run}: {models}");
             for from_catalog in FROM_CATALOG {
                 assert_eq!(
                     models.contains(from_catalog),

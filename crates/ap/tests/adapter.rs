@@ -680,12 +680,14 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
 }
 
 // spec(MODE): With `read`, `ask`, `edit`, or `auto`, when the working directory is a share, a rule in its `.codex/rules` that allows a command lets Codex run that command outside its sandbox without asking.
+// spec(MODE): With `auto`, when the working directory is a share, its `.codex/config.toml` can still name a model catalog (`model_catalog_json`) that gives Codex's reviewer its own policy, policy template, and model, and turns guardian v2's classifier on with its own threshold and instructions.
 #[test]
 fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
-    // Real Codex follows the rule in T2. This checks the adapter's part.
-    // Codex loads a directory's `.codex/rules` only when it trusts the
-    // directory. So in each of these modes, the adapter trusts every share
-    // that can be the working directory, and doesn't bypass the sandbox.
+    // Real Codex follows the rule and loads the catalog in T2. This checks
+    // the adapter's part. Codex loads a directory's `.codex/rules` and
+    // `.codex/config.toml` only when it trusts the directory. So in each of
+    // these modes, the adapter trusts every share that can be the working
+    // directory, doesn't bypass the sandbox, and names no catalog of its own.
     let (_, directories) = shares("codex");
     let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
     for version in CODEX_VERSIONS {
@@ -696,6 +698,8 @@ fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
                 let run = format!("{version} {mode:?} {interactive}");
                 let bypass = "--dangerously-bypass-approvals-and-sandbox";
                 assert!(!arguments.iter().any(|a| a == bypass), "{run}");
+                let catalog = "model_catalog_json";
+                assert!(!arguments.iter().any(|a| a.contains(catalog)), "{run}");
                 let overrides: Vec<&str> = (arguments.windows(2))
                     .filter(|pair| pair[0] == "-c")
                     .map(|pair| pair[1].as_str())
@@ -708,34 +712,6 @@ fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
                     let trusted = format!("\"{share}\"={{trust_level=\"trusted\"}}");
                     assert!(projects[0].contains(&trusted), "{run} {share}");
                 }
-            }
-        }
-    }
-}
-
-// spec(MODE): With `auto`, when the working directory is a share, its `.codex/config.toml` can still name a model catalog (`model_catalog_json`) that gives Codex's reviewer its own policy, policy template, and model, and turns guardian v2's classifier on with its own threshold and instructions.
-#[test]
-fn a_codex_share_that_is_the_working_directory_keeps_its_model_catalog() {
-    // Real Codex loads the catalog in T2. This checks the adapter's part:
-    // in `auto`, it trusts every share and names no catalog of its own.
-    let (_, directories) = shares("codex");
-    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
-    for version in CODEX_VERSIONS {
-        for interactive in [false, true] {
-            let mut arguments = codex::arguments(version, None, None, Mode::Auto, interactive);
-            arguments.extend(codex::workspace(&directories));
-            let run = format!("{version} {interactive}");
-            assert!(
-                !arguments.iter().any(|a| a.contains("model_catalog_json")),
-                "{run}"
-            );
-            let projects = arguments.iter().find(|a| a.starts_with("projects="));
-            for share in &directories {
-                let trusted = format!("\"{share}\"={{trust_level=\"trusted\"}}");
-                assert!(
-                    projects.is_some_and(|p| p.contains(&trusted)),
-                    "{run} {share}"
-                );
             }
         }
     }

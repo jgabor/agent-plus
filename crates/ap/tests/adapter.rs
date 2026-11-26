@@ -436,8 +436,28 @@ fn a_codex_project_cant_change_the_reviewer() {
                 assert!(overrides.contains(&"auto_review.policy=\"\""), "{run}");
                 for value in overrides {
                     let blank = value.starts_with("auto_review.") && value.ends_with("=\"\"");
-                    assert!(blank || value == on, "{run} {value}");
+                    assert!(
+                        blank || value == on || value == GUARDIAN_V2_OFF,
+                        "{run} {value}"
+                    );
                 }
+            }
+        }
+    }
+}
+
+/// The override that keeps Codex's guardian v2 off.
+const GUARDIAN_V2_OFF: &str = "features.guardianv2=false";
+
+// spec(MODE): With `auto`, the Codex adapter also keeps `features.guardianv2` off, as it is by default, so a project can't use that key to turn on the classifier that lets Codex approve an action without asking the reviewer.
+#[test]
+fn a_codex_project_cant_skip_the_reviewer() {
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                let arguments = codex::arguments(version, None, None, mode, interactive);
+                let off = (arguments.windows(2)).any(|pair| pair == ["-c", GUARDIAN_V2_OFF]);
+                assert_eq!(off, mode == Mode::Auto, "{version} {mode:?} {interactive}");
             }
         }
     }
@@ -478,6 +498,8 @@ fn a_codex_agentfile_without_mode_starts_in_auto() {
             "sandbox_workspace_write.writable_roots=[]",
             "-c",
             "features.guardian_approval=true",
+            "-c",
+            GUARDIAN_V2_OFF,
             "-c",
             "auto_review.policy=\"\"",
             "-c",

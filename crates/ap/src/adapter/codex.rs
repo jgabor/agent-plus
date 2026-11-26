@@ -38,6 +38,17 @@
 //! then, but its source skips the reviewer on other paths, so in `auto` the
 //! adapter turns the feature on, as it is by default.
 //!
+//! A trusted project's `[features.guardianv2]` turns on a classifier, and
+//! sets its instructions and the score under which Codex approves an action
+//! without asking the reviewer. With `review_threshold = 1.0`, Codex 0.169.0
+//! and 0.172.0 applied a patch outside the workspace with no review. So in
+//! `auto` the adapter turns the feature off, as it is by default, and the
+//! table goes with it. Codex 0.146.0 and later know the feature, and none
+//! from 0.137.0 to 0.172.0 warns about the override. A trusted project's
+//! `model_catalog_json` can still turn the classifier on, with its own
+//! threshold and instructions, because a catalog's `guardian` policy skips
+//! the feature.
+//!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
 //! interactive run passes `--no-daemon` wherever the version has it.
@@ -172,8 +183,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// extra writable roots, each set every time. A
 /// headless run in `auto` uses `--approve-for-me`, which sets the same
 /// sandbox, approval policy, and reviewer, where the version has it. In
-/// `auto`, the reviewer's feature is on, and each [`REVIEWER_TEXT`] key the
-/// version takes is set empty.
+/// `auto`, the reviewer's feature is on, guardian v2 is off, and each
+/// [`REVIEWER_TEXT`] key the version takes is set empty.
 pub fn arguments(
     version_text: &str,
     model: Option<&str>,
@@ -232,6 +243,8 @@ pub fn arguments(
         arguments.extend([
             "-c".to_owned(),
             "features.guardian_approval=true".to_owned(),
+            "-c".to_owned(),
+            "features.guardianv2=false".to_owned(),
         ]);
         for (key, from, until) in REVIEWER_TEXT {
             if at_least(&from) && until.is_none_or(|until| !at_least(&until)) {

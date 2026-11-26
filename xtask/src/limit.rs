@@ -24,6 +24,12 @@
 //! once. Jobs nest when a test of `xtask` runs `xtask`, which is small, when
 //! someone wraps a step, as in `cargo xtask run cargo xtask gate`, and when the
 //! mutation step runs each test binary as a job of its own.
+//!
+//! macOS has no systemd, and nothing else there limits the memory of a whole
+//! process tree: `setrlimit` and launchd's limits count each process alone. So
+//! a job there runs as a plain child, without a memory limit, and says so on
+//! stderr. A job with a time limit is refused there, and that leaves fuzzing
+//! and mutation to Linux.
 
 use crate::Problem;
 use crate::lock::Hold;
@@ -95,6 +101,7 @@ pub fn seconds(variable: &str, default: u64) -> Result<u64, Problem> {
 /// and, if `limit` is given, on its seconds. The job replaces `systemd-run`, so
 /// the command's exit status is the job's. Without a systemd user session
 /// `systemd-run` fails and the job doesn't start.
+#[cfg(not(target_os = "macos"))]
 pub fn scope(
     program: impl AsRef<OsStr>,
     arguments: &[impl AsRef<OsStr>],
@@ -106,6 +113,31 @@ pub fn scope(
         .arg("--")
         .arg(program)
         .args(arguments);
+    Ok(command)
+}
+
+/// A command that runs `program` as a plain child, because macOS has nothing
+/// that limits the memory of a whole process tree. It says so on stderr, and
+/// refuses a time limit, which only a scope can hold if `xtask` dies.
+#[cfg(target_os = "macos")]
+pub fn scope(
+    program: impl AsRef<OsStr>,
+    arguments: &[impl AsRef<OsStr>],
+    limit: Option<u64>,
+) -> Result<Command, Problem> {
+    let program = program.as_ref();
+    if limit.is_some() {
+        return Err(Problem(format!(
+            "couldn't run `{}` with a time limit: macOS has no systemd scope",
+            program.to_string_lossy()
+        )));
+    }
+    eprintln!(
+        "note: `{}` runs without a memory limit, because macOS has none that covers a process tree",
+        program.to_string_lossy()
+    );
+    let mut command = Command::new(program);
+    command.args(arguments);
     Ok(command)
 }
 
@@ -229,6 +261,16 @@ mod tests {
         assert_eq!(deadline.limit_at(at(70), 3600), None);
         assert_eq!(deadline.limit_at(at(90), 3600), None);
         assert_eq!(Deadline::from(start, 10, 30).limit_at(at(0), 5), None);
+    }
+
+    /// Only a scope can hold a time limit if `xtask` dies, so a job with one
+    /// doesn't start on macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_a_job_with_a_time_limit_is_refused() {
+        let none: [&str; 0] = [];
+        assert!(super::scope("true", &none, Some(1)).is_err());
+        assert!(super::scope("true", &none, None).is_ok());
     }
 
     #[test]

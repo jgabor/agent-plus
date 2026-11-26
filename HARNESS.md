@@ -593,7 +593,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` outside `xtask/tests/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
-| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit |
+| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit. On macOS it runs with no memory limit, and says so on stderr |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 | `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |
@@ -1187,13 +1187,18 @@ GitHub.
 | Triage time | 06:00 local |
 | Nightly limit | 110 minutes, the last 10 kept for the report |
 | Fuzzing and mutation limit | 1 hour each, or what the nightly limit leaves |
-| Memory for fuzzing, mutation, the gate's tests, and `cargo xtask run` | 8 GiB per job |
+| Memory for fuzzing, mutation, the gate's tests, and `cargo xtask run` | 8 GiB per job, and none on macOS |
 | Lease length | 12 hours |
 | Merge timeout | 30 minutes |
 | Attempts on one failing check | 3 |
 | Time limit on an issue | Twice its estimate |
 | Review rounds | 3, or 5 for security, data loss, or concurrency |
 | Minimum free disk | 50 GiB |
+
+A job's memory limit is a systemd scope, because `ulimit` counts each process
+alone. macOS has no systemd, and nothing there limits a whole process tree, so
+`cargo xtask run` and a test run there have no memory limit. A job with a time
+limit doesn't start there, so fuzzing and mutation run only on Linux.
 
 The places stay at 2, below the 5 worker slots on Linux, because three test
 runs at once failed on timing in 13 of 18 runs on the owner's host. If gates

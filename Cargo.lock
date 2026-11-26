@@ -21,6 +21,8 @@ dependencies = [
  "git",
  "graviola",
  "guest",
+ "h2",
+ "http",
  "libc",
  "net",
  "netstack",
@@ -32,6 +34,7 @@ dependencies = [
  "smoltcp",
  "store",
  "time",
+ "tokio",
  "vmm",
  "webpki-roots",
 ]

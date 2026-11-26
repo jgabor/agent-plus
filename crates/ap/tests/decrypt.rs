@@ -4,18 +4,21 @@
 //! serves a link, as in a run. A second `smoltcp` interface plays the guest
 //! on the other end, and reaches fake destinations on this host's loopback
 //! as `host.ap.internal`. Each fake destination notes the request line of
-//! every request that reaches it.
+//! every request that reaches it. Over HTTP/2, the `h2` crate is the guest's
+//! client and the fake destination's server, on either end of the proxy.
 
 #![cfg(target_os = "linux")]
 
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
+use std::pin::Pin;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::task::Poll;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,6 +32,7 @@ use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr};
+use tokio::io::{AsyncRead, AsyncWriteExt, DuplexStream, ReadBuf, duplex};
 
 const NAME: &str = "host.ap.internal";
 /// How long the guest waits for an answer.
@@ -229,6 +233,11 @@ impl Guest {
     /// offers HTTP/2 and HTTP/1.1.
     fn tls(root: &CertificateDer<'static>) -> ClientConnection {
         Guest::tls_offering(root, &[b"h2", b"http/1.1"])
+    }
+
+    /// A TLS client as [`Guest::tls`]'s, which offers only HTTP/1.1.
+    fn http1(root: &CertificateDer<'static>) -> ClientConnection {
+        Guest::tls_offering(root, &[b"http/1.1"])
     }
 
     /// A TLS client for `host.ap.internal`, which trusts only `root`, and
@@ -439,6 +448,12 @@ fn settled(seen: &Seen) -> Vec<String> {
 /// `host.ap.internal` with a certificate it signed, which agrees HTTP/2 or
 /// HTTP/1.1.
 fn server() -> (CertificateDer<'static>, Arc<ServerConfig>) {
+    server_offering(&[b"h2", b"http/1.1"])
+}
+
+/// A certificate authority and a TLS server as [`server`]'s, which agrees
+/// only `protocols`.
+fn server_offering(protocols: &[&[u8]]) -> (CertificateDer<'static>, Arc<ServerConfig>) {
     let now = SystemTime::now();
     let authority = Authority::generate(now).unwrap();
     let leaf = authority.issue(NAME, now).unwrap();
@@ -449,13 +464,348 @@ fn server() -> (CertificateDer<'static>, Arc<ServerConfig>) {
         .with_no_client_auth()
         .with_single_cert(vec![leaf.certificate], leaf.key)
         .unwrap();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    config.alpn_protocols = protocols.iter().map(|protocol| protocol.to_vec()).collect();
     (authority.certificate().clone(), Arc::new(config))
+}
+
+/// The length of each body an HTTP/2 request sends: past the initial
+/// window of 65,535, so the guest sends it as the destination's window
+/// opens, which passes unread.
+const BODY: usize = 200_000;
+/// The bytes each in-memory pipe to an `h2` end holds.
+const PIPE: usize = 1 << 20;
+
+/// The body that a request for `path` sends.
+fn body_for(path: &str) -> Vec<u8> {
+    path.bytes().cycle().take(BODY).collect()
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+}
+
+/// Moves `received`, which came from the other end of `tls`, to `pipe`,
+/// which an `h2` end reads, and what that end wrote to `tls`, whose records
+/// go on `unsent`. Returns whether `pipe` is still open, or how TLS ended.
+async fn relay(
+    pipe: &mut DuplexStream,
+    tls: &mut rustls::Connection,
+    mut received: &[u8],
+    unsent: &mut Vec<u8>,
+) -> Result<bool, String> {
+    // Plaintext is read as each record is, since rustls holds only so much.
+    let mut plain = Vec::new();
+    let ended = loop {
+        match tls.reader().read_to_end(&mut plain) {
+            Ok(_) => break true,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.to_string()),
+        }
+        if received.is_empty() {
+            break false;
+        }
+        tls.read_tls(&mut received)
+            .map_err(|error| error.to_string())?;
+        tls.process_new_packets()
+            .map_err(|error| error.to_string())?;
+    };
+    pipe.write_all(&plain)
+        .await
+        .map_err(|error| error.to_string())?;
+    if ended {
+        return Err("closed".to_owned());
+    }
+    // What the `h2` end wrote, without waiting for more.
+    let mut buffer = vec![0; 64 * 1024];
+    let mut read = ReadBuf::new(&mut buffer);
+    let polled = std::future::poll_fn(|context| {
+        Poll::Ready(Pin::new(&mut *pipe).poll_read(context, &mut read))
+    })
+    .await;
+    let open = match polled {
+        Poll::Ready(Ok(())) if read.filled().is_empty() => {
+            tls.send_close_notify();
+            false
+        }
+        Poll::Ready(Ok(())) => {
+            tls.writer().write_all(read.filled()).unwrap();
+            true
+        }
+        Poll::Ready(Err(error)) => return Err(error.to_string()),
+        Poll::Pending => true,
+    };
+    while tls.wants_write() {
+        tls.write_tls(unsent).unwrap();
+    }
+    Ok(open)
+}
+
+/// What the requests on an HTTP/2 connection got, and how it ended.
+struct Asked {
+    /// Each answer's body, or why there was none, in the order asked.
+    answers: Vec<Result<String, String>>,
+    /// The protocol the guest agreed.
+    protocol: Option<Vec<u8>>,
+    /// The connection was reset.
+    reset: bool,
+}
+
+impl Guest {
+    /// Sends each of `batches` from an `h2` client on `handle`, through
+    /// `tls`: each request of a batch at once, with the body that
+    /// [`body_for`] gives its path, and the next batch once every request
+    /// of this one has its answer.
+    fn ask_h2(
+        &mut self,
+        handle: SocketHandle,
+        tls: ClientConnection,
+        batches: Vec<Vec<String>>,
+    ) -> Asked {
+        runtime().block_on(async {
+            let (io, pipe) = duplex(PIPE);
+            let asking = tokio::spawn(async move {
+                let handshake = (h2::client::Builder::new())
+                    .handshake::<_, &'static [u8]>(io)
+                    .await;
+                let (client, connection) = match handshake {
+                    Ok(handshake) => handshake,
+                    Err(error) => return vec![Err(error.to_string())],
+                };
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                let mut answers = Vec::new();
+                for batch in batches {
+                    let asked: Vec<_> = (batch.into_iter())
+                        .map(|url| tokio::spawn(ask(client.clone(), url)))
+                        .collect();
+                    for answer in asked {
+                        answers.push(answer.await.unwrap().map_err(|error| error.to_string()));
+                    }
+                }
+                answers
+            });
+            let mut pipe = Some(pipe);
+            let mut tls = rustls::Connection::Client(tls);
+            tls.set_buffer_limit(None);
+            let mut unsent = Vec::new();
+            let mut buffer = vec![0; 64 * 1024];
+            let mut reset = false;
+            let deadline = Instant::now() + WAIT;
+            while !asking.is_finished() && Instant::now() < deadline {
+                self.poll();
+                let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+                if socket.can_send() && !unsent.is_empty() {
+                    let n = socket.send_slice(&unsent).unwrap();
+                    unsent.drain(..n);
+                }
+                let mut received = Vec::new();
+                while socket.can_recv() {
+                    let n = socket.recv_slice(&mut buffer).unwrap();
+                    received.extend_from_slice(&buffer[..n]);
+                }
+                // The guest never closes first, so only a reset closes it.
+                reset |= socket.state() == tcp::State::Closed;
+                if let Some(open) = &mut pipe {
+                    let goes_on = relay(open, &mut tls, &received, &mut unsent).await;
+                    // Without its pipe, the client's connection ends.
+                    if reset || goes_on != Ok(true) {
+                        pipe = None;
+                    }
+                }
+                tokio::task::yield_now().await;
+                thread::sleep(Duration::from_millis(1));
+            }
+            let answers = match asking.is_finished() {
+                true => asking.await.unwrap(),
+                false => vec![Err("timed out".to_owned())],
+            };
+            Asked {
+                answers,
+                protocol: tls.alpn_protocol().map(<[u8]>::to_vec),
+                reset,
+            }
+        })
+    }
+}
+
+/// Asks for `url` with the body that [`body_for`] gives its path, and
+/// returns the answer's body.
+async fn ask(
+    client: h2::client::SendRequest<&'static [u8]>,
+    url: String,
+) -> Result<String, h2::Error> {
+    let mut client = client.ready().await?;
+    let request = http::Request::post(url).body(()).unwrap();
+    let body: &'static [u8] = body_for(request.uri().path()).leak();
+    let (response, mut send) = client.send_request(request, false)?;
+    send.send_data(body, true)?;
+    let mut body = response.await?.into_body();
+    let mut answer = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        body.flow_control().release_capacity(chunk.len())?;
+        answer.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&answer).into_owned())
+}
+
+/// A fake destination over TLS with `config`, which serves HTTP/2 with the
+/// `h2` crate, and lets the client send frames, windows, and a header
+/// table larger than HTTP/2's first ones. It notes each request in the
+/// order it came: its method, its path, and whether its body is the whole
+/// of what [`body_for`] gives. It answers each with the path.
+fn h2_destination(config: Arc<ServerConfig>) -> (u16, Seen) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Seen::default();
+    let noted = Arc::clone(&seen);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            let (config, noted) = (Arc::clone(&config), Arc::clone(&noted));
+            thread::spawn(move || serve_h2(stream, config, noted));
+        }
+    });
+    (port, seen)
+}
+
+/// Serves HTTP/2 on `stream`, as [`h2_destination`] says.
+fn serve_h2(stream: TcpStream, config: Arc<ServerConfig>, noted: Seen) {
+    runtime().block_on(async {
+        let (io, pipe) = duplex(PIPE);
+        let serving = tokio::spawn(async move {
+            let mut builder = h2::server::Builder::new();
+            builder
+                .max_frame_size(1 << 20)
+                .initial_window_size(1 << 20)
+                .initial_connection_window_size(1 << 20)
+                .header_table_size(1 << 16);
+            let Ok(mut connection) = builder.handshake::<_, &'static [u8]>(io).await else {
+                return;
+            };
+            while let Some(Ok((request, respond))) = connection.accept().await {
+                let at = {
+                    let mut noted = noted.lock().unwrap();
+                    noted.push(String::new());
+                    noted.len() - 1
+                };
+                tokio::spawn(answer_h2(request, respond, Arc::clone(&noted), at));
+            }
+        });
+        stream.set_nonblocking(true).unwrap();
+        let mut pipe = Some(pipe);
+        let mut tls = rustls::Connection::Server(ServerConnection::new(config).unwrap());
+        tls.set_buffer_limit(None);
+        let mut unsent = Vec::new();
+        let mut buffer = vec![0; 64 * 1024];
+        let deadline = Instant::now() + WAIT;
+        while !serving.is_finished() && Instant::now() < deadline {
+            let mut received = Vec::new();
+            match (&stream).read(&mut buffer) {
+                Ok(0) => pipe = None,
+                Ok(n) => received.extend_from_slice(&buffer[..n]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => pipe = None,
+            }
+            if let Some(open) = &mut pipe
+                && relay(open, &mut tls, &received, &mut unsent).await != Ok(true)
+            {
+                pipe = None;
+            }
+            while !unsent.is_empty() {
+                match (&stream).write(&unsent) {
+                    Ok(n) => drop(unsent.drain(..n)),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(_) => unsent.clear(),
+                }
+            }
+            tokio::task::yield_now().await;
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+}
+
+/// Notes `request` at `at`, once its body has come, and answers it.
+async fn answer_h2(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<&'static [u8]>,
+    noted: Seen,
+    at: usize,
+) {
+    let (method, path) = (
+        request.method().to_string(),
+        request.uri().path().to_owned(),
+    );
+    let mut body = request.into_body();
+    let mut got = Vec::new();
+    while let Some(Ok(chunk)) = body.data().await {
+        let _ = body.flow_control().release_capacity(chunk.len());
+        got.extend_from_slice(&chunk);
+    }
+    let whole = match got == body_for(&path) {
+        true => "whole",
+        false => "broken",
+    };
+    noted.lock().unwrap()[at] = format!("{method} {path} {whole}");
+    if let Ok(mut send) = respond.send_response(http::Response::new(()), false) {
+        let _ = send.send_data(path.into_bytes().leak(), true);
+    }
+}
+
+// spec(NETWORK): On a decrypted connection, the proxy verifies the upstream server's certificate and checks every request's host and path, including each request on a reused HTTP/2 connection (`:authority`).
+#[test]
+fn each_request_on_a_reused_http2_connection_is_checked() {
+    let (root, config) = server();
+    let (port, seen) = h2_destination(config);
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let url = |host: &str, path: &str| format!("https://{host}:{port}{path}");
+    let paths = ["/allowed/one", "/allowed/two", "/allowed/three"];
+
+    // Three requests at once, then a denied one, on one connection.
+    let handle = guest.connect();
+    let tls = Guest::tls(&guest.authority.clone());
+    let allowed = paths.map(|path| url(NAME, path)).to_vec();
+    let asked = guest.ask_h2(handle, tls, vec![allowed, vec![url(NAME, "/denied")]]);
+    assert_eq!(asked.protocol.as_deref(), Some(&b"h2"[..]));
+    assert_eq!(asked.answers[..3], paths.map(|path| Ok(path.to_owned())));
+    assert!(asked.answers[3].is_err(), "{:?}", asked.answers[3]);
+    assert!(asked.reset);
+    // A request whose `:authority` names another host.
+    let handle = guest.connect();
+    let tls = Guest::tls(&guest.authority.clone());
+    let other = vec![vec![url("example.com", "/allowed/other")]];
+    let asked = guest.ask_h2(handle, tls, other);
+    assert!(asked.answers[0].is_err(), "{:?}", asked.answers);
+    assert!(asked.reset);
+
+    // The allowed requests reached the destination whole and in order, and
+    // nothing else did.
+    assert_eq!(
+        settled(&seen),
+        paths.map(|path| format!("POST {path} whole"))
+    );
+}
+
+#[test]
+fn the_guest_gets_http2_only_when_the_server_chose_it() {
+    let (root, config) = server_offering(&[b"http/1.1"]);
+    let (port, seen) = destination(Some(config));
+    let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    let handle = guest.connect();
+    let mut tls = Guest::tls(&guest.authority.clone());
+    let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/one"));
+    assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
+    assert_eq!(settled(&seen), ["GET /allowed/one HTTP/1.1 (http/1.1)"]);
 }
 
 // spec(NETWORK): **Decryption.** The proxy decrypts TLS, with the per-run certificate authority, only where it must.
 // spec(NETWORK): on hosts with URL rules, because the rules need the request path
-// spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 // spec(NETWORK): A request that the rules deny never reaches the server, and the proxy resets the connection it came on.
 #[test]
 fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
@@ -465,7 +815,7 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     let mut guest = Guest::new(&rules, vec![root.clone()], port);
 
     let reused = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let answer = guest.exchange(reused, Some(&mut tls), &get("/allowed/a"));
     assert!(
         answer
@@ -473,8 +823,7 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
             .is_ok_and(|a| a.ends_with("\r\n\r\n/allowed/a")),
         "{answer:?}"
     );
-    // The guest's side is the run's authority's, and offered only
-    // HTTP/1.1.
+    // The guest's side is the run's authority's.
     assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
     // A second request on the same connection, which the rules deny,
     // resets it.
@@ -482,32 +831,28 @@ fn a_url_rule_decides_each_request_on_a_connection_the_proxy_decrypts() {
     assert_eq!(answer, Err("reset".to_owned()));
 
     let denied = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let answer = guest.exchange(denied, Some(&mut tls), &get("/allowed/../denied"));
     assert_eq!(answer, Err("reset".to_owned()));
     // An allowed and a denied request together: the denied one never
     // reaches the destination, and the connection resets.
     let mixed = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let both = [get("/allowed/pipelined"), get("/denied/pipelined")].concat();
     let answer = guest.exchange(mixed, Some(&mut tls), &both);
     assert_eq!(answer, Err("reset".to_owned()));
-    // A guest that offers only HTTP/2 gets no protocol it can speak.
-    let only_h2 = guest.connect();
-    let mut tls = Guest::tls_offering(&guest.authority.clone(), &[b"h2"]);
-    let answer = guest.exchange(only_h2, Some(&mut tls), &get("/allowed/h2"));
-    assert!(answer.is_err(), "{answer:?}");
     let answer = {
         let other = guest.connect();
-        let mut tls = Guest::tls(&guest.authority.clone());
+        let mut tls = Guest::http1(&guest.authority.clone());
         let named = b"GET /allowed/b HTTP/1.1\r\nHost: example.com\r\n\r\n";
         guest.exchange(other, Some(&mut tls), named)
     };
     assert!(answer.is_err(), "{answer:?}");
 
-    // The destination got the allowed requests alone, and was offered only
-    // HTTP/1.1 too. An allowed request ahead of a denied one may or may not
-    // have reached it before the reset.
+    // The destination got the allowed requests alone, over the HTTP/1.1
+    // the guest offered, though it agrees HTTP/2 too. An allowed request
+    // ahead of a denied one may or may not have reached it before the
+    // reset.
     let pipelined = "GET /allowed/pipelined HTTP/1.1 (http/1.1)";
     let seen: Vec<String> = (settled(&seen).into_iter())
         .filter(|line| line != pipelined)
@@ -529,7 +874,7 @@ fn a_destination_that_ends_before_its_handshake_still_resets_a_denied_guest() {
     let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
     let mut guest = Guest::new(&rules, vec![root], port);
     let handle = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let both = [get("/allowed/first"), get("/denied")].concat();
     let started = Instant::now();
     assert_eq!(
@@ -600,7 +945,7 @@ fn a_guest_that_ends_before_any_request_leaves_no_connection_open() {
         let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
         let mut guest = Guest::new(&rules, vec![root.clone()], port);
         let handle = guest.connect();
-        let mut tls = Guest::tls(&guest.authority.clone());
+        let mut tls = Guest::http1(&guest.authority.clone());
         // Its handshake, then its close, and no request.
         handshake(&mut guest, handle, &mut tls);
         tls.send_close_notify();
@@ -635,7 +980,7 @@ fn a_request_and_the_guest_s_close_together_reach_a_slow_destination() {
     let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
     let mut guest = Guest::new(&rules, vec![root], port);
     let handle = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     handshake(&mut guest, handle, &mut tls);
     // The request and the close in one write, while the proxy's own
     // handshake waits for the destination.
@@ -661,7 +1006,7 @@ fn a_denied_request_resets_the_guest_while_the_destination_stays_silent() {
     let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/allowed\n");
     let mut guest = Guest::new(&rules, vec![root], port);
     let handle = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     handshake(&mut guest, handle, &mut tls);
     let answer = guest.exchange(handle, Some(&mut tls), &get("/denied"));
     assert_eq!(answer, Err("reset".to_owned()));
@@ -726,7 +1071,7 @@ fn bytes_after_either_side_ends_tls_hold_up_no_other_connection() {
 
     // The guest ends TLS, and sends a record more.
     let handle = guest.connect();
-    let mut tls = Guest::tls(&authority);
+    let mut tls = Guest::http1(&authority);
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/a"));
     assert!(answer.is_ok(), "{answer:?}");
     tls.send_close_notify();
@@ -740,14 +1085,14 @@ fn bytes_after_either_side_ends_tls_hold_up_no_other_connection() {
     // The destination does.
     guest.port = ending_port;
     let handle = guest.connect();
-    let mut tls = Guest::tls(&authority);
+    let mut tls = Guest::http1(&authority);
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/end"));
     assert!(answer.is_ok(), "{answer:?}");
 
     // The proxy still serves.
     guest.port = port;
     let handle = guest.connect();
-    let mut tls = Guest::tls(&authority);
+    let mut tls = Guest::http1(&authority);
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/b"));
     assert!(answer.is_ok(), "{answer:?}");
     assert_eq!(
@@ -794,13 +1139,13 @@ fn a_destination_whose_certificate_the_roots_don_t_trust_is_refused() {
     // Trusted, it answers.
     let mut guest = Guest::new(&rules, vec![root], port);
     let handle = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed"));
     assert!(answer.is_ok(), "{answer:?}");
     // Not, and nothing reaches it.
     let mut guest = Guest::new(&rules, Vec::new(), port);
     let handle = guest.connect();
-    let mut tls = Guest::tls(&guest.authority.clone());
+    let mut tls = Guest::http1(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &get("/allowed/untrusted"));
     assert!(answer.is_err(), "{answer:?}");
     assert_eq!(settled(&seen), ["GET /allowed HTTP/1.1 (http/1.1)"]);
@@ -1387,6 +1732,7 @@ fn holding_placeholder(host: &str) -> Vec<u8> {
 // spec(SECRET): in request headers on the adapter's allowlist (for example, `Authorization` and `x-api-key`), never in query strings or bodies
 // spec(SECRET): In an `Authorization: Basic` header, which git sends over HTTPS, the proxy decodes the credentials, replaces the placeholder in them, and encodes them again.
 // spec(SECRET): Injection requires decrypting TLS to the bound hosts (see [Enforcement](#network)).
+// spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
 #[test]
 fn a_bound_host_gets_the_value_in_the_allowed_headers_alone() {
     let (root, config) = server();
@@ -1395,6 +1741,8 @@ fn a_bound_host_gets_the_value_in_the_allowed_headers_alone() {
     let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
     let handle = guest.connect();
     // The guest trusts the run's authority alone, so the proxy decrypted.
+    // It offered HTTP/2, as the destination does, and gets HTTP/1.1, since
+    // the proxy puts a value in only an HTTP/1.1 request.
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
     assert!(answer.is_ok(), "{answer:?}");

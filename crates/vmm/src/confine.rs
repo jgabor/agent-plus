@@ -356,10 +356,11 @@ fn share_times_rules(socket: RawFd) -> Vec<Rule> {
 
 /// The calls the network process makes while it passes the guest's frames
 /// through its stack. It has one thread, so it starts none. It reads and
-/// writes frames on `link`, waits on it, and writes to standard error, where
-/// a panic says the id of the thread that panicked. It writes to standard
-/// output too, a socket to `ap run`, where it reports what it blocked. It
-/// makes no socket, so nothing it does reaches past the link and `ap run`.
+/// writes frames on `link`, waits on it, and writes to standard error. A
+/// panic there says the id of the thread that panicked. It writes to
+/// standard output too, a socket to `ap run`, where it reports what it
+/// blocked. It makes no socket, so nothing it does reaches past the link and
+/// `ap run`.
 fn network_rules(link: RawFd) -> Vec<Rule> {
     let mut rules = vec![Rule::AllowIf(RECVFROM, 0, vec![link as u32])];
     rules.extend(network_common_rules(link));
@@ -1154,6 +1155,8 @@ mod tests {
         if std::env::var_os(PANICKING_VARIABLE).is_none() {
             return;
         }
+        let threads = std::fs::read_dir("/proc/self/task").unwrap().count();
+        assert_eq!(threads, 1, "the network process has threads it doesn't own");
         confine_network(0).unwrap();
         let unwound = std::panic::catch_unwind(|| panic!("{PANIC}")).is_err();
         // SAFETY: `_exit` ends the process at once.

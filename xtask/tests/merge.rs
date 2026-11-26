@@ -1746,6 +1746,24 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
     assert!(merged < started, "{calls}");
 }
 
+/// So neither the slot nor the turn outlives a killed merge in a command it
+/// started. Only `gh pr merge` keeps the slot.
+#[test]
+fn a_command_that_a_merge_starts_holds_neither_the_slot_nor_the_turn() {
+    // Before the turn, and in the xtask of `main` after it.
+    for (name, on) in [("build", "build --quiet --package xtask"), ("gate", "cargo fmt")] {
+        let repo = Repo::new(&format!("no-lock-{name}"));
+        let fds = repo.bin.join("fds");
+        let list = format!("ls -l /proc/$$/fd/ > '{}'", fds.display());
+        assert_merged(&repo, &repo.merge_running(on, &list));
+        let open = fs::read_to_string(&fds).unwrap();
+        assert!(open.contains(" -> "), "{name}: {open}");
+        for lock in ["merge.lock", "turn.lock"] {
+            assert!(!open.contains(lock), "{name}: {open}");
+        }
+    }
+}
+
 #[test]
 fn the_pr_is_read_again_after_the_slot() {
     let repo = Repo::new("read-again");

@@ -1744,19 +1744,64 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
     assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     heard.extend(lines.try_iter());
     assert_eq!(second.status.code(), Some(0), "{heard:?}");
-    let mut pending: Vec<String> = posts(&repo)
+    let calls = repo.calls();
+    let mut proving: Vec<String> = posts(&repo)
         .into_iter()
-        .filter(|(_, said)| said.starts_with("pending"))
+        .filter(|(_, said)| said.starts_with("pending Proving:"))
         .map(|(commit, _)| commit)
         .collect();
-    pending.dedup();
-    let calls = repo.calls();
-    assert_eq!(pending, [first_head, second_head], "{calls}");
+    proving.dedup();
+    assert_eq!(proving, [first_head, second_head.clone()], "{calls}");
+    // Once, though it let the slot go for the turn.
+    let waited: Vec<(String, String)> = posts(&repo)
+        .into_iter()
+        .filter(|(commit, said)| *commit == second_head && said.starts_with("pending Waiting:"))
+        .collect();
+    let waiting = "pending Waiting: the merge slot".to_string();
+    assert_eq!(waited, [(second_head, waiting)], "{calls}");
     // The second does nothing under the slot until the first has merged.
     let slot_fetch = "+refs/heads/8-y:refs/remotes/origin/8-y";
     let started = calls.find(slot_fetch).expect(&calls);
     let merged = calls.find("gh pr merge 9 ").expect(&calls);
     assert!(merged < started, "{calls}");
+}
+
+/// A merge whose xtask of `main` can't start ends the wait it posted, as an
+/// error does.
+#[test]
+fn a_merge_whose_xtask_of_main_cant_start_ends_its_wait() {
+    let repo = Repo::new("cant-start");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let held = fs::File::create(directory.join("merge.lock")).unwrap();
+    held.lock().unwrap();
+    // The stand-in build then leaves a program that nobody can run.
+    let child = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("RUN_ON", "build --quiet --package xtask")
+        .env(
+            "RUN_COMMAND",
+            r#"cp() { command cp "$@" && chmod a-x "$2"; }"#,
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while posts(&repo).is_empty() {
+        assert!(Instant::now() < deadline, "{}", repo.calls());
+        thread::sleep(Duration::from_millis(10));
+    }
+    held.unlock().unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("couldn't run the xtask of `main`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(last_post(&repo), "failure Stopped by an error");
 }
 
 /// So neither the slot nor the turn outlives a killed merge in a command it
@@ -3801,6 +3846,7 @@ impl Repo {
         self.git(&["checkout", "-q", BRANCH]);
         let json = pr_json(pr, pr.state).replace(BRANCH, branch);
         fs::write(self.bin.join(format!("pr-{number}.json")), json).unwrap();
+        fs::write(self.bin.join(format!("branch-{number}")), branch).unwrap();
     }
 
     /// Adds the record that an earlier `prepare` leaves at the tip of a branch.

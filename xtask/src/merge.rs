@@ -333,6 +333,13 @@ fn run_the_checks_of(
         .wait()
         .map_err(|e| Problem(format!("couldn't wait for the xtask of `main`: {e}")))?;
     drop(turn);
+    // The shell's own codes, when it couldn't run that xtask, which then
+    // ended nothing this one posted. No xtask exits with either.
+    if let Some(code @ (126 | 127)) = ended.code() {
+        return Err(Problem(format!(
+            "couldn't run the xtask of `main`: `sh` exited {code}"
+        )));
+    }
     end_as(ended)
 }
 

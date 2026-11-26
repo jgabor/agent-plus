@@ -44,10 +44,11 @@ const MAX_READ: usize = 64 << 20;
 /// then cheap to read, and a walk of the tree goes no more than 512 deep,
 /// which the stack holds.
 const MAX_PATH: usize = 1024;
-/// How large an object of the agent's, a pack index, or all its pack
-/// indexes, may be, in bytes, at most. Zlib inflates about 1000 to 1, so a small file can say it holds
-/// far more than this. It is git's `core.bigFileThreshold`, above which git
-/// stores a blob whole.
+/// How large an object of the agent's, a pack index, all its pack
+/// indexes, or a file of its refs may be, in bytes, at most. Zlib inflates
+/// about 1000 to 1, and a sparse file costs almost nothing, so a small file
+/// can say it holds far more than this. It is git's `core.bigFileThreshold`,
+/// above which git stores a blob whole.
 const MAX_OBJECT: usize = 512 << 20;
 /// The author and committer of the last commit.
 const IDENTITY: &str = "Agent+ <ap@localhost>";
@@ -103,15 +104,22 @@ impl<'a> Agent<'a> {
     }
 
     /// The agent's file at `path` in its `.git`, or `None` if it has no
-    /// regular file or symlink there. Nothing on the way is a symlink.
-    fn file(&self, path: &str) -> io::Result<Option<Content>> {
+    /// regular file or symlink there. Nothing on the way is a symlink, and
+    /// a file longer than `MAX_OBJECT` is refused.
+    fn file(&self, path: &str) -> Result<Option<Content>, git::Error> {
         let inner = format!(".git/{path}");
-        match self.records.view(inner.as_bytes()) {
+        let read = match self.records.view(inner.as_bytes()) {
             View::Agent(Entry::File { .. }) => read_beneath(&self.dir.join("tree"), &inner),
             View::Agent(Entry::Symlink { target }) => Ok(Some(Content::Link(target.clone()))),
             View::Agent(_) | View::Absent => Ok(None),
             View::Yours => read_beneath(&self.dir.join(GIT), path),
-        }
+        };
+        read.map_err(|error| match error.kind() {
+            io::ErrorKind::FileTooLarge => {
+                git::Error::Corrupt(format!("the agent's {inner} is larger than the limit"))
+            }
+            _ => git::Error::Io(error),
+        })
     }
 
     /// The commit the agent's `HEAD` names, or `None` if it names none.
@@ -543,7 +551,9 @@ fn check_kind(id: &Id, named: Option<Kind>, kind: Kind) -> Result<(), git::Error
 }
 
 /// The regular file or symlink at `path` beneath `dir`, reached with no
-/// symlink on the way, or `None` if there is neither there.
+/// symlink on the way, or `None` if there is neither there. A file longer
+/// than `MAX_OBJECT` is refused before it is read, since a sparse file can
+/// say it is any length.
 fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     let name = CString::new(dir.as_os_str().as_bytes()).map_err(io::Error::other)?;
     let dir = match openat2(libc::AT_FDCWD, &name, libc::O_DIRECTORY, NO_SYMLINKS) {
@@ -581,10 +591,19 @@ fn read_beneath(dir: &Path, path: &str) -> io::Result<Option<Content>> {
     if !metadata.is_file() {
         return Ok(None);
     }
+    let larger = || io::Error::from(io::ErrorKind::FileTooLarge);
+    if metadata.len() > MAX_OBJECT as u64 {
+        return Err(larger());
+    }
     // The descriptor reads nothing, so the file opens again through it.
-    let mut file = File::open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
+    let file = File::open(format!("/proc/self/fd/{}", fd.as_raw_fd()))?;
     let mut contents = Vec::new();
-    file.read_to_end(&mut contents)?;
+    // It may have grown since.
+    file.take(MAX_OBJECT as u64 + 1)
+        .read_to_end(&mut contents)?;
+    if contents.len() > MAX_OBJECT {
+        return Err(larger());
+    }
     Ok(Some(Content::File(contents)))
 }
 

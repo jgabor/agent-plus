@@ -47,3 +47,6 @@ Host requirements	Debian builds the same packages for both.	States a fact about 
 Host requirements	In practice, Intel Broadwell or AMD Zen and newer.	Translates the x86_64 feature floor into CPU families as an illustration.
 Host requirements	Apple M1 and newer qualify.	Names CPUs that meet the arm64 feature floor as an illustration.
 Host requirements	A Raspberry Pi 4 does not.	Names one board that misses the arm64 feature floor as an illustration.
+NETWORK	For untrusted code, start from `NETWORK -` and allow what it needs.	Advises when to choose `NETWORK -`; the default and its rules are stated in the units before it.
+NETWORK	Use `NETWORK -` with allow rules when the boundary matters, and URL rules where a server's other names matter, because URL rules turn on decryption.	Advises which rules to choose; that URL rules cause decryption is stated under Decryption.
+AUTH	In CI, use `AUTH key`.	Advises CI users which sign-in to choose, and claims nothing about ap.

@@ -1312,12 +1312,16 @@ fn every_store_holds_the_tree_s_guest_files_before_its_first_command() {
 #[test]
 fn a_copy_whose_digest_isn_t_the_pin_s_isn_t_used() {
     let wrong = |repo: &Repo| copies_with_os(repo, "not the os layer\n");
-    for (store, counts, _) in guest_files_held("wrong", wrong) {
+    for (store, counts, root) in guest_files_held("wrong", wrong) {
         assert!(!counts.is_empty(), "{store}");
         // Only the kernel's copy matches its pin.
         assert!(
             counts.iter().all(|count| count == "1"),
             "{store}: {counts:?}"
+        );
+        assert!(
+            root.join(format!("layers/{KERNEL_DIGEST}")).is_file(),
+            "{store}"
         );
     }
 }

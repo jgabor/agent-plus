@@ -130,21 +130,20 @@ struct Copies(Vec<(PathBuf, String)>);
 impl Copies {
     /// The copies of the guest files that the tree's pins name. A copy whose
     /// digest isn't its pin's is left out, and that file is downloaded, as
-    /// it is when the tree holds no copy. The T1 tests move an OS layer's
-    /// directory into place only once both of its files are checked.
+    /// it is when the tree holds no copy or names no digest. The T1 tests
+    /// move an OS layer's directory into place only once both of its files
+    /// are checked.
     fn find(root: &Path) -> Result<Copies, Problem> {
         let mut copies = Vec::new();
         for guest in [Guest::Os, Guest::Kernel] {
             let pin = guest.pin();
-            let text = match fs::read_to_string(root.join(pin)) {
-                Ok(text) => text,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(Problem(format!("couldn't read {pin}: {e}"))),
+            let text = fs::read_to_string(root.join(pin)).unwrap_or_default();
+            let Ok(digest) = pinned_digest(pin, &text) else {
+                continue;
             };
-            let digest = pinned_digest(pin, &text)?;
             let stored = guest.stored(&digest);
-            if is_copy(&root.join(guest.copy(&digest)), &digest)?
-                && stored.iter().all(|(tree, _)| root.join(tree).is_file())
+            if stored.iter().all(|(tree, _)| root.join(tree).is_file())
+                && is_copy(&root.join(guest.copy(&digest)), &digest)?
             {
                 copies.extend(
                     stored

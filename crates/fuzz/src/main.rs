@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::cell::Cell;
 use std::env;
 use std::fs::{self, File};
 use std::io::Write;
@@ -15,9 +16,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::panic;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{Command, ExitCode, Stdio};
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vmm::GuestMemory;
 use vmm::virtio::Transport;
@@ -813,6 +817,8 @@ const TARGETS: [Target; 14] = [
             "\x01\x05\0\0\0",
             "\0\x01\0\0\0",
             "\x09\x04\0\0\0",
+            "\x01\x25\0\0\0",
+            "\x01\x0d\0\0\0",
             "\u{82}",
             "\u{83}",
             "\u{84}",
@@ -821,6 +827,8 @@ const TARGETS: [Target; 14] = [
             "\u{be}",
             "\x41\x10host.ap.internal",
             "\x41\x0bexample.com",
+            "\x41\x14host.ap.internal:443",
+            "\x41\x11host.ap.internal.",
             "\x0f\x17\x10host.ap.internal",
             "\x04\x0a/allowed/x",
             "\x04\x07/denied",
@@ -1368,6 +1376,89 @@ fn same_requests(passed: &[u8], ours: &[Framed]) {
     );
 }
 
+/// A stream that a server reads from `bytes`, as far as `fed`, and how far
+/// it got. Once `fed` is past `bytes`, it ends. What the server writes goes
+/// nowhere.
+struct Pipe<'a> {
+    bytes: &'a [u8],
+    fed: Rc<Cell<usize>>,
+    read: Rc<Cell<usize>>,
+}
+
+impl Pipe<'_> {
+    /// The next bytes fed, up to `room` of them, which are then read, or
+    /// none once it ends.
+    fn next(&self, room: usize) -> Poll<&[u8]> {
+        let (read, fed) = (self.read.get(), self.fed.get());
+        let available = fed.min(self.bytes.len());
+        if read == available && fed <= self.bytes.len() {
+            return Poll::Pending;
+        }
+        let end = available.min(read + room);
+        self.read.set(end);
+        Poll::Ready(&self.bytes[read..end])
+    }
+}
+
+impl hyper::rt::Read for Pipe<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let room = buf.remaining();
+        self.next(room).map(|bytes| {
+            buf.put_slice(bytes);
+            Ok(())
+        })
+    }
+}
+
+impl hyper::rt::Write for Pipe<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl tokio::io::AsyncRead for Pipe<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        self.next(buf.remaining()).map(|bytes| {
+            buf.put_slice(bytes);
+            Ok(())
+        })
+    }
+}
+
+impl tokio::io::AsyncWrite for Pipe<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// The requests that hyper's HTTP/1.1 server reads from `passed`, fed to it
 /// one byte at a time, the offset where it stopped reading, if it did, and
 /// the offset where it refused a body, if it did. Since the stream never
@@ -1376,49 +1467,11 @@ fn same_requests(passed: &[u8], ours: &[Framed]) {
 /// A request ends where hyper has read all of its body.
 fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>) {
     use hyper::body::{Body, Bytes, Frame, Incoming};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::convert::Infallible;
-    use std::pin::{Pin, pin};
-    use std::rc::Rc;
-    use std::task::{Context, Poll, Waker};
+    use std::pin::pin;
+    use std::task::Waker;
 
-    /// The stream hyper reads, and how far it got.
-    struct Stream<'a> {
-        passed: &'a [u8],
-        fed: Rc<Cell<usize>>,
-        read: Rc<Cell<usize>>,
-    }
-    impl hyper::rt::Read for Stream<'_> {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            mut buf: hyper::rt::ReadBufCursor<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            let (read, fed) = (self.read.get(), self.fed.get());
-            if read == fed {
-                return Poll::Pending;
-            }
-            let end = fed.min(read + buf.remaining());
-            buf.put_slice(&self.passed[read..end]);
-            self.read.set(end);
-            Poll::Ready(Ok(()))
-        }
-    }
-    impl hyper::rt::Write for Stream<'_> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Poll::Ready(Ok(buf.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
     /// An empty response body.
     struct Nothing;
     impl Body for Nothing {
@@ -1467,8 +1520,8 @@ fn served_requests(passed: &[u8]) -> (Vec<Framed>, Option<usize>, Option<usize>)
             }
         })
     };
-    let stream = Stream {
-        passed,
+    let stream = Pipe {
+        bytes: passed,
         fed: fed.clone(),
         read: read.clone(),
     };
@@ -1572,8 +1625,9 @@ fn http2_check_input(input: &str) -> bool {
         let mut passed = Vec::new();
         let mut asked = Vec::new();
         let mut decide = |path: &str| {
-            asked.push((path.to_owned(), allowed(path)));
-            allowed(path)
+            let allows = allowed(path);
+            asked.push((path.to_owned(), allows));
+            allows
         };
         let mut fed = Ok(());
         for chunk in bytes.chunks(piece) {
@@ -1587,7 +1641,7 @@ fn http2_check_input(input: &str) -> bool {
     };
     let whole = checked(bytes.len().max(1));
     for piece in [1, 1 + bytes.len() % 13] {
-        assert!(checked(piece) == whole, "in pieces of {piece}");
+        assert_eq!(checked(piece), whole, "in pieces of {piece}");
     }
     let (passed, asked, fed, holding) = whole;
     let allows: Vec<&str> = (asked.iter())
@@ -1598,10 +1652,11 @@ fn http2_check_input(input: &str) -> bool {
     fed.is_ok() && !holding
 }
 
-/// What the `h2` crate's server read of one request: its `:authority`, its
-/// `Host` values, escaped, its `:path`, and its body.
+/// What the `h2` crate's server read of one request: its stream, its
+/// `:authority`, its `Host` values, escaped, its `:path`, and its body.
 #[derive(Debug, PartialEq)]
 struct Served {
+    stream: u32,
     authority: Option<String>,
     hosts: Vec<String>,
     path: String,
@@ -1611,21 +1666,18 @@ struct Served {
 }
 
 /// Panics unless the `h2` crate's server, reading `passed`, serves the
-/// requests for `allows`, in order, for paths the rules read as the same,
-/// each naming `host.ap.internal`, and
-/// reads each as it reads it from `input`, what the guest sent. Where the
-/// check refused, the last request it allowed may not have passed. Where
-/// the server stopped reading, it serves the first of them.
+/// requests for `allows`, in order, each naming `host.ap.internal`, and
+/// reads each as it reads the same stream from `input`, what the guest
+/// sent. Where the check refused, the last request it allowed may not have
+/// passed. Where the server stopped reading, it serves the first of them.
 fn same_http2(input: &[u8], passed: &[u8], allows: &[&str], refused: bool) {
     let (theirs, stopped) = served_http2(passed);
     let (sent, _) = served_http2(input);
-    // The rules decide on a path without its query or fragment, and a
-    // server may drop the fragment.
-    let decided = |paths: &mut dyn Iterator<Item = &str>| -> Vec<_> {
-        paths.map(net::request_path).collect()
-    };
-    let paths = decided(&mut theirs.iter().map(|served| &served.path[..]));
-    let wanted = decided(&mut allows.iter().copied());
+    let paths: Vec<&str> = theirs.iter().map(|served| &served.path[..]).collect();
+    // The server drops a path's fragment, as the rules do.
+    let wanted: Vec<&str> = (allows.iter())
+        .map(|&path| path.split('#').next().unwrap_or_default())
+        .collect();
     let last = wanted.len().saturating_sub(usize::from(refused));
     let ordered = match stopped {
         true => wanted.starts_with(&paths),
@@ -1635,7 +1687,10 @@ fn same_http2(input: &[u8], passed: &[u8], allows: &[&str], refused: bool) {
         let mut names = served.authority.iter().chain(&served.hosts).peekable();
         names.peek().is_some() && names.all(|name| names_host(name.as_bytes()))
     });
-    let same = theirs.iter().zip(&sent).all(|(theirs, sent)| {
+    let same = theirs.iter().all(|theirs| {
+        let Some(sent) = sent.iter().find(|sent| sent.stream == theirs.stream) else {
+            return true;
+        };
         let (short, long) = match theirs.body.len() <= sent.body.len() {
             true => (theirs, sent),
             false => (sent, theirs),
@@ -1659,58 +1714,13 @@ fn same_http2(input: &[u8], passed: &[u8], allows: &[&str], refused: bool) {
 /// request check does: frames of any length, and a header table and
 /// header lists as large as a head may be.
 fn served_http2(bytes: &[u8]) -> (Vec<Served>, bool) {
-    use std::cell::Cell;
-    use std::pin::{Pin, pin};
-    use std::rc::Rc;
-    use std::task::{Context, Poll, Waker};
-
-    /// The stream the server reads, and how far it got. Past `bytes`, it
-    /// ends.
-    struct Stream<'a> {
-        bytes: &'a [u8],
-        fed: Rc<Cell<usize>>,
-        read: Rc<Cell<usize>>,
-    }
-    impl tokio::io::AsyncRead for Stream<'_> {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            let (read, fed) = (self.read.get(), self.fed.get());
-            let available = fed.min(self.bytes.len());
-            if read == available {
-                return match fed > self.bytes.len() {
-                    true => Poll::Ready(Ok(())),
-                    false => Poll::Pending,
-                };
-            }
-            let end = available.min(read + buf.remaining());
-            buf.put_slice(&self.bytes[read..end]);
-            self.read.set(end);
-            Poll::Ready(Ok(()))
-        }
-    }
-    impl tokio::io::AsyncWrite for Stream<'_> {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Poll::Ready(Ok(buf.len()))
-        }
-        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
+    use std::pin::pin;
+    use std::task::Waker;
 
     const HEAD_LIMIT: u32 = 64 * 1024;
     let fed = Rc::new(Cell::new(0));
     let read = Rc::new(Cell::new(0));
-    let stream = Stream {
+    let stream = Pipe {
         bytes,
         fed: fed.clone(),
         read: read.clone(),
@@ -1750,6 +1760,7 @@ fn served_http2(bytes: &[u8]) -> (Vec<Served>, bool) {
                         let escaped = |value: &[u8]| value.escape_ascii().to_string();
                         let uri = request.uri();
                         served.push(Served {
+                            stream: respond.stream_id().as_u32(),
                             authority: uri.authority().map(|a| a.as_str().to_owned()),
                             hosts: (request.headers().get_all("host").iter())
                                 .map(|value| escaped(value.as_bytes()))
@@ -3087,6 +3098,24 @@ mod tests {
         assert!(http2_check_input(input));
         let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
         assert_eq!(paths(&served_http2(&http2_passed(&input)).0), ["/allowed"]);
+    }
+
+    #[test]
+    fn requests_are_compared_by_stream() {
+        // h2 resets the guest's stream 1, which depends on itself, but not
+        // what passes, since the check drops its priority.
+        let input = concat!(
+            preface!(),
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\x25\x01\x25\0\0\0\x01\0\0\0\x01\x10",
+            "\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/a",
+            "\0\0\x20\x01\x05\0\0\0\x03\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/b",
+        );
+        assert!(http2_check_input(input));
+        let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+        assert_eq!(paths(&served_http2(&input).0), ["/allowed/b"]);
+        let passed = served_http2(&http2_passed(&input)).0;
+        assert_eq!(paths(&passed), ["/allowed/a", "/allowed/b"]);
     }
 
     #[test]

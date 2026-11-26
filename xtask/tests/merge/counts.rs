@@ -1,5 +1,4 @@
 use super::prepare::last_post;
-use super::waits::{TWO_GATE_TESTS, changing};
 use super::*;
 
 pub(super) fn with_base(name: &str, proven: u32, passing: u32) -> Repo {
@@ -229,22 +228,6 @@ fn a_change_only_to_the_tests_of_a_crate_runs_no_bench() {
     assert_merged(&repo, &output);
     assert!(!stdout(&output).contains("bench:"), "{}", stdout(&output));
     assert!(!repo.calls().contains("Proving: bench"), "{}", repo.calls());
-}
-
-/// Its own xtask is built from `xtask/src`, which is `main`'s, so it would
-/// prove the same thing again.
-#[test]
-fn a_change_only_to_xtask_tests_is_not_proven_by_its_own_xtask() {
-    let repo = changing(
-        "own-tests-only",
-        &[("xtask/tests/a.rs", "#[test]\nfn one() {}\n")],
-        &[("xtask/tests/a.rs", TWO_GATE_TESTS)],
-    );
-    let output = repo.merge();
-    assert_merged(&repo, &output);
-    let calls = repo.calls();
-    assert_eq!(calls.matches("cargo fmt --all").count(), 1, "{calls}");
-    assert!(!calls.contains("its own xtask"), "{calls}");
 }
 
 /// Neither change loosens a budget, so each merges.

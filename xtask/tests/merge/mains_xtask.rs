@@ -1,6 +1,6 @@
 use super::floor::revert_of;
 use super::prepare::last_post;
-use super::waits::changing;
+use super::waits::{TWO_GATE_TESTS, changing};
 use super::*;
 
 /// How many times a merge built an xtask.
@@ -177,4 +177,20 @@ fn an_exact_revert_of_a_change_to_xtask_is_proven_by_mains_alone() {
     let output = repo.prepare();
     assert_prepared(&repo, &output);
     assert_eq!(builds(&repo), 1, "{}", repo.calls());
+}
+
+/// Its own xtask is built from `xtask/src`, which is `main`'s, so it would
+/// prove the same thing again.
+#[test]
+fn a_change_only_to_xtask_tests_is_not_proven_by_its_own_xtask() {
+    let repo = changing(
+        "own-tests-only",
+        &[("xtask/tests/a.rs", "#[test]\nfn one() {}\n")],
+        &[("xtask/tests/a.rs", TWO_GATE_TESTS)],
+    );
+    let output = repo.merge();
+    assert_merged(&repo, &output);
+    let calls = repo.calls();
+    assert_eq!(calls.matches("cargo fmt --all").count(), 1, "{calls}");
+    assert!(!calls.contains("its own xtask"), "{calls}");
 }

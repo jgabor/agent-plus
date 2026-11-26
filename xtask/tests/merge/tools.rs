@@ -120,3 +120,25 @@ fi
         lying = variant_binary("lying").display(),
     )
 }
+
+#[test]
+fn a_tool_just_written_can_run_while_other_threads_start_processes() {
+    let directory = held_tmp().join("merge/fresh-tool");
+    if directory.exists() {
+        fs::remove_dir_all(&directory).unwrap();
+    }
+    fs::create_dir_all(&directory).unwrap();
+    thread::scope(|scope| {
+        for worker in 0..16 {
+            let directory = &directory;
+            scope.spawn(move || {
+                for round in 0..200 {
+                    let tool = directory.join(format!("tool-{worker}-{round}"));
+                    common::write_tool(&tool, "#!/bin/sh\nexit 0\n");
+                    let status = Command::new(&tool).status().unwrap();
+                    assert!(status.success());
+                }
+            });
+        }
+    });
+}

@@ -1,3 +1,4 @@
+use super::prepare::posts;
 use super::*;
 
 #[test]
@@ -244,5 +245,42 @@ fn a_check_that_needs_a_short_path_fails_the_proof() {
         stdout(&output).contains("fail tests"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn the_callers_cargo_settings_do_not_reach_the_merge() {
+    let repo = Repo::new("caller-config");
+    repo.write(
+        ".cargo/config.toml",
+        "[build]\nrustc-wrapper = \"/bin/false\"\n",
+    );
+    assert_merged(&repo, &repo.merge());
+}
+
+#[test]
+fn a_record_commit_that_changes_more_is_not_merged() {
+    let repo = Repo::new("sneaky");
+    let hook = repo.root.join(".git/hooks/pre-commit");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    common::write_tool(
+        &hook,
+        "#!/bin/sh\necho x > sneaky.txt\ngit add sneaky.txt\n",
+    );
+    let output = repo.merge();
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(
+        stderr(&output).contains("sneaky.txt"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
+    // Its proof passed before the record commit changed more.
+    assert_eq!(
+        posts(&repo).pop().unwrap(),
+        (
+            repo.head(),
+            "failure Proven, then stopped by an error".to_string()
+        )
     );
 }

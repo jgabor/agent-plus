@@ -82,28 +82,6 @@ fn a_merge_removes_trees_no_live_run_holds() {
 }
 
 #[test]
-fn a_tool_just_written_can_run_while_other_threads_start_processes() {
-    let directory = held_tmp().join("merge/fresh-tool");
-    if directory.exists() {
-        fs::remove_dir_all(&directory).unwrap();
-    }
-    fs::create_dir_all(&directory).unwrap();
-    thread::scope(|scope| {
-        for worker in 0..16 {
-            let directory = &directory;
-            scope.spawn(move || {
-                for round in 0..200 {
-                    let tool = directory.join(format!("tool-{worker}-{round}"));
-                    common::write_tool(&tool, "#!/bin/sh\nexit 0\n");
-                    let status = Command::new(&tool).status().unwrap();
-                    assert!(status.success());
-                }
-            });
-        }
-    });
-}
-
-#[test]
 fn a_worktree_locked_by_a_killed_attempt_is_cleared() {
     let repo = Repo::new("locked-worktree");
     assert_eq!(repo.merge_killed("cargo fmt", "before").status.code(), None);
@@ -783,16 +761,6 @@ fn a_label_the_checks_do_not_read_can_change_during_the_proof() {
 }
 
 #[test]
-fn the_callers_cargo_settings_do_not_reach_the_merge() {
-    let repo = Repo::new("caller-config");
-    repo.write(
-        ".cargo/config.toml",
-        "[build]\nrustc-wrapper = \"/bin/false\"\n",
-    );
-    assert_merged(&repo, &repo.merge());
-}
-
-#[test]
 fn a_killed_merge_keeps_the_slot_until_its_squash_finishes() {
     let repo = Repo::new("squash-outlives");
     let killed = repo.merge_running("gh pr merge", "kill -9 $PPID; sleep 2");
@@ -827,31 +795,4 @@ fn a_merge_resumes_from_another_worktree_and_clears_the_first() {
     assert_merged(&repo, &output);
     assert!(repo.merge_trees().is_empty(), "{:?}", repo.merge_trees());
     assert_eq!(repo.git(&["worktree", "list"]).lines().count(), 2);
-}
-
-#[test]
-fn a_record_commit_that_changes_more_is_not_merged() {
-    let repo = Repo::new("sneaky");
-    let hook = repo.root.join(".git/hooks/pre-commit");
-    fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    common::write_tool(
-        &hook,
-        "#!/bin/sh\necho x > sneaky.txt\ngit add sneaky.txt\n",
-    );
-    let output = repo.merge();
-    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
-    assert!(
-        stderr(&output).contains("sneaky.txt"),
-        "{}",
-        stderr(&output)
-    );
-    assert!(!repo.calls().contains("gh pr merge"), "{}", repo.calls());
-    // Its proof passed before the record commit changed more.
-    assert_eq!(
-        posts(&repo).pop().unwrap(),
-        (
-            repo.head(),
-            "failure Proven, then stopped by an error".to_string()
-        )
-    );
 }

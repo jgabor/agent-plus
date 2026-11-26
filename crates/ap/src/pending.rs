@@ -300,12 +300,16 @@ const BARE: [&[u8]; 4] = [b"HEAD", b"objects", b"refs", b"commondir"];
 /// finds one: a directory that holds `HEAD`, and either `commondir` or both
 /// `objects` and `refs`. It counts each of yours, and each entry the agent
 /// made, matched folded, so that nothing the agent wrote completes one.
+/// It also says whether the share's root is in a `.git` directory.
 struct Bare<'a> {
     /// Which of `BARE` the agent made in each directory it made one in,
     /// with each directory its records put a path beneath.
     made: BTreeMap<&'a [u8], [bool; 4]>,
     /// Whether a directory above the share's root is one.
     above: bool,
+    /// Whether a name along the share's path on your host matches `.git`,
+    /// folded, the root's own included.
+    git: bool,
     /// Each directory looked at so far, and whether it is one.
     found: std::cell::RefCell<BTreeMap<Vec<u8>, bool>>,
 }
@@ -332,9 +336,13 @@ impl<'a> Bare<'a> {
                 !matches!(found, Err(error) if error.kind() == io::ErrorKind::NotFound)
             })
         });
+        let git = root
+            .iter()
+            .any(|name| name.as_bytes().eq_ignore_ascii_case(b".git"));
         Bare {
             made,
             above,
+            git,
             found: Default::default(),
         }
     }
@@ -666,6 +674,7 @@ impl Host {
         let git = (path.split(|&byte| byte == b'/')).any(|name| name.eq_ignore_ascii_case(b".git"));
         if path.is_empty()
             || git
+            || bare.git
             || matches!(view, View::Yours)
             || !matches!(self.stat(path), Ok(Some(m)) if m.is_dir())
             || !matches!(bare.holds(self, path), Ok(false))
@@ -1317,7 +1326,9 @@ fn verdict(
             conflict: false,
         })
     };
-    if names.iter().any(|name| name.eq_ignore_ascii_case(b".git")) {
+    if names.iter().any(|name| name.eq_ignore_ascii_case(b".git"))
+        || bare.is_some_and(|bare| bare.git)
+    {
         return skipped("it is under .git");
     }
     if let Some(bare) = bare

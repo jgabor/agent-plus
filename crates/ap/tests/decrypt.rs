@@ -756,6 +756,7 @@ async fn answer_h2(
 }
 
 // spec(NETWORK): On a decrypted connection, the proxy verifies the upstream server's certificate and checks every request's host and path, including each request on a reused HTTP/2 connection (`:authority`).
+// spec(NETWORK): On a host with URL rules, where it puts in no secret's value, it offers `h2` too, and the guest gets HTTP/2 only when the server chose it.
 #[test]
 fn each_request_on_a_reused_http2_connection_is_checked() {
     let (root, config) = server();
@@ -1840,9 +1841,12 @@ fn a_bound_host_with_url_rules_gets_the_value_in_the_requests_they_allow() {
     let rules = format!("NETWORK -\nNETWORK +https://{NAME}:{port}/path\n");
     let mut guest = Guest::injecting(&rules, vec![root], port, bound_to(NAME));
     let handle = guest.connect();
+    // The guest and the destination offer HTTP/2, and the proxy puts the
+    // value in an HTTP/1.1 request alone.
     let mut tls = Guest::tls(&guest.authority.clone());
     let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
     assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
     let seen = settled(&seen);
     assert_eq!(seen.len(), 1);
     assert!(

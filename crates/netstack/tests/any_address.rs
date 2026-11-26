@@ -1243,17 +1243,22 @@ fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
             }
         }
     }
-    // smoltcp drops a TCP segment from or to no address.
-    for (syn, none) in syns.iter().zip([ip("0.0.0.0"), ip("::")]) {
-        refused.push(("SYN", "from", none, readdressed(syn, Some(none), None)));
+    // smoltcp drops a TCP segment from or to no address, though it takes
+    // a datagram from no IPv4 address.
+    let none = ip("0.0.0.0");
+    refused.push(("SYN", "from", none, readdressed(&syns[0], Some(none), None)));
+    for (syn, none) in syns.iter().zip([none, ip("::")]) {
         refused.push(("SYN", "to", none, readdressed(syn, None, Some(none))));
     }
     let now = Instant::now();
-    // Each frame, from another unicast address, is asked about.
+    // Each frame, from another unicast address, is asked about, and so is
+    // a datagram from no IPv4 address.
+    let sources = [ip("10.0.2.16"), ip("fd00::16")];
     for (frame, other) in syns
         .iter()
         .chain(&datagrams)
-        .zip([ip("10.0.2.16"), ip("fd00::16")].repeat(2))
+        .zip(sources.repeat(2))
+        .chain([(&datagrams[0], none)])
     {
         let mut asked = false;
         stack().receive(&readdressed(frame, Some(other), None), now, |_| {

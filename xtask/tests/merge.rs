@@ -1751,7 +1751,10 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
 #[test]
 fn a_command_that_a_merge_starts_holds_neither_the_slot_nor_the_turn() {
     // Before the turn, and in the xtask of `main` after it.
-    for (name, on) in [("build", "build --quiet --package xtask"), ("gate", "cargo fmt")] {
+    for (name, on) in [
+        ("build", "build --quiet --package xtask"),
+        ("gate", "cargo fmt"),
+    ] {
         let repo = Repo::new(&format!("no-lock-{name}"));
         let fds = repo.bin.join("fds");
         let list = format!("ls -l /proc/$$/fd/ > '{}'", fds.display());

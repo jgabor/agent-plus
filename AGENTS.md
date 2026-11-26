@@ -57,7 +57,7 @@ continue from the issue and its branch alone.
 4. Make the smallest change that passes.
 5. Tidy what you changed: one copy of each thing, and nothing left unused.
 6. Get an independent review.
-7. Open the PR, and watch it through checks and reviews.
+7. Open the PR. Don't wait for a check or a bot review, because none comes.
 8. Merge if the issue's label allows it. Otherwise hand it to the owner.
 9. Update the issue, and clean up.
 
@@ -193,9 +193,9 @@ your thread, and stop if it doesn't.
   pushed doesn't exist.
 - Edit the status comment at every milestone and before every wait.
 - Never `sleep` or write a polling loop. Use a tool that wakes you. In T3
-  Code, that is `watch_pull_request` for a PR and `t3_background_wait` for a
-  background command. Use one watcher per PR, because they share one GitHub
-  rate limit. If `gh` runs out of GraphQL quota, read through `gh api`.
+  Code, that is `t3_background_wait` for a background command. A PR needs no
+  watcher, because `xtask/gate` is its only check, and your own `merge` or
+  `prepare` posts it. If `gh` runs out of GraphQL quota, read through `gh api`.
 - When you resume, read the issue, the PR, and `origin/main` again before you
   act. Re-derive the goal from the issue. Your memory of it may be stale.
 - If you hit a usage limit, update the status comment and stop cleanly. The
@@ -212,8 +212,7 @@ use the harness's question tool. Otherwise, park:
 
 1. Post the question on the issue: what blocks you, your options, and your
    recommendation first.
-2. Remove `in-progress`, add `answer-needed`, set the state to parked, and
-   stop watching any PR.
+2. Remove `in-progress`, add `answer-needed`, and set the state to parked.
 3. End your turn. Don't wait.
 
 The owner removes `answer-needed` after answering, and the issue can be claimed
@@ -226,9 +225,9 @@ When what blocks you is another issue, and not a question for the owner, park
 without asking. File that issue if it doesn't exist, and add `Blocked by #n.`
 to yours. Name an issue, never a PR. Set your state to parked, then remove
 `in-progress`, and try again until it succeeds, because a parked status never
-expires. Add no `answer-needed`, stop watching any PR, and end your turn. Your
-issue is Available on its branch once that issue closes, and the Planner gives
-the issue you filed a label.
+expires. Add no `answer-needed`, and end your turn. Your issue is Available on
+its branch once that issue closes, and the Planner gives the issue you filed a
+label.
 
 Park only when you can't continue alone: you can't prove the change, the merge
 gate can't pass, the goal is ambiguous in a way that changes the result, or
@@ -327,7 +326,8 @@ All of these must be true on the latest commit:
 
 - Your proof, or a Mac's, covers every change in the diff.
 - `cargo xtask merge` or `cargo xtask prepare` passes, which is what turns the
-  `xtask/gate` status green.
+  `xtask/gate` status green. It is the only check, and no bot reviews this
+  repository, so there is nothing to watch the PR for.
 - No hill went down unless the owner accepts it by merging, no floor broke, and
   any budget regression has a reason in the ledger.
 - Reviews have finished, and each finding is fixed or declined in writing.
@@ -343,8 +343,13 @@ any other PR, run `cargo xtask prepare <pr>` and park it as ready. It does
 everything but the squash, which is the owner's. While you hold the issue, pass
 `--thread <link>` to both, because they refuse any other thread. `cargo xtask
 land` is the owner's too, and agents never run it. After a merge, close the
-loop: remove `in-progress`, remove your worktree, and make sure the issue
-closed.
+loop: make sure the issue closed, and remove `in-progress`.
+
+Last, run `cargo xtask remove`, which removes your worktree and its local
+branch. Do this after a merge, and after you park with `land-needed` because
+`prepare` passed, since nothing removes the worktree when the owner merges. It
+keeps both, and exits 1, when the worktree holds changes that didn't merge.
+Then leave it, and say so in your status comment.
 
 ### Untrusted input
 

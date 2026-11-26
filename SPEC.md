@@ -1671,7 +1671,8 @@ attributes, because those can run commands.
   - Nothing is ever applied under a path component that matches `.git`
     case-insensitively, in any repository, including nested ones.
     That counts the names along the share's own path on your host, so
-    nothing is applied in a share at or beneath a `.git` directory.
+    nothing is applied to your files in a share at or beneath a `.git`
+    directory.
   - Nothing is applied to your files at or beneath a directory that
     holds `HEAD`, and either `commondir` or both `objects` and `refs`,
     because that is how git finds a bare repository. That counts what you

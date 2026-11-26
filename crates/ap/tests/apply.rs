@@ -503,7 +503,22 @@ fn nothing_is_applied_in_a_bare_repository() {
     assert!(!scratch.store().join("pending").join(&run).exists());
 }
 
-// spec(SHARE): That counts the names along the share's own path on your host, so nothing is applied in a share at or beneath a `.git` directory.
+// spec(SHARE): That counts the names along the share's own path on your host, so nothing is applied to your files in a share at or beneath a `.git` directory.
+#[test]
+fn nothing_is_applied_in_a_share_that_is_git() {
+    let scratch = Scratch::sharing("git-root", ".Git");
+    fs::write(scratch.share.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    write(&pending, "config", 0o644, b"[core]\n");
+
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "skipped config: it is under .git\n");
+    assert!(!scratch.exists("config"));
+}
+
+// spec(SHARE): That counts the names along the share's own path on your host, so nothing is applied to your files in a share at or beneath a `.git` directory.
 #[test]
 fn nothing_is_applied_in_a_share_beneath_git() {
     let scratch = Scratch::sharing("git-above", ".GIT/hooks");

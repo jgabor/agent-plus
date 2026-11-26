@@ -419,10 +419,10 @@ impl Stack {
     /// reaches smoltcp: a flow sent to the stack, or a frame that opens
     /// none. It parses each header, and checks each checksum, as smoltcp
     /// does, so a frame smoltcp would refuse opens no flow. It reads past
-    /// one hop-by-hop header, as smoltcp does. A frame
-    /// that hides its transport, such as behind any other IPv6 extension
-    /// header or in a fragment, or a flow sent to every station, is dropped,
-    /// because smoltcp would take it without asking.
+    /// one hop-by-hop header, and drops what smoltcp drops for its
+    /// addresses. A frame that hides its transport, such as behind any
+    /// other IPv6 extension header or in a fragment, or a flow sent to every
+    /// station, is dropped, because smoltcp would take it without asking.
     fn classify(&self, frame: &[u8]) -> Seen {
         let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
             return Seen::Drop;
@@ -476,10 +476,18 @@ impl Stack {
                 }
                 _ => return Seen::Drop,
             };
+        // smoltcp drops a packet from an address that isn't unicast, except
+        // an IPv4 packet from no address. It drops a TCP segment from or to
+        // no address.
+        if !self.unicast(source) && source != IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+            return Seen::Drop;
+        }
         match protocol {
             // Neighbor discovery, and the stack's own ICMP.
             IpProtocol::Icmp | IpProtocol::Icmpv6 => Seen::Other,
-            IpProtocol::Tcp if ours => {
+            IpProtocol::Tcp
+                if ours && !source.is_unspecified() && !destination.is_unspecified() =>
+            {
                 let tcp = TcpPacket::new_checked(payload).and_then(|tcp| {
                     TcpRepr::parse(&tcp, &source.into(), &destination.into(), &checksums)
                 });
@@ -508,6 +516,24 @@ impl Stack {
                 }
             }
             _ => Seen::Drop,
+        }
+    }
+
+    /// Whether smoltcp calls `address` unicast: not one for many stations,
+    /// such as the broadcast address of the stack's IPv4 subnet, and not
+    /// unspecified.
+    fn unicast(&self, address: IpAddr) -> bool {
+        match address {
+            IpAddr::V4(address) => {
+                let subnet = self.iface.ip_addrs().iter().any(
+                    |cidr| matches!(cidr, IpCidr::Ipv4(cidr) if cidr.broadcast() == Some(address)),
+                );
+                !(address.is_broadcast()
+                    || address.is_multicast()
+                    || address.is_unspecified()
+                    || subnet)
+            }
+            IpAddr::V6(address) => !(address.is_multicast() || address.is_unspecified()),
         }
     }
 

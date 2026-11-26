@@ -1189,3 +1189,93 @@ fn a_ping_gets_no_reply_from_anywhere() {
         }
     }
 }
+
+/// `frame`, a TCP or UDP frame, from `source` and to `destination` where
+/// either is given, with its checksums filled.
+fn readdressed(frame: &[u8], source: Option<IpAddr>, destination: Option<IpAddr>) -> Vec<u8> {
+    let mut frame = frame.to_vec();
+    match (source, destination) {
+        (Some(IpAddr::V4(_)), _) | (_, Some(IpAddr::V4(_))) => {
+            let mut ip = Ipv4Packet::new_checked(&mut frame[14..]).unwrap();
+            if let Some(IpAddr::V4(source)) = source {
+                ip.set_src_addr(source);
+            }
+            if let Some(IpAddr::V4(destination)) = destination {
+                ip.set_dst_addr(destination);
+            }
+            ip.fill_checksum();
+        }
+        _ => {
+            let mut ip = Ipv6Packet::new_checked(&mut frame[14..]).unwrap();
+            if let Some(IpAddr::V6(source)) = source {
+                ip.set_src_addr(source);
+            }
+            if let Some(IpAddr::V6(destination)) = destination {
+                ip.set_dst_addr(destination);
+            }
+        }
+    }
+    edited(&frame, false, |_| {})
+}
+
+#[test]
+fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
+    let ip = |address: &str| -> IpAddr { address.parse().unwrap() };
+    let syns = [
+        syn_frame(SocketAddr::new(ip("203.0.113.7"), 443)),
+        syn_frame(SocketAddr::new(ip("2001:db8::1"), 443)),
+    ];
+    let datagrams = [
+        datagram_frame(SocketAddr::new(ip("198.51.100.9"), 53)),
+        datagram_frame(SocketAddr::new(ip("2001:db8::9"), 53)),
+    ];
+    // smoltcp drops a packet from an address that isn't unicast. The last
+    // IPv4 one is the broadcast address of the stack's subnet.
+    let not_unicast = [
+        vec![ip("224.0.0.1"), ip("255.255.255.255"), ip("10.0.2.255")],
+        vec![ip("ff02::1"), ip("::")],
+    ];
+    let mut refused = Vec::new();
+    for (frames, kind) in [(&syns, "SYN"), (&datagrams, "datagram")] {
+        for (frame, sources) in frames.iter().zip(&not_unicast) {
+            for &source in sources {
+                refused.push((kind, "from", source, readdressed(frame, Some(source), None)));
+            }
+        }
+    }
+    // smoltcp drops a TCP segment from or to no address, though it takes
+    // a datagram from no IPv4 address.
+    let none = ip("0.0.0.0");
+    refused.push(("SYN", "from", none, readdressed(&syns[0], Some(none), None)));
+    for (syn, none) in syns.iter().zip([none, ip("::")]) {
+        refused.push(("SYN", "to", none, readdressed(syn, None, Some(none))));
+    }
+    let now = Instant::now();
+    // Each frame, from another unicast address, is asked about, and so is
+    // a datagram from no IPv4 address.
+    let sources = [ip("10.0.2.16"), ip("fd00::16")];
+    for (frame, other) in syns
+        .iter()
+        .chain(&datagrams)
+        .zip(sources.repeat(2))
+        .chain([(&datagrams[0], none)])
+    {
+        let mut asked = false;
+        stack().receive(&readdressed(frame, Some(other), None), now, |_| {
+            asked = true;
+            false
+        });
+        assert!(asked, "{other}");
+    }
+    let mut asked = Vec::new();
+    for (kind, side, address, frame) in refused {
+        let mut stack = stack();
+        stack.receive_holding(&frame, now, |flow| {
+            asked.push((kind, side, address, *flow));
+            Verdict::Hold
+        });
+        assert_eq!(stack.sockets(), 0, "{kind} {side} {address}");
+        assert!(stack.transmit().is_none(), "{kind} {side} {address}");
+    }
+    assert!(asked.is_empty(), "asked about {asked:#?}");
+}

@@ -71,6 +71,7 @@ fn ends_within(pidfd: &OwnedFd, millis: i32) -> bool {
     unsafe { libc::poll(&mut watched, 1, millis) == 1 }
 }
 
+// spec(Run): **End.** A run that `ap run` started ends when that `ap run` exits, for any reason, including a closed terminal or a killed `ap run` process, and its VM stops with it.
 #[test]
 fn a_share_server_ends_when_the_ap_run_that_started_it_is_killed() {
     let mut parent = Command::new(env::current_exe().unwrap())

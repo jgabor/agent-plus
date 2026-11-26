@@ -706,7 +706,11 @@ because the work it blocks is already planned. It still takes a worker slot.
 An issue that someone else filed waits for the owner.
 
 The planner works on one milestone at a time: the first on the roadmap with a
-step that doesn't pass, which `cargo xtask gaps` names. Its parent is the open
+step that doesn't pass, which `cargo xtask gaps` names. `gaps` runs no step
+marked `spend`, nor one that needs such a step, so for each of those it skips,
+it reads the open issue titled `Roadmap details`, which the nightly job last
+wrote. The step passes when that issue ticks it under the same id and name.
+Otherwise it keeps its milestone current. The milestone's parent is the open
 issue that the owner has labeled, and whose body names that milestone in a
 `Milestone:` line. A parent whose milestone passes is never chosen, so leaving
 it open holds nothing up.

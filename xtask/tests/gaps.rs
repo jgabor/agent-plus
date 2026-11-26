@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+mod common;
+
 const SPEC: &str = "# A\n\nZulu. Yankee.\n\n# B\n\nAlpha.\n";
 const CHECK_YANKEE: &str = "// spec(A): Yankee.\n#[test]\nfn yankee() {}\n";
 const JOURNEY: &str = "[[milestone]]\nname = \"Early\"\nsummary = \"s\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Early\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Later on\"\nneeds = [1]\nscript = \"harness/journey/bad.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Early\"\nneeds = [2]\nscript = \"harness/journey/ok.sh\"\n";
@@ -73,6 +75,44 @@ fn gaps(root: &Path, args: &[&str]) -> Output {
         .arg("gaps")
         .args(args)
         .current_dir(root)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("XTASK_ACTIVITY_HELD")
+        .output()
+        .unwrap()
+}
+
+/// A journey whose first milestone has a step that spends, and a step that
+/// needs it, so `gaps` skips both.
+const PAID: &str = "[[milestone]]\nname = \"Paid\"\nsummary = \"s\"\ncommands = []\n\n[[milestone]]\nname = \"Later on\"\nsummary = \"s\"\ncommands = []\n\n[[step]]\nid = 1\nname = \"first\"\nmilestone = \"Paid\"\nneeds = []\nscript = \"harness/journey/ok.sh\"\nspend = true\n\n[[step]]\nid = 2\nname = \"second\"\nmilestone = \"Paid\"\nneeds = [1]\nscript = \"harness/journey/ok.sh\"\n\n[[step]]\nid = 3\nname = \"third\"\nmilestone = \"Later on\"\nneeds = []\nscript = \"harness/journey/bad.sh\"\n";
+
+/// A fake `gh` that lists the issues in `issues.json` beside it.
+const GH: &str = r#"#!/bin/sh
+d="$(dirname "$0")"
+case "$1 $2" in
+  "issue list") cat "$d/issues.json" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 3 ;;
+esac
+"#;
+
+fn gaps_with_details(root: &Path, body: &str) -> Output {
+    let bin = root.with_extension("bin");
+    if bin.exists() {
+        fs::remove_dir_all(&bin).unwrap();
+    }
+    fs::create_dir_all(&bin).unwrap();
+    common::write_tool(&bin.join("gh"), GH);
+    let body = body.replace('\n', "\\n");
+    fs::write(
+        bin.join("issues.json"),
+        format!(
+            "[{{\"number\":7,\"state\":\"OPEN\",\"title\":\"Roadmap details\",\"body\":\"{body}\",\"labels\":[],\"url\":\"https://github.com/o/r/issues/7\",\"parent\":null}}]\n"
+        ),
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("gaps")
+        .current_dir(root)
+        .env("PATH", common::path(&[&bin]))
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("XTASK_ACTIVITY_HELD")
         .output()
@@ -194,4 +234,40 @@ fn a_stray_argument_exits_2() {
     let output = gaps(&root, &["--wat"]);
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("`gaps` takes"));
+}
+
+/// `gaps` runs no step that spends, so the nightly job's last run, in the
+/// details it wrote, says whether one passes.
+#[test]
+fn a_step_that_spends_passes_when_the_nightly_job_passed_it() {
+    let root = repository("paid-pass", &[("harness/journey.toml", PAID)]);
+    let details = "### 1. Paid\n\nSteps:\n\n- [x] Step 1: first\n- [x] Step 2: second\n\n### 2. Later on\n\nSteps:\n\n- [ ] Step 3: third (fails)\n";
+    let output = gaps_with_details(&root, details);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = stdout(&output);
+    assert!(text.starts_with("milestone Later on\n"), "{text}");
+    assert!(!text.contains("step 1 "), "{text}");
+    assert!(!text.contains("step 2 "), "{text}");
+    assert!(text.contains("step 3 fail Later on: third\n"), "{text}");
+}
+
+/// A step that spends, which the nightly job failed, skipped, or ran under
+/// another id or name, still keeps its milestone current.
+#[test]
+fn a_step_that_spends_is_a_gap_unless_the_nightly_job_passed_it() {
+    let root = repository("paid-gap", &[("harness/journey.toml", PAID)]);
+    for details in [
+        "",
+        "- [ ] Step 1: first (fails)\n- [ ] Step 2: second (skipped)\n",
+        "- [x] Step 1: first\n- [ ] Step 2: second (fails)\n",
+        "- [x] Step 1: renamed\n- [x] Step 2: second\n",
+    ] {
+        let text = stdout(&gaps_with_details(&root, details));
+        assert!(text.starts_with("milestone Paid\n"), "{details:?}\n{text}");
+    }
 }

@@ -26,7 +26,7 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     // GitHub comes first, so that a run that can't reach it stops early.
     let gh = Gh::new(&root);
-    let (issues, prs) = (gh.roadmap_issues()?, gh.open_prs()?);
+    let (issues, prs) = (gh.roadmap_issues("all")?, gh.open_prs()?);
     let mut hold = match details {
         true => lock::testing(&root)?,
         false => lock::shared(&root)?,
@@ -80,7 +80,7 @@ fn lines(root: &Path) -> Vec<Line> {
 /// issue, there is nowhere to write.
 pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Problem> {
     let gh = Gh::new(root);
-    let issues = gh.roadmap_issues()?;
+    let issues = gh.roadmap_issues("all")?;
     let Some(issue) = titled(&issues, ISSUE_TITLE) else {
         return Ok(());
     };
@@ -247,13 +247,7 @@ fn details(
         }
         text.push_str("\nSteps:\n\n");
         for step in steps {
-            let (mark, note) = match step.state {
-                "pass" => ("x", ""),
-                "fail" => (" ", " (fails)"),
-                _ => (" ", " (skipped)"),
-            };
-            let (id, name) = (step.id, shown(&step.name));
-            text.push_str(&format!("- [{mark}] Step {id}: {name}{note}\n"));
+            text.push_str(&step_line(step.id, &step.name, step.state));
         }
     }
 
@@ -299,6 +293,30 @@ fn details(
         .collect();
     section(&mut text, "### To label or close", unlabeled);
     text
+}
+
+/// A step's line in its milestone.
+fn step_line(id: i64, name: &str, state: &str) -> String {
+    let (mark, note) = match state {
+        "pass" => ("x", ""),
+        "fail" => (" ", " (fails)"),
+        _ => (" ", " (skipped)"),
+    };
+    format!("- [{mark}] Step {id}: {}{note}\n", shown(name))
+}
+
+/// The body of the details that the nightly job wrote last, or nothing when
+/// there are none.
+pub fn last_details(root: &Path) -> Result<String, Problem> {
+    let issues = Gh::new(root).roadmap_issues("open")?;
+    Ok(titled(&issues, DETAILS_TITLE).map_or_else(String::new, |issue| issue.body.clone()))
+}
+
+/// Whether these details show the step passing, under its id and its name, so
+/// a step renamed or renumbered since they were written hasn't passed.
+pub fn passed_in(details: &str, step: &Outcome) -> bool {
+    let line = step_line(step.id, &step.name, "pass");
+    details.lines().any(|found| found == line.trim_end())
 }
 
 /// A command's line in its milestone. Its promises are those under its own

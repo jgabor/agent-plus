@@ -2,7 +2,7 @@
 //! order the planner should take it.
 
 use crate::json::quoted;
-use crate::{Problem, Verdict, bench, journey, ledger, lock, score, testrun, workspace};
+use crate::{Problem, Verdict, bench, journey, ledger, lock, roadmap, score, testrun, workspace};
 use std::collections::BTreeMap;
 
 /// A gap isn't a failure of this command. A broken spec quote is, as in
@@ -24,7 +24,17 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let values = ledger::at_head(&root)?.map_or_else(BTreeMap::new, |record| record.budgets);
     let budgets = bench::read_budgets(&root)?;
 
-    let steps: Vec<_> = outcomes.iter().filter(|o| o.state != "pass").collect();
+    // `gaps` runs no step that spends, so the nightly job's last run says
+    // whether one passes. Only a step left out needs GitHub.
+    let left_out = |o: &journey::Outcome| o.spends && o.state == "skip";
+    let details = match outcomes.iter().any(left_out) {
+        true => roadmap::last_details(&root)?,
+        false => String::new(),
+    };
+    let passed = |o: &journey::Outcome| {
+        o.state == "pass" || (left_out(o) && roadmap::passed_in(&details, o))
+    };
+    let steps: Vec<_> = outcomes.iter().filter(|o| !passed(o)).collect();
     // The planner works on one milestone at a time: the first in roadmap
     // order that has a step still to pass.
     let milestone = journey::milestones(&root)?

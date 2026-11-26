@@ -2392,14 +2392,16 @@ fn a_head_with_too_many_paths_beneath_what_the_agent_removed_stays_pending() {
 /// From #694: the agent commits `big`, a byte more than 512 MiB of zeros,
 /// which its git compresses to about half a MiB, loose or packed. Or it
 /// packs its commits, and the index of that pack is a byte more than 512
-/// MiB long, which costs almost nothing as a sparse file. `ap apply`
-/// refuses each before it reads it, within a fixed time.
+/// MiB long, which costs almost nothing as a sparse file. Or it packs its
+/// commits twice, and each index is a byte more than 256 MiB long. `ap
+/// apply` refuses each before it reads it, within a fixed time.
 // spec(SHARE): `ap diff` and `ap apply` read none of the agent's objects or pack indexes larger than 512 MiB.
 // spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
+// spec(SHARE): They do the same when the agent's pack indexes are larger than 512 MiB in all, before they read one.
 #[test]
 fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
     const LARGER: u64 = (512 << 20) + 1;
-    for case in ["loose", "packed", "index"] {
+    for case in ["loose", "packed", "index", "indexes"] {
         let repository = Repository::new(&format!("too-large-{case}"), true, &[]);
         let guest = &repository.guest;
         let packs = || {
@@ -2412,24 +2414,32 @@ fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
         };
         let earlier = packs();
         let blob = match case {
-            "index" => {
+            "index" | "indexes" => {
                 repository.commit("a", "a\n");
                 repo::run(guest, &["repack", "-q", "-d"]);
+                if case == "indexes" {
+                    repository.commit("b", "b\n");
+                    repo::run(guest, &["repack", "-q", "-d"]);
+                }
                 String::new()
             }
             _ => repo::commit_zeros(guest, "big", LARGER, case == "loose"),
         };
         let written = packs().difference(&earlier).cloned().collect::<Vec<_>>();
-        let idx = written
+        let pack = repository.pending.join("tree/.git/objects/pack");
+        let indexes = written
             .iter()
-            .find(|name| name.to_str().unwrap().ends_with(".idx"));
-        let idx = idx.map(|idx| repository.pending.join("tree/.git/objects/pack").join(idx));
+            .filter(|name| name.to_str().unwrap().ends_with(".idx"))
+            .map(|idx| pack.join(idx))
+            .collect::<Vec<_>>();
+        let idx = indexes.first().cloned();
         repository.land();
-        if case == "index" {
-            let idx = fs::OpenOptions::new()
-                .write(true)
-                .open(idx.as_ref().unwrap());
-            idx.unwrap().set_len(LARGER).unwrap();
+        if case.starts_with("index") {
+            let each = LARGER / indexes.len() as u64 + 1;
+            for idx in &indexes {
+                let idx = fs::OpenOptions::new().write(true).open(idx);
+                idx.unwrap().set_len(each).unwrap();
+            }
         }
         let before = repository.objects_and_refs();
 
@@ -2441,7 +2451,11 @@ fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
                 let idx = idx.unwrap().display().to_string();
                 format!("{idx} has an entry at 12 larger than the limit")
             }
-            _ => format!("{} is larger than the limit", idx.unwrap().display()),
+            "index" => format!("{} is larger than the limit", idx.unwrap().display()),
+            _ => format!(
+                "the pack indexes in {} are larger than the limit in all",
+                pack.display()
+            ),
         };
         let error = format!("{why}, so everything stays pending");
         repository.stays_pending(&output, &error, &before);

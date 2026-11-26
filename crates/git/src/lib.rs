@@ -313,9 +313,8 @@ fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Error> {
     let Some((file, len)) = open(path)? else {
         return Ok(None);
     };
-    let larger = || corrupt(format!("{} is larger than the limit", path.display()));
     if len > limit as u64 {
-        return Err(larger());
+        return Err(larger(path));
     }
     // It may have grown since.
     let mut bytes = Vec::with_capacity(len as usize);
@@ -323,11 +322,16 @@ fn read(path: &Path, limit: usize) -> Result<Option<Vec<u8>>, Error> {
         .take((limit as u64).saturating_add(1))
         .read_to_end(&mut bytes)
     {
-        Ok(_) if bytes.len() > limit => Err(larger()),
+        Ok(_) if bytes.len() > limit => Err(larger(path)),
         Ok(_) => Ok(Some(bytes)),
         Err(e) if is_missing(&e) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Why the file at `path` is refused.
+fn larger(path: &Path) -> Error {
+    corrupt(format!("{} is larger than the limit", path.display()))
 }
 
 /// A loose object's zlib stream, inflated as far as its header. It is
@@ -519,6 +523,9 @@ impl Repository {
             if open(&index.with_extension("pack"))?.is_some()
                 && let Some((_, len)) = open(index)?
             {
+                if len > self.limit as u64 {
+                    return Err(larger(index));
+                }
                 all = all.saturating_add(len);
             }
         }

@@ -8,7 +8,8 @@ use crate::accepts::{
     self, Decision, Mode, Proof, Scoring, acceptance, decide, fails_early, hold_back, prove,
 };
 use crate::forge::{Gh, PullRequest};
-use crate::{Problem, Verdict, base, bench, ledger, lock, waits, workspace};
+use crate::lock::{self, Hold};
+use crate::{Problem, Verdict, base, bench, ledger, waits, workspace};
 use std::cell::Cell;
 use std::env;
 use std::fs;
@@ -168,6 +169,7 @@ fn sequence(
         pr: &pr,
         gated: &gated,
         kept: kept.as_ref(),
+        slot: Some(&slot),
     };
     let mut status = Status::begin(&gh, &fetched.branch);
     let starting = |check: &str| status.proving(check);
@@ -178,17 +180,22 @@ fn sequence(
             return Ok(Verdict::Fail);
         }
     };
+    let place = proof.place.take();
     if accepts::proves_with_its_own(&tree.path, &fetched.main, mode)? {
         status.proving("its own xtask");
-        match prove_with_its_own(&tree.path, &scoring)? {
+        match prove_with_its_own(&tree.path, &scoring, place)? {
             Ok(own) => proof = own.after(proof),
             Err(failed) => {
                 status.failed(&format!("Failed in its own xtask: {}", failed.join(", ")));
                 return Ok(Verdict::Fail);
             }
         }
+    } else {
+        drop(place);
     }
-    let Proof { record, accepted } = proof;
+    let Proof {
+        record, accepted, ..
+    } = proof;
     status.proven.set(true);
 
     if let Some(why) = again(|| changed_during_proof(&gh, &root, &scoring, &fetched.main))? {
@@ -260,7 +267,11 @@ fn sequence(
 fn run_the_checks_of(root: &Path, main: &str) -> Result<Verdict, Problem> {
     let directory = bench::temp_outside(root)?.join(format!("xtask-checks-{}", repository(root)?));
     let tree = Tree::at(root, directory.join("tree"), main)?;
-    let built = build_xtask(&tree.path, &directory.join("target"))?;
+    let built = build_xtask(
+        &tree.path,
+        &directory.join("target"),
+        &lock::shared(&tree.path)?,
+    )?;
     drop(tree);
     let program = keep(&directory.join("bin"), &built, main)?;
     let problem = process::Command::new(program)
@@ -319,10 +330,10 @@ fn sweep_kept(bin: &Path) {
     }
 }
 
-/// Builds the xtask of a tree, and says where it is. A build shares the
-/// activity lock, so that it doesn't slow a bench.
-fn build_xtask(tree: &Path, target: &Path) -> Result<PathBuf, Problem> {
-    let _hold = lock::shared(tree)?;
+/// Builds the xtask of a tree, and says where it is. The build runs under
+/// `_shared`, a shared hold of the activity lock, so that it doesn't slow a
+/// bench.
+fn build_xtask(tree: &Path, target: &Path, _shared: &Hold) -> Result<PathBuf, Problem> {
     let target_dir = target.to_string_lossy();
     let output = process::Command::new("cargo")
         .args([
@@ -978,19 +989,28 @@ impl Drop for Early<'_> {
     }
 }
 
-/// Builds the xtask of the rebased tree, and proves the PR with it. Its
-/// `prove` writes the record into the tree, and its result into a file.
+/// Builds the xtask of the rebased tree, and proves the PR with it, in `place`
+/// if `main`'s proof kept one. Its `prove` writes the record into the tree,
+/// and its result into a file.
 fn prove_with_its_own(
     tree: &Path,
     scoring: &Scoring,
+    place: Option<Hold>,
 ) -> Result<Result<Proof, Vec<String>>, Problem> {
     // Each proof can take most of the timeout, so its own gets a new one once
     // it has a place. The PR's code can't renew the timeout, so the place it
     // tests in is taken here.
+    // Its build waits for the activity lock too, which a bench can hold for
+    // minutes.
     report_place(true)?;
-    let place = lock::place(tree)?;
+    let place = match place {
+        Some(place) => place,
+        None => lock::place(tree, scoring.slot)?,
+    };
+    let building = place.share()?;
     report_place(false)?;
-    let program = build_xtask(tree, &tree.join("target"))?;
+    let program = build_xtask(tree, &tree.join("target"), &building)?;
+    let place = building.keep_place();
     let own = tree.join(OWN);
     let couldnt = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", own.display()));
     if own.exists() {
@@ -1037,7 +1057,11 @@ fn prove_with_its_own(
         return Ok(Err(failed));
     }
     let record = ledger::read(tree, scoring.issue as usize)?;
-    Ok(Ok(Proof { record, accepted }))
+    Ok(Ok(Proof {
+        record,
+        accepted,
+        place: None,
+    }))
 }
 
 /// Tells the supervisor that the bench of the PR's own xtask waits for the
@@ -1161,9 +1185,12 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
         pr: &pr,
         gated: &gated,
         kept: kept.as_ref(),
+        slot: None,
     };
     let (lines, verdict) = match prove(&tree, &scoring, &|_| {}, &tell_main)? {
-        Ok(Proof { record, accepted }) => {
+        Ok(Proof {
+            record, accepted, ..
+        }) => {
             ledger::store(&tree, &record)?;
             let lines: Vec<String> = accepted.iter().map(|a| format!("accepted {a}\n")).collect();
             (lines, Verdict::Pass)

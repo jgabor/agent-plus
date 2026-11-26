@@ -51,9 +51,9 @@ pub fn respond(root: &Path, head: &str, status: &str) -> Result<(), Problem> {
             issue
         }
     };
-    let hold = lock::testing(root)?;
+    let mut hold = lock::testing(root)?;
     let tree = Tree::create(root, TREE, head)?;
-    let (outcome, revert) = bisect_and_revert(root, &gh, &tree, &hold, head, status, issue)
+    let (outcome, revert) = bisect_and_revert(root, &gh, &tree, &mut hold, head, status, issue)
         .unwrap_or_else(|Problem(message)| (format!("Couldn't bisect or revert: {message}"), None));
     gh.post_comment(issue, &format!("{RESPONDED}\n{outcome}"))?;
     // The response is over. Preparing takes the activity lock in its own right,
@@ -102,7 +102,7 @@ fn bisect_and_revert(
     root: &Path,
     gh: &Gh,
     tree: &Tree,
-    hold: &Hold,
+    hold: &mut Hold,
     head: &str,
     status: &str,
     issue: u64,
@@ -148,7 +148,7 @@ fn newest_passing(
 
 /// The first commit that fails, given that the last one does. A commit that
 /// can't be tested counts as failing, as it does in the nightly job.
-fn first_bad<'a>(tree: &Tree, hold: &Hold, commits: &[&'a str]) -> Result<&'a str, Problem> {
+fn first_bad<'a>(tree: &Tree, hold: &mut Hold, commits: &[&'a str]) -> Result<&'a str, Problem> {
     let (mut low, mut high) = (0, commits.len() - 1);
     while low < high {
         let middle = (low + high) / 2;
@@ -161,7 +161,7 @@ fn first_bad<'a>(tree: &Tree, hold: &Hold, commits: &[&'a str]) -> Result<&'a st
     Ok(commits[high])
 }
 
-fn passes(tree: &Tree, hold: &Hold, commit: &str) -> Result<bool, Problem> {
+fn passes(tree: &Tree, hold: &mut Hold, commit: &str) -> Result<bool, Problem> {
     base::git_text(&tree.path, &["checkout", "-q", "-f", "--detach", commit])?;
     Ok(match gate::check(&tree.path, hold, None) {
         Ok((failed, _)) => failed.is_empty(),

@@ -67,8 +67,8 @@ pub fn verdict(failed: &Failed) -> Verdict {
 
 pub fn run() -> Result<Verdict, Problem> {
     let root = workspace::root()?;
-    let hold = lock::testing(&root)?;
-    let (failed, _) = check(&root, &hold, None)?;
+    let mut hold = lock::testing(&root)?;
+    let (failed, _) = check(&root, &mut hold, None)?;
     Ok(verdict(&failed))
 }
 
@@ -76,7 +76,7 @@ pub fn run() -> Result<Verdict, Problem> {
 /// the tests earned. A T2 check that didn't run earns nothing.
 pub fn check(
     root: &Path,
-    hold: &Hold,
+    hold: &mut Hold,
     merging: Option<&Merging>,
 ) -> Result<(Failed, score::Score), Problem> {
     require_tools(root)?;

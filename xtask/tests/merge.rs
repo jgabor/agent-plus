@@ -2143,6 +2143,183 @@ fn the_wait_for_a_place_does_not_count_against_the_timeout() {
     assert_merged(&repo, &merge.wait_with_output().unwrap());
 }
 
+/// The proof waits for the activity lock once it has its place, as it does
+/// behind a pending bench, and that wait doesn't count against the timeout
+/// either. The test keeps the one place until the merge waits for it, which
+/// the merge shows by keeping `ahead.lock`. Then it keeps the turnstile, as a
+/// bench would, frees the place, and waits until the merge has taken it. The
+/// proof's work takes up to 40 seconds on a loaded machine, of the 60 that
+/// the timeout gives it.
+#[test]
+fn the_proofs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
+    let repo = Repo::new("activity-wait");
+    let directory = repo.root.join(".git/xtask");
+    fs::create_dir_all(&directory).unwrap();
+    let lock = |name: &str| {
+        fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(name))
+            .unwrap()
+    };
+    let place = lock("place-0.lock");
+    place.lock().unwrap();
+    // To files, because nothing reads a pipe while this waits.
+    let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_PLACES", "1")
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .stdout(said("merge.out"))
+        .stderr(said("merge.err"))
+        .spawn()
+        .unwrap();
+    let ahead = directory.join("ahead.lock");
+    common::wait_until("the merge never waited for a place", || {
+        common::locked(&ahead)
+    });
+    let turnstile = lock("turnstile.lock");
+    turnstile.lock().unwrap();
+    place.unlock().unwrap();
+    common::wait_until("the merge never took the place", || !common::locked(&ahead));
+    // The wait alone now outlasts the timeout.
+    thread::sleep(Duration::from_secs(62));
+    if let Some(status) = merge.try_wait().unwrap() {
+        panic!(
+            "the merge didn't wait for the activity lock: {status}\n{}\n{}",
+            fs::read_to_string(repo.temp.join("merge.out")).unwrap(),
+            fs::read_to_string(repo.temp.join("merge.err")).unwrap()
+        );
+    }
+    turnstile.unlock().unwrap();
+    let status = merge.wait().unwrap();
+    let output = Output {
+        status,
+        stdout: fs::read(repo.temp.join("merge.out")).unwrap(),
+        stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
+    };
+    assert_merged(&repo, &output);
+}
+
+/// The proof of a PR's own xtask builds it under a shared hold of the activity
+/// lock, and that wait doesn't count against the timeout either. The journey
+/// step of `main`'s proof waits at a FIFO, so the test knows that proof holds
+/// the lock. The test keeps the turnstile, as a bench does, lets the step end,
+/// and takes the lock once `main`'s proof lets it go. The proof's work takes
+/// up to 40 seconds on a loaded machine, of the 60 that the timeout gives it.
+#[test]
+fn the_build_of_its_own_xtask_waits_for_the_activity_lock_off_the_timeout() {
+    let name = "own-build-wait";
+    let bin = held_tmp().join("merge").join(name).join("bin");
+    let (ready, go, once) = (bin.join("ready"), bin.join("go"), bin.join("once"));
+    let step = format!(
+        "#!/bin/sh\nif [ ! -e '{once}' ]; then : > '{once}'; echo > '{ready}'; read _ < '{go}'; fi\nexit 0\n",
+        once = once.display(),
+        ready = ready.display(),
+        go = go.display()
+    );
+    let repo = changing(
+        name,
+        &[("harness/journey/one.sh", &step)],
+        &[("xtask/src/limit.rs", "// a tighter limit\n")],
+    );
+    common::fifo(&ready);
+    common::fifo(&go);
+    // To files, because nothing reads a pipe while this waits.
+    let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
+    let mut merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
+        .stdout(said("merge.out"))
+        .stderr(said("merge.err"))
+        .spawn()
+        .unwrap();
+    common::meet(&ready, false);
+    let lock = |name: &str| {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(repo.root.join(".git/xtask").join(name))
+            .unwrap()
+    };
+    let turnstile = lock("turnstile.lock");
+    turnstile.lock().unwrap();
+    common::meet(&go, true);
+    let activity = lock("activity.lock");
+    activity.lock().unwrap();
+    // The wait alone now outlasts the timeout.
+    thread::sleep(Duration::from_secs(62));
+    if let Some(status) = merge.try_wait().unwrap() {
+        panic!(
+            "the merge didn't wait for the activity lock: {status}\n{}\n{}",
+            fs::read_to_string(repo.temp.join("merge.out")).unwrap(),
+            fs::read_to_string(repo.temp.join("merge.err")).unwrap()
+        );
+    }
+    drop((activity, turnstile));
+    let status = merge.wait().unwrap();
+    let output = Output {
+        status,
+        stdout: fs::read(repo.temp.join("merge.out")).unwrap(),
+        stderr: fs::read(repo.temp.join("merge.err")).unwrap(),
+    };
+    assert_merged(&repo, &output);
+    assert_eq!(repo.calls().matches("cargo fmt --all").count(), 2);
+}
+
+/// A PR that changes xtask is proven twice. With no bench between them, the
+/// proof of its own xtask keeps the place of the proof before it, so a run
+/// that waits for a place goes only after both. The run starts to wait in the
+/// first proof's format check, which waits at a FIFO until it does.
+#[test]
+fn the_proof_of_its_own_xtask_keeps_the_place_of_the_proof_before_it() {
+    let repo = changing(
+        "own-keeps-place",
+        &[],
+        &[("xtask/src/limit.rs", "// a tighter limit\n")],
+    );
+    let (ready, go) = (repo.temp.join("ready"), repo.temp.join("go"));
+    common::fifo(&ready);
+    common::fifo(&go);
+    let merge = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["merge", "9"])
+        .env("XTASK_PLACES", "1")
+        .env("RUN_ON", "cargo fmt --all")
+        .env(
+            "RUN_COMMAND",
+            format!("echo > '{}'; read _ < '{}'", ready.display(), go.display()),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    common::meet(&ready, false);
+    let calls = repo.bin.join("calls");
+    let mut waiter = repo
+        .command(env!("CARGO_BIN_EXE_xtask"))
+        .args(["run", "sh", "-c", "echo 'waiter ran' >> \"$0\""])
+        .arg(&calls)
+        .env("XTASK_PLACES", "1")
+        .spawn()
+        .unwrap();
+    let queue = repo.root.join(".git/xtask/places.lock");
+    common::wait_until("the run never waited for a place", || {
+        common::locked(&queue)
+    });
+    common::meet(&go, true);
+    let output = merge.wait_with_output().unwrap();
+    assert!(waiter.wait().unwrap().success());
+    assert_merged(&repo, &output);
+    let calls = repo.calls();
+    let ran = calls.find("waiter ran").expect("the run never ran");
+    let own = calls.rfind("cargo fmt --all").unwrap();
+    assert!(own > calls.find("cargo fmt --all").unwrap(), "{calls}");
+    assert!(ran > own, "the run went between the two proofs:\n{calls}");
+}
+
 /// The merge runs again in the xtask of `main`, which takes the slot again,
 /// and another merge can take it in between. That wait doesn't count against
 /// the timeout either. The build of that xtask waits until this test is about

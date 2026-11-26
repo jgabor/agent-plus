@@ -2,10 +2,18 @@
 
 use std::env;
 use std::ffi::OsString;
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
+
+/// How long a test waits for what it expects before it fails. A run that is
+/// slow to get there only makes it wait longer.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub const LIMIT: Duration = Duration::from_secs(120);
 
 /// Writes an executable that a test can run at once. A child process does the
 /// writing. If this process held the file open for writing, a `fork` on another
@@ -70,4 +78,58 @@ pub fn each<T: Sync>(items: &[T], case: impl Fn(&T) + Sync) {
             scope.spawn(move || case(item));
         }
     });
+}
+
+/// Makes a FIFO, where a test and what it runs can wait for each other.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub fn fifo(path: &Path) {
+    let made = Command::new("mkfifo").arg(path).status().unwrap();
+    assert!(made.success(), "{}", path.display());
+}
+
+/// Opens a FIFO, which waits for the other side to open it too, so neither
+/// side needs a sleep. A reader reads until the writer closes it. Fails the
+/// test if the other side never comes.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub fn meet(path: &Path, write: bool) {
+    let path = path.to_path_buf();
+    let (met, done) = mpsc::channel();
+    thread::spawn(move || {
+        if write {
+            fs::write(&path, "").unwrap();
+        } else {
+            fs::read(&path).unwrap();
+        }
+        let _ = met.send(());
+    });
+    assert!(
+        done.recv_timeout(LIMIT).is_ok(),
+        "nothing met this test at the FIFO"
+    );
+}
+
+/// Whether something holds a lock on the file at `path`, shared or alone.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub fn locked(path: &Path) -> bool {
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .unwrap();
+    match file.try_lock() {
+        Ok(()) => false,
+        Err(TryLockError::WouldBlock) => true,
+        Err(TryLockError::Error(e)) => panic!("{}: {e}", path.display()),
+    }
+}
+
+/// Returns once `ready` is true, or fails the test with `why` at the limit.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub fn wait_until(why: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + LIMIT;
+    while !ready() {
+        assert!(Instant::now() < deadline, "{why}");
+        thread::sleep(Duration::from_millis(20));
+    }
 }

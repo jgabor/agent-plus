@@ -26,38 +26,99 @@ const PLACE_INHERITED: &str = "XTASK_PLACE_HELD";
 const PLACES: usize = 2;
 /// Replaces the number of places, so that a test needs few holders.
 const PLACES_OVERRIDE: &str = "XTASK_PLACES";
+/// Kept by the merge slot's holder while it waits for a place, which every
+/// other run lets it have first.
+const AHEAD: &str = "ahead.lock";
 
-/// The kernel drops these locks when the files close, including when the
-/// process is killed.
+/// How this process holds one of the locks: not at all, through a parent that
+/// passed it down, or by a file of its own. The kernel drops a lock when its
+/// file closes, including when the process is killed.
+enum Held {
+    No,
+    Inherited,
+    Own(File),
+}
+
+impl Held {
+    fn any(&self) -> bool {
+        !matches!(self, Held::No)
+    }
+}
+
 pub struct Hold {
-    files: Vec<File>,
     directory: PathBuf,
-    activity: bool,
-    place: bool,
+    place: Held,
+    /// The activity lock, shared for a build or a run of the tests, and held
+    /// alone by a bench.
+    activity: Held,
+    /// A bench's turnstile, or a slot.
+    files: Vec<File>,
+    /// The merge slot's holder took the place, and never gives it up.
+    ahead: bool,
 }
 
 impl Hold {
+    fn new(directory: &Path) -> Hold {
+        Hold {
+            directory: directory.to_path_buf(),
+            place: Held::No,
+            activity: Held::No,
+            files: Vec::new(),
+            ahead: false,
+        }
+    }
+
     /// Lets a child process, and any `xtask` it starts, share this hold.
     pub fn pass_to(&self, command: &mut Command) {
-        if self.activity {
+        if self.activity.any() {
             command.env(INHERITED, &self.directory);
         }
-        if self.place {
+        if self.place.any() {
             command.env(PLACE_INHERITED, &self.directory);
         }
     }
 
     pub fn has_place(&self) -> bool {
-        self.place
+        self.place.any()
     }
 
     /// Adds a shared hold of the activity lock to a place. A place comes
     /// first, so a holder never waits for a place while a bench waits for it.
-    pub fn share(self) -> Result<Hold, Problem> {
-        let mut shared = shared_in(&self.directory)?;
-        shared.files.extend(self.files);
-        shared.place = self.place;
-        Ok(shared)
+    pub fn share(mut self) -> Result<Hold, Problem> {
+        self.activity = shared_activity(&self.directory)?;
+        Ok(self)
+    }
+
+    /// Lets go of the activity lock, and keeps the place.
+    pub fn keep_place(mut self) -> Hold {
+        self.activity = Held::No;
+        self
+    }
+
+    /// Between two parts of a run, such as two packages' tests, lets others
+    /// go first. When the merge slot's holder waits for a place, it gets this
+    /// one, and when a bench waits for the activity lock, it gets that. Then
+    /// this takes back what it let go, in the usual order. Only a place of
+    /// this process's own lets anything go, so the merge slot's holder, and a
+    /// run whose parent passed its place down, go on.
+    pub fn between(&mut self) -> Result<(), Problem> {
+        if self.ahead || !matches!(self.place, Held::Own(_)) {
+            return Ok(());
+        }
+        let shared = self.activity.any();
+        if waits_ahead(&self.directory)? {
+            self.activity = Held::No;
+            self.place = Held::No;
+            self.place = Held::Own(take_place(&self.directory, places()?, false)?);
+        } else if shared && bench_waits(&self.directory)? {
+            self.activity = Held::No;
+        } else {
+            return Ok(());
+        }
+        if shared {
+            self.activity = Held::Own(take_shared(&self.directory)?);
+        }
+        Ok(())
     }
 
     /// For a child that must keep this hold until it exits, even if this
@@ -65,8 +126,12 @@ impl Hold {
     /// child's stdin shares. A hold inherited from a parent has no file, and
     /// the parent keeps it.
     pub fn as_stdin(&self) -> Result<Stdio, Problem> {
-        let Some(file) = self.files.first() else {
-            return Ok(Stdio::null());
+        let file = match &self.activity {
+            Held::Own(file) => file,
+            _ => match self.files.first() {
+                Some(file) => file,
+                None => return Ok(Stdio::null()),
+            },
         };
         let file = file
             .try_clone()
@@ -76,46 +141,44 @@ impl Hold {
 }
 
 pub fn shared(root: &Path) -> Result<Hold, Problem> {
-    shared_in(&directory(root)?)
+    let directory = directory(root)?;
+    let mut hold = Hold::new(&directory);
+    hold.activity = shared_activity(&directory)?;
+    Ok(hold)
 }
 
-fn shared_in(directory: &Path) -> Result<Hold, Problem> {
+fn shared_activity(directory: &Path) -> Result<Held, Problem> {
     if inherited(INHERITED, directory) {
-        return Ok(Hold {
-            files: Vec::new(),
-            directory: directory.to_path_buf(),
-            activity: true,
-            place: false,
-        });
+        return Ok(Held::Inherited);
     }
-    take_shared(directory)
+    Ok(Held::Own(take_shared(directory)?))
 }
 
 /// For a run of the tests: a place, and then a shared hold.
 pub fn testing(root: &Path) -> Result<Hold, Problem> {
-    place(root)?.share()
+    place(root, None)?.share()
 }
 
 /// One of the places, which a caller then shares with `Hold::share`. A merge
 /// waits for its place apart from the rest, so that the wait doesn't count
-/// against its timeout.
-pub fn place(root: &Path) -> Result<Hold, Problem> {
+/// against its timeout. The holder of the merge slot, which it passes as
+/// `slot`, gets its place ahead of every run that waits for one, and keeps
+/// it to the end, because every merge waits for a proof under the slot.
+pub fn place(root: &Path, slot: Option<&Hold>) -> Result<Hold, Problem> {
     let directory = directory(root)?;
-    let mut files = Vec::new();
-    if !inherited(PLACE_INHERITED, &directory) {
-        if inherited(INHERITED, &directory) {
-            return Err(Problem(
-                "the tests can't wait for a place under a hold without one, because a pending bench would wait for them".to_string(),
-            ));
-        }
-        files.push(take_place(&directory, places()?)?);
+    let mut hold = Hold::new(&directory);
+    hold.ahead = slot.is_some();
+    if inherited(PLACE_INHERITED, &directory) {
+        hold.place = Held::Inherited;
+        return Ok(hold);
     }
-    Ok(Hold {
-        files,
-        directory,
-        activity: false,
-        place: true,
-    })
+    if inherited(INHERITED, &directory) {
+        return Err(Problem(
+            "the tests can't wait for a place under a hold without one, because a pending bench would wait for them".to_string(),
+        ));
+    }
+    hold.place = Held::Own(take_place(&directory, places()?, hold.ahead)?);
+    Ok(hold)
 }
 
 fn places() -> Result<usize, Problem> {
@@ -200,12 +263,9 @@ fn slot(root: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem
         }
         Err(TryLockError::Error(e)) => return Err(couldnt(e)),
     }
-    Ok(Hold {
-        files: vec![file],
-        directory,
-        activity: false,
-        place: false,
-    })
+    let mut hold = Hold::new(&directory);
+    hold.files.push(file);
+    Ok(hold)
 }
 
 pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
@@ -274,17 +334,12 @@ fn is_executable(path: &Path) -> bool {
 
 /// Every holder passes through the turnstile, which a pending bench keeps, so
 /// a bench isn't starved by a stream of new holders.
-fn take_shared(directory: &Path) -> Result<Hold, Problem> {
+fn take_shared(directory: &Path) -> Result<File, Problem> {
     let turnstile = open(directory, "turnstile.lock")?;
     turnstile.lock().map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
     activity.lock_shared().map_err(failed)?;
-    Ok(Hold {
-        files: vec![activity],
-        directory: directory.to_path_buf(),
-        activity: true,
-        place: false,
-    })
+    Ok(activity)
 }
 
 fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
@@ -292,22 +347,37 @@ fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
     turnstile.lock().map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
     activity.lock().map_err(failed)?;
-    Ok(Hold {
-        files: vec![turnstile, activity],
-        directory: directory.to_path_buf(),
-        activity: true,
-        place: false,
-    })
+    let mut hold = Hold::new(directory);
+    hold.activity = Held::Own(activity);
+    hold.files.push(turnstile);
+    Ok(hold)
 }
 
-/// Waiters queue for the first free place one at a time. `flock` can't wait
-/// for any one of several files, so the first in the queue waits on each
-/// place in a thread of its own, and keeps the first it gets. A thread that
-/// gets one later finds nobody to hand it to, and frees it at once.
-fn take_place(directory: &Path, count: usize) -> Result<File, Problem> {
+/// Waiters queue for a place one at a time, behind the merge slot's holder,
+/// which waits apart from the queue and keeps this file while it does.
+/// `flock` wakes waiters in no set order, so another waiter that gets a place
+/// while the holder waits gives it up, and waits until the holder has one.
+fn take_place(directory: &Path, count: usize, ahead: bool) -> Result<File, Problem> {
     let couldnt = |e: std::io::Error| Problem(format!("couldn't take a place: {e}"));
-    let queue = open(directory, "places.lock")?;
-    queue.lock().map_err(couldnt)?;
+    let turn = open(directory, if ahead { AHEAD } else { "places.lock" })?;
+    turn.lock().map_err(couldnt)?;
+    loop {
+        let place = free_place(directory, count)?;
+        if ahead || !waits_ahead(directory)? {
+            return Ok(place);
+        }
+        drop(place);
+        let behind = open(directory, AHEAD)?;
+        behind.lock_shared().map_err(couldnt)?;
+    }
+}
+
+/// The first place that is free, or that frees. `flock` can't wait for any one
+/// of several files, so this waits on each place in a thread of its own, and
+/// keeps the first it gets. A thread that gets one later finds nobody to hand
+/// it to, and frees it at once.
+fn free_place(directory: &Path, count: usize) -> Result<File, Problem> {
+    let couldnt = |e: std::io::Error| Problem(format!("couldn't take a place: {e}"));
     let names: Vec<String> = (0..count).map(|i| format!("place-{i}.lock")).collect();
     for name in &names {
         let file = open(directory, name)?;
@@ -331,6 +401,15 @@ fn take_place(directory: &Path, count: usize) -> Result<File, Problem> {
     first
         .recv()
         .map_err(|_| Problem("couldn't take a place: every wait failed".to_string()))
+}
+
+/// Whether the merge slot's holder waits for a place.
+fn waits_ahead(directory: &Path) -> Result<bool, Problem> {
+    match open(directory, AHEAD)?.try_lock_shared() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(Problem(format!("couldn't read {AHEAD}: {e}"))),
+    }
 }
 
 fn failed(error: std::io::Error) -> Problem {
@@ -374,8 +453,9 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bench_waits, open, take_exclusive, take_shared};
+    use super::{bench_waits, open, take_exclusive, take_place, take_shared};
     use std::fs::{self, TryLockError};
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{Receiver, channel};
     use std::thread;
@@ -408,7 +488,12 @@ mod tests {
 
     /// Returns once something holds the turnstile.
     fn wait_for_turnstile(path: &Path) {
-        let probe = open(path, "turnstile.lock").map_err(|e| e.0).unwrap();
+        wait_for(path, "turnstile.lock");
+    }
+
+    /// Returns once something holds the lock on `name`.
+    fn wait_for(path: &Path, name: &str) {
+        let probe = open(path, name).map_err(|e| e.0).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match probe.try_lock() {
@@ -416,7 +501,7 @@ mod tests {
                 Ok(()) => probe.unlock().unwrap(),
                 Err(error) => panic!("{error}"),
             }
-            assert!(Instant::now() < deadline, "nothing took the turnstile");
+            assert!(Instant::now() < deadline, "nothing took {name}");
             thread::yield_now();
         }
     }
@@ -461,6 +546,53 @@ mod tests {
         let bench = take_exclusive(&path).map_err(|e| e.0).unwrap();
         assert!(!waits(), "the bench holds the lock");
         drop(bench);
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// Returns once something waits to share the lock on `name`, which
+    /// `/proc/locks` lists as a blocked request on the file's inode.
+    fn wait_for_a_sharer(path: &Path, name: &str) {
+        let inode = fs::metadata(path.join(name)).unwrap().ino().to_string();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let locks = fs::read_to_string("/proc/locks").unwrap();
+            let waits = locks.lines().any(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                words.get(1) == Some(&"->")
+                    && words.contains(&"READ")
+                    && words
+                        .iter()
+                        .any(|word| word.rsplit(':').next() == Some(&inode) && word.contains(':'))
+            });
+            if waits {
+                return;
+            }
+            assert!(Instant::now() < deadline, "nothing waited to share {name}");
+            thread::yield_now();
+        }
+    }
+
+    /// The test keeps `ahead.lock`, as the merge slot's holder does while it
+    /// waits for a place. The one place frees while a run waits for it in the
+    /// queue, and that run gets it, gives it up, and waits for the holder.
+    #[test]
+    fn a_run_in_the_queue_lets_the_merge_slots_holder_have_the_next_place() {
+        let path = directory("ahead");
+        let held = take_place(&path, 1, false).map_err(|e| e.0).unwrap();
+        let p = path.clone();
+        let queued = holder(move || take_place(&p, 1, false).map_err(|e| e.0).unwrap());
+        wait_for(&path, "places.lock");
+        let ahead = open(&path, "ahead.lock").map_err(|e| e.0).unwrap();
+        ahead.lock().unwrap();
+
+        drop(held);
+        wait_for_a_sharer(&path, "ahead.lock");
+        let next = open(&path, "place-0.lock").map_err(|e| e.0).unwrap();
+        assert!(next.try_lock().is_ok(), "the queue kept the place");
+        assert!(queued.try_recv().is_err(), "both have the one place");
+
+        drop((ahead, next));
+        queued.recv().unwrap().send(()).unwrap();
         fs::remove_dir_all(&path).unwrap();
     }
 

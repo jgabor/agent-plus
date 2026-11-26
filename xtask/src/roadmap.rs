@@ -28,14 +28,14 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
     // GitHub comes first, so that a run that can't reach it stops early.
     let gh = Gh::new(&root);
     let (issues, prs) = (gh.roadmap_issues()?, gh.open_prs()?);
-    let hold = match details {
+    let mut hold = match details {
         true => lock::testing(&root)?,
         false => lock::shared(&root)?,
     };
     let outcomes = journey::outcomes(&root, &journey::Keys::new())?;
     // Only the details count proven promises, which takes a run of the tests.
     let score = match details {
-        true => Some(score::compute(&root, &testrun::run(&root, &hold)?)?),
+        true => Some(score::compute(&root, &testrun::run(&root, &mut hold)?)?),
         false => None,
     };
     drop(hold);

@@ -1173,3 +1173,162 @@ fn score_counts_a_budget_with_no_value_as_missed() {
     );
     assert!(stdout(&repo.xtask(&["score"])).ends_with("budgets 0 of 1\n"));
 }
+
+/// The pinned guest files of `GUEST_PINS`, with the digests their pins name.
+const OS_LAYER: &str = "os layer\n";
+const OS_DIGEST: &str = "52fa17fddf7b0788e0a3957c215082dbf77a8719ac2d6b6811f56cec1e91f268";
+const KERNEL: &str = "kernel\n";
+const KERNEL_DIGEST: &str = "a0c936696eb7d5ee3192bf53b9d281cecbb40ca9db520de72cb95817ad92ac72";
+const GUEST_PINS: &[(&str, &str)] = &[
+    (
+        "guest/os/pin.toml",
+        "url = \"https://example.com/os\"\nsha256 = \"52fa17fddf7b0788e0a3957c215082dbf77a8719ac2d6b6811f56cec1e91f268\"\n",
+    ),
+    (
+        "guest/kernel/pin.toml",
+        "url = \"https://example.com/vmlinux\"\nsha256 = \"a0c936696eb7d5ee3192bf53b9d281cecbb40ca9db520de72cb95817ad92ac72\"\n",
+    ),
+];
+
+/// `ap`, which first adds a line to `HOME`'s `guest` file with how many of
+/// the pinned guest files its store holds.
+fn counting_guest_files(ap: &str) -> String {
+    let count = format!(
+        "    if let Ok(home) = std::env::var(\"HOME\") {{\n        let store = std::path::Path::new(&home).join(\".local/share/ap\");\n        let held = [\"zstd-layers/{OS_DIGEST}\", \"plain-layers/{OS_DIGEST}\", \"layers/{KERNEL_DIGEST}\"].iter().filter(|path| store.join(path).is_file()).count();\n        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(format!(\"{{home}}/guest\")).unwrap();\n        std::io::Write::write_all(&mut file, format!(\"{{held}}\\n\").as_bytes()).unwrap();\n    }}\n"
+    );
+    ap.replacen("{\n", &format!("{{\n{count}"), 1)
+}
+
+/// A stage that runs `ap` with a store: its budget, its `ap`, its other
+/// files, and the `HOME` of each store it uses.
+struct Stage {
+    name: &'static str,
+    budgets: &'static str,
+    ap: &'static str,
+    extra: &'static [(&'static str, &'static str)],
+    homes: &'static [&'static str],
+}
+
+const STAGES: &[Stage] = &[
+    Stage {
+        name: "boot",
+        budgets: BOOT_BUDGETS,
+        ap: BOOTS,
+        extra: &[],
+        homes: &["target/bench/home"],
+    },
+    Stage {
+        name: "build",
+        budgets: BUILD_BUDGETS,
+        ap: BUILDS,
+        extra: &[],
+        homes: &[
+            "target/bench/noop/home/base",
+            "target/bench/noop/home/candidate",
+        ],
+    },
+    Stage {
+        name: "run",
+        budgets: RUN_BUDGETS,
+        ap: RUNS,
+        extra: FAKE_HARNESS,
+        homes: &["target/bench/run/home"],
+    },
+    Stage {
+        name: "idle",
+        budgets: IDLE_BUDGETS,
+        ap: IDLES,
+        extra: FAKE_HARNESS,
+        homes: &["target/bench/idle/home"],
+    },
+];
+
+/// Benches each stage with the guest files pinned, after `copies` puts what
+/// it likes in the tree, and returns, for each store, how many of the pinned
+/// guest files it held at each command, and the store's root.
+fn guest_files_held(name: &str, copies: impl Fn(&Repo)) -> Vec<(String, Vec<String>, PathBuf)> {
+    let mut held = Vec::new();
+    for stage in STAGES {
+        let files: Vec<_> = stage.extra.iter().chain(GUEST_PINS).copied().collect();
+        let repo = Repo::with(
+            &format!("guest-{name}-{}", stage.name),
+            stage.budgets,
+            &counting_guest_files(stage.ap),
+            &files,
+        );
+        copies(&repo);
+        assert_passes(&repo.bench());
+        for home in stage.homes {
+            let home = repo.root.join(home);
+            let counts = fs::read_to_string(home.join("guest")).unwrap();
+            let counts = counts.lines().map(str::to_string).collect();
+            held.push((
+                format!("{} {}", stage.name, home.display()),
+                counts,
+                home.join(".local/share/ap"),
+            ));
+        }
+    }
+    held
+}
+
+/// Puts the tree's copies of the guest files where the T1 tests leave them,
+/// with this content for the OS layer.
+fn copies_with_os(repo: &Repo, os: &str) {
+    let seed = format!("target/guest/os-{OS_DIGEST}");
+    repo.write(
+        &format!("{seed}/zstd-layers/{OS_DIGEST}"),
+        "a frame of the os layer\n",
+    );
+    repo.write(&format!("{seed}/plain-layers/{OS_DIGEST}"), os);
+    repo.write("target/guest/vmlinux", KERNEL);
+}
+
+/// The bench puts the guest files that the tree holds into each store before
+/// its first command, so no command downloads one.
+#[test]
+fn every_store_holds_the_tree_s_guest_files_before_its_first_command() {
+    for (store, counts, root) in guest_files_held("copied", |repo| copies_with_os(repo, OS_LAYER)) {
+        assert!(!counts.is_empty(), "{store}");
+        assert!(
+            counts.iter().all(|count| count == "3"),
+            "{store}: {counts:?}"
+        );
+        let read = |path: &str| fs::read_to_string(root.join(path)).unwrap();
+        assert_eq!(
+            read(&format!("plain-layers/{OS_DIGEST}")),
+            OS_LAYER,
+            "{store}"
+        );
+        assert_eq!(
+            read(&format!("zstd-layers/{OS_DIGEST}")),
+            "a frame of the os layer\n",
+            "{store}"
+        );
+        assert_eq!(read(&format!("layers/{KERNEL_DIGEST}")), KERNEL, "{store}");
+    }
+}
+
+#[test]
+fn a_copy_whose_digest_isn_t_the_pin_s_isn_t_used() {
+    let wrong = |repo: &Repo| copies_with_os(repo, "not the os layer\n");
+    for (store, counts, _) in guest_files_held("wrong", wrong) {
+        assert!(!counts.is_empty(), "{store}");
+        // Only the kernel's copy matches its pin.
+        assert!(
+            counts.iter().all(|count| count == "1"),
+            "{store}: {counts:?}"
+        );
+    }
+}
+
+#[test]
+fn a_tree_with_no_copies_benches_with_empty_stores() {
+    for (store, counts, _) in guest_files_held("none", |_| {}) {
+        assert!(!counts.is_empty(), "{store}");
+        assert!(
+            counts.iter().all(|count| count == "0"),
+            "{store}: {counts:?}"
+        );
+    }
+}

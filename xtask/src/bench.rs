@@ -104,6 +104,85 @@ impl Guest {
             Guest::Kernel => "target/guest/vmlinux".to_string(),
         }
     }
+
+    /// The files a store keeps for the file with this digest, each as where
+    /// the T1 tests keep it and where a store does. A store keeps an OS layer
+    /// compressed and uncompressed, as the T1 tests do.
+    fn stored(self, digest: &str) -> Vec<(String, String)> {
+        match self {
+            Guest::Os => vec![
+                (self.copy(digest), format!("plain-layers/{digest}")),
+                (
+                    format!("target/guest/os-{digest}/zstd-layers/{digest}"),
+                    format!("zstd-layers/{digest}"),
+                ),
+            ],
+            Guest::Kernel => vec![(self.copy(digest), format!("layers/{digest}"))],
+        }
+    }
+}
+
+/// The guest files that the tree holds copies of, as paths in the tree and in
+/// a store. Every store of the bench starts with them, so no command it runs
+/// downloads one.
+struct Copies(Vec<(PathBuf, String)>);
+
+impl Copies {
+    /// The copies of the guest files that the tree's pins name. A copy whose
+    /// digest isn't its pin's is left out, and that file is downloaded, as
+    /// it is when the tree holds no copy. The T1 tests move an OS layer's
+    /// directory into place only once both of its files are checked.
+    fn find(root: &Path) -> Result<Copies, Problem> {
+        let mut copies = Vec::new();
+        for guest in [Guest::Os, Guest::Kernel] {
+            let pin = guest.pin();
+            let text = match fs::read_to_string(root.join(pin)) {
+                Ok(text) => text,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Problem(format!("couldn't read {pin}: {e}"))),
+            };
+            let digest = pinned_digest(pin, &text)?;
+            let stored = guest.stored(&digest);
+            if is_copy(&root.join(guest.copy(&digest)), &digest)?
+                && stored.iter().all(|(tree, _)| root.join(tree).is_file())
+            {
+                copies.extend(
+                    stored
+                        .into_iter()
+                        .map(|(tree, store)| (root.join(tree), store)),
+                );
+            }
+        }
+        Ok(Copies(copies))
+    }
+
+    /// Puts the copies in the store that `ap` keeps under `home`, where a
+    /// download leaves them. A file the store holds already stays.
+    fn put(&self, home: &Path) -> Result<(), Problem> {
+        let store = home.join(".local/share/ap");
+        for (from, to) in &self.0 {
+            let to = store.join(to);
+            let problem = |e: io::Error| {
+                Problem(format!(
+                    "couldn't put {} in {}: {e}",
+                    from.display(),
+                    to.display()
+                ))
+            };
+            fs::create_dir_all(to.parent().expect("a file has a parent")).map_err(problem)?;
+            // A store replaces or removes its files, and never writes into
+            // one, so it can share the tree's. A copy works across
+            // filesystems.
+            match fs::hard_link(from, &to) {
+                Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+                    fs::copy(from, &to).map(drop).map_err(problem)?
+                }
+                Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(problem(e)),
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 /// How a budget is measured. A key that isn't listed is a mistake in the
@@ -224,15 +303,9 @@ pub fn pinned_sizes(root: &Path, commit: &str) -> Result<BTreeMap<String, f64>, 
                 budget.key
             ))
         })?;
-        let digest = match toml::document(&text)
-            .map_err(|e| Problem(format!("{pin}: {e}")))?
-            .get("sha256")
-        {
-            Some(Value::Str(digest)) => digest.clone(),
-            _ => return Err(Problem(format!("{pin} has no `sha256`"))),
-        };
+        let digest = pinned_digest(pin, &text)?;
         let copy = root.join(guest.copy(&digest));
-        if !copy.is_file() || sha256(&copy)? != digest {
+        if !is_copy(&copy, &digest)? {
             return Err(Problem(format!(
                 "`{}` is the size of the file that {pin} pins, and {} isn't that file. The T1 tests fetch it",
                 budget.key,
@@ -242,6 +315,22 @@ pub fn pinned_sizes(root: &Path, commit: &str) -> Result<BTreeMap<String, f64>, 
         sizes.insert(budget.key, size(&copy)?);
     }
     Ok(sizes)
+}
+
+/// The digest that the pin file `pin`, which holds `text`, names.
+fn pinned_digest(pin: &str, text: &str) -> Result<String, Problem> {
+    match toml::document(text)
+        .map_err(|e| Problem(format!("{pin}: {e}")))?
+        .get("sha256")
+    {
+        Some(Value::Str(digest)) => Ok(digest.clone()),
+        _ => Err(Problem(format!("{pin} has no `sha256`"))),
+    }
+}
+
+/// Whether `copy` is a file with this digest.
+fn is_copy(copy: &Path, digest: &str) -> Result<bool, Problem> {
+    Ok(copy.is_file() && sha256(copy)? == digest)
 }
 
 /// How many budgets with a target meet it, and how many have one. A budget
@@ -312,6 +401,7 @@ pub fn compare(
         None
     };
     drop(hold);
+    let copies = Copies::find(root)?;
 
     waiting(true)?;
     let measuring = lock::exclusive(root);
@@ -323,6 +413,7 @@ pub fn compare(
         &candidate,
         harness.as_deref(),
         &directory,
+        &copies,
     )?;
     drop(measuring);
 
@@ -538,6 +629,7 @@ fn measure(
     candidate: &Path,
     harness: Option<&Path>,
     directory: &Path,
+    copies: &Copies,
 ) -> Result<Vec<Row>, Problem> {
     let mut rows = Vec::new();
     for budget in budgets {
@@ -547,8 +639,8 @@ fn measure(
                 (Some(before), after)
             }
             Some(Measure::Size) => (Some(size(base)?), size(candidate)?),
-            Some(Measure::Boot) => boots(base, candidate, &directory.join("home"))?,
-            Some(Measure::Build) => noop_builds(base, candidate, &directory.join("noop"))?,
+            Some(Measure::Boot) => boots(base, candidate, &directory.join("home"), copies)?,
+            Some(Measure::Build) => noop_builds(base, candidate, &directory.join("noop"), copies)?,
             Some(Measure::Run) => {
                 let harness = harness.expect("the fake harness is built for `run_ms`");
                 let directory = directory.join("run");
@@ -557,6 +649,7 @@ fn measure(
                     candidate,
                     harness,
                     &directory,
+                    copies,
                     RUN_AGENTFILE,
                     run_once_headless,
                 )?
@@ -569,6 +662,7 @@ fn measure(
                     candidate,
                     harness,
                     &directory,
+                    copies,
                     IDLE_AGENTFILE,
                     idle_once,
                 )?
@@ -634,9 +728,15 @@ fn run_once(binary: &Path) -> Result<f64, Problem> {
 /// The boot medians of both builds, or of the candidate alone when the base
 /// has no `ap boot`. One warm-up run each comes first, and every run shares
 /// `home`, so no download is timed.
-fn boots(base: &Path, candidate: &Path, home: &Path) -> Result<(Option<f64>, f64), Problem> {
+fn boots(
+    base: &Path,
+    candidate: &Path,
+    home: &Path,
+    copies: &Copies,
+) -> Result<(Option<f64>, f64), Problem> {
     fs::create_dir_all(home)
         .map_err(|e| Problem(format!("couldn't create {}: {e}", home.display())))?;
+    copies.put(home)?;
     let timed = |binary: &Path| boot_once(binary, home)?.ok_or_else(|| no_boot(binary));
     let base_boots = boot_once(base, home)?.is_some();
     if !base_boots && has_boot(base, home)? {
@@ -686,6 +786,7 @@ fn noop_builds(
     base: &Path,
     candidate: &Path,
     directory: &Path,
+    copies: &Copies,
 ) -> Result<(Option<f64>, f64), Problem> {
     let problem =
         |e: std::io::Error| Problem(format!("couldn't write {}: {e}", directory.display()));
@@ -705,6 +806,7 @@ fn noop_builds(
         let cache = home.join(".cache/ap");
         fs::create_dir_all(&cache).map_err(problem)?;
         fs::write(cache.join(NOOP_HARNESS_SHA256), NOOP_HARNESS).map_err(problem)?;
+        copies.put(home)?;
     }
     let home_of = |binary: &Path| if binary == base { &homes[0] } else { &homes[1] };
     let grants = [
@@ -847,6 +949,7 @@ fn runs(
     candidate: &Path,
     harness: &Path,
     directory: &Path,
+    copies: &Copies,
     agentfile: &str,
     once: fn(&Path, &str, &Path) -> Result<Option<f64>, Problem>,
 ) -> Result<(Option<f64>, f64), Problem> {
@@ -860,6 +963,7 @@ fn runs(
     let cache = home.join(".cache/ap");
     fs::create_dir_all(&cache).map_err(problem)?;
     fs::copy(harness, cache.join(&digest)).map_err(problem)?;
+    copies.put(&home)?;
     let agents = [directory.join("base"), directory.join("candidate")];
     for agent in &agents {
         fs::create_dir_all(agent).map_err(problem)?;

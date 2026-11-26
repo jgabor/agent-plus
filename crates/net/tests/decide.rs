@@ -466,6 +466,29 @@ fn backslashes_and_semicolons_under_a_host_with_url_rules_are_denied() {
     );
 }
 
+// spec(NETWORK): So are request targets there with a `#`, because an HTTP request target can't have one, and some servers read what follows it as part of the path.
+#[test]
+fn a_raw_hash_under_a_host_with_url_rules_is_denied() {
+    let rules = "NETWORK +github.com\nNETWORK -https://github.com/jgabor/secret\n";
+    for url in [
+        "https://github.com/x#/../jgabor/secret",
+        "https://github.com/x#",
+        "https://github.com/x?a#/../jgabor/secret",
+    ] {
+        decides(rules, request(url), DENY, "path");
+    }
+    // An escaped `#` is part of its segment.
+    decides(
+        rules,
+        request("https://github.com/x%23/jgabor/secret"),
+        ALLOW,
+        "+github.com",
+    );
+    // Without URL rules for the host, the target doesn't matter.
+    let rules = "NETWORK -\nNETWORK +github.com\nNETWORK +https://codeberg.org/x\n";
+    decides(rules, request("https://github.com/x#/../y"), ALLOW, "+github.com");
+}
+
 // spec(NETWORK): **Evaluation.** The most specific matching rule wins, so line order never matters.
 #[test]
 fn line_order_never_matters() {

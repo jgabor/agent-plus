@@ -50,6 +50,7 @@ const F_GETFD: u32 = 1;
 const F_OFD_GETLK: u32 = 36;
 const F_OFD_SETLK: u32 = 37;
 const MAP_ANONYMOUS: u32 = 0x20;
+const PROT_EXEC: u32 = 4;
 const O_ACCMODE: u32 = 3;
 
 // x86_64 system call numbers.
@@ -173,6 +174,9 @@ enum Rule {
     AllowIfNull(u32, u32),
     /// Answered with this error, without running it.
     Refuse(u32, u32),
+    /// What the rule inside does, unless the argument at this index has a
+    /// bit of this mask, which kills.
+    UnlessSet(u32, u32, Box<Rule>),
 }
 
 /// The calls that the VMM, its watchdog, and the output relay make while a
@@ -263,10 +267,7 @@ fn share_server_rules(
     times: &[RawFd],
     kept: Option<RawFd>,
 ) -> Vec<Rule> {
-    use Rule::{
-        Allow, AllowIf, AllowIfNull, AllowIfSet, AllowUnless, AllowUnlessEither,
-        AllowUnlessOrAllSet,
-    };
+    use Rule::{Allow, AllowIf, AllowIfNull, AllowUnless, AllowUnlessEither, AllowUnlessOrAllSet};
     let times: Vec<u32> = times.iter().map(|fd| *fd as u32).collect();
     let read = [vec![socket as u32], times.clone()].concat();
     let mut rules = vec![
@@ -290,7 +291,6 @@ fn share_server_rules(
             Some(kept) => AllowUnless(FLOCK, 0, kept as u32),
             None => Allow(FLOCK),
         },
-        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
         Allow(MADVISE),
@@ -303,6 +303,7 @@ fn share_server_rules(
         Allow(EXIT),
         Allow(EXIT_GROUP),
     ];
+    rules.extend(memory_rules());
     if !times.is_empty() {
         rules.push(AllowIf(SENDMSG, 0, times));
     }
@@ -388,8 +389,8 @@ fn network_connecting_rules(link: RawFd) -> Vec<Rule> {
 }
 
 fn network_common_rules(link: RawFd) -> Vec<Rule> {
-    use Rule::{Allow, AllowIf, AllowIfSet};
-    vec![
+    use Rule::{Allow, AllowIf};
+    let mut rules = vec![
         AllowIf(READ, 0, vec![link as u32]),
         AllowIf(WRITE, 0, vec![link as u32, STDOUT, STDERR]),
         Allow(POLL),
@@ -397,7 +398,6 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
         Allow(CLOCK_GETTIME),
         Allow(CLOSE),
         AllowIf(FCNTL, 1, vec![F_GETFD]),
-        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
         Allow(MADVISE),
@@ -411,12 +411,25 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
         Allow(GETTID),
         Allow(EXIT),
         Allow(EXIT_GROUP),
+    ];
+    rules.extend(memory_rules());
+    rules
+}
+
+/// How the share server and the network process map memory, and change
+/// what it allows. They map only anonymous memory, and none of it may run.
+/// musl's allocator maps pages that allow nothing when the program break
+/// can't grow, and lets them be read and written with `mprotect`.
+fn memory_rules() -> [Rule; 2] {
+    use Rule::{Allow, AllowIfSet, UnlessSet};
+    [
+        UnlessSet(2, PROT_EXEC, Box::new(AllowIfSet(MMAP, 3, MAP_ANONYMOUS))),
+        UnlessSet(2, PROT_EXEC, Box::new(Allow(MPROTECT))),
     ]
 }
 
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
     let kill = op(RETURN, 0, 0, RET_KILL_PROCESS);
-    let allow = op(RETURN, 0, 0, RET_ALLOW);
     let mut program = vec![
         op(LOAD_WORD, 0, 0, OFFSET_ARCH),
         op(JUMP_EQUAL, 1, 0, AUDIT_ARCH_X86_64),
@@ -426,66 +439,79 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
         kill,
     ];
     for rule in rules {
-        let load = |index: u32| op(LOAD_WORD, 0, 0, OFFSET_ARGS + 8 * index);
-        let (number, body) = match rule {
-            Rule::Allow(number) => (*number, vec![allow]),
-            Rule::Refuse(number, errno) => (*number, vec![op(RETURN, 0, 0, RET_ERRNO | errno)]),
-            Rule::AllowIf(number, index, values) => {
-                let mut body = vec![load(*index)];
-                for value in values {
-                    body.extend([op(JUMP_EQUAL, 0, 1, *value), allow]);
-                }
-                body.push(kill);
-                (*number, body)
-            }
-            Rule::AllowIfSet(number, index, mask) => (
-                *number,
-                vec![load(*index), op(JUMP_SET, 0, 1, *mask), allow, kill],
-            ),
-            Rule::AllowUnless(number, index, value) => (
-                *number,
-                vec![load(*index), op(JUMP_EQUAL, 0, 1, *value), kill, allow],
-            ),
-            Rule::AllowUnlessEither(number, [first, second], value) => (
-                *number,
-                vec![
-                    load(*first),
-                    op(JUMP_EQUAL, 3, 0, *value),
-                    load(*second),
-                    op(JUMP_EQUAL, 1, 0, *value),
-                    allow,
-                    kill,
-                ],
-            ),
-            Rule::AllowUnlessOrAllSet(number, (at, value), (index, mask)) => (
-                *number,
-                vec![
-                    load(*at),
-                    op(JUMP_EQUAL, 4, 0, *value),
-                    load(*index),
-                    op(AND, 0, 0, *mask),
-                    op(JUMP_EQUAL, 1, 0, *mask),
-                    allow,
-                    kill,
-                ],
-            ),
-            Rule::AllowIfNull(number, index) => (
-                *number,
-                vec![
-                    load(*index),
-                    op(JUMP_EQUAL, 0, 3, 0),
-                    op(LOAD_WORD, 0, 0, OFFSET_ARGS + 8 * index + 4),
-                    op(JUMP_EQUAL, 0, 1, 0),
-                    allow,
-                    kill,
-                ],
-            ),
-        };
+        let (number, body) = compiled(rule);
         program.push(op(JUMP_EQUAL, 0, body.len() as u8, number));
         program.extend(body);
     }
     program.push(kill);
     program
+}
+
+/// The number of the call `rule` is for, and what the filter runs for it.
+fn compiled(rule: &Rule) -> (u32, Vec<Instruction>) {
+    let kill = op(RETURN, 0, 0, RET_KILL_PROCESS);
+    let allow = op(RETURN, 0, 0, RET_ALLOW);
+    let load = |index: u32| op(LOAD_WORD, 0, 0, OFFSET_ARGS + 8 * index);
+    match rule {
+        Rule::Allow(number) => (*number, vec![allow]),
+        Rule::Refuse(number, errno) => (*number, vec![op(RETURN, 0, 0, RET_ERRNO | errno)]),
+        Rule::AllowIf(number, index, values) => {
+            let mut body = vec![load(*index)];
+            for value in values {
+                body.extend([op(JUMP_EQUAL, 0, 1, *value), allow]);
+            }
+            body.push(kill);
+            (*number, body)
+        }
+        Rule::AllowIfSet(number, index, mask) => (
+            *number,
+            vec![load(*index), op(JUMP_SET, 0, 1, *mask), allow, kill],
+        ),
+        Rule::AllowUnless(number, index, value) => (
+            *number,
+            vec![load(*index), op(JUMP_EQUAL, 0, 1, *value), kill, allow],
+        ),
+        Rule::AllowUnlessEither(number, [first, second], value) => (
+            *number,
+            vec![
+                load(*first),
+                op(JUMP_EQUAL, 3, 0, *value),
+                load(*second),
+                op(JUMP_EQUAL, 1, 0, *value),
+                allow,
+                kill,
+            ],
+        ),
+        Rule::AllowUnlessOrAllSet(number, (at, value), (index, mask)) => (
+            *number,
+            vec![
+                load(*at),
+                op(JUMP_EQUAL, 4, 0, *value),
+                load(*index),
+                op(AND, 0, 0, *mask),
+                op(JUMP_EQUAL, 1, 0, *mask),
+                allow,
+                kill,
+            ],
+        ),
+        Rule::AllowIfNull(number, index) => (
+            *number,
+            vec![
+                load(*index),
+                op(JUMP_EQUAL, 0, 3, 0),
+                op(LOAD_WORD, 0, 0, OFFSET_ARGS + 8 * index + 4),
+                op(JUMP_EQUAL, 0, 1, 0),
+                allow,
+                kill,
+            ],
+        ),
+        Rule::UnlessSet(index, mask, rule) => {
+            let (number, inside) = compiled(rule);
+            let mut body = vec![load(*index), op(JUMP_SET, 0, 1, *mask), kill];
+            body.extend(inside);
+            (number, body)
+        }
+    }
 }
 
 /// Confines every thread of this process, for the rest of its life. Call it
@@ -1128,6 +1154,38 @@ mod tests {
             connecting_call(MMAP, [0, 4096, 1, MAP_PRIVATE, 4, 0]),
             RET_KILL_PROCESS
         );
+    }
+
+    /// musl's allocator maps pages that allow nothing when the program
+    /// break can't grow, and opens them with `mprotect`. No filter but the
+    /// VMM's lets memory run.
+    #[test]
+    fn the_share_server_and_the_network_process_open_memory_that_never_runs() {
+        const PROT_READ_WRITE: u32 = 3;
+        let socket = SOCKET as RawFd;
+        let filters = [
+            share_server_rules(socket, Changes::Nothing, &[], None),
+            share_server_rules(socket, Changes::Files, &[TIMES as RawFd], None),
+            share_server_rules(socket, Changes::FilesModesAndTimes, &[], None),
+            network_rules(socket),
+            network_connecting_rules(socket),
+        ];
+        let anonymous = MAP_PRIVATE | MAP_ANONYMOUS;
+        for rules in &filters {
+            let call = |number, args| run_rules(rules, AUDIT_ARCH_X86_64, number, args);
+            assert_eq!(
+                call(MPROTECT, [0, 4096, PROT_READ_WRITE, 0, 0, 0]),
+                RET_ALLOW
+            );
+            assert_eq!(call(MMAP, [0, 8192, 0, anonymous, u32::MAX, 0]), RET_ALLOW);
+            for prot in [PROT_EXEC, PROT_READ_WRITE | PROT_EXEC] {
+                assert_eq!(call(MPROTECT, [0, 4096, prot, 0, 0, 0]), RET_KILL_PROCESS);
+                assert_eq!(
+                    call(MMAP, [0, 4096, prot, anonymous, u32::MAX, 0]),
+                    RET_KILL_PROCESS
+                );
+            }
+        }
     }
 
     /// Set in the process that

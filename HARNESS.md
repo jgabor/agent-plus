@@ -558,7 +558,11 @@ reads the `Touches` and `Blocked by` lines, the parent that GitHub records for
 a sub-issue, and the `State`, `Thread`, `Branch`, and `Lease until` fields.
 
 - The paths in `Touches` are its backticked words. Two issues overlap when one
-  path is a prefix of the other.
+  path is a prefix of the other, in whole parts, unless they name different
+  sections of one file.
+- A path names one section of a file when it ends in `#` and the heading's
+  link anchor, such as `SPEC.md#network`. Anchors compare without case. A
+  path with no section overlaps each section of its file.
 - An issue with no `## Touches` isn't claimable, and neither is a parent: an
   issue that GitHub lists another issue under, as a sub-issue, or one with a
   line that starts with `Milestone:`, even before it has a sub-issue.

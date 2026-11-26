@@ -104,10 +104,16 @@ What should be true afterwards, in a sentence or two.
 The checks that prove it: SPEC sentences, journey steps, or a budget.
 
 ## Touches
-The crates or paths this will change.
+The files this will change, or the sections of them.
 
 Blocked by #34.
 ```
+
+`Touches` names the files an issue changes when they are known, and a
+directory only when the work spans it or creates it. When it changes one
+section of a Markdown file, it names the section by the heading's link
+anchor, such as `SPEC.md#network`. An entry for the whole file overlaps each
+of its sections.
 
 A parent that delivers a milestone names it on a line of its own, such as
 `Milestone: Author.`.

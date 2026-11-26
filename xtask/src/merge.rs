@@ -320,6 +320,8 @@ fn run_the_checks_of(
         Some(head) => command.env(POSTED, head),
         None => command.env_remove(POSTED),
     };
+    // It is the xtask of `main`, which takes the slot ahead anyway.
+    lock::keep_turn_from(&mut command);
     let mut checks = command
         .args(["-c", AS_WORKER])
         .arg(program)

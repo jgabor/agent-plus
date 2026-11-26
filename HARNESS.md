@@ -957,8 +957,8 @@ take one merge slot. A systemd user timer in `harness/refresh/` starts it every
 five minutes, and its service moves the checkout to the newest `main` first,
 so the refresh runs the `xtask` of `main`. The owner turns the timer on, as
 [Owner actions](#owner-actions) says, and no agent installs or starts it. A
-refresh that starts while another runs proves nothing, and exits 0. A run that
-finds no PR to prove only reads GitHub, so it is cheap to run often.
+refresh that starts while another runs proves nothing, and exits 0. A refresh
+that finds no PR to prove only reads GitHub, so it is cheap to run often.
 
 For each PR it goes on to prove or merge, the refresh takes the merge slot.
 If another run holds it, the refresh says that it waits for it, and posts that
@@ -1271,6 +1271,9 @@ start to fail on timing, lower the worker slots on Linux to 4.
   ```
 
   It merges with your `gh` sign-in, and commits its records as your git user.
+  The service names `git` and `cargo` with no directory, so systemd looks for
+  them in `/usr/local/bin` and `/usr/bin`. The refresh finds `gh` on the path
+  that `systemctl --user show-environment` prints.
   It runs while your user's systemd does, so `loginctl enable-linger` keeps it
   running when you are signed out. After a change to its units on `main`, run
   `systemctl --user daemon-reload`.

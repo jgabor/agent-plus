@@ -350,21 +350,16 @@ pub fn has_turn(root: &Path) -> Result<bool, Problem> {
     Ok(inherited(TURN_INHERITED, &directory(root)?))
 }
 
+/// Keeps a turn that this process was passed from what `command` runs, which
+/// has no turn of its own.
+pub fn keep_turn_from(command: &mut Command) {
+    command.env_remove(TURN_INHERITED);
+}
+
 /// Held for a whole refresh, so that one that starts while another runs
 /// proves nothing. `None` if another run holds it.
 pub fn refresh_slot(root: &Path) -> Result<Option<Hold>, Problem> {
-    let directory = directory(root)?;
-    let file = open(&directory, "refresh.lock")?;
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(None),
-        Err(TryLockError::Error(e)) => {
-            return Err(Problem(format!("couldn't take refresh.lock: {e}")));
-        }
-    }
-    let mut hold = Hold::new(&directory);
-    hold.files.push(file);
-    Ok(Some(hold))
+    Ok(try_slot(&directory(root)?, "refresh.lock")?.ok())
 }
 
 /// Held for a whole response to a failing gate, so that two can't share the
@@ -374,19 +369,34 @@ pub fn response_slot(root: &Path) -> Result<Hold, Problem> {
 }
 
 fn slot(directory: &Path, name: &str, waiting: impl FnOnce()) -> Result<Hold, Problem> {
-    let file = open(directory, name)?;
-    let couldnt = |e| Problem(format!("couldn't take {name}: {e}"));
-    match file.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
+    match try_slot(directory, name)? {
+        Ok(hold) => Ok(hold),
+        Err(file) => {
             waiting();
-            file.lock().map_err(couldnt)?;
+            file.lock().map_err(|e| couldnt_take(name, e))?;
+            Ok(holding(directory, file))
         }
-        Err(TryLockError::Error(e)) => return Err(couldnt(e)),
     }
+}
+
+/// The lock on `name` if it is free, or else its file, to wait on.
+fn try_slot(directory: &Path, name: &str) -> Result<Result<Hold, File>, Problem> {
+    let file = open(directory, name)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Ok(holding(directory, file))),
+        Err(TryLockError::WouldBlock) => Ok(Err(file)),
+        Err(TryLockError::Error(e)) => Err(couldnt_take(name, e)),
+    }
+}
+
+fn holding(directory: &Path, file: File) -> Hold {
     let mut hold = Hold::new(directory);
     hold.files.push(file);
-    Ok(hold)
+    hold
+}
+
+fn couldnt_take(name: &str, error: io::Error) -> Problem {
+    Problem(format!("couldn't take {name}: {error}"))
 }
 
 pub fn run(command: &[&str]) -> Result<Verdict, Problem> {

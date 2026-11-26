@@ -1602,9 +1602,9 @@ fn tls_after(before: &'static [u8], config: Arc<ServerConfig>) -> (u16, Seen) {
     (port, seen)
 }
 
-// spec(NETWORK): On a host that the proxy decrypts for a rule, TLS that starts after plain text, as it does after `STARTTLS`, is denied, because the proxy decrypts TLS only from a connection's first byte.
+// spec(NETWORK): On a host that the proxy decrypts for a rule, TLS that starts where a connection's text ends, as it does after `STARTTLS`, is denied, because the proxy decrypts TLS only from a connection's first byte.
 #[test]
-fn tls_after_plain_text_is_denied_on_a_host_the_proxy_decrypts() {
+fn tls_where_text_ends_is_denied_on_a_host_the_proxy_decrypts() {
     let (root, config) = server();
     let (port, seen) = tls_after(b"STARTTLS\r\n", config);
     let broader = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -gist.{NAME}\n");
@@ -1620,9 +1620,9 @@ fn tls_after_plain_text_is_denied_on_a_host_the_proxy_decrypts() {
     assert_eq!(settled(&seen), [] as [String; 0]);
 }
 
-// spec(NETWORK): On a connection that starts with neither TLS nor HTTP, the proxy reads nothing after a control character other than tab, carriage return, or line feed, so TLS that starts after one, as PostgreSQL's does, is neither checked nor decrypted.
+// spec(NETWORK): On a host without URL rules, TLS that starts after the control character that ends a connection's text, as PostgreSQL's does, is neither checked nor decrypted, and a client can end its text on purpose with a control character that its server ignores.
 #[test]
-fn tls_after_bytes_that_aren_t_text_is_not_decrypted() {
+fn tls_after_text_that_ended_otherwise_is_not_decrypted() {
     const SSL_REQUEST: &[u8] = b"\x00\x00\x00\x08\x04\xd2\x16\x2f";
     let (root, config) = server();
     let (port, seen) = tls_after(SSL_REQUEST, config);

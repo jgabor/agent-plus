@@ -713,6 +713,34 @@ fn a_codex_share_that_is_the_working_directory_keeps_its_rules() {
     }
 }
 
+// spec(MODE): With `auto`, when the working directory is a share, its `.codex/config.toml` can still name a model catalog (`model_catalog_json`) that gives Codex's reviewer its own policy, policy template, and model, and turns guardian v2's classifier on with its own threshold and instructions.
+#[test]
+fn a_codex_share_that_is_the_working_directory_keeps_its_model_catalog() {
+    // Real Codex loads the catalog in T2. This checks the adapter's part:
+    // in `auto`, it trusts every share and names no catalog of its own.
+    let (_, directories) = shares("codex");
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            let mut arguments = codex::arguments(version, None, None, Mode::Auto, interactive);
+            arguments.extend(codex::workspace(&directories));
+            let run = format!("{version} {interactive}");
+            assert!(
+                !arguments.iter().any(|a| a.contains("model_catalog_json")),
+                "{run}"
+            );
+            let projects = arguments.iter().find(|a| a.starts_with("projects="));
+            for share in &directories {
+                let trusted = format!("\"{share}\"={{trust_level=\"trusted\"}}");
+                assert!(
+                    projects.is_some_and(|p| p.contains(&trusted)),
+                    "{run} {share}"
+                );
+            }
+        }
+    }
+}
+
 // spec(SECRET): Each adapter's allowlist is `Authorization` and `x-api-key`.
 #[test]
 fn each_adapter_lets_the_proxy_fill_authorization_and_x_api_key() {

@@ -1010,6 +1010,11 @@ default is `auto`.
 - With `read`, `ask`, `edit`, or `auto`, when the working directory is a
   share, a rule in its `.codex/rules` that allows a command lets Codex run
   that command outside its sandbox without asking.
+- With `auto`, when the working directory is a share, its
+  `.codex/config.toml` can still name a model catalog (`model_catalog_json`)
+  that gives Codex's reviewer its own policy, policy template, and model,
+  and turns guardian v2's classifier on with its own threshold and
+  instructions.
 - `MODE` overrides any permission settings a plugin sets.
 - `auto` depends on the harness. With Claude Code, it needs a recent model,
   an administrator can turn it off, and its classifier calls count toward

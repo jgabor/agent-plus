@@ -912,9 +912,11 @@ fn frames_input(input: &str) -> (usize, usize) {
     }
 }
 
-/// Panics unless smoltcp's wire parsing, which `classify` doesn't call,
-/// reads `frame` as a packet to the stack's MAC address that opens `flow`.
-/// It reads past one hop-by-hop header, and leaves checksums unchecked.
+/// Panics unless smoltcp's wire parsing reads `frame` as a packet to the
+/// stack's MAC address that opens `flow`. `classify` calls the same parsers,
+/// so this checks the code around them: which headers it reads, the SYN it
+/// looks for, and the addresses and ports it takes. It reads past one
+/// hop-by-hop header, and leaves checksums unchecked.
 fn same_flow(frame: &[u8], flow: &netstack::Flow) {
     use smoltcp::phy::ChecksumCapabilities;
     let ignored = ChecksumCapabilities::ignored();
@@ -927,10 +929,7 @@ fn same_flow(frame: &[u8], flow: &netstack::Flow) {
 
 /// The flow that smoltcp's wire parsing reads in a frame to the stack's MAC
 /// address: a SYN, or a UDP datagram.
-fn flow_of(
-    frame: &[u8],
-    checksums: &smoltcp::phy::ChecksumCapabilities,
-) -> Option<netstack::Flow> {
+fn flow_of(frame: &[u8], checksums: &smoltcp::phy::ChecksumCapabilities) -> Option<netstack::Flow> {
     use smoltcp::wire::{
         EthernetAddress, EthernetFrame, EthernetRepr, IpProtocol, TcpControl, TcpPacket, TcpRepr,
         UdpPacket, UdpRepr,
@@ -945,8 +944,13 @@ fn flow_of(
     let at = |ip, port| SocketAddr::new(IpAddr::from(ip), port);
     match protocol {
         IpProtocol::Tcp => {
-            let tcp = TcpRepr::parse(&TcpPacket::new_checked(payload).ok()?, &from, &to, checksums)
-                .ok()?;
+            let tcp = TcpRepr::parse(
+                &TcpPacket::new_checked(payload).ok()?,
+                &from,
+                &to,
+                checksums,
+            )
+            .ok()?;
             let syn = tcp.control == TcpControl::Syn && tcp.ack_number.is_none();
             syn.then(|| netstack::Flow::Tcp {
                 source: at(from, tcp.src_port),
@@ -954,8 +958,13 @@ fn flow_of(
             })
         }
         IpProtocol::Udp => {
-            let udp = UdpRepr::parse(&UdpPacket::new_checked(payload).ok()?, &from, &to, checksums)
-                .ok()?;
+            let udp = UdpRepr::parse(
+                &UdpPacket::new_checked(payload).ok()?,
+                &from,
+                &to,
+                checksums,
+            )
+            .ok()?;
             Some(netstack::Flow::Udp {
                 source: at(from, udp.src_port),
                 destination: at(to, udp.dst_port),
@@ -988,7 +997,12 @@ fn ip_of<'a>(
             let packet = Ipv4Packet::new_checked(payload).ok()?;
             let repr = Ipv4Repr::parse(&packet, checksums).ok()?;
             let from = IpAddress::Ipv4(repr.src_addr);
-            Some((repr.next_header, from, repr.dst_addr.into(), packet.payload()))
+            Some((
+                repr.next_header,
+                from,
+                repr.dst_addr.into(),
+                packet.payload(),
+            ))
         }
         EthernetProtocol::Ipv6 => {
             let packet = Ipv6Packet::new_checked(payload).ok()?;
@@ -1053,7 +1067,9 @@ fn sent_parsed(frame: &[u8]) -> Option<()> {
                 return None;
             };
             let icmp = Icmpv6Packet::new_checked(payload).ok()?;
-            Icmpv6Repr::parse(&from, &to, &icmp, &checked).ok().map(drop)
+            Icmpv6Repr::parse(&from, &to, &icmp, &checked)
+                .ok()
+                .map(drop)
         }
         _ => None,
     }
@@ -2753,7 +2769,13 @@ mod tests {
             unreachable!()
         };
         destination.set_port(444);
-        same_flow(&frame, &netstack::Flow::Tcp { source, destination });
+        same_flow(
+            &frame,
+            &netstack::Flow::Tcp {
+                source,
+                destination,
+            },
+        );
     }
 
     /// The frames corpus's IPv4 SYN, as if the stack had sent it.

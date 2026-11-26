@@ -131,21 +131,21 @@ fn start_one(
     read_write: bool,
 ) -> io::Result<Started> {
     let (mine, theirs) = UnixStream::pair()?;
+    let mut command = Command::new(program);
     // Each root reaches the server as a descriptor it inherits, numbered in
     // its arguments. The copies are made just for it, and closed once it
     // has started.
     let mut inherited = Vec::new();
     if let Some(kept) = kept {
-        inherited.push(inheritable(kept)?);
+        inherited.push(inheritable(&mut command, kept)?);
     }
     for root in roots {
-        inherited.push(inheritable(root.directory)?);
+        inherited.push(inheritable(&mut command, root.directory)?);
         if let Mode::CopyOnWrite(pending) = root.mode {
-            inherited.push(inheritable(pending)?);
+            inherited.push(inheritable(&mut command, pending)?);
         }
     }
     let mut numbers = inherited.iter().map(|fd| fd.as_raw_fd().to_string());
-    let mut command = Command::new(program);
     for name in hidden {
         command.env_remove(name);
     }
@@ -203,14 +203,26 @@ fn die_with_this_thread(command: &mut Command) {
 #[cfg(target_os = "macos")]
 fn die_with_this_thread(_command: &mut Command) {}
 
-/// A copy of `fd` that a program this process starts inherits, numbered
-/// past standard error. Make it just before the program starts, and drop
-/// it just after, so no other program inherits it.
-pub fn inheritable(fd: BorrowedFd) -> io::Result<OwnedFd> {
-    // SAFETY: `F_DUPFD` takes an open descriptor and returns a new one.
-    let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD, STDERR + 1) };
+/// A copy of `fd` that the program `command` starts inherits, numbered
+/// past standard error. The copy closes when any other program starts, so
+/// one that another thread starts at the same time doesn't inherit it.
+/// Only the process that becomes `command`'s program keeps it, from its
+/// fork through its exec. Keep the copy until `command` has started, and
+/// drop it just after.
+pub fn inheritable(command: &mut Command, fd: BorrowedFd) -> io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD_CLOEXEC` takes an open descriptor and returns a new
+    // one.
+    let copy = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, STDERR + 1) };
     if copy < 0 {
         return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the closure runs in the forked child, and makes one system
+    // call that takes and returns plain integers.
+    unsafe {
+        command.pre_exec(move || match libc::fcntl(copy, libc::F_SETFD, 0) {
+            -1 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
+        });
     }
     // SAFETY: the descriptor is new, and nothing else owns it.
     Ok(unsafe { OwnedFd::from_raw_fd(copy) })

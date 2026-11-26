@@ -149,14 +149,14 @@ fn start_as_other(mode: &str, root: &Path) -> (Child, Guest) {
     // SAFETY: both calls take nothing, and can't fail.
     let me = unsafe { (libc::geteuid(), libc::getegid()) };
     let (mine, theirs) = UnixStream::pair().unwrap();
-    let inherited = share::inheritable(File::open(root).unwrap().as_fd()).unwrap();
+    let mut command = Command::new(env::current_exe().unwrap());
+    let inherited = share::inheritable(&mut command, File::open(root).unwrap().as_fd()).unwrap();
     let args = format!("{mode}\n{}", inherited.as_raw_fd());
     let setgroups = CString::new("/proc/self/setgroups").unwrap();
     let uid_map = CString::new("/proc/self/uid_map").unwrap();
     let gid_map = CString::new("/proc/self/gid_map").unwrap();
     let uid_line = format!("{OTHER} {} 1\n", me.0);
     let gid_line = format!("{OTHER} {} 1\n", me.1);
-    let mut command = Command::new(env::current_exe().unwrap());
     command
         .env(ARGS, args)
         .stdin(OwnedFd::from(theirs))

@@ -2462,26 +2462,36 @@ fn an_object_or_pack_index_larger_than_the_limit_stays_pending() {
     }
 }
 
-/// From #832: the agent's `refs/heads/main`, a loose ref, or its
-/// `packed-refs`, once its git packed its refs, is 10 GiB long, which costs
-/// almost nothing as a sparse file. `ap apply` refuses each before it
-/// reads it, within a fixed time.
+/// From #832: the agent's `HEAD`, once its git checked out a new branch,
+/// its `refs/heads/main`, a loose ref, or its `packed-refs`, once its git
+/// packed its refs, is a byte more than 512 MiB long, or 10 GiB, which
+/// costs almost nothing as a sparse file. `ap apply` refuses each before
+/// it reads it, within a fixed time.
 // spec(SHARE): Nor do they read the agent's `HEAD`, one of its loose refs, or its `packed-refs` when it is larger than that.
 // spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_ref_file_larger_than_the_limit_stays_pending() {
-    for file in ["refs/heads/main", "packed-refs"] {
-        let name = file.replace('/', "-");
-        let repository = Repository::new(&format!("too-large-{name}"), true, &[]);
+    let files = ["HEAD", "refs/heads/main", "packed-refs"];
+    for (file, len) in files
+        .into_iter()
+        .flat_map(|f| [(f, (512 << 20) + 1), (f, 10 << 30)])
+    {
+        let name = format!("too-large-{}-{len}", file.replace('/', "-"));
+        let repository = Repository::new(&name, true, &[]);
         repository.commit("a", "a\n");
-        if file == "packed-refs" {
-            repo::run(&repository.guest, &["pack-refs", "--all"]);
-            record(&repository.pending, "DELETE \".git/refs/heads/main\"");
+        let guest = &repository.guest;
+        match file {
+            "HEAD" => drop(repo::run(guest, &["checkout", "-q", "-b", "work"])),
+            "packed-refs" => {
+                repo::run(guest, &["pack-refs", "--all"]);
+                record(&repository.pending, "DELETE \".git/refs/heads/main\"");
+            }
+            _ => {}
         }
         repository.land();
         let path = repository.pending.join("tree/.git").join(file);
         let opened = fs::OpenOptions::new().write(true).open(path);
-        opened.unwrap().set_len(10 << 30).unwrap();
+        opened.unwrap().set_len(len).unwrap();
         let before = repository.objects_and_refs();
 
         let output = repository.apply_within(2);

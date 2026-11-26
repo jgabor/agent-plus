@@ -644,8 +644,9 @@ fn a_history_that_can_t_be_read_still_shows_the_files() {
 }
 
 /// The first line `ap diff` prints, within 20 seconds of CPU time, once the
-/// agent's git has run `commit` on a clone of your repository, and the
-/// agent has deleted `deleted`, and written a file at `written`.
+/// agent's git has run `commit` on a clone of your repository, `landed` has
+/// changed the share's pending directory once the agent's `.git` is in it,
+/// and the agent has deleted `deleted`, and written a file at `written`.
 fn first_line(
     name: &str,
     commit: impl Fn(&Path),
@@ -781,19 +782,26 @@ fn an_object_larger_than_the_limit_is_said_first() {
     }
 }
 
-/// From #832: the agent's `refs/heads/main`, a loose ref, or its
-/// `packed-refs`, once its git packed its refs, is 10 GiB long, which costs
-/// almost nothing as a sparse file. `ap diff` says why on the first line,
-/// before it reads it, within a fixed time.
+/// From #832: the agent's `HEAD`, once its git checked out a new branch,
+/// its `refs/heads/main`, a loose ref, or its `packed-refs`, once its git
+/// packed its refs, is a byte more than 512 MiB long, or 10 GiB, which
+/// costs almost nothing as a sparse file. `ap diff` says why on the first
+/// line, before it reads it, within a fixed time.
 // spec(SHARE): Nor do they read the agent's `HEAD`, one of its loose refs, or its `packed-refs` when it is larger than that.
 // spec(SHARE): At a larger one, `ap diff`'s first line says why, and `ap apply` refuses the branch import, says why, and everything stays pending.
 #[test]
 fn a_ref_file_larger_than_the_limit_is_said_first() {
-    for file in ["refs/heads/main", "packed-refs"] {
+    let files = ["HEAD", "refs/heads/main", "packed-refs"];
+    for (file, len) in files
+        .into_iter()
+        .flat_map(|f| [(f, (512 << 20) + 1), (f, 10 << 30)])
+    {
         let commit = |guest: &Path| {
             repo::commit(guest, "a", "a\n", "write a");
-            if file == "packed-refs" {
-                repo::run(guest, &["pack-refs", "--all"]);
+            match file {
+                "HEAD" => drop(repo::run(guest, &["checkout", "-q", "-b", "work"])),
+                "packed-refs" => drop(repo::run(guest, &["pack-refs", "--all"])),
+                _ => {}
             }
         };
         let landed = |pending: &Path| {
@@ -802,9 +810,9 @@ fn a_ref_file_larger_than_the_limit_is_said_first() {
             }
             let path = pending.join("tree/.git").join(file);
             let opened = fs::OpenOptions::new().write(true).open(path);
-            opened.unwrap().set_len(10 << 30).unwrap();
+            opened.unwrap().set_len(len).unwrap();
         };
-        let name = format!("too-large-{}", file.replace('/', "-"));
+        let name = format!("too-large-{}-{len}", file.replace('/', "-"));
         let first = first_line(&name, commit, landed, "gone", None);
         assert_eq!(
             first,

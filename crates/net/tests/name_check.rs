@@ -321,6 +321,8 @@ fn tls_where_text_ends_gets_the_hello_check() {
     // that doesn't read as a request.
     let xmpp = b"<stream:stream><starttls/>";
     refused_after(&after(xmpp, "other.example"), xmpp);
+    // Empty lines before a hello are text too.
+    refused_after(&after(b"\r\n", "other.example"), b"\r\n");
     // A hello cut off holds, as one from the first byte does.
     let cut = after(STARTTLS, NAME);
     let (out, result, holding) = fed(&cut[..cut.len() - 1], 3);

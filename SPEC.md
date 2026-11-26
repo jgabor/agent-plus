@@ -2069,9 +2069,9 @@ allow one.
   that doesn't carry HTTP is denied, because the proxy can't check the names
   in it. On a host that the proxy decrypts for a rule, TLS that starts where
   a connection's text ends, as it does after `STARTTLS`, is denied, because
-  the proxy decrypts TLS only from a connection's first byte. A request that the rules
-  deny never reaches the server, and the proxy resets the connection it came
-  on.
+  the proxy decrypts TLS only from a connection's first byte. A request
+  that the rules deny never reaches the server, and the proxy resets the
+  connection it came on.
   The proxy connects to the server before the first request, but nothing
   the server sends reaches the guest until the rules allow a request. The
   proxy reads what the guest sends, and what the server answers passes

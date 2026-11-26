@@ -13,7 +13,7 @@ use std::env;
 use std::ffi::{c_int, c_ulong};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
-use std::net::{TcpListener, UdpSocket};
+use std::net::UdpSocket;
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -27,7 +27,7 @@ use ap::fetch;
 use ap::store::Store;
 use guest::net;
 use t1::started::Started;
-use t1::{guest_binary, kernel, os};
+use t1::{guest_binary, kernel, one_port, os};
 
 /// How long `ap` may take, in seconds, before `timeout` stops it, and the VM
 /// it holds with it.
@@ -288,10 +288,8 @@ fn floor_closed_network() {
     scratch.build("closed");
     // The host's loopback listens, on both families, for anything the run
     // sends it.
-    let tcp4 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (tcp4, tcp6, udp4) = one_port();
     let port = tcp4.local_addr().unwrap().port();
-    let tcp6 = TcpListener::bind(("::1", port)).unwrap();
-    let udp4 = UdpSocket::bind(("127.0.0.1", port)).unwrap();
     for listener in [&tcp4, &tcp6] {
         listener.set_nonblocking(true).unwrap();
     }

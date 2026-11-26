@@ -17,11 +17,6 @@ const HEADING: &str = "# Nightly report for `";
 const WINDOW: &str = "--since=24.hours";
 /// How a report folded its checks before they became one line.
 const MUTATION_FAILED: &str = "\n- fail mutation\n";
-/// The last line of a posted report with a change to SPEC.md or the rules.
-/// It also says, to anyone reading the comment later, that this one is read.
-pub const MARK: &str = "Mark this report read by reacting with :eyes:.";
-/// The reaction that marks a report read.
-const READ: &str = "eyes";
 const SPEC: &str = "SPEC.md";
 const RULES: [&str; 2] = ["AGENTS.md", "HARNESS.md"];
 
@@ -96,12 +91,6 @@ struct RuleChange {
     headings: Vec<String>,
 }
 
-/// A posted report that asks to be read, and that the owner hasn't marked.
-pub struct Unread {
-    pub commit: String,
-    pub url: String,
-}
-
 pub struct Report {
     commit: String,
     /// The repository's page, which each link starts with.
@@ -114,7 +103,6 @@ pub struct Report {
     waiting: Vec<Waiting>,
     spec_changes: Vec<SpecChange>,
     rule_changes: Vec<RuleChange>,
-    unread: Vec<Unread>,
 }
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
@@ -175,37 +163,6 @@ fn reports(gh: &Gh, number: Option<u64>) -> Result<Option<Reports>, Problem> {
     }))
 }
 
-/// The reports on this issue that ask to be read, and that have no :eyes:
-/// from the owner's account. A comment is only data, so only the owner's
-/// count, and so does only the owner's reaction.
-pub fn unread_on(gh: &Gh, number: Option<u64>) -> Result<Vec<Unread>, Problem> {
-    unread(gh, &reports(gh, number)?)
-}
-
-fn unread(gh: &Gh, reports: &Option<Reports>) -> Result<Vec<Unread>, Problem> {
-    let Some(reports) = reports else {
-        return Ok(Vec::new());
-    };
-    let mut found = Vec::new();
-    for comment in &reports.comments {
-        let asks = comment.body.lines().any(|line| line == MARK);
-        let Some(commit) = comment.body.strip_prefix(HEADING) else {
-            continue;
-        };
-        if comment.author != reports.owner
-            || !asks
-            || gh.reacted(comment.id, READ)?.contains(&reports.owner)
-        {
-            continue;
-        }
-        found.push(Unread {
-            commit: commit.split('`').next().unwrap_or_default().to_string(),
-            url: comment.url.clone(),
-        });
-    }
-    Ok(found)
-}
-
 pub fn build(root: &Path) -> Result<Report, Problem> {
     let budgets = bench::read_budgets(root)?;
     let scores = ledger::at_head(root)?.map(|record| {
@@ -232,7 +189,6 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         waiting: Vec::new(),
         spec_changes: Vec::new(),
         rule_changes: Vec::new(),
-        unread: Vec::new(),
     };
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
@@ -243,7 +199,6 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         .map(|issue| issue.number);
     let reports = reports(&gh, number)?;
     let start = start_from(root, &reports, |_| true)?;
-    report.unread = unread(&gh, &reports)?;
     let log = base::git_text(root, &["log", &start, "--format=%H %h %s", "HEAD"])?;
     // Each commit, and what names it: its PR, or the commit when it has no
     // record.
@@ -694,12 +649,6 @@ impl Report {
         let mut above = Vec::new();
         self.spec_section(&mut text, &mut above);
         self.rules_section(&mut text, &mut above);
-        let unread = self
-            .unread
-            .iter()
-            .map(|u| format!("[Nightly report for `{}`]({})", u.commit, u.url))
-            .collect();
-        section(&mut text, "Unread reports", unread);
         let rest: Vec<String> = self
             .merged
             .iter()
@@ -733,16 +682,6 @@ impl Report {
             Source::Pr { number, title } => self.link(title, "pull", *number),
             Source::Commit(commit) => format!("`{commit}`"),
         }
-    }
-
-    /// The report as the nightly job posts it. One with a change to SPEC.md
-    /// or the rules ends by asking the owner to mark it read.
-    pub fn comment(&self, checks: &[(&str, &str)]) -> String {
-        let mut text = self.markdown(checks);
-        if !self.spec_changes.is_empty() || !self.rule_changes.is_empty() {
-            text.push_str(&format!("\n{MARK}\n"));
-        }
-        text
     }
 
     /// Each changed sentence of SPEC.md, under its heading and then its
@@ -883,19 +822,8 @@ impl Report {
                 )
             })
             .collect();
-        let unread: Vec<String> = self
-            .unread
-            .iter()
-            .map(|u| {
-                format!(
-                    "{{\"commit\":{},\"url\":{}}}",
-                    quoted(&u.commit),
-                    quoted(&u.url)
-                )
-            })
-            .collect();
         format!(
-            "{{\"commit\":{},\"scores\":{scores},\"left_out\":{},\"merged\":[{}],\"regressed\":[{}],\"unrecorded\":[{}],\"waiting\":[{}],\"spec_changes\":[{}],\"rule_changes\":[{}],\"unread\":[{}]}}",
+            "{{\"commit\":{},\"scores\":{scores},\"left_out\":{},\"merged\":[{}],\"regressed\":[{}],\"unrecorded\":[{}],\"waiting\":[{}],\"spec_changes\":[{}],\"rule_changes\":[{}]}}",
             quoted(&self.commit),
             self.left_out,
             merged.join(","),
@@ -903,8 +831,7 @@ impl Report {
             unrecorded.join(","),
             waiting.join(","),
             spec_changes.join(","),
-            rule_changes.join(","),
-            unread.join(",")
+            rule_changes.join(",")
         )
     }
 }

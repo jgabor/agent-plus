@@ -82,7 +82,7 @@ pub fn run() -> Result<Verdict, Problem> {
         Err(_) => report,
     });
     let failed = built.is_err() || checks.iter().any(|(_, state)| *state == FAIL);
-    let posted = built.and_then(|report| post(&root, &report.comment(&checks)));
+    let posted = built.and_then(|report| post(&root, &report.markdown(&checks)));
     let (verdict, status, word) = if failed {
         (Verdict::Fail, "failure", FAIL)
     } else {

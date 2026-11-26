@@ -45,7 +45,6 @@ clean machine:
 - Every journey step passes on Linux x86_64 and macOS on Apple Silicon.
 - Every budget is met.
 - Every floor holds, and none is pending.
-- No nightly report with a change to SPEC.md or the rules is unread.
 
 ## Terms
 
@@ -1072,19 +1071,13 @@ does the following on `main`:
    one shows what it was and what it is now, and a removed one says so.
    Under one heading, a commit's removed sentences and its added ones pair up
    in order, and each pair is a change. A marked sentence counts, whitespace
-   doesn't, and a commit with no record is named by its commit. Then comes a
-   link to each earlier unread report. What merged folds below that, leaving
-   out the PRs named above, with both counts in its summary, as in `Merged:
-   41, 17 of them above`. When it leaves out every PR, the summary is a line
-   of its own. Last comes a line with the count of checks in each state,
-   which names each check that didn't pass. A section with nothing in it is
-   left out. A PR or an issue is named as a link whose text is its title, at
-   most once under a heading. A report with a change to SPEC.md or the rules
-   ends with "Mark this report read by reacting with :eyes:." Until the
-   owner's account reacts to it with :eyes:, it is unread. A reaction from
-   anyone else doesn't count. A report with neither change has no such line,
-   and needs no mark. `cargo xtask report` prints the same report without
-   the line, because nothing can react to it.
+   doesn't, and a commit with no record is named by its commit. What merged
+   folds below that, leaving out the PRs named above, with both counts in its
+   summary, as in `Merged: 41, 17 of them above`. When it leaves out every
+   PR, the summary is a line of its own. Last comes a line with the count of
+   checks in each state, which names each check that didn't pass. A section
+   with nothing in it is left out. A PR or an issue is named as a link whose
+   text is its title, at most once under a heading.
 4. Post status `xtask/nightly` on the tested commit.
 5. If a floor failed, file an issue, bisect from the newest commit with a
    passing `xtask/nightly` to this one, and open a revert PR for the first bad
@@ -1141,9 +1134,8 @@ ends with a link to it. The details have three parts:
    proposed, and the open sub-issues of the roadmap issue.
 3. What waits on the owner: open PRs and issues labeled `land-needed` or
    `answer-needed`, and open issues with no `auto:*` label and no parent in
-   this repository, and each unread [nightly report](#nightly-job). A listed
-   PR stands for the issues it closes, so they are left out, and so are the
-   issues that `xtask` writes.
+   this repository. A listed PR stands for the issues it closes, so they are
+   left out, and so are the issues that `xtask` writes.
 
 The details show each command with how many of its promises are proven. Its
 promises are those under its own heading in SPEC.md, and under each heading

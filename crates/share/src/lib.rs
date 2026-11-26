@@ -95,6 +95,8 @@ pub struct Servers {
 /// starts with a copy of `kept`, if there is one, which it holds until it
 /// exits. A server of `rw` shares changes modes and times, so it holds
 /// nothing but its shares.
+/// Each server is killed when the thread that calls this ends, so call it
+/// from one that outlives the servers.
 pub fn start(
     program: &Path,
     roots: &[Root<BorrowedFd>],

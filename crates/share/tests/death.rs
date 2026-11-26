@@ -7,6 +7,7 @@ use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 use share::{Mode, Root};
@@ -67,20 +68,36 @@ fn ends_within(pidfd: &OwnedFd, millis: i32) -> bool {
         events: libc::POLLIN,
         revents: 0,
     };
-    // SAFETY: `watched` is one valid `pollfd`, which outlives the call.
-    unsafe { libc::poll(&mut watched, 1, millis) == 1 }
+    loop {
+        // SAFETY: `watched` is one valid `pollfd`, which outlives the call.
+        match unsafe { libc::poll(&mut watched, 1, millis) } {
+            -1 if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => {}
+            ready => return ready == 1,
+        }
+    }
 }
 
 // spec(Run): **End.** A run that `ap run` started ends when that `ap run` exits, for any reason, including a closed terminal or a killed `ap run` process, and its VM stops with it.
 #[test]
 fn a_share_server_ends_when_the_ap_run_that_started_it_is_killed() {
-    let mut parent = Command::new(env::current_exe().unwrap())
+    let mut parent = Command::new(env::current_exe().unwrap());
+    parent
         .env(PARENT, "1")
         .env(SERVER, "1")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stdout(Stdio::piped());
+    // The stand-in for `ap run` ends with the test, however it ends.
+    // SAFETY: the closure runs in the forked child, and makes only a system
+    // call that takes and returns plain integers.
+    unsafe {
+        parent.pre_exec(|| {
+            match libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) {
+                0 => Ok(()),
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        });
+    }
+    let mut parent = parent.spawn().unwrap();
     let mut line = String::new();
     BufReader::new(parent.stdout.take().unwrap())
         .read_line(&mut line)
@@ -89,6 +106,9 @@ fn a_share_server_ends_when_the_ap_run_that_started_it_is_killed() {
         .map(|pid| pidfd_open(pid.parse().unwrap()))
         .collect();
     assert_eq!(servers.len(), 2, "{line:?}");
+    // Both are running before the stand-in for `ap run` is killed.
+    let running: Vec<bool> = servers.iter().map(|pidfd| !ends_within(pidfd, 0)).collect();
+    assert_eq!(running, [true, true], "the rw server, then the other");
     parent.kill().unwrap();
     parent.wait().unwrap();
     let ended: Vec<bool> = servers

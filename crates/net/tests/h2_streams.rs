@@ -580,3 +580,76 @@ fn our_initial_window_size_changes_each_open_stream_once_acknowledged_6_9_2() {
     connection.consumed(7, 60);
     assert!(connection.updates().contains(&window_update(7, 60)));
 }
+
+// A connection that watches frames pass to a server that is another
+// program.
+
+/// A watching connection that has accepted each of `frames`.
+fn watched(frames: &[Frame]) -> Connection {
+    let mut connection = Connection::watching();
+    for frame in frames {
+        connection.receive(frame.clone()).expect("accepted");
+    }
+    connection
+}
+
+#[test]
+fn a_watching_connection_counts_no_window() {
+    // DATA past every window the server started with, which only the
+    // server knows it opened.
+    let mut connection = watched(&[headers(1, false)]);
+    assert_eq!(
+        connection.receive(data(1, 4 * WINDOW, true)),
+        Ok(Some(Event::Data {
+            stream: 1,
+            data: vec![b'd'; 4 * WINDOW],
+            end_stream: true,
+        }))
+    );
+    // Updates past 2^31 - 1, since what the server sent passes unseen.
+    let mut connection = watched(&[headers(1, false)]);
+    for stream in [0, 1] {
+        assert_eq!(
+            connection.receive(window_update(stream, MAX_WINDOW)),
+            Ok(None)
+        );
+        assert_eq!(
+            connection.receive(window_update(stream, MAX_WINDOW)),
+            Ok(None)
+        );
+    }
+    let settings = Frame::Settings(vec![(INITIAL_WINDOW_SIZE, MAX_WINDOW)]);
+    assert!(connection.receive(settings).is_ok());
+    assert!(connection.updates().is_empty());
+}
+
+#[test]
+fn a_watching_connection_still_refuses_an_update_of_0_6_9() {
+    let mut connection = watched(&[headers(1, false)]);
+    assert_eq!(
+        connection.receive(window_update(1, 0)),
+        stream_error(1, Error::WindowUpdate)
+    );
+    assert_eq!(
+        connection.receive(window_update(0, 0)),
+        connection_error(Error::WindowUpdate)
+    );
+}
+
+#[test]
+fn a_watched_stream_closes_once_the_client_ends_it() {
+    let mut connection = watched(&[headers(1, false), data(1, 3, true)]);
+    // The client can still give the server window for its answer.
+    assert_eq!(connection.receive(window_update(1, 100)), Ok(None));
+    assert_eq!(connection.receive(reset(1)), Ok(None));
+    assert_eq!(
+        connection.receive(data(1, 1, false)),
+        connection_error(Error::StreamClosed)
+    );
+    // A request that ends with its headers closes too.
+    let mut connection = watched(&[headers(1, true)]);
+    assert_eq!(
+        connection.receive(headers(1, true)),
+        connection_error(Error::StreamId)
+    );
+}

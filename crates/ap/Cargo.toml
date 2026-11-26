@@ -25,6 +25,9 @@ rcgen = { version = "0.14", default-features = false, features = ["pem"] }
 time = { version = "0.3", default-features = false }
 
 [dev-dependencies]
+h2 = { version = "0.4.20", default-features = false }
+http = { version = "1", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "io-util"] }
 smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-udp"] }
 
 [lints]

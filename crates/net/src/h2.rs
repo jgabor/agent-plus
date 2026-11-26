@@ -17,7 +17,7 @@ use crate::hpack::{self, Decoder, Encoder, Header};
 pub const PREFACE: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// SETTINGS_MAX_FRAME_SIZE before SETTINGS change it, by section 6.5.2.
-const MAX_FRAME_SIZE: usize = 1 << 14;
+pub(crate) const MAX_FRAME_SIZE: usize = 1 << 14;
 /// HPACK's table size before SETTINGS change it, by section 6.5.2.
 const TABLE_SIZE: usize = 4096;
 const HEAD: usize = 9;
@@ -39,11 +39,11 @@ const END_HEADERS: u8 = 0x4;
 const PADDED: u8 = 0x8;
 const PRIORITY_FLAG: u8 = 0x20;
 
-const HEADER_TABLE_SIZE: u16 = 0x1;
-const ENABLE_PUSH: u16 = 0x2;
+pub(crate) const HEADER_TABLE_SIZE: u16 = 0x1;
+pub(crate) const ENABLE_PUSH: u16 = 0x2;
 const MAX_CONCURRENT_STREAMS: u16 = 0x3;
 const INITIAL_WINDOW_SIZE: u16 = 0x4;
-const MAX_FRAME_SIZE_SETTING: u16 = 0x5;
+pub(crate) const MAX_FRAME_SIZE_SETTING: u16 = 0x5;
 
 /// The reserved bit of a stream id, which a reader ignores, by section 4.1.
 const STREAM_MASK: u32 = 0x7fff_ffff;
@@ -291,6 +291,13 @@ impl Reader {
         self.held.drain(..self.at);
         self.at = 0;
         self.held.extend_from_slice(bytes);
+    }
+
+    /// Whether it holds part of the preface, of a frame, or of a header
+    /// block, which more bytes must finish.
+    pub fn holding(&self) -> bool {
+        let preface = self.preface > 0 && self.preface < PREFACE.len();
+        preface || self.at < self.held.len() || self.state.open.is_some()
     }
 
     /// The next whole frame, or None until more bytes come. A frame of an
@@ -824,6 +831,9 @@ pub enum Refused {
 /// It discards what comes on a stream it reset, as section 5.1 says, for
 /// the last `RESETS` of them. Past that, a frame on an older one is refused
 /// as on any closed stream.
+///
+/// One that watches a connection whose server is another program keeps no
+/// windows, since only the server knows what it granted.
 pub struct Connection {
     /// The streams that are open or half-closed.
     streams: BTreeMap<u32, Stream>,
@@ -842,6 +852,8 @@ pub struct Connection {
     send: i64,
     /// What the connection's receive window has to get back.
     unannounced: i64,
+    /// Whether it keeps the windows, which it doesn't when it watches.
+    windows: bool,
     failed: Option<Error>,
 }
 
@@ -880,7 +892,20 @@ impl Connection {
             receive: WINDOW,
             send: WINDOW,
             unannounced: 0,
+            windows: true,
             failed: None,
+        }
+    }
+
+    /// A connection as `new`'s, whose frames pass between the client and a
+    /// server that is another program, which the caller watches. It never
+    /// refuses a frame for a window, since what the server sends and grants
+    /// passes unseen. A stream closes once the client ends it, since only
+    /// the server sees its own end. The caller never asks `send`.
+    pub fn watching() -> Connection {
+        Connection {
+            windows: false,
+            ..Connection::new()
         }
     }
 
@@ -944,7 +969,7 @@ impl Connection {
             Frame::WindowUpdate { stream, increment } => self.window_update(stream, increment),
             Frame::Settings(settings) => {
                 for &(id, value) in &settings {
-                    if id != INITIAL_WINDOW_SIZE {
+                    if id != INITIAL_WINDOW_SIZE || !self.windows {
                         continue;
                     }
                     let change = i64::from(value) - self.send_initial;
@@ -1037,6 +1062,9 @@ impl Connection {
             Known::Closed => return Err(Refused::Connection(Error::StreamClosed)),
             Known::Reset | Known::Live => {}
         }
+        if !self.windows {
+            return self.watched_data(stream, data, end_stream);
+        }
         // Even DATA that is refused counts toward the connection's window,
         // by section 6.9.
         if length > self.receive {
@@ -1069,11 +1097,34 @@ impl Connection {
         }))
     }
 
+    /// DATA on a live or reset stream of a connection it watches.
+    fn watched_data(
+        &mut self,
+        stream: u32,
+        data: Vec<u8>,
+        end_stream: bool,
+    ) -> Result<Option<Event>, Refused> {
+        if !self.streams.contains_key(&stream) {
+            return Ok(None);
+        }
+        if end_stream {
+            self.end(stream, true);
+        }
+        Ok(Some(Event::Data {
+            stream,
+            data,
+            end_stream,
+        }))
+    }
+
     fn window_update(&mut self, stream: u32, increment: u32) -> Result<Option<Event>, Refused> {
         let increment = i64::from(increment);
         if stream == 0 {
             if increment == 0 {
                 return Err(Refused::Connection(Error::WindowUpdate));
+            }
+            if !self.windows {
+                return Ok(None);
             }
             self.send += increment;
             if self.send > MAX_WINDOW {
@@ -1088,6 +1139,9 @@ impl Connection {
         }
         if increment == 0 {
             return self.refuse(stream, Error::WindowUpdate);
+        }
+        if !self.windows {
+            return Ok(None);
         }
         let open = self.streams.get_mut(&stream).expect("a live stream");
         open.send += increment;
@@ -1121,7 +1175,7 @@ impl Connection {
         } else {
             open.local_end = true;
         }
-        if open.remote_end && open.local_end {
+        if open.remote_end && (open.local_end || !self.windows) {
             self.streams.remove(&stream);
         }
     }

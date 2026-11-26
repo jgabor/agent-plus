@@ -6,8 +6,12 @@
 //! decrypted: the guest gets a certificate for the attributed name, which
 //! the run's [`Authority`] signs, and the proxy opens TLS of its own to the
 //! destination, which must show a certificate that the roots trust for that
-//! name. Both offer only `http/1.1`. Anything else is read as plain HTTP.
-//! Either way, [`NameCheck::requests`] reads each request, and the rules
+//! name. Both offer `http/1.1`. When the guest offers `h2` too, and the
+//! connection is decrypted for its URL rules alone, the destination is
+//! offered both, and the guest's hello waits for its answer, so the guest
+//! gets `h2` only where the destination chose it. Anything that isn't TLS
+//! is read as plain HTTP. Either way, [`NameCheck::requests`] reads each
+//! request, or [`NameCheck::http2`] each HTTP/2 request, and the rules
 //! decide its target. A request they deny never reaches the destination,
 //! and the connection ends with a reset. So does traffic that isn't HTTP.
 //!
@@ -33,7 +37,7 @@ use net::{NameCheck, Request};
 use netstack::{ConnectionId, Stack};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::server::Acceptor;
+use rustls::server::{Accepted, Acceptor};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection};
 
 use super::proxy::SILENT_WAIT;
@@ -45,8 +49,10 @@ const BUFFER: usize = 16 * 1024;
 const HELLO_LIMIT: usize = 64 * 1024;
 /// How long a client hello may take to come whole.
 const HELLO_WAIT: Duration = Duration::from_secs(30);
-/// The only protocol either side is offered.
+/// The protocol either side is offered.
 const HTTP1: &[u8] = b"http/1.1";
+/// The protocol both sides are offered too, where the check reads it.
+const H2: &[u8] = b"h2";
 pub struct Decryption {
     authority: Authority,
     client: Arc<ClientConfig>,
@@ -75,8 +81,8 @@ impl Decryption {
         })
     }
 
-    /// The guest's side of a connection to `name`.
-    fn server(&self, name: &str) -> io::Result<Arc<ServerConfig>> {
+    /// The guest's side of a connection to `name`, which agrees `protocol`.
+    fn server(&self, name: &str, protocol: &[u8]) -> io::Result<Arc<ServerConfig>> {
         let leaf = self.authority.issue(name, SystemTime::now())?;
         let provider = Arc::new(rustls_graviola::default_provider());
         let mut server = ServerConfig::builder_with_provider(provider)
@@ -85,7 +91,7 @@ impl Decryption {
             .with_no_client_auth()
             .with_single_cert(vec![leaf.certificate], leaf.key)
             .map_err(io::Error::other)?;
-        server.alpn_protocols = vec![HTTP1.to_vec()];
+        server.alpn_protocols = vec![protocol.to_vec()];
         Ok(Arc::new(server))
     }
 }
@@ -179,6 +185,9 @@ enum Stage {
     First,
     /// A TLS client hello is coming, and these bytes of it came.
     Hello(Box<Acceptor>, Vec<u8>),
+    /// The guest's hello waits for the destination's handshake, which
+    /// says whether the guest gets HTTP/2, and these bytes came after it.
+    Upstream(Box<Accepted>, Box<ClientConnection>, Vec<u8>),
     /// TLS, decrypted: the guest's side, and the destination's.
     Tls(Box<ServerConnection>, Box<ClientConnection>),
     Plain,
@@ -240,7 +249,7 @@ impl Decrypted {
                 client.is_handshaking() || (open && !guest.is_handshaking())
             }
             Stage::Plain => open,
-            Stage::Passing(_) => true,
+            Stage::Passing(_) | Stage::Upstream(..) => true,
             // Only a guest that sent nothing first hears the server first.
             Stage::First => open,
             Stage::Hello(..) => false,
@@ -251,7 +260,10 @@ impl Decrypted {
     /// Whether it waits to write to the stream.
     pub(super) fn wants_to_write(&self) -> bool {
         !self.to_upstream.is_empty()
-            || matches!(&self.stage, Stage::Tls(_, client) if client.wants_write())
+            || matches!(
+                &self.stage,
+                Stage::Tls(_, client) | Stage::Upstream(_, client, _) if client.wants_write()
+            )
     }
 
     /// Moves what it can both ways, decrypting with `decryption`, without
@@ -338,7 +350,7 @@ impl Decrypted {
                     _ => self.notified = true,
                 }
             }
-            if let Stage::Tls(_, client) = &mut self.stage {
+            if let Stage::Tls(_, client) | Stage::Upstream(_, client, _) = &mut self.stage {
                 while self.to_upstream.len() < BUFFER && client.wants_write() {
                     client.write_tls(&mut self.to_upstream)?;
                 }
@@ -354,7 +366,10 @@ impl Decrypted {
                 }
             }
             let flushed = self.to_upstream.is_empty()
-                && !matches!(&self.stage, Stage::Tls(_, client) if client.wants_write());
+                && !matches!(
+                    &self.stage,
+                    Stage::Tls(_, client) | Stage::Upstream(_, client, _) if client.wants_write()
+                );
             // A guest that ends before the rules allow a request gets nothing
             // from the destination, so the connection ends here.
             if self.guest_closed && !self.allowed {
@@ -370,7 +385,12 @@ impl Decrypted {
                     // A destination that ends TLS sent its `close_notify`, which
                     // the guest got. One that only closes TCP cut the guest
                     // off, so the guest's side ends the same way.
-                    Ok(0) if matches!(&self.stage, Stage::Tls(_, client) if client.is_handshaking()) =>
+                    Ok(0)
+                        if matches!(
+                            &self.stage,
+                            Stage::Tls(_, client) | Stage::Upstream(_, client, _)
+                                if client.is_handshaking()
+                        ) =>
                     {
                         return Err(io::Error::other("the destination ended its handshake"));
                     }
@@ -378,6 +398,7 @@ impl Decrypted {
                     Ok(n) => {
                         moved = true;
                         self.upstream_sent(&buffer[..n])?;
+                        self.answer_hello(decryption, injection, decide)?;
                     }
                     Err(error) if waited(&error) => {}
                     Err(error) => return Err(error),
@@ -515,16 +536,35 @@ impl Decrypted {
                     }
                 }
                 let decryption = decryption.ok_or_else(|| refused("TLS it can't decrypt"))?;
-                let config = decryption.server(&self.name)?;
-                let mut guest = (accepted.into_connection(config))
-                    .map_err(|(error, _)| io::Error::other(error))?;
-                guest.set_buffer_limit(None);
                 let name = ServerName::try_from(self.name.clone()).map_err(io::Error::other)?;
-                let mut client = ClientConnection::new(Arc::clone(&decryption.client), name)
+                // The check reads HTTP/2 only where nothing is put in.
+                let offers = accepted.client_hello().alpn();
+                let h2 = offers.is_some_and(|mut offers| offers.any(|offer| offer == H2))
+                    && self.reads == Reads::Requests
+                    && !self.injects;
+                let protocols = match h2 {
+                    true => vec![H2.to_vec(), HTTP1.to_vec()],
+                    false => vec![HTTP1.to_vec()],
+                };
+                let client = Arc::clone(&decryption.client);
+                let mut client = (ClientConnection::new_with_alpn(client, name, protocols))
                     .map_err(io::Error::other)?;
                 client.set_buffer_limit(None);
-                self.stage = Stage::Tls(Box::new(guest), Box::new(client));
+                if h2 {
+                    let waiting = Box::new(accepted);
+                    self.stage = Stage::Upstream(waiting, Box::new(client), Vec::new());
+                    return Ok(());
+                }
+                let guest = self.guest_tls(accepted, decryption, HTTP1)?;
+                self.stage = Stage::Tls(guest, Box::new(client));
                 self.decrypted(injection, &mut allows)
+            }
+            Stage::Upstream(.., after) => {
+                after.extend_from_slice(input);
+                match after.len() > HELLO_LIMIT {
+                    true => Err(not_http("a long client hello")),
+                    false => Ok(()),
+                }
             }
             Stage::Tls(..) => {
                 while !input.is_empty() {
@@ -540,6 +580,53 @@ impl Decrypted {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The guest's side of TLS, which answers its hello with `protocol`.
+    fn guest_tls(
+        &self,
+        accepted: Accepted,
+        decryption: &Decryption,
+        protocol: &[u8],
+    ) -> io::Result<Box<ServerConnection>> {
+        let config = decryption.server(&self.name, protocol)?;
+        let mut guest =
+            (accepted.into_connection(config)).map_err(|(error, _)| io::Error::other(error))?;
+        guest.set_buffer_limit(None);
+        Ok(Box::new(guest))
+    }
+
+    /// Answers a guest's hello that waits, once the destination's handshake
+    /// is done, with HTTP/2 if the destination chose it, or else HTTP/1.1,
+    /// and reads what the guest sent after its hello.
+    fn answer_hello(
+        &mut self,
+        decryption: Option<&Decryption>,
+        injection: &Injection,
+        decide: &mut Decide,
+    ) -> io::Result<()> {
+        let Stage::Upstream(_, client, _) = &self.stage else {
+            return Ok(());
+        };
+        if client.is_handshaking() {
+            return Ok(());
+        }
+        let Stage::Upstream(accepted, client, after) =
+            std::mem::replace(&mut self.stage, Stage::First)
+        else {
+            unreachable!()
+        };
+        let decryption = decryption.ok_or_else(|| refused("TLS it can't decrypt"))?;
+        let h2 = client.alpn_protocol() == Some(H2);
+        let guest = self.guest_tls(*accepted, decryption, if h2 { H2 } else { HTTP1 })?;
+        if h2 {
+            self.check = NameCheck::http2(&self.name);
+        }
+        self.stage = Stage::Tls(guest, client);
+        match after.is_empty() {
+            true => Ok(()),
+            false => self.guest_sent(&after, Some(decryption), injection, decide),
         }
     }
 
@@ -579,6 +666,9 @@ impl Decrypted {
         };
         let mut buffer = [0; BUFFER];
         let mut passed = Vec::new();
+        // Whether the rules allowed a request, since HTTP/2 passes frames
+        // before any.
+        let granted = Cell::new(false);
         loop {
             match guest.reader().read(&mut buffer) {
                 Ok(0) if self.check.holding() => {
@@ -589,7 +679,11 @@ impl Decrypted {
                     break;
                 }
                 Ok(n) => {
-                    let mut decide = |target: &str| allows(Scheme::Https, target);
+                    let mut decide = |target: &str| {
+                        let allowed = allows(Scheme::Https, target);
+                        granted.set(granted.get() || allowed);
+                        allowed
+                    };
                     let fed = (self.check).feed_rewriting(
                         &buffer[..n],
                         &mut passed,
@@ -602,7 +696,7 @@ impl Decrypted {
                         passed.truncate(at);
                     }
                     client.writer().write_all(&passed)?;
-                    self.allowed |= !passed.is_empty();
+                    self.allowed |= granted.get();
                     passed.clear();
                     if without.is_some() {
                         return Err(refused("a request without its key"));
@@ -618,6 +712,13 @@ impl Decrypted {
 
     /// Passes what came from the destination to the guest.
     fn upstream_sent(&mut self, mut input: &[u8]) -> io::Result<()> {
+        // The destination's handshake, while the guest's hello waits.
+        if let Stage::Upstream(_, client, _) = &mut self.stage {
+            while !input.is_empty() && client.read_tls(&mut input)? > 0 {
+                client.process_new_packets().map_err(io::Error::other)?;
+            }
+            return Ok(());
+        }
         let Stage::Tls(guest, client) = &mut self.stage else {
             self.to_guest.extend_from_slice(input);
             return Ok(());
@@ -651,7 +752,7 @@ impl Decrypted {
     /// The guest closed its half.
     fn guest_ended(&mut self) -> io::Result<()> {
         let unchecked = match &self.stage {
-            Stage::First | Stage::Hello(..) => true,
+            Stage::First | Stage::Hello(..) | Stage::Upstream(..) => true,
             Stage::Tls(guest, _) => guest.is_handshaking() || self.check.holding(),
             Stage::Plain => self.check.holding(),
             Stage::Passing(check) => check.as_ref().is_some_and(|check| check.holding()),

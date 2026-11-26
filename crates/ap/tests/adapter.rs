@@ -1,6 +1,6 @@
 //! The Claude Code and Codex adapters, against the golden files in
-//! `golden/claude/` and `golden/codex/`: the files each renders, and the
-//! arguments it starts the harness with.
+//! `golden/claude/` and `golden/codex/`: the files each renders, the
+//! arguments it starts the harness with, and the variables it keeps.
 //!
 //! `AP_BLESS=1 cargo test --test adapter` writes the golden files from the
 //! adapter, for a change that means to change them. Read the diff before you
@@ -494,6 +494,37 @@ fn reserved_errors(agent: &str, lines: &str) -> Vec<agentfile::Error> {
         .agent
         .harness;
     agentfile::reserved(&instructions, &ap::adapter::reserved(harness))
+}
+
+/// The variables the adapter for `harness` keeps, one per line, each after
+/// the reason it is kept: `set` when `ap` or the adapter sets it, `sign-in`
+/// when the harness reads it for sign-in, and `key` when `AUTH key` reads it.
+fn reserved_variables(harness: agentfile::Harness) -> String {
+    let reserved = ap::adapter::reserved(harness);
+    let mut lines = String::new();
+    for (why, names) in [
+        ("set", reserved.set.as_slice()),
+        ("sign-in", reserved.sign_in),
+        ("key", &[reserved.key]),
+    ] {
+        for name in names {
+            lines.push_str(&format!("{why} {name}\n"));
+        }
+    }
+    lines
+}
+
+#[test]
+fn each_adapter_keeps_its_variables() {
+    golden(
+        "reserved.txt",
+        reserved_variables(agentfile::Harness::Claude).as_bytes(),
+    );
+    golden_in(
+        "codex",
+        "reserved.txt",
+        reserved_variables(agentfile::Harness::Codex).as_bytes(),
+    );
 }
 
 #[test]

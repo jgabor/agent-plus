@@ -22,13 +22,14 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
 use smoltcp::iface::{Config as IfaceConfig, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{self, Device, DeviceCapabilities, Medium};
+use smoltcp::phy::{self, ChecksumCapabilities, Device, DeviceCapabilities, Medium};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, HardwareAddress, IpAddress, IpCidr,
-    IpProtocol, Ipv4Packet, Ipv6ExtHeader, Ipv6ExtHeaderRepr, Ipv6HopByHopHeader, Ipv6HopByHopRepr,
-    Ipv6OptionFailureType, Ipv6OptionRepr, Ipv6Packet, TcpPacket, UdpPacket,
+    IpProtocol, Ipv4Packet, Ipv4Repr, Ipv6ExtHeader, Ipv6ExtHeaderRepr, Ipv6HopByHopHeader,
+    Ipv6HopByHopRepr, Ipv6OptionFailureType, Ipv6OptionRepr, Ipv6Packet, Ipv6Repr, TcpControl,
+    TcpPacket, TcpRepr, UdpPacket, UdpRepr,
 };
 
 /// Bytes each TCP connection buffers in each direction.
@@ -416,7 +417,9 @@ impl Stack {
 
     /// What `frame` is to the stack. Only a frame the stack can decide on
     /// reaches smoltcp: a flow sent to the stack, or a frame that opens
-    /// none. It reads past one hop-by-hop header, as smoltcp does. A frame
+    /// none. It parses each header as smoltcp does, so a frame smoltcp would
+    /// refuse opens no flow, though it leaves the checksums to smoltcp. It
+    /// reads past one hop-by-hop header, as smoltcp does. A frame
     /// that hides its transport, such as behind any other IPv6 extension
     /// header or in a fragment, or a flow sent to every station, is dropped,
     /// because smoltcp would take it without asking.
@@ -429,6 +432,7 @@ impl Stack {
         if !ours && !to.is_broadcast() && !to.is_multicast() {
             return Seen::Drop;
         }
+        let checksums = ChecksumCapabilities::ignored();
         let (source, destination, protocol, payload): (IpAddr, IpAddr, IpProtocol, &[u8]) =
             match ethernet.ethertype() {
                 EthernetProtocol::Arp => return Seen::Other,
@@ -436,13 +440,16 @@ impl Stack {
                     let Ok(ip) = Ipv4Packet::new_checked(ethernet.payload()) else {
                         return Seen::Drop;
                     };
+                    let Ok(repr) = Ipv4Repr::parse(&ip, &checksums) else {
+                        return Seen::Drop;
+                    };
                     if ip.more_frags() || ip.frag_offset() != 0 {
                         return Seen::Drop;
                     }
                     (
-                        IpAddr::V4(ip.src_addr()),
-                        IpAddr::V4(ip.dst_addr()),
-                        ip.next_header(),
+                        IpAddr::V4(repr.src_addr),
+                        IpAddr::V4(repr.dst_addr),
+                        repr.next_header,
                         ip.payload(),
                     )
                 }
@@ -450,7 +457,10 @@ impl Stack {
                     let Ok(ip) = Ipv6Packet::new_checked(ethernet.payload()) else {
                         return Seen::Drop;
                     };
-                    let (protocol, payload) = match ip.next_header() {
+                    let Ok(repr) = Ipv6Repr::parse(&ip) else {
+                        return Seen::Drop;
+                    };
+                    let (protocol, payload) = match repr.next_header {
                         IpProtocol::HopByHop => match behind_hop_by_hop(ip.payload()) {
                             Some(behind) => behind,
                             None => return Seen::Drop,
@@ -458,8 +468,8 @@ impl Stack {
                         protocol => (protocol, ip.payload()),
                     };
                     (
-                        IpAddr::V6(ip.src_addr()),
-                        IpAddr::V6(ip.dst_addr()),
+                        IpAddr::V6(repr.src_addr),
+                        IpAddr::V6(repr.dst_addr),
                         protocol,
                         payload,
                     )
@@ -469,22 +479,34 @@ impl Stack {
         match protocol {
             // Neighbor discovery, and the stack's own ICMP.
             IpProtocol::Icmp | IpProtocol::Icmpv6 => Seen::Other,
-            IpProtocol::Tcp if ours => match TcpPacket::new_checked(payload) {
-                Ok(tcp) if tcp.syn() && !tcp.ack() => Seen::Flow(Flow::Tcp {
-                    source: SocketAddr::new(source, tcp.src_port()),
-                    destination: SocketAddr::new(destination, tcp.dst_port()),
-                }),
-                // smoltcp gives a segment of no connection a reset.
-                Ok(_) => Seen::Other,
-                Err(_) => Seen::Drop,
-            },
-            IpProtocol::Udp if ours => match UdpPacket::new_checked(payload) {
-                Ok(udp) => Seen::Flow(Flow::Udp {
-                    source: SocketAddr::new(source, udp.src_port()),
-                    destination: SocketAddr::new(destination, udp.dst_port()),
-                }),
-                Err(_) => Seen::Drop,
-            },
+            IpProtocol::Tcp if ours => {
+                let tcp = TcpPacket::new_checked(payload).and_then(|tcp| {
+                    TcpRepr::parse(&tcp, &source.into(), &destination.into(), &checksums)
+                });
+                match tcp {
+                    Ok(tcp) if tcp.control == TcpControl::Syn && tcp.ack_number.is_none() => {
+                        Seen::Flow(Flow::Tcp {
+                            source: SocketAddr::new(source, tcp.src_port),
+                            destination: SocketAddr::new(destination, tcp.dst_port),
+                        })
+                    }
+                    // smoltcp gives a segment of no connection a reset.
+                    Ok(_) => Seen::Other,
+                    Err(_) => Seen::Drop,
+                }
+            }
+            IpProtocol::Udp if ours => {
+                let udp = UdpPacket::new_checked(payload).and_then(|udp| {
+                    UdpRepr::parse(&udp, &source.into(), &destination.into(), &checksums)
+                });
+                match udp {
+                    Ok(udp) => Seen::Flow(Flow::Udp {
+                        source: SocketAddr::new(source, udp.src_port),
+                        destination: SocketAddr::new(destination, udp.dst_port),
+                    }),
+                    Err(_) => Seen::Drop,
+                }
+            }
             _ => Seen::Drop,
         }
     }

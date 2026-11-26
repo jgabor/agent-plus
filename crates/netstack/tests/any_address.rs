@@ -864,36 +864,145 @@ fn every_socket_is_freed_after_connections_end_by_fin_and_by_reset() {
     assert_eq!(stack.sockets(), 0);
 }
 
-/// `frame`, a TCP or UDP frame over IPv4, from another `source` port and to
-/// another `destination` port, with its checksum filled, or spoiled if
-/// `bad`.
-fn with_ports(frame: &[u8], source: u16, destination: u16, bad: bool) -> Vec<u8> {
+/// `frame`, a TCP or UDP frame, with its segment or datagram changed by
+/// `edit`, and its checksum filled, or spoiled if `bad`.
+fn edited(frame: &[u8], bad: bool, edit: impl FnOnce(&mut [u8])) -> Vec<u8> {
+    let ethernet = EthernetFrame::new_checked(frame).unwrap();
+    let (from, to, protocol, start, end): (IpAddress, IpAddress, IpProtocol, usize, usize) =
+        match ethernet.ethertype() {
+            EthernetProtocol::Ipv4 => {
+                let ip = Ipv4Packet::new_checked(ethernet.payload()).unwrap();
+                let header = usize::from(ip.header_len());
+                let total = usize::from(ip.total_len());
+                (
+                    ip.src_addr().into(),
+                    ip.dst_addr().into(),
+                    ip.next_header(),
+                    header,
+                    total,
+                )
+            }
+            EthernetProtocol::Ipv6 => {
+                let ip = Ipv6Packet::new_checked(ethernet.payload()).unwrap();
+                let total = 40 + usize::from(ip.payload_len());
+                (
+                    ip.src_addr().into(),
+                    ip.dst_addr().into(),
+                    ip.next_header(),
+                    40,
+                    total,
+                )
+            }
+            other => panic!("not IP: {other}"),
+        };
     let mut frame = frame.to_vec();
-    let mut ethernet = EthernetFrame::new_unchecked(&mut frame[..]);
-    let mut ip = Ipv4Packet::new_unchecked(ethernet.payload_mut());
-    let (from, to) = (ip.src_addr().into(), ip.dst_addr().into());
-    let udp = ip.next_header() == smoltcp::wire::IpProtocol::Udp;
-    let payload = ip.payload_mut();
-    if udp {
-        let mut udp = UdpPacket::new_unchecked(payload);
-        udp.set_src_port(source);
-        udp.set_dst_port(destination);
-        udp.fill_checksum(&from, &to);
-        let spoiled = udp.checksum() ^ 0xff;
-        if bad {
-            udp.set_checksum(spoiled);
+    let transport = &mut frame[14 + start..14 + end];
+    edit(transport);
+    match protocol {
+        IpProtocol::Udp => {
+            let mut udp = UdpPacket::new_unchecked(transport);
+            udp.fill_checksum(&from, &to);
+            let spoiled = udp.checksum() ^ 0xff;
+            if bad {
+                udp.set_checksum(spoiled);
+            }
         }
-    } else {
-        let mut tcp = TcpPacket::new_unchecked(payload);
-        tcp.set_src_port(source);
-        tcp.set_dst_port(destination);
-        tcp.fill_checksum(&from, &to);
-        let spoiled = tcp.checksum() ^ 0xff;
-        if bad {
-            tcp.set_checksum(spoiled);
+        IpProtocol::Tcp => {
+            let mut tcp = TcpPacket::new_unchecked(transport);
+            tcp.fill_checksum(&from, &to);
+            let spoiled = tcp.checksum() ^ 0xff;
+            if bad {
+                tcp.set_checksum(spoiled);
+            }
         }
+        other => panic!("not TCP or UDP: {other}"),
     }
     frame
+}
+
+/// `frame`, a TCP or UDP frame, from another `source` port and to another
+/// `destination` port, with its checksum filled, or spoiled if `bad`.
+fn with_ports(frame: &[u8], source: u16, destination: u16, bad: bool) -> Vec<u8> {
+    edited(frame, bad, |transport| {
+        transport[..2].copy_from_slice(&source.to_be_bytes());
+        transport[2..4].copy_from_slice(&destination.to_be_bytes());
+    })
+}
+
+#[test]
+fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
+    let tcp_to = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 443),
+        SocketAddr::new(IpAddr::V6("2001:db8::1".parse().unwrap()), 443),
+    ];
+    let udp_to = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9)), 53),
+        SocketAddr::new(IpAddr::V6("2001:db8::9".parse().unwrap()), 53),
+    ];
+    let syns = tcp_to.map(syn_frame);
+    let datagrams = udp_to.map(datagram_frame);
+    let mut refused = Vec::new();
+    for frame in syns.iter().chain(&datagrams) {
+        // A version field that says the other IP version.
+        let mut wrong = frame.clone();
+        wrong[14] ^= 0x20;
+        if let [0x08, 0x00] = wrong[12..14] {
+            Ipv4Packet::new_unchecked(&mut wrong[14..]).fill_checksum();
+        }
+        refused.push(("wrong version", wrong));
+    }
+    for syn in &syns {
+        let first_option = |length: u8| {
+            edited(syn, false, |tcp| {
+                let mut tcp = TcpPacket::new_unchecked(tcp);
+                let options = tcp.options_mut();
+                assert!(options.len() >= 2, "the SYN has options");
+                // A maximum segment size.
+                options[..2].copy_from_slice(&[2, length]);
+            })
+        };
+        refused.extend([
+            ("MSS of the wrong length", first_option(3)),
+            ("option past the header", first_option(0xff)),
+            ("SYN from port 0", with_ports(syn, 0, 443, false)),
+            ("SYN to port 0", with_ports(syn, 49152, 0, false)),
+            (
+                "SYN with FIN",
+                edited(syn, false, |tcp| {
+                    TcpPacket::new_unchecked(tcp).set_fin(true)
+                }),
+            ),
+            (
+                "SYN with RST",
+                edited(syn, false, |tcp| {
+                    TcpPacket::new_unchecked(tcp).set_rst(true)
+                }),
+            ),
+        ]);
+    }
+    for datagram in &datagrams {
+        refused.push(("datagram to port 0", with_ports(datagram, 40000, 0, false)));
+    }
+    let now = Instant::now();
+    // Each frame, as the guest sent it, is asked about.
+    for frame in syns.iter().chain(&datagrams) {
+        let mut asked = false;
+        stack().receive(&edited(frame, false, |_| {}), now, |_| {
+            asked = true;
+            false
+        });
+        assert!(asked, "{frame:?}");
+    }
+    let mut asked = Vec::new();
+    for (kind, frame) in refused {
+        let mut stack = stack();
+        stack.receive(&frame, now, |flow| {
+            asked.push((kind, *flow));
+            false
+        });
+        assert_eq!(stack.sockets(), 0, "{kind}");
+    }
+    assert!(asked.is_empty(), "asked about {asked:#?}");
 }
 
 // spec(NETWORK): **Connections at once.** The guest can have at most 64 TCP connections that it has started but not finished opening, and a SYN past that is dropped unanswered, so the guest sends it again.

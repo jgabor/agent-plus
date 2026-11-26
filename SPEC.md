@@ -1531,6 +1531,9 @@ How it works:
   each answer from your host.
 - An agent's first POSIX lock on a file fails if the name the agent last
   reached the file by is gone.
+- Reading the attributes of a file with another hard link, as `stat` does,
+  fails with a `No such file or directory` error once the name the agent
+  last reached the file by is gone, even while the agent holds it open.
 - In an `rw` share, the agent can give back a mode it took away from a
   file or a directory, while the agent's kernel still holds the file in its
   cache.

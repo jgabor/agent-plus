@@ -700,12 +700,9 @@ impl Share {
         };
         let file = path(found.fd.as_fd())?;
         if served.is_ok() && matches!(named, Err(libc::EACCES)) {
-            let there = [
-                &path(found.parent.as_fd())?,
-                &b"/"[..],
-                found.name.to_bytes(),
-            ]
-            .concat();
+            let parent = path(found.parent.as_fd())?;
+            let parent = parent.strip_suffix(b"/").unwrap_or(&parent);
+            let there = [parent, b"/", found.name.to_bytes()].concat();
             if file == there {
                 return Ok(());
             }

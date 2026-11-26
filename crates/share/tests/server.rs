@@ -665,6 +665,23 @@ fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() 
     assert_eq!(size_of(&mut guest, nested), Ok(6));
 }
 
+// spec(SHARE): Reading the attributes of a file with another hard link, as `stat` does, fails with a `No such file or directory` error once the name the agent last reached the file by is gone, even while the agent holds it open.
+#[test]
+fn a_linked_file_s_attributes_need_the_name_the_agent_last_reached_it_by() {
+    let tree = Tree::new("linked-unlinked");
+    let other = tree.root.join("dir/other.txt");
+    fs::hard_link(tree.root.join("dir/nested.txt"), &other).unwrap();
+    let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
+    let dir = guest.walk("dir").unwrap();
+    let nested = guest.walk("dir/nested.txt").unwrap();
+    guest.open(nested, 0).unwrap();
+    assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
+    // Reached by its other name, it shows them again.
+    assert_eq!(guest.walk("dir/other.txt"), Ok(nested));
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+}
+
 #[test]
 fn a_write_never_reaches_a_directory_the_host_moves_outside_the_root() {
     let tree = Tree::new("rw-moved-out");

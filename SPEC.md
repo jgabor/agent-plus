@@ -1677,6 +1677,9 @@ attributes, because those can run commands.
     even if a repository lies above or below the share. A file that changed
     on your side after the agent first wrote it is not applied, and
     `ap apply` reports it.
+  - A file you changed or added beneath a directory after the agent
+    removed or replaced it is not applied, `ap apply` reports it, and it
+    stays pending.
   - Nothing is ever applied under a path component that matches `.git`
     case-insensitively, in any repository, including nested ones.
     That counts the names along the share's own path on your host, so

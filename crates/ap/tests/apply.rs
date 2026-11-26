@@ -354,6 +354,58 @@ fn a_file_you_changed_too_is_reported_and_stays_pending() {
     assert_eq!(scratch.read("mine.txt"), "yours, again\n");
 }
 
+/// From #857: the records name only the directory the agent removed or
+/// replaced, and you change a file beneath it in place, and add one deeper
+/// down. Neither moves the directory's own times, and the agent never saw
+/// either one, so each is reported and stays pending.
+// spec(SHARE): A file you changed or added beneath a directory after the agent removed or replaced it is not applied, `ap apply` reports it, and it stays pending.
+#[test]
+fn a_file_you_changed_beneath_a_directory_the_agent_removed_stays_pending() {
+    let scratch = Scratch::new("conflict-beneath");
+    let share = &scratch.share;
+    fs::create_dir_all(share.join("logs/sub")).unwrap();
+    fs::write(share.join("logs/notes.txt"), "notes\n").unwrap();
+    fs::create_dir_all(share.join("cache/sub")).unwrap();
+    let (run, pending) = scratch.run("notes", 1);
+    delete(share, &pending, "logs");
+    change(share, &pending, "cache", 0o644, b"a file\n");
+    fs::write(share.join("logs/notes.txt"), "yours, again\n").unwrap();
+    fs::write(share.join("logs/sub/new.txt"), "new\n").unwrap();
+    fs::write(share.join("cache/sub/new.txt"), "new\n").unwrap();
+    let why = "it changed on your side after the agent first changed it";
+    let skipped = format!(
+        "skipped cache/sub/new.txt: {why}\n\
+         skipped logs/notes.txt: {why}\n\
+         skipped logs/sub/new.txt: {why}\n"
+    );
+    // What becomes of the agent's file in place of `cache` is #980's.
+    let yours = |output: &Output| -> String {
+        (stdout(output).lines())
+            .filter(|line| !line.starts_with("failed cache: "))
+            .map(|line| format!("{line}\n"))
+            .collect()
+    };
+
+    let diff = scratch.ap(&["diff", &run]);
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(diff.status.code(), Some(0), "{}", stderr(&diff));
+    let cache = "diff --git a/cache b/cache\nnew file mode 100644\n\
+                 --- /dev/null\n+++ b/cache\n@@ -0,0 +1 @@\n+a file\n";
+    assert_eq!(stdout(&diff), format!("{cache}{skipped}"));
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(yours(&output), skipped);
+    assert_eq!(scratch.read("logs/notes.txt"), "yours, again\n");
+    assert_eq!(scratch.read("logs/sub/new.txt"), "new\n");
+    assert_eq!(scratch.read("cache/sub/new.txt"), "new\n");
+    // They stay pending, and stay as they were.
+    let output = scratch.ap(&["apply", &run]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(yours(&output), skipped);
+    assert_eq!(scratch.read("logs/notes.txt"), "yours, again\n");
+    assert_eq!(scratch.read("logs/sub/new.txt"), "new\n");
+}
+
 /// Only a file `ap apply` itself landed is exempt from the check, not one
 /// you changed to match the agent's, and not one it can't read.
 #[test]
@@ -835,6 +887,16 @@ fn a_file_in_place_of_your_directory_with_an_ignored_file_is_skipped() {
         fs::write(share.join(path), data).unwrap();
     }
     let (run, pending) = scratch.run("notes", 1);
+    // The agent empties each directory before it replaces it.
+    for path in [
+        "logs/old.log",
+        "logs/notes.txt",
+        "cache/deep/run.log",
+        "cache/deep",
+        "plain/a.txt",
+    ] {
+        delete(share, &pending, path);
+    }
     change(share, &pending, "logs", 0o644, b"a file\n");
     record(&pending, &base(share, "cache"));
     link(&pending, "cache", ".gitignore");

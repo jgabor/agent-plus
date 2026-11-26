@@ -1102,8 +1102,10 @@ impl Share<'_> {
                     let mut out = Vec::new();
                     line(&mut out, "skipped", &path, &why);
                     if conflict {
-                        let base = recorded_base(&records, &path).map(|(_, base)| *base);
-                        kept.insert(path.clone(), base);
+                        // One you put there since has no record, so you
+                        // had no file there before.
+                        let base = records.bases.get(&path).copied().flatten();
+                        kept.insert(path.clone(), Some(base));
                     }
                     report.insert(path, out);
                 }
@@ -1565,22 +1567,17 @@ fn changed(records: &Records, host: &Host) -> io::Result<BTreeSet<Vec<u8>>> {
 }
 
 /// Whether your file at `path` changed since the agent first changed it,
-/// by the record the share server kept of it then. A file of yours that
-/// the agent never changed itself, but removed with a directory above it,
-/// goes by the record of the nearest such directory.
+/// by the record the share server kept of it then. The agent empties a
+/// directory before it removes or replaces it, and the share server keeps
+/// a record of each file it removes, so a file of yours it has no record
+/// of, beneath what it removed or replaced and recorded, is one you put
+/// there since.
 fn changed_on_your_side(records: &Records, host: &Host, path: &[u8]) -> io::Result<bool> {
-    let Some((path, base)) = recorded_base(records, path) else {
-        return Ok(false);
-    };
-    Ok(host.stat(path)?.as_ref().map(Base::of) != *base)
-}
-
-/// The record the share server kept of your file at `path`, or at the
-/// nearest directory above it that has one, and that record's path.
-fn recorded_base<'a>(records: &'a Records, path: &'a [u8]) -> Option<(&'a [u8], &'a Option<Base>)> {
-    let mut recorded = parents(path).chain([path]).collect::<Vec<_>>();
-    recorded.reverse();
-    (recorded.into_iter()).find_map(|path| Some((path, records.bases.get(path)?)))
+    match records.bases.get(path) {
+        Some(base) => Ok(host.stat(path)?.as_ref().map(Base::of) != *base),
+        None => Ok(!records.entries.contains_key(path)
+            && parents(path).any(|parent| records.bases.contains_key(parent))),
+    }
 }
 
 /// Why a symlink at `path` with this target would leave the share, if it

@@ -2,6 +2,7 @@
 //! by arming auto-merge on the newest `main`, and merges it.
 
 use crate::forge::{Gh, OpenPr};
+use crate::lock::Hold;
 use crate::work::LAND_NEEDED;
 use crate::{Problem, Verdict, accepts, base, lock, merge, workspace};
 use std::collections::BTreeSet;
@@ -22,6 +23,10 @@ pub fn run() -> Result<Verdict, Problem> {
             "`refresh` works on a repository, so run it at the top of a git checkout".to_string(),
         ));
     }
+    let Some(_running) = lock::refresh_slot(&root)? else {
+        println!("refresh: another refresh runs, so this one proves nothing");
+        return Ok(Verdict::Pass);
+    };
     let gh = Gh::new(&root);
     let waiting: BTreeSet<u64> = gh
         .open_issues()?
@@ -52,9 +57,9 @@ pub fn run() -> Result<Verdict, Problem> {
             Ok((head, true)) => {
                 merge::post_gate(&gh, &head, "pending", &queued(count));
                 count += 1;
-                ready.push((rows.len(), pr));
+                ready.push((rows.len(), pr, Some(head)));
             }
-            Ok((_, false)) => ready.push((rows.len(), pr)),
+            Ok((_, false)) => ready.push((rows.len(), pr, None)),
             Err(Problem(message)) => {
                 eprintln!("refresh: PR {}: {message}", pr.number);
                 row.said = message;
@@ -66,8 +71,20 @@ pub fn run() -> Result<Verdict, Problem> {
     let mut proofs = 0;
     // Found at the first PR that fails, and only then.
     let mut main_proof: Option<Result<(), String>> = None;
-    for (at, pr) in &ready {
+    for (at, pr, queued) in &ready {
         let row = &mut rows[*at];
+        // One lock orders this PR's proof and squash with every other merge.
+        // The turn keeps its place while its `prepare` holds the slot.
+        let mut slot = lock::merge_slot(&root, false, || {
+            if let Some(head) = queued {
+                merge::post_gate(&gh, head, "pending", "Waiting: the merge slot");
+            }
+            eprintln!(
+                "refresh: PR {} waits for the merge slot, which another run holds",
+                pr.number
+            );
+        })?;
+        let turn = lock::merge_turn(&root)?;
         // A merge earlier in this run can leave this PR behind.
         let (seen, stale) = match needs_proof(&root, &gh, pr) {
             Ok(seen) => seen,
@@ -91,11 +108,14 @@ pub fn run() -> Result<Verdict, Problem> {
                 println!("::group::{place}: {}", escaped(&pr.title));
             }
             let started = Instant::now();
-            let prepared = prepare(&root, pr.number);
+            // It takes the slot ahead, in this turn.
+            drop(slot);
+            let prepared = prepare(&root, pr.number, &turn);
             if actions {
                 println!("::endgroup::");
             }
             row.took = Some(started.elapsed());
+            slot = lock::merge_slot(&root, true, || {})?;
             proven = prepared?;
             match current_head(&root, pr) {
                 Some(now) => head = now,
@@ -120,7 +140,7 @@ pub fn run() -> Result<Verdict, Problem> {
                     Ok(Vec::new())
                 };
                 let merged = match new {
-                    Ok(new) if new.is_empty() => merge_if_armed(&root, &gh, pr, &head),
+                    Ok(new) if new.is_empty() => merge_if_armed(&gh, pr, &head, &slot),
                     Ok(new) => Ok(Landed::Open(format!(
                         "its proof accepts what the owner didn't approve: {}. Arming its auto-merge again approves it",
                         new.join("; ")
@@ -149,6 +169,8 @@ pub fn run() -> Result<Verdict, Problem> {
                 continue;
             }
         }
+        // Nothing after this merges, and the proof of `main` can take long.
+        drop((slot, turn));
         if proven {
             // Someone pushed after the proof, so its green is on an older head.
             row.verdict = "proven";
@@ -233,10 +255,9 @@ enum Landed {
 }
 
 /// Squashes a proven PR, if the owner's approval still stands for the head
-/// that was proven.
-fn merge_if_armed(root: &Path, gh: &Gh, pr: &OpenPr, head: &str) -> Result<Landed, Problem> {
+/// that was proven. The caller holds the slot, from the proof on.
+fn merge_if_armed(gh: &Gh, pr: &OpenPr, head: &str, slot: &Hold) -> Result<Landed, Problem> {
     let number = pr.number;
-    let slot = lock::merge_slot(root, false, || {})?;
     let now = gh.armed(number)?;
     // GitHub's own auto-merge can get there first, and then GitHub closes
     // the PR's issues itself.
@@ -264,7 +285,7 @@ fn merge_if_armed(root: &Path, gh: &Gh, pr: &OpenPr, head: &str) -> Result<Lande
         if read.closing_issues != pr.closing_issues {
             return Ok(Landed::Open("the issue it closes changed".to_string()));
         }
-        if let Err(problem) = gh.merge_pr(number, head, &slot)
+        if let Err(problem) = gh.merge_pr(number, head, slot)
             && gh.armed(number)?.state != "MERGED"
         {
             return Err(problem);
@@ -598,11 +619,14 @@ fn stop_group(group: u32) {
     }
 }
 
-/// Its own process, so that one PR's timeout or crash ends only that PR.
-fn prepare(root: &Path, number: u64) -> Result<bool, Problem> {
+/// Its own process, so that one PR's timeout or crash ends only that PR. It
+/// runs in the refresh's `turn`.
+fn prepare(root: &Path, number: u64, turn: &Hold) -> Result<bool, Problem> {
     let program =
         env::current_exe().map_err(|e| Problem(format!("couldn't find this program: {e}")))?;
-    let status = Command::new(program)
+    let mut command = Command::new(program);
+    turn.pass_turn_to(&mut command);
+    let status = command
         .args(["prepare", &number.to_string(), "--keep-budgets"])
         .current_dir(root)
         .status()

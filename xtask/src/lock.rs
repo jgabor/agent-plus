@@ -33,6 +33,9 @@ const AHEAD: &str = "ahead.lock";
 /// Kept by a merge while the xtask of `main` that it runs takes the slot
 /// again, which every other merge lets it have first.
 const TURN: &str = "turn.lock";
+/// Set to the lock directory on a merge that runs during a turn its parent
+/// keeps, so that it takes the slot ahead, as the xtask of `main` does.
+const TURN_INHERITED: &str = "XTASK_TURN_HELD";
 
 /// What a take waits for, when it can't have its lock at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +147,12 @@ impl Hold {
         if self.place.any() {
             command.env(PLACE_INHERITED, &self.directory);
         }
+    }
+
+    /// Lets a merge that `command` runs have this turn, which the caller
+    /// keeps until that merge ends.
+    pub fn pass_turn_to(&self, command: &mut Command) {
+        command.env(TURN_INHERITED, &self.directory);
     }
 
     pub fn has_place(&self) -> bool {
@@ -331,9 +340,31 @@ pub fn merge_slot(root: &Path, ahead: bool, waiting: impl FnOnce()) -> Result<Ho
 /// Kept by a merge from the slot to its proof, while the xtask of `main` that
 /// it runs takes the slot again, so that no other merge takes it in between.
 /// The merge holds the slot while it takes this, and no merge waits for this
-/// while it holds the slot.
+/// while it holds the slot. A refresh keeps it from a PR's proof to its squash.
 pub fn merge_turn(root: &Path) -> Result<Hold, Problem> {
     slot(&directory(root)?, TURN, || {})
+}
+
+/// Whether this merge runs in a turn that its parent keeps.
+pub fn has_turn(root: &Path) -> Result<bool, Problem> {
+    Ok(inherited(TURN_INHERITED, &directory(root)?))
+}
+
+/// Held for a whole refresh, so that one that starts while another runs
+/// proves nothing. `None` if another run holds it.
+pub fn refresh_slot(root: &Path) -> Result<Option<Hold>, Problem> {
+    let directory = directory(root)?;
+    let file = open(&directory, "refresh.lock")?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(TryLockError::Error(e)) => {
+            return Err(Problem(format!("couldn't take refresh.lock: {e}")));
+        }
+    }
+    let mut hold = Hold::new(&directory);
+    hold.files.push(file);
+    Ok(Some(hold))
 }
 
 /// Held for a whole response to a failing gate, so that two can't share the

@@ -131,9 +131,10 @@ fn sequence(
     }
     // The xtask of `main` takes the slot again, ahead of every other merge,
     // because the merge that runs it lets it go, and the timeout has started
-    // by then.
+    // by then. So does a merge that a refresh runs in its turn.
     tell_supervisor(WAITING)?;
-    let slot = lock::merge_slot(&root, runs_the_checks_of_main(), || {
+    let ahead = runs_the_checks_of_main() || lock::has_turn(&root)?;
+    let slot = lock::merge_slot(&root, ahead, || {
         status.waits("the merge slot");
         eprintln!("{command}: PR {number} waits for the merge slot, which another run holds");
     })?;
@@ -288,7 +289,8 @@ fn sequence(
 /// the merge again in it, which takes the slot again. If `main` moves before
 /// that one fetches, it builds again. This keeps the merge's turn until that
 /// xtask ends, so no other merge takes the slot in between, and ends as that
-/// xtask does. The xtask of `main` has its turn kept by the merge that ran it.
+/// xtask does. The xtask of `main` has its turn kept by the merge that ran it,
+/// and a merge that a refresh runs has it kept by the refresh.
 fn run_the_checks_of(
     root: &Path,
     main: &str,
@@ -304,7 +306,7 @@ fn run_the_checks_of(
     )?;
     drop(tree);
     let program = keep(&directory.join("bin"), &built, main)?;
-    let turn = if runs_the_checks_of_main() {
+    let turn = if runs_the_checks_of_main() || lock::has_turn(root)? {
         None
     } else {
         Some(lock::merge_turn(root)?)

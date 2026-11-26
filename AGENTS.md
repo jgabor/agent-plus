@@ -185,7 +185,7 @@ your thread, and stop if it doesn't.
   onto `main` once the other PR merges.
 - Use subagents only for independent parts, and reconcile their results
   yourself. The thread that claimed the issue is the only one that pushes,
-  comments, or watches the PR.
+  or comments on the issue or the PR.
 
 ### Long runs
 
@@ -294,8 +294,8 @@ Created with <model> in <harness>.
 - A PR that raises no [count](HARNESS.md#hills) gives the reason in a line
   that reads `Hill: none, <reason>`, or `merge` and `prepare` fail it. A
   cleanup rarely raises one, and a change to this file never does.
-- Solve one problem per PR. Open a real PR, not a draft, so checks and
-  reviewers run.
+- Solve one problem per PR. Open a real PR, not a draft, because GitHub
+  won't merge a draft.
 - Check the title, body, and attachments for secrets and private details.
 - Don't post filler comments. When nothing is new, stay quiet.
 

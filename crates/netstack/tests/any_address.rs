@@ -946,15 +946,19 @@ fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
         // A version field that says the other IP version.
         let mut wrong = frame.clone();
         wrong[14] ^= 0x20;
+        if let [0x08, 0x00] = wrong[12..14] {
+            Ipv4Packet::new_unchecked(&mut wrong[14..]).fill_checksum();
+        }
         refused.push(("wrong version", wrong));
     }
     for syn in &syns {
-        let set_flags = |flags: u8| edited(syn, false, |tcp| tcp[13] |= flags);
         let first_option = |length: u8| {
             edited(syn, false, |tcp| {
-                assert!(usize::from(tcp[12] >> 4) * 4 > 20, "the SYN has options");
-                tcp[20] = 2;
-                tcp[21] = length;
+                let mut tcp = TcpPacket::new_unchecked(tcp);
+                let options = tcp.options_mut();
+                assert!(options.len() >= 2, "the SYN has options");
+                // A maximum segment size.
+                options[..2].copy_from_slice(&[2, length]);
             })
         };
         refused.extend([
@@ -962,8 +966,18 @@ fn a_flow_smoltcp_would_refuse_to_parse_is_never_asked_about() {
             ("option past the header", first_option(0xff)),
             ("SYN from port 0", with_ports(syn, 0, 443, false)),
             ("SYN to port 0", with_ports(syn, 49152, 0, false)),
-            ("SYN with FIN", set_flags(0x01)),
-            ("SYN with RST", set_flags(0x04)),
+            (
+                "SYN with FIN",
+                edited(syn, false, |tcp| {
+                    TcpPacket::new_unchecked(tcp).set_fin(true)
+                }),
+            ),
+            (
+                "SYN with RST",
+                edited(syn, false, |tcp| {
+                    TcpPacket::new_unchecked(tcp).set_rst(true)
+                }),
+            ),
         ]);
     }
     for datagram in &datagrams {

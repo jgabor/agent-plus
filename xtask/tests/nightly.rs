@@ -1997,8 +1997,7 @@ fn mutation_stops_at_its_limit_and_keeps_what_it_found() {
     fs::write(repo.bin.join("missed.txt"), MISSED).unwrap();
     // The limit stops the job only once it has found a survivor.
     let waits = repo.bin.join("limit-waits");
-    let made = Command::new("mkfifo").arg(&waits).status().unwrap();
-    assert!(made.success());
+    common::fifo(&waits);
     repo.set_mutants(
         "cat \"$d/missed.txt\" > target/mutants/mutants.out/missed.txt\n: > \"$d/limit-waits\"\nsleep 30\n",
     );

@@ -894,12 +894,12 @@ The timeout stops while `main`'s xtask waits to take the slot again, because
 the slot is let go as the merge starts that xtask.
 The timeout starts again when `main`'s xtask takes the slot, and when a PR's own
 xtask starts its proof, so each proof gets all of it. The PR's own xtask can't
-start it again. It stops while a proof waits for a place, and then for a
-shared hold of the activity lock, and starts again once the proof has both.
-It also stops while the proof's bench waits to hold the
-activity lock alone, because other work holds that lock for as long as it runs,
-and then goes on from where it stopped. A PR's own xtask can't stop the timeout
-either. It tells `main`'s xtask when its bench waits, and the timeout stops only
+start it again. It stops while a proof waits for a place, and while `main`'s
+xtask then waits for a shared hold of the activity lock, for its gate or to
+build the PR's own xtask. It starts again once the proof has both. It also
+stops while the proof's bench waits to hold the activity lock alone, because
+other work holds that lock for as long as it runs, and then goes on from where
+it stopped. A PR's own xtask can't stop the timeout either. It tells `main`'s xtask when its bench waits, and the timeout stops only
 while `main`'s xtask also sees, by trying the locks, that a bench waits for
 work that shares the activity lock. So its bench's wait behind another bench
 counts, and so does any wait it only claims.

@@ -1,9 +1,10 @@
 //! Feeds generated text to the code that reads untrusted input, and stops at
 //! the first panic. It needs no fuzzing engine, so it builds on stable. Where
 //! httparse, hyper, h2, iri-string, smoltcp, `git`, or `sha1sum` does the
-//! same job, a target compares the two. miniz_oxide compresses the loose objects
-//! that `crates/git` and `git` both read. Those crates are pure Rust, so the
-//! fuzzer adds no C to the tree. A run is reproduced by passing its seed again.
+//! same job, a target compares the two. miniz_oxide compresses the loose
+//! objects that `crates/git` and `git` both read. Those crates are pure Rust,
+//! so the fuzzer adds no C to the tree. A run is reproduced by passing its
+//! seed again.
 
 #![forbid(unsafe_code)]
 

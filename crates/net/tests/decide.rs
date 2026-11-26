@@ -486,7 +486,12 @@ fn a_raw_hash_under_a_host_with_url_rules_is_denied() {
     );
     // Without URL rules for the host, the target doesn't matter.
     let rules = "NETWORK -\nNETWORK +github.com\nNETWORK +https://codeberg.org/x\n";
-    decides(rules, request("https://github.com/x#/../y"), ALLOW, "+github.com");
+    decides(
+        rules,
+        request("https://github.com/x#/../y"),
+        ALLOW,
+        "+github.com",
+    );
 }
 
 // spec(NETWORK): **Evaluation.** The most specific matching rule wins, so line order never matters.

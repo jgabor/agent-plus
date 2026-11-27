@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A backstop for the steps before the gate. A job that runs out of time
     # ends as cancelled, which files no issue.
     timeout-minutes: 45
@@ -44,7 +44,7 @@ jobs:
   report:
     needs: gate
     if: failure()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The run holds the group until this job ends.
     timeout-minutes: 5
     permissions:

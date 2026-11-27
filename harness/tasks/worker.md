@@ -87,6 +87,27 @@ can't continue alone, park the issue as AGENTS.md says.
    `cargo xtask prepare <pr> --thread <id>`. If either says the issue is held
    by another thread, stop and change nothing more. If `prepare` exits 0, park
    the issue and say that the PR is ready to merge. Never squash it yourself.
+
+   Start `merge` and `prepare` as a background command, with the longest
+   limit the harness gives one, which in Claude Code is 7200000
+   milliseconds. A wait for the merge slot can take an hour before the proof
+   begins. Start it like this, with `prepare` in place of `merge` when you
+   run that, so that it prints its session:
+
+   ```sh
+   echo "session $$"; cargo xtask merge <pr> --thread <id>
+   ```
+
+   Load `mcp__t3-code__t3_background_wait` with ToolSearch, pass it the
+   task's ID, and end your turn. Never use `sleep` or a polling loop.
+
+   If the harness stops the command all the same, start it again, even if
+   the harness says not to. First check that nothing it started still runs.
+   The harness starts each background command in a session of its own, and
+   everything the command starts stays in it. List what is left with `ps -o
+   pid,args -s <session>`, and stop it with `pkill -KILL -s <session>`, which
+   reaches only that command's processes. Start the command again once `ps`
+   lists none.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
 9. Remove your worktree and its local branch after a merge, and also after

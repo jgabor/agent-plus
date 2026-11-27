@@ -40,6 +40,13 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
         if !trimmed.is_empty() && !line.starts_with("  ") {
             extractor.marked_item = false;
         }
+        // A line left of the open numbered item's text ends that item, unless
+        // it only continues the paragraph. A numbered line there starts its
+        // sibling, and sets the column again.
+        let indent = line.len() - trimmed.len();
+        let left = extractor
+            .numbered
+            .take_if(|column| !trimmed.is_empty() && indent < *column);
         if let Some(open) = opens_fence(trimmed) {
             extractor.flush();
             fence = Some(open);
@@ -60,12 +67,25 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
             }
         } else {
             let body = trimmed.strip_prefix("> ").unwrap_or(trimmed);
-            if let Some(item) = list_item(body) {
+            // As in CommonMark, a numbered line interrupts a paragraph only
+            // from 1, so a wrapped "125. " continues it.
+            let item = list_item(body).filter(|(_, number)| {
+                number.is_none_or(|n| {
+                    n.trim_start_matches('0') == "1" || extractor.block.is_empty() || left.is_some()
+                })
+            });
+            if let Some((item, number)) = item {
                 extractor.flush();
                 extractor.marked_item = false;
                 extractor.in_item = true;
+                if let Some(number) = number {
+                    extractor.numbered = Some(indent + number.len() + 2);
+                }
                 extractor.block.push(item);
             } else {
+                if !extractor.block.is_empty() {
+                    extractor.numbered = extractor.numbered.or(left);
+                }
                 extractor.block.push(body);
             }
         }
@@ -82,6 +102,8 @@ struct Extractor<'a> {
     units: Vec<Unit>,
     /// The current block began as a list item.
     in_item: bool,
+    /// The column where the open numbered list item's text starts.
+    numbered: Option<usize>,
     /// A marker earlier in this list item covers what follows it.
     marked_item: bool,
     keep_marked: bool,
@@ -278,14 +300,16 @@ fn is_separator(line: &str) -> bool {
         && line.bytes().all(|b| matches!(b, b'|' | b'-' | b':' | b' '))
 }
 
-fn list_item(line: &str) -> Option<&str> {
+/// Returns a list item's text, and its number if it is numbered.
+fn list_item(line: &str) -> Option<(&str, Option<&str>)> {
     for marker in ["- ", "* ", "+ "] {
         if let Some(item) = line.strip_prefix(marker) {
-            return Some(item);
+            return Some((item, None));
         }
     }
     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    (digits > 0).then(|| line[digits..].strip_prefix(". "))?
+    let item = (digits > 0).then(|| line[digits..].strip_prefix(". "))??;
+    Some((item, Some(&line[..digits])))
 }
 
 fn backticks(bytes: &[u8]) -> usize {
@@ -483,6 +507,48 @@ mod tests {
                 "Nested."
             ]
         );
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_list_item() {
+        let spec = "# A\n\n- It exits with\n  125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_paragraph() {
+        let spec = "# A\n\nIt exits with\n125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn numbered_items_follow_each_other() {
+        let spec = "# A\n\n1. One\n2. Two\n3. Three\n";
+        assert_eq!(texts(spec), ["One", "Two", "Three"]);
+    }
+
+    #[test]
+    fn a_first_numbered_item_interrupts_a_paragraph() {
+        let spec = "# A\n\nThese apply\n1. One\n2. Two\n";
+        assert_eq!(texts(spec), ["These apply", "One", "Two"]);
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_numbered_item() {
+        let spec = "# A\n\n1. It exits with\n   125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn a_numbered_item_follows_its_nested_bullet_and_paragraph() {
+        let spec = "# A\n\n1. One\n   - Sub\n2. Two\n\n   More\n3. Three\n";
+        assert_eq!(texts(spec), ["One", "Sub", "Two", "More", "Three"]);
+    }
+
+    #[test]
+    fn a_lazy_line_keeps_its_numbered_item_open() {
+        let spec = "# A\n\n1. One\n  wraps.\n2. Two\n\n# B\n\n> 1. Three\n>    wraps.\n> 2. Four\n";
+        assert_eq!(texts(spec), ["One wraps.", "Two", "Three wraps.", "Four"]);
     }
 
     #[test]

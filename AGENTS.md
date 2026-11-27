@@ -131,6 +131,7 @@ the parent's plan. Don't fix it in this PR.
 | `in-progress` | An agent holds the issue |
 | `land-needed` | The issue's PR is ready for a person to merge |
 | `answer-needed` | The issue is waiting for an answer |
+| `action-needed` | Something stays broken until the owner takes [an action](#owner-actions) |
 | `host:macos` | The issue has to start on a Mac. The owner adds it, and the worker on the Mac removes it when it hands the issue to Linux |
 
 ### Claiming work
@@ -235,6 +236,44 @@ the next step is outside your label. Decide everything else yourself. A
 decision a user could observe goes into SPEC.md, as [the spec](#the-spec)
 says. List the rest in the PR.
 
+### Owner actions
+
+When your change needs an action that only the owner may take, such as
+installing or enabling something on a machine, changing a repository setting,
+or setting a secret, file an issue for it before you run `merge` or `prepare`.
+It has the label `action-needed`, and no `auto:*` label. The label is for what
+stops working, stays broken, or stays unsafe until the owner acts. A merge is
+`land-needed`, and a question is `answer-needed`. Only the owner closes the
+issue or removes its label.
+
+The title is the action as an instruction, and says where, such as "Turn the
+refresh timer on, on the Linux machine". The body has these three parts, in
+this order, and nothing else. It is 20 lines at most, with no fold and no
+history, and it links the PR for the rest.
+
+```markdown
+## Do this
+The exact commands, in a code block.
+
+## Until you do
+What doesn't work, in a sentence or two.
+
+## How to check
+A command, and what it prints when the action is done.
+```
+
+The PR's body starts with the action, above `## Problem`, as an alert that
+names the issue:
+
+```markdown
+> [!IMPORTANT]
+> After you merge this: turn the refresh timer on (#123). Until you do,
+> no approved PR is proven or merged.
+```
+
+Your last message in your thread starts with the same sentence, and the
+`Next` of your status comment names the issue.
+
 ### Proof
 
 Proof is evidence you observed yourself in this session: command output, a
@@ -257,7 +296,8 @@ reproduction, or a transcript of a run. "Tests pass" isn't proof of a behavior.
 ### Pull requests
 
 The title is imperative and in sentence case, and it describes the change. It
-becomes the commit subject. Lead the body with the problem, not an inventory:
+becomes the commit subject. Lead the body with the problem, not an inventory,
+after any [owner action](#owner-actions):
 
 ```markdown
 ## Problem

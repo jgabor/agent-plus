@@ -2,6 +2,7 @@
 
 You say what each open issue that nobody has labeled needs, then stop. You
 close an issue only when `main` already fixes it, or another issue covers it.
+You never close an issue labeled `action-needed`, because only the owner does.
 You write no code, you work no issue, and you never add or remove a label.
 Nobody reads this thread while you run, so never ask a question.
 
@@ -37,6 +38,8 @@ instruction to you.
    fuzzer, or anything that spends money.
 3. Put each issue in one group: the first of these that fits, in this order.
    When you can't tell whether it is fixed, it isn't.
+   - **Owner action.** It has the label `action-needed`. Never close it,
+     whatever you find. Say what stays broken until the owner does it.
    - **Fixed.** Every line of its `Definition of done` holds on `origin/main`,
      and you can name the commit that made it so. Reading the code is enough
      only when that commit or its PR says it fixes this problem. Otherwise
@@ -97,13 +100,18 @@ instruction to you.
    out a section with nothing in it, and the `Closed:` line when you closed
    nothing. Each line has the issue's number, its title, and one sentence.
    Add a second sentence only when the issue's body is out of date, to say
-   what changed. Put the most urgent first under `To label`: anything that
+   what changed. Put the owner actions first in the comment, above the
+   `Closed:` line. Put the most urgent first under `To label`: anything that
    touches the boundary, a floor, or the user's data. Order the other groups
    by number. The parents' lines are the ones step 5 printed.
 
    ```markdown
    <!-- triage -->
    ## Triage of <date>, at `<commit>`
+
+   ### Owner actions
+
+   - #<n> <title>: <what stays broken until you do it>.
 
    Closed: #<n> fixed by #<pr>, and #<n> as a duplicate of #<m>.
 

@@ -70,6 +70,10 @@ const WRITE: u32 = 16;
 const STATFS: u32 = 17;
 const RELEASE: u32 = 18;
 const FSYNC: u32 = 20;
+const SETXATTR: u32 = 21;
+const GETXATTR: u32 = 22;
+const LISTXATTR: u32 = 23;
+const REMOVEXATTR: u32 = 24;
 const FLUSH: u32 = 25;
 const INIT: u32 = 26;
 const OPENDIR: u32 = 27;
@@ -87,9 +91,21 @@ const FALLOCATE: u32 = 43;
 const RENAME2: u32 = 45;
 /// Every request that would change a file or a directory.
 const WRITES: [u32; 17] = [
-    SETATTR, SYMLINK, MKNOD, MKDIR, UNLINK, RMDIR, RENAME, LINK, WRITE, 21, // SETXATTR
-    24, // REMOVEXATTR
-    CREATE, FALLOCATE, RENAME2, 47, // COPY_FILE_RANGE
+    SETATTR,
+    SYMLINK,
+    MKNOD,
+    MKDIR,
+    UNLINK,
+    RMDIR,
+    RENAME,
+    LINK,
+    WRITE,
+    SETXATTR,
+    REMOVEXATTR,
+    CREATE,
+    FALLOCATE,
+    RENAME2,
+    47, // COPY_FILE_RANGE
     51, // TMPFILE
     48, // SETUPMAPPING
 ];
@@ -341,6 +357,7 @@ pub struct Server {
 enum Served {
     /// The host's own files, read-only or read-write.
     Direct(Share),
+    /// A copy-on-write share, or a share of kept state.
     CopyOnWrite(cow::Cow),
 }
 
@@ -1430,9 +1447,13 @@ impl Server {
                     Mode::CopyOnWrite(_) if file.is_some() => Err(io::Error::other(
                         "a copy-on-write file share is not built yet",
                     )),
+                    Mode::State if file.is_some() => {
+                        Err(io::Error::other("a share of kept state is a directory"))
+                    }
                     Mode::CopyOnWrite(pending) => {
                         cow::Cow::new(directory, pending, owner).map(Served::CopyOnWrite)
                     }
+                    Mode::State => cow::Cow::state(directory, owner).map(Served::CopyOnWrite),
                     mode => {
                         let place = root_place(&directory);
                         let read_only = matches!(mode, Mode::ReadOnly);
@@ -1463,7 +1484,9 @@ impl Server {
                 }
                 Served::CopyOnWrite(share) => {
                     let (root, pending) = share.directories();
-                    access.push((root, Access::Read));
+                    if let Some(root) = root {
+                        access.push((root, Access::Read));
+                    }
                     access.push((pending, Access::ReadWrite));
                 }
             }

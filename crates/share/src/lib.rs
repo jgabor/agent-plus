@@ -10,12 +10,14 @@
 //! write to an `ro` share, and in an `rw` share refuses the writes
 //! [`server`] protects against. It writes a copy-on-write share's changes
 //! beneath that share's pending directory, and reads the share's root
-//! alone. Landlock doesn't cover a file's mode or times. A server with an
-//! `rw` share changes those, so it holds no other share. A server with none
-//! can't change them, and a process of its own, in [`times`], sets the
-//! times of a copy-on-write share's copies. A server of `rw` shares runs in
-//! a user namespace of its own, in [`namespace`], so it can change the mode
-//! of a file it can't read. The frames on the socket are the ones
+//! alone. A share of kept state is a pending directory with no root, which
+//! the next run's server shows again. Landlock doesn't cover a file's mode
+//! or times. A server with an `rw` share changes those, so it holds no
+//! other share. A server with none can't change them, and a process of its
+//! own, in [`times`], sets the times of the copies in a copy-on-write share
+//! or a share of kept state. A server of `rw` shares runs in a user
+//! namespace of its own, in [`namespace`], so it can change the mode of a
+//! file it can't read. The frames on the socket are the ones
 //! [`vmm::fs`] describes. A server with no `rw` share can hold one more
 //! file until it exits, such as a run's locked record, so the run stays
 //! active until it has answered its last request. Its filter refuses to
@@ -31,6 +33,7 @@ mod landlock;
 mod macos;
 #[cfg(target_os = "linux")]
 mod namespace;
+pub mod records;
 mod root;
 #[cfg(target_os = "linux")]
 mod server;
@@ -63,6 +66,7 @@ pub const PROGRAM: &str = "ap-share-server";
 const READ_ONLY: &str = "ro";
 const READ_WRITE: &str = "rw";
 const COPY_ON_WRITE: &str = "cow";
+const STATE: &str = "state";
 /// Before a share's mode, names the one file a file share shows.
 const FILE: &str = "file";
 /// Before the shares, names a descriptor the server holds until it exits.
@@ -88,7 +92,8 @@ pub struct Servers {
 
 /// Starts `program`, a build of `ap`, as the share servers for `roots`, in
 /// share order. Each root's directory is one the caller opened, and so is
-/// a copy-on-write share's pending directory, which must be empty. A server
+/// a copy-on-write share's pending directory, which must be empty. A share
+/// of kept state's directory holds what its last server kept. A server
 /// serves what the caller checked, and never opens a path itself. Each one
 /// starts without the environment variables named in `hidden`. The server
 /// of shares that aren't `rw`, the only one that keeps pending changes,
@@ -162,6 +167,7 @@ fn start_one(
             Mode::ReadOnly => command.arg(READ_ONLY).arg(next()),
             Mode::ReadWrite => command.arg(READ_WRITE).arg(next()),
             Mode::CopyOnWrite(_) => command.arg(COPY_ON_WRITE).arg(next()).arg(next()),
+            Mode::State => command.arg(STATE).arg(next()),
         };
     }
     command.stdin(OwnedFd::from(theirs)).stdout(Stdio::null());
@@ -231,8 +237,9 @@ pub fn inheritable(command: &mut Command, fd: BorrowedFd) -> io::Result<OwnedFd>
 /// The share server's process: `args` are a mode and the number of an
 /// inherited descriptor of a root directory for each share, and for a
 /// copy-on-write share the number of its pending directory's after it. A
-/// file share has `file` and the file's name before its mode. The shares
-/// are all `rw`, or none of them are. Before them, `keep` and the number of
+/// share of kept state is `state` and its directory's number. A file share
+/// has `file` and the file's name before its mode. The shares are all
+/// `rw`, or none of them are. Before them, `keep` and the number of
 /// another inherited descriptor name one it holds until it exits, so that a
 /// lock on that file outlives its last answer. A server of `rw` shares
 /// refuses it. It serves requests from its standard input, a socket, until
@@ -298,7 +305,7 @@ fn open_kept(arg: &OsString) -> io::Result<RawFd> {
 fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
     let usage = || {
         io::Error::other(
-            "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
+            "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor | state descriptor)...",
         )
     };
     let mut taken: Vec<i32> = kept.into_iter().collect();
@@ -341,6 +348,7 @@ fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
             Some(READ_ONLY) => Mode::ReadOnly,
             Some(READ_WRITE) => Mode::ReadWrite,
             Some(COPY_ON_WRITE) => Mode::CopyOnWrite(take(args.next())?),
+            Some(STATE) => Mode::State,
             _ => return Err(usage()),
         };
         roots.push(Root {

@@ -4,12 +4,15 @@ use std::ffi::CString;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 /// What a share allows. A copy-on-write share keeps the agent's changes
-/// in a directory of its own, `P`.
+/// in a directory of its own, `P`. A share of kept state shows only what
+/// the guest wrote to it, kept in its directory as a copy-on-write share
+/// keeps its changes, so the next run's server shows it again.
 #[derive(Debug)]
 pub enum Mode<P = OwnedFd> {
     ReadOnly,
     ReadWrite,
     CopyOnWrite(P),
+    State,
 }
 
 /// A share's root, as the server takes it: a directory, and what the share
@@ -52,6 +55,7 @@ impl<F: AsFd> Root<F> {
                 Mode::ReadOnly => Mode::ReadOnly,
                 Mode::ReadWrite => Mode::ReadWrite,
                 Mode::CopyOnWrite(pending) => Mode::CopyOnWrite(pending.as_fd()),
+                Mode::State => Mode::State,
             },
         }
     }

@@ -43,6 +43,24 @@
 //! record, and a copy's times are set by the times process, which reaches
 //! the tree alone.
 //!
+//! A share of kept state is one of these with no root, so it shows only
+//! what the guest wrote, and its directory is its pending directory. It
+//! writes no `BASE`, and its next server reads its records back, so the
+//! next run sees the same files. A last line with no newline is one a
+//! server stopped writing, so it goes, and so does whatever the tree holds
+//! with no record. It takes what overlayfs needs of its
+//! upper layer, which a share of your files refuses: a chown to the owner a
+//! file has, `RENAME_WHITEOUT`, which leaves a whiteout, a `CHAR` numbered
+//! 0 0, `RENAME_EXCHANGE`, and extended attributes, each one a record:
+//!
+//! ```text
+//! XATTR "upper/build" "trusted.overlay.opaque" "y"
+//! XATTR "upper/build" "trusted.overlay.opaque" none
+//! ```
+//!
+//! The first sets the attribute, and the second removes it. A `DELETE`
+//! removes the attributes of everything it removes.
+//!
 //! A guest's node is a path. Each request resolves it again, one layer at a
 //! time, beneath the root or the tree, following no symlink. A directory
 //! that has your files beneath it can't be renamed, as in overlayfs, so a
@@ -51,6 +69,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
+use crate::records::{Words, mode, number, quote, valid_path};
 use crate::times::Times;
 
 const TREE: &CStr = c"tree";
@@ -62,12 +81,30 @@ const HEAD: &CStr = c"head";
 const FILE_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
 const PERMISSIONS: u32 = 0o7777;
+/// The longest name and value of an extended attribute, from
+/// `<linux/limits.h>`.
+const XATTR_NAME_MAX: usize = 255;
+const XATTR_SIZE_MAX: usize = 1 << 16;
+/// The longest list of a file's attributes' names, each ended with a NUL.
+const XATTR_LIST_MAX: usize = 1 << 16;
+/// `setxattr`'s flags: the attribute must be new, or must be there.
+const XATTR_CREATE: u32 = 1;
+const XATTR_REPLACE: u32 = 2;
 /// `FUSE_GETATTR_FH`: the guest asks about the file a handle has open.
 const GETATTR_FH: u32 = 1;
 const PATH_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW;
 const READ_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 /// How a file that holds POSIX locks on the agent's copy opens.
 const LOCK_FLAGS: i32 = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
+/// A path's extended attributes, by name.
+type Xattrs = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// The whiteout that overlayfs makes, a character device numbered 0, 0.
+const WHITEOUT: Entry = Entry::Special {
+    mode: libc::S_IFCHR,
+    rdev: 0,
+};
 
 /// What the agent made of a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,7 +214,8 @@ enum Handle {
 }
 
 pub(super) struct Cow {
-    root: OwnedFd,
+    /// Your files, or none in a share of kept state.
+    root: Option<OwnedFd>,
     owner: Owner,
     pending: OwnedFd,
     /// The copy of your `.git`, if the root held one when the run started.
@@ -190,6 +228,9 @@ pub(super) struct Cow {
     recorded: std::cell::Cell<u64>,
     /// What the agent made of each path it changed.
     entries: BTreeMap<Vec<u8>, Entry>,
+    /// The extended attributes of each path that has any, by name, in a
+    /// share of kept state.
+    xattrs: BTreeMap<Vec<u8>, Xattrs>,
     /// The paths with a `BASE` record.
     based: BTreeSet<Vec<u8>>,
     nodes: BTreeMap<u64, Node>,
@@ -328,29 +369,162 @@ fn beneath(path: &[u8], dir: &[u8]) -> bool {
     }
 }
 
-fn quote(out: &mut Vec<u8>, bytes: &[u8]) {
-    out.push(b' ');
-    out.push(b'"');
-    for chunk in bytes.utf8_chunks() {
-        for c in chunk.valid().chars() {
-            match c {
-                '"' => out.extend(b"\\\""),
-                '\\' => out.extend(b"\\\\"),
-                c if c.is_ascii_control() => out.extend(format!("\\x{:02x}", c as u8).bytes()),
-                c => out.extend(c.encode_utf8(&mut [0; 4]).bytes()),
-            }
-        }
-        for byte in chunk.invalid() {
-            out.extend(format!("\\x{byte:02x}").bytes());
-        }
-    }
-    out.push(b'"');
-}
-
 /// A device as the guest's kernel encodes it, from the host's `dev_t`.
 fn encode(rdev: u64) -> u32 {
-    let (major, minor) = (libc::major(rdev), libc::minor(rdev));
+    device(libc::major(rdev), libc::minor(rdev))
+}
+
+/// A device as the guest's kernel encodes it, from its major and minor.
+fn device(major: u32, minor: u32) -> u32 {
     (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12)
+}
+
+/// The record that sets the extended attribute `name` of `path` to
+/// `value`, or removes it.
+fn xattr_line(path: &[u8], name: &[u8], value: Option<&[u8]>) -> Vec<u8> {
+    let mut out = b"XATTR".to_vec();
+    quote(&mut out, path);
+    quote(&mut out, name);
+    match value {
+        Some(value) => quote(&mut out, value),
+        None => out.extend(b" none"),
+    }
+    out
+}
+
+/// The name of an extended attribute, as the guest sends it.
+fn xattr_name(body: &[u8]) -> Result<&[u8], i32> {
+    let name = CStr::from_bytes_until_nul(body).map_err(|_| libc::EINVAL)?;
+    match name.to_bytes() {
+        [] => Err(libc::EINVAL),
+        name if name.len() > XATTR_NAME_MAX => Err(libc::ERANGE),
+        name => Ok(name),
+    }
+}
+
+/// What a guest that asks for `size` bytes gets of `value`: its length
+/// alone when it asks for none, as `struct fuse_getxattr_out`.
+fn sized(value: Vec<u8>, size: u32) -> Answer {
+    match size {
+        0 => Ok([(value.len() as u32).to_le_bytes(), [0; 4]].concat()),
+        size if value.len() > size as usize => Err(libc::ERANGE),
+        _ => Ok(value),
+    }
+}
+
+/// What a share of kept state holds when its server starts, read from its
+/// records, and how long they are.
+#[derive(Default)]
+struct Kept {
+    entries: BTreeMap<Vec<u8>, Entry>,
+    xattrs: BTreeMap<Vec<u8>, Xattrs>,
+    len: u64,
+}
+
+impl Kept {
+    /// Reads `records` in order. A last line with no newline is one that a
+    /// server stopped writing, so it goes.
+    fn read(records: BorrowedFd) -> io::Result<Self> {
+        let mut text = Vec::new();
+        let mut chunk = vec![0; MAX_READ];
+        loop {
+            match sys::pread(records, &mut chunk, text.len() as u64)? {
+                0 => break,
+                len => text.extend_from_slice(&chunk[..len]),
+            }
+        }
+        let len = text
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |end| end + 1);
+        if len < text.len() {
+            sys::ftruncate(records, len as u64)?;
+        }
+        let mut kept = Kept {
+            len: len as u64,
+            ..Kept::default()
+        };
+        for line in text[..len].split_inclusive(|&byte| byte == b'\n') {
+            let line = &line[..line.len() - 1];
+            kept.read_line(line).ok_or_else(|| {
+                let line = String::from_utf8_lossy(line);
+                io::Error::new(io::ErrorKind::InvalidData, format!("bad record {line:?}"))
+            })?;
+        }
+        Ok(kept)
+    }
+
+    fn read_line(&mut self, line: &[u8]) -> Option<()> {
+        let mut words = Words::new(line);
+        let word = words.bare()?;
+        let path = words.quoted()?;
+        // The share's root is `""`, which the guest can change but not
+        // remove or replace.
+        let root = path.is_empty() && matches!(word, b"DIR" | b"XATTR");
+        if !root && !valid_path(&path) {
+            return None;
+        }
+        let entry = match word {
+            b"FILE" => Entry::File {
+                mode: mode(words.bare()?)?,
+            },
+            b"DIR" => Entry::Dir {
+                mode: mode(words.bare()?)?,
+                opaque: false,
+            },
+            b"SYMLINK" => Entry::Symlink {
+                target: words.quoted()?,
+            },
+            b"FIFO" | b"SOCKET" | b"CHAR" | b"BLOCK" => {
+                let (kind, numbered) = match word {
+                    b"FIFO" => (libc::S_IFIFO, false),
+                    b"SOCKET" => (libc::S_IFSOCK, false),
+                    b"CHAR" => (libc::S_IFCHR, true),
+                    _ => (libc::S_IFBLK, true),
+                };
+                let mode = kind | mode(words.bare()?)?;
+                let mut rdev = 0;
+                if numbered {
+                    let major = u32::try_from(number(words.bare()?)?).ok()?;
+                    let minor = u32::try_from(number(words.bare()?)?).ok()?;
+                    rdev = device(major, minor);
+                }
+                Entry::Special { mode, rdev }
+            }
+            b"DELETE" => {
+                self.entries.retain(|other, _| !beneath(other, &path));
+                self.xattrs
+                    .retain(|other, _| *other != path && !beneath(other, &path));
+                Entry::Deleted
+            }
+            b"XATTR" => {
+                let name = words.quoted()?;
+                let value = match words.bare() {
+                    Some(b"none") => None,
+                    Some(_) => return None,
+                    None => Some(words.quoted()?),
+                };
+                words.end()?;
+                let held = self.xattrs.entry(path.clone()).or_default();
+                match value {
+                    Some(value) => {
+                        held.insert(name, value);
+                    }
+                    None => {
+                        held.remove(&name);
+                    }
+                }
+                if held.is_empty() {
+                    self.xattrs.remove(&path);
+                }
+                return Some(());
+            }
+            _ => return None,
+        };
+        words.end()?;
+        self.entries.insert(path, entry);
+        Some(())
+    }
 }
 
 /// The record that sets `path` to `entry`.
@@ -637,6 +811,31 @@ fn remove_tree(directory: BorrowedFd, name: &CStr) -> io::Result<()> {
     sys::unlinkat(directory, name, libc::AT_REMOVEDIR)
 }
 
+/// Removes what the tree of a share of kept state holds beneath `path` with
+/// no record: what a server that stopped between changing the tree and
+/// recording it left there.
+fn prune(tree: BorrowedFd, path: &[u8], entries: &BTreeMap<Vec<u8>, Entry>) -> io::Result<()> {
+    let dir = sys::open_beneath(tree, &c(path), libc::O_PATH | libc::O_DIRECTORY)?;
+    for (name, _, _) in names(dir.as_fd()).map_err(io::Error::from_raw_os_error)? {
+        let at = join(path, &name);
+        match entries.get(&at) {
+            // A filesystem may not say what kind a name is.
+            Some(Entry::Dir { .. }) => match prune(tree, &at, entries) {
+                Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {}
+                pruned => pruned?,
+            },
+            Some(Entry::Deleted) | None => match sys::unlinkat(dir.as_fd(), &c(&name), 0) {
+                Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
+                    remove_tree(dir.as_fd(), &c(&name))?;
+                }
+                removed => removed?,
+            },
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Copies the directory `from`, at `path` in a git directory, into the
 /// directory `to`, but for what `objects` holds. `linked` is set if
 /// `packed-refs`, `refs`, or anything beneath it is a symlink, or if one of
@@ -758,6 +957,37 @@ impl Cow {
         let flags = libc::O_WRONLY | libc::O_APPEND | libc::O_EXCL;
         let records = sys::create_beneath(pending.as_fd(), RECORDS, flags, FILE_MODE)?;
         let git = capture(root.as_fd(), pending.as_fd())?;
+        let made = Kept::default();
+        Self::serving(Some(root), pending, owner, git, tree, records, made)
+    }
+
+    /// A share of kept state in `directory`, which holds what an earlier
+    /// run's guest wrote, or nothing.
+    pub(super) fn state(directory: OwnedFd, owner: Owner) -> io::Result<Self> {
+        if !is(sys::fstat(directory.as_fd())?.st_mode, libc::S_IFDIR) {
+            return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+        }
+        match sys::mkdirat(directory.as_fd(), TREE, DIR_MODE) {
+            Err(error) if error.raw_os_error() != Some(libc::EEXIST) => return Err(error),
+            _ => {}
+        }
+        let tree = sys::open_beneath(directory.as_fd(), TREE, libc::O_PATH | libc::O_DIRECTORY)?;
+        let flags = libc::O_RDWR | libc::O_APPEND;
+        let records = sys::create_beneath(directory.as_fd(), RECORDS, flags, FILE_MODE)?;
+        let kept = Kept::read(records.as_fd())?;
+        prune(tree.as_fd(), b"", &kept.entries)?;
+        Self::serving(None, directory, owner, None, tree, records, kept)
+    }
+
+    fn serving(
+        root: Option<OwnedFd>,
+        pending: OwnedFd,
+        owner: Owner,
+        git: Option<OwnedFd>,
+        tree: OwnedFd,
+        records: OwnedFd,
+        kept: Kept,
+    ) -> io::Result<Self> {
         let times = Times::start(tree.as_fd())?;
         Ok(Self {
             root,
@@ -767,8 +997,9 @@ impl Cow {
             tree,
             times,
             records,
-            recorded: std::cell::Cell::new(0),
-            entries: BTreeMap::new(),
+            recorded: std::cell::Cell::new(kept.len),
+            entries: kept.entries,
+            xattrs: kept.xattrs,
             based: BTreeSet::new(),
             nodes: BTreeMap::from([(
                 ROOT,
@@ -786,9 +1017,15 @@ impl Cow {
         })
     }
 
-    /// The share's root, and its pending directory.
-    pub(super) fn directories(&self) -> (BorrowedFd<'_>, BorrowedFd<'_>) {
-        (self.root.as_fd(), self.pending.as_fd())
+    /// The share's root, if it has one, and its pending directory.
+    pub(super) fn directories(&self) -> (Option<BorrowedFd<'_>>, BorrowedFd<'_>) {
+        (self.root.as_ref().map(AsFd::as_fd), self.pending.as_fd())
+    }
+
+    /// Whether this is a share of kept state, which shows none of your
+    /// files.
+    fn kept(&self) -> bool {
+        self.root.is_none()
     }
 
     /// The socket of the process that sets the times of the copies.
@@ -797,13 +1034,14 @@ impl Cow {
     }
 
     fn open_lower(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
-        let (dir, path) = self.lower(path);
+        let (dir, path) = self.lower(path).ok_or(libc::ENOENT)?;
         sys::open_beneath(dir, &c(path), flags).map_err(errno)
     }
 
     /// Where your file at `path` is, as the guest sees it: the copy of your
     /// `.git` for what it holds, and the root for everything else.
-    fn lower<'a>(&self, path: &'a [u8]) -> (BorrowedFd<'_>, &'a [u8]) {
+    fn lower<'a>(&self, path: &'a [u8]) -> Option<(BorrowedFd<'_>, &'a [u8])> {
+        let root = self.root.as_ref()?;
         if let Some(git) = &self.git {
             let rest = match path {
                 b".git" => Some(&b""[..]),
@@ -813,10 +1051,10 @@ impl Cow {
                 && rest != b"objects"
                 && !rest.starts_with(b"objects/")
             {
-                return (git.as_fd(), rest);
+                return Some((git.as_fd(), rest));
             }
         }
-        (self.root.as_fd(), path)
+        Some((root.as_fd(), path))
     }
 
     fn open_upper(&self, path: &[u8], flags: i32) -> Result<OwnedFd, i32> {
@@ -912,10 +1150,37 @@ impl Cow {
         Err(written.map_or_else(errno, |_| libc::EIO))
     }
 
-    /// Records that `path` is now `entry`.
+    /// Records that `path` is now `entry`. A deleted path's extended
+    /// attributes go with it, and those of everything beneath it.
     fn set(&mut self, path: &[u8], entry: Entry) -> Result<(), i32> {
         self.record(line(path, &entry))?;
+        if entry == Entry::Deleted {
+            self.take_xattrs(path);
+        }
         self.entries.insert(path.to_vec(), entry);
+        Ok(())
+    }
+
+    /// Takes the extended attributes of `path` and of everything beneath
+    /// it away, and returns them by what follows `path` in each path.
+    fn take_xattrs(&mut self, path: &[u8]) -> Vec<(Vec<u8>, Xattrs)> {
+        let found: Vec<_> = (self.xattrs.keys())
+            .filter(|key| *key == path || beneath(key, path))
+            .cloned()
+            .collect();
+        let taken = found.into_iter().filter_map(|key| {
+            let held = self.xattrs.remove(&key)?;
+            Some((key[path.len()..].to_vec(), held))
+        });
+        taken.collect()
+    }
+
+    /// Records each of `held`, the extended attributes of `path`.
+    fn set_xattrs(&mut self, path: &[u8], held: Xattrs) -> Result<(), i32> {
+        for (name, value) in &held {
+            self.record(xattr_line(path, name, Some(value)))?;
+        }
+        self.xattrs.insert(path.to_vec(), held);
         Ok(())
     }
 
@@ -934,7 +1199,7 @@ impl Cow {
     /// Records your file at `path` as it is before the agent's first change
     /// there. `stat` is your file's, if the caller has it.
     fn base(&mut self, path: &[u8], stat: Option<&libc::stat>) -> Result<(), i32> {
-        if self.based.contains(path) {
+        if self.kept() || self.based.contains(path) {
             return Ok(());
         }
         let found;
@@ -1534,12 +1799,25 @@ impl Cow {
             true => (u32_at(body, 8).ok_or(libc::EINVAL)?, body.get(16..)),
             false => (0, body.get(8..)),
         };
-        if flags & !libc::RENAME_NOREPLACE != 0 {
+        // A share of kept state takes the flags overlayfs needs of its
+        // upper layer too.
+        let allowed = match self.kept() {
+            true => libc::RENAME_NOREPLACE | libc::RENAME_EXCHANGE | libc::RENAME_WHITEOUT,
+            false => libc::RENAME_NOREPLACE,
+        };
+        if flags & !allowed != 0 {
             return Err(libc::EINVAL);
         }
         let (old, new) = two_names(names.ok_or(libc::EINVAL)?)?;
         let from = join(&self.directory(parent)?, old.as_bytes());
         let into = join(&self.directory(to)?, new.as_bytes());
+        if flags & libc::RENAME_EXCHANGE != 0 {
+            return match flags {
+                libc::RENAME_EXCHANGE => self.exchange(&from, &into),
+                _ => Err(libc::EINVAL),
+            };
+        }
+        let whiteout = flags & libc::RENAME_WHITEOUT != 0;
         let source = self.view(&from)?;
         let source_dir = source.is_dir()?;
         let target = match self.view(&into) {
@@ -1591,8 +1869,10 @@ impl Cow {
         )
         .map_err(errno)?;
         let moved = self.take_beneath(&from);
+        let xattrs = self.take_xattrs(&from);
         let replaced = target.is_some() || self.entries.keys().any(|key| beneath(key, &into));
         self.take_beneath(&into);
+        self.take_xattrs(&into);
         if replaced {
             // Read in order, the records drop what was there first.
             self.record(line(&into, &Entry::Deleted))?;
@@ -1607,9 +1887,172 @@ impl Cow {
             self.base(&path, None)?;
             self.set(&path, entry)?;
         }
+        for (rest, held) in xattrs {
+            self.set_xattrs(&[&into[..], &rest].concat(), held)?;
+        }
         self.set(&from, Entry::Deleted)?;
+        if whiteout {
+            self.create_upper(&from, libc::O_WRONLY)?;
+            self.keep(&from, WHITEOUT)?;
+        }
         self.move_nodes(&into, None);
         self.move_nodes(&from, Some(&into));
+        Ok(Vec::new())
+    }
+
+    /// `RENAME_EXCHANGE`, in a share of kept state, where everything the
+    /// guest sees is in the tree, with an entry: `from` and `into` trade
+    /// places, with everything beneath them.
+    fn exchange(&mut self, from: &[u8], into: &[u8]) -> Answer {
+        self.view(from)?;
+        self.view(into)?;
+        if from == into {
+            return Ok(Vec::new());
+        }
+        if beneath(into, from) || beneath(from, into) {
+            return Err(libc::EINVAL);
+        }
+        if !self.entries.contains_key(from) || !self.entries.contains_key(into) {
+            return Err(libc::EIO);
+        }
+        let (from_dir, from_name) = split(from);
+        let (into_dir, into_name) = split(into);
+        let flags = libc::O_PATH | libc::O_DIRECTORY;
+        sys::renameat2(
+            self.open_upper(from_dir, flags)?.as_fd(),
+            &c(from_name),
+            self.open_upper(into_dir, flags)?.as_fd(),
+            &c(into_name),
+            libc::RENAME_EXCHANGE,
+        )
+        .map_err(errno)?;
+        let mut taken = Vec::new();
+        for path in [from, into] {
+            let mut entries = vec![(Vec::new(), self.entries.remove(path).ok_or(libc::EIO)?)];
+            entries.extend(self.take_beneath(path));
+            taken.push((entries, self.take_xattrs(path)));
+        }
+        // Read in order, the records drop what was at both places first.
+        self.record(line(from, &Entry::Deleted))?;
+        self.record(line(into, &Entry::Deleted))?;
+        for ((entries, xattrs), to) in taken.into_iter().zip([into, from]) {
+            for (rest, entry) in entries {
+                self.set(&[to, &rest].concat(), entry)?;
+            }
+            for (rest, held) in xattrs {
+                self.set_xattrs(&[to, &rest].concat(), held)?;
+            }
+        }
+        let paths: Vec<_> = (self.paths.keys())
+            .filter(|key| [from, into].iter().any(|at| *key == at || beneath(key, at)))
+            .cloned()
+            .collect();
+        let mut moved = Vec::new();
+        for key in paths {
+            let Some(node) = self.paths.remove(&key) else {
+                continue;
+            };
+            let (at, to) = match key == from || beneath(&key, from) {
+                true => (from, into),
+                false => (into, from),
+            };
+            moved.push(([to, &key[at.len()..]].concat(), node));
+        }
+        for (path, node) in moved {
+            if let Some(found) = self.nodes.get_mut(&node) {
+                found.path = Some(path.clone());
+            }
+            self.paths.insert(path, node);
+        }
+        Ok(Vec::new())
+    }
+
+    /// The node `node`'s path, which must show something, in a share of
+    /// kept state, whose extended attributes the guest reaches.
+    fn xattr_path(&self, node: u64) -> Result<Vec<u8>, i32> {
+        if !self.kept() {
+            return Err(libc::ENOSYS);
+        }
+        let path = self.path(node)?;
+        self.view(&path)?;
+        Ok(path)
+    }
+
+    /// `struct fuse_setxattr_in`, then the name and the value.
+    fn setxattr(&mut self, node: u64, body: &[u8]) -> Answer {
+        let path = self.xattr_path(node)?;
+        let size = u32_at(body, 0).ok_or(libc::EINVAL)? as usize;
+        let flags = u32_at(body, 4).ok_or(libc::EINVAL)?;
+        let name = xattr_name(body.get(8..).ok_or(libc::EINVAL)?)?.to_vec();
+        let value = body.get(8 + name.len() + 1..).unwrap_or_default();
+        let value = value.get(..size).ok_or(libc::EINVAL)?;
+        if size > XATTR_SIZE_MAX {
+            return Err(libc::E2BIG);
+        }
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(libc::EINVAL);
+        }
+        let names = self.xattrs.get(&path).into_iter().flat_map(BTreeMap::keys);
+        let listed: usize = names
+            .filter(|held| **held != name)
+            .map(|held| held.len() + 1)
+            .sum();
+        if listed + name.len() + 1 > XATTR_LIST_MAX {
+            return Err(libc::ENOSPC);
+        }
+        let held = self
+            .xattrs
+            .get(&path)
+            .is_some_and(|held| held.contains_key(&name));
+        if flags & XATTR_CREATE != 0 && held {
+            return Err(libc::EEXIST);
+        }
+        if flags & XATTR_REPLACE != 0 && !held {
+            return Err(libc::ENODATA);
+        }
+        self.record(xattr_line(&path, &name, Some(value)))?;
+        self.xattrs
+            .entry(path)
+            .or_default()
+            .insert(name, value.to_vec());
+        Ok(Vec::new())
+    }
+
+    /// `struct fuse_getxattr_in`, then the name.
+    fn getxattr(&self, node: u64, body: &[u8]) -> Answer {
+        let path = self.xattr_path(node)?;
+        let size = u32_at(body, 0).ok_or(libc::EINVAL)?;
+        let name = xattr_name(body.get(8..).ok_or(libc::EINVAL)?)?;
+        let value = self.xattrs.get(&path).and_then(|held| held.get(name));
+        sized(value.ok_or(libc::ENODATA)?.clone(), size)
+    }
+
+    /// `struct fuse_getxattr_in`: each name, ended with a NUL.
+    fn listxattr(&self, node: u64, body: &[u8]) -> Answer {
+        let path = self.xattr_path(node)?;
+        let size = u32_at(body, 0).ok_or(libc::EINVAL)?;
+        let names = self.xattrs.get(&path).into_iter().flat_map(BTreeMap::keys);
+        sized(
+            names.flat_map(|name| [&name[..], b"\0"].concat()).collect(),
+            size,
+        )
+    }
+
+    /// The name.
+    fn removexattr(&mut self, node: u64, body: &[u8]) -> Answer {
+        let path = self.xattr_path(node)?;
+        let name = xattr_name(body)?;
+        let held = self.xattrs.get_mut(&path).ok_or(libc::ENODATA)?;
+        if !held.contains_key(name) {
+            return Err(libc::ENODATA);
+        }
+        self.record(xattr_line(&path, name, None))?;
+        if let Some(held) = self.xattrs.get_mut(&path) {
+            held.remove(name);
+            if held.is_empty() {
+                self.xattrs.remove(&path);
+            }
+        }
         Ok(Vec::new())
     }
 
@@ -1643,7 +2086,7 @@ impl Cow {
         let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
         let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
         let valid = word(0)?;
-        if valid & (FATTR_UID | FATTR_GID) != 0 {
+        if valid & (FATTR_UID | FATTR_GID) != 0 && !self.keeps_owner(node, valid, body)? {
             return Err(libc::EPERM);
         }
         let path = match self.path(node) {
@@ -1692,6 +2135,20 @@ impl Cow {
             &self.attributes(node, &self.view(&path)?)?,
             self.owner,
         ))
+    }
+
+    /// Whether `SETATTR`'s owner, in `body`, is the one the guest sees
+    /// `node` have. A share of kept state lets the guest give a file the
+    /// owner it has, which changes nothing, as overlayfs does with each file
+    /// it copies up.
+    fn keeps_owner(&self, node: u64, valid: u32, body: &[u8]) -> Result<bool, i32> {
+        if !self.kept() {
+            return Ok(false);
+        }
+        let (uid, gid) = self.owner.guest(&self.view(&self.path(node)?)?.stat()?);
+        let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
+        Ok((valid & FATTR_UID == 0 || word(76)? == uid)
+            && (valid & FATTR_GID == 0 || word(80)? == gid))
     }
 
     /// `SETATTR` for a node that is gone, through the agent's copy that a
@@ -1850,7 +2307,7 @@ impl Cow {
     }
 
     fn statfs(&self) -> Answer {
-        statfs(self.root.as_fd())
+        statfs(self.root.as_ref().unwrap_or(&self.pending).as_fd())
     }
 }
 
@@ -1890,6 +2347,10 @@ pub(super) fn dispatch(share: &mut Cow, request: &Request) -> Option<Answer> {
         GETLK => share.getlk(body),
         SETLK => share.setlk(body, false),
         SETLKW => share.setlk(body, true),
+        SETXATTR => share.setxattr(node, body),
+        GETXATTR => share.getxattr(node, body),
+        LISTXATTR => share.listxattr(node, body),
+        REMOVEXATTR => share.removexattr(node, body),
         DESTROY => Ok(Vec::new()),
         FORGET => {
             share.forget(node, u64_at(body, 0).unwrap_or(0));

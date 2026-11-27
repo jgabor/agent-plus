@@ -18,6 +18,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use share::records::{Words, mode, number, valid_path};
+
 use crate::gitignore::Gitignore;
 use crate::unified;
 
@@ -116,7 +118,7 @@ impl Records {
     }
 
     fn read_line(&mut self, line: &[u8]) -> Option<()> {
-        let mut words = Words { rest: line };
+        let mut words = Words::new(line);
         let word = words.bare()?;
         let path = words.quoted()?;
         // The share's root is `""`, which the agent can change but not
@@ -201,83 +203,12 @@ impl Records {
     }
 }
 
-/// The words of a record: bare ones, split at a space, and quoted ones.
-struct Words<'a> {
-    rest: &'a [u8],
-}
-
-impl<'a> Words<'a> {
-    fn bare(&mut self) -> Option<&'a [u8]> {
-        if self.rest.is_empty() || self.rest.first() == Some(&b'"') {
-            return None;
-        }
-        let end = (self.rest.iter())
-            .position(|&byte| byte == b' ')
-            .unwrap_or(self.rest.len());
-        let word = &self.rest[..end];
-        self.rest = self.rest.get(end + 1..).unwrap_or_default();
-        (!word.is_empty()).then_some(word)
-    }
-
-    /// A quoted word, with `\"`, `\\`, and `\xNN` read back.
-    fn quoted(&mut self) -> Option<Vec<u8>> {
-        let mut bytes = self.rest.strip_prefix(b"\"")?.iter();
-        let mut word = Vec::new();
-        loop {
-            match *bytes.next()? {
-                b'"' => break,
-                b'\\' => match *bytes.next()? {
-                    b'x' => {
-                        let high = (*bytes.next()? as char).to_digit(16)?;
-                        let low = (*bytes.next()? as char).to_digit(16)?;
-                        word.push((high * 16 + low) as u8);
-                    }
-                    byte @ (b'"' | b'\\') => word.push(byte),
-                    _ => return None,
-                },
-                byte => word.push(byte),
-            }
-        }
-        let rest = bytes.as_slice();
-        self.rest = match rest.first() {
-            None => rest,
-            Some(b' ') => &rest[1..],
-            Some(_) => return None,
-        };
-        Some(word)
-    }
-
-    fn end(&self) -> Option<()> {
-        self.rest.is_empty().then_some(())
-    }
-}
-
-fn number(word: &[u8]) -> Option<u64> {
-    std::str::from_utf8(word).ok()?.parse().ok()
-}
-
-fn mode(word: &[u8]) -> Option<u32> {
-    u32::from_str_radix(std::str::from_utf8(word).ok()?, 8)
-        .ok()
-        .filter(|mode| mode & !0o7777 == 0)
-}
-
 /// A time as `<seconds>.<nanoseconds>`, in nanoseconds.
 fn time(word: &[u8]) -> Option<i128> {
     let (seconds, nanoseconds) = std::str::from_utf8(word).ok()?.split_once('.')?;
     let seconds: i64 = seconds.parse().ok()?;
     let nanoseconds: u32 = nanoseconds.parse().ok().filter(|&n| n < 1_000_000_000)?;
     Some(i128::from(seconds) * 1_000_000_000 + i128::from(nanoseconds))
-}
-
-/// Whether `path` names something beneath a share's root: names joined by
-/// `/`, none of them empty, `.`, or `..`.
-fn valid_path(path: &[u8]) -> bool {
-    !path.is_empty()
-        && !path.contains(&0)
-        && path
-            .split(|&byte| byte == b'/')
-            .all(|name| !matches!(name, b"" | b"." | b".."))
 }
 
 /// Each directory above `path`, from the root's first down.

@@ -14,6 +14,7 @@ vmm = { path = "../vmm" }
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
 erofs = { path = "../erofs" }
+libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["std"] }
 rustls-graviola = "0.4"
 share = { path = "../share" }

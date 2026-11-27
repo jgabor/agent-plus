@@ -10,22 +10,34 @@ const GOOD: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 
 /// A workspace with one crate, whose `lib.rs` holds `source`.
 fn workspace(name: &str, source: &str) -> PathBuf {
+    packages(name, &[("demo", source)])
+}
+
+/// A workspace of crates, each a name and the `lib.rs` it holds.
+fn packages(name: &str, crates: &[(&str, &str)]) -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     if root.exists() {
         fs::remove_dir_all(&root).unwrap();
     }
-    fs::create_dir_all(root.join("demo/src")).unwrap();
+    fs::create_dir_all(&root).unwrap();
+    let members: Vec<String> = crates.iter().map(|(name, _)| format!("{name:?}")).collect();
     fs::write(
         root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"demo\"]\nresolver = \"3\"\n",
+        format!(
+            "[workspace]\nmembers = [{}]\nresolver = \"3\"\n",
+            members.join(", ")
+        ),
     )
     .unwrap();
-    fs::write(
-        root.join("demo/Cargo.toml"),
-        "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(root.join("demo/src/lib.rs"), source).unwrap();
+    for (name, source) in crates {
+        fs::create_dir_all(root.join(name).join("src")).unwrap();
+        fs::write(
+            root.join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join(name).join("src/lib.rs"), source).unwrap();
+    }
     fs::write(root.join("SPEC.md"), "# A\n").unwrap();
     let output = Command::new("cargo")
         .arg("generate-lockfile")
@@ -110,6 +122,86 @@ fn a_failing_test_fails() {
     let output = xtask(&root, &["gate"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stdout(&output).contains("fail tests"));
+}
+
+/// Meets the other package at the FIFO `name` in the workspace, or fails
+/// after a minute, so that packages run one after another fail and end.
+const MEET: &str = r#"#![cfg(test)]
+
+use std::io::Write;
+
+fn meet(name: &str, write: bool) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(name);
+    let (met, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if write {
+            std::fs::write(&path, "").unwrap();
+        } else {
+            std::fs::read(&path).unwrap();
+        }
+        let _ = met.send(());
+    });
+    let limit = std::time::Duration::from_secs(60);
+    assert!(done.recv_timeout(limit).is_ok(), "the other never came");
+}
+"#;
+
+/// Starts a line on stderr, and ends it only after the other package wrote a
+/// whole line of its own.
+const STARTS: &str = r#"
+#[test]
+fn starts_a_line() {
+    let mut stderr = std::io::stderr();
+    stderr.write_all(b"first half, ").unwrap();
+    meet("half", true);
+    meet("whole", false);
+    stderr.write_all(b"second half\n").unwrap();
+}
+"#;
+
+const BETWEEN: &str = r#"
+#[test]
+fn writes_a_line_between() {
+    meet("half", false);
+    std::io::stderr().write_all(b"a whole line\n").unwrap();
+    meet("whole", true);
+}
+"#;
+
+#[test]
+fn packages_run_side_by_side_and_keep_their_lines_whole() {
+    let starts = format!("{MEET}{STARTS}");
+    let between = format!("{MEET}{BETWEEN}");
+    let root = packages("side-by-side", &[("a", &starts), ("b", &between)]);
+    for fifo in ["half", "whole"] {
+        common::fifo(&root.join(fifo));
+    }
+    let output = xtask(&root, &["gate"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(lines.contains(&"first half, second half"), "{err}");
+    assert!(lines.contains(&"a whole line"), "{err}");
+}
+
+const FAILS: &str = "#[test]\nfn fails() {\n    panic!(\"planted\");\n}\n";
+
+const FINISHES: &str = r#"#[test]
+fn finishes() {
+    let marks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::write(marks.join("finished"), "").unwrap();
+}
+"#;
+
+#[test]
+fn a_failing_package_fails_the_run_and_the_others_finish() {
+    let root = packages("one-fails", &[("a", FAILS), ("b", FINISHES)]);
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout(&output).contains("fail tests"));
+    assert!(root.join("finished").exists(), "{}", stderr(&output));
 }
 
 #[test]

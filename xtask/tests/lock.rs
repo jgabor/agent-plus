@@ -17,6 +17,7 @@ mod common;
 const HOLD_ENV: &str = "XTASK_ACTIVITY_HELD";
 const PLACE_ENV: &str = "XTASK_PLACE_HELD";
 const PLACES_ENV: &str = "XTASK_PLACES";
+const AT_ONCE_ENV: &str = "XTASK_PACKAGES_AT_ONCE";
 /// Long enough for `xtask` to reach the lock. A slow machine can only make a
 /// check that something stays blocked pass, never fail.
 const WAIT: Duration = Duration::from_millis(400);
@@ -63,6 +64,7 @@ fn xtask(root: &Path, args: &[&str]) -> Command {
         .env_remove(HOLD_ENV)
         .env_remove(PLACE_ENV)
         .env_remove(PLACES_ENV)
+        .env_remove(AT_ONCE_ENV)
         .env_remove("CARGO_TARGET_DIR");
     command
 }
@@ -593,31 +595,26 @@ fn take(file: File) -> Option<File> {
     held.recv_timeout(common::LIMIT).ok()
 }
 
-/// A workspace of two packages, whose tests run a package at a time. The tests
-/// of whichever runs first say so at the FIFO `ready`, and then wait at `go`.
-/// The second package's tests write `second`.
-fn two_packages(name: &str) -> PathBuf {
+/// A workspace of packages, each a name and the `lib.rs` it holds.
+fn packages(name: &str, crates: &[(&str, &str)]) -> PathBuf {
     let root = workspace(name);
+    let members: Vec<String> = crates.iter().map(|(name, _)| format!("{name:?}")).collect();
     fs::write(
         root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"3\"\n",
+        format!(
+            "[workspace]\nmembers = [{}]\nresolver = \"3\"\n",
+            members.join(", ")
+        ),
     )
     .unwrap();
-    for fifo in ["ready", "go"] {
-        common::fifo(&root.join(fifo));
-    }
-    let test = format!(
-        "#[test]\nfn takes_turns() {{\n    let marks = std::path::Path::new({:?});\n    if std::fs::File::create_new(marks.join(\"first\")).is_ok() {{\n        std::fs::write(marks.join(\"ready\"), \"\").unwrap();\n        std::fs::read(marks.join(\"go\")).unwrap();\n    }} else {{\n        std::fs::write(marks.join(\"second\"), \"\").unwrap();\n    }}\n}}\n",
-        root.display().to_string()
-    );
-    for package in ["a", "b"] {
+    for (package, source) in crates {
         fs::create_dir_all(root.join(package).join("src")).unwrap();
         fs::write(
             root.join(package).join("Cargo.toml"),
             format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
         )
         .unwrap();
-        fs::write(root.join(package).join("src/lib.rs"), &test).unwrap();
+        fs::write(root.join(package).join("src/lib.rs"), source).unwrap();
     }
     let lockfile = Command::new("cargo")
         .arg("generate-lockfile")
@@ -628,11 +625,30 @@ fn two_packages(name: &str) -> PathBuf {
     root
 }
 
+/// A workspace of two packages, whose tests run a package at a time. The tests
+/// of whichever runs first say so at the FIFO `ready`, and then wait at `go`.
+/// The second package's tests write `second`.
+fn two_packages(name: &str) -> PathBuf {
+    let marks = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("lock")
+        .join(name);
+    let test = format!(
+        "#[test]\nfn takes_turns() {{\n    let marks = std::path::Path::new({:?});\n    if std::fs::File::create_new(marks.join(\"first\")).is_ok() {{\n        std::fs::write(marks.join(\"ready\"), \"\").unwrap();\n        std::fs::read(marks.join(\"go\")).unwrap();\n    }} else {{\n        std::fs::write(marks.join(\"second\"), \"\").unwrap();\n    }}\n}}\n",
+        marks.display().to_string()
+    );
+    let root = packages(name, &[("a", &test), ("b", &test)]);
+    for fifo in ["ready", "go"] {
+        common::fifo(&root.join(fifo));
+    }
+    root
+}
+
 /// `xtask score`, which runs each package's tests, in a host with this many
-/// places.
+/// places, a package at a time.
 fn score(root: &Path, places: usize) -> Child {
     xtask(root, &["score"])
         .env(PLACES_ENV, places.to_string())
+        .env(AT_ONCE_ENV, "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -687,4 +703,76 @@ fn a_test_run_gives_its_place_to_the_merge_slots_holder_between_packages() {
     let mut run = run;
     assert!(run.wait().unwrap().success());
     assert!(root.join("second").exists());
+}
+
+/// Says at the FIFO `ready-<package>` that its tests run, waits at
+/// `go-<package>`, and writes `done-<package>` as it ends. Each wait fails
+/// after a minute, so that a run this test gave up on ends.
+fn waits_to_end(package: &str, marks: &Path) -> String {
+    let meet = r#"
+fn meet(path: std::path::PathBuf, write: bool) {
+    let (met, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if write {
+            std::fs::write(&path, "").unwrap();
+        } else {
+            std::fs::read(&path).unwrap();
+        }
+        let _ = met.send(());
+    });
+    let limit = std::time::Duration::from_secs(60);
+    assert!(done.recv_timeout(limit).is_ok(), "the test never came");
+}
+"#;
+    format!(
+        "{meet}\n#[test]\nfn waits_to_end() {{\n    let marks = std::path::Path::new({:?});\n    meet(marks.join(\"ready-{package}\"), true);\n    meet(marks.join(\"go-{package}\"), false);\n    std::fs::write(marks.join(\"done-{package}\"), \"\").unwrap();\n}}\n",
+        marks.display().to_string()
+    )
+}
+
+/// Two packages run side by side, and a bench comes while they run. The run
+/// starts no third package until the bench has had its turn, and the bench
+/// gets the activity lock only once both have ended.
+#[test]
+fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
+    let name = "bench-side-by-side";
+    let marks = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("lock")
+        .join(name);
+    let (a, b) = (waits_to_end("a", &marks), waits_to_end("b", &marks));
+    let third = format!(
+        "#[test]\nfn third() {{\n    std::fs::write(std::path::Path::new({:?}).join(\"third\"), \"\").unwrap();\n}}\n",
+        marks.display().to_string()
+    );
+    let root = packages(name, &[("a", &a), ("b", &b), ("c", &third)]);
+    for fifo in ["ready-a", "go-a", "ready-b", "go-b"] {
+        common::fifo(&root.join(fifo));
+    }
+    let mut run = xtask(&root, &["score"])
+        .env(PLACES_ENV, "2")
+        .env(AT_ONCE_ENV, "2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    common::meet(&root.join("ready-a"), false);
+    common::meet(&root.join("ready-b"), false);
+    let pending = turnstile(&root);
+    pending.lock().unwrap();
+    common::meet(&root.join("go-a"), true);
+    common::meet(&root.join("go-b"), true);
+    let bench = take(activity(&root)).expect("the run kept the activity lock");
+    for package in ["a", "b"] {
+        assert!(
+            root.join(format!("done-{package}")).exists(),
+            "the bench had the lock while {package} still ran"
+        );
+    }
+    assert!(
+        !root.join("third").exists(),
+        "the next package ran before the bench"
+    );
+    drop((bench, pending));
+    assert!(run.wait().unwrap().success());
+    assert!(root.join("third").exists());
 }

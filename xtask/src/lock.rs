@@ -789,27 +789,60 @@ mod tests {
         fs::remove_dir_all(&path).unwrap();
     }
 
-    /// Returns once something waits to share the lock on `name`, which
-    /// `/proc/locks` lists as a blocked request on the file's inode.
+    /// Takes the lock on `name` once it frees. A process that another test
+    /// starts keeps a copy of each open file until it runs its program, so a
+    /// lock can stay taken for a moment after its holder lets it go.
+    fn take_when_free(path: &Path, name: &str) -> fs::File {
+        let file = open(path, name).map_err(|e| e.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return file,
+                Err(TryLockError::WouldBlock) => {}
+                Err(error) => panic!("{error}"),
+            }
+            assert!(Instant::now() < deadline, "the queue kept {name}");
+            thread::yield_now();
+        }
+    }
+
+    /// Returns once something in this process waits to share the lock on
+    /// `name`.
     fn wait_for_a_sharer(path: &Path, name: &str) {
-        let inode = fs::metadata(path.join(name)).unwrap().ino().to_string();
+        let inode = fs::metadata(path.join(name)).unwrap().ino();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let locks = fs::read_to_string("/proc/locks").unwrap();
-            let waits = locks.lines().any(|line| {
-                let words: Vec<&str> = line.split_whitespace().collect();
-                words.get(1) == Some(&"->")
-                    && words.contains(&"READ")
-                    && words
-                        .iter()
-                        .any(|word| word.rsplit(':').next() == Some(&inode) && word.contains(':'))
-            });
-            if waits {
+            if waits_to_share(&locks, std::process::id(), inode) {
                 return;
             }
             assert!(Instant::now() < deadline, "nothing waited to share {name}");
             thread::yield_now();
         }
+    }
+
+    /// Whether `locks`, read from `/proc/locks`, lists a blocked request by
+    /// process `pid` to share the file with inode `inode`.
+    fn waits_to_share(locks: &str, pid: u32, inode: u64) -> bool {
+        let (pid, inode) = (pid.to_string(), format!(":{inode}"));
+        locks.lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            matches!(words[..], [_, "->", _, _, "READ", by, file, ..]
+                if by == pid && file.ends_with(&inode))
+        })
+    }
+
+    /// Another process that waits to share a file with the same inode number
+    /// isn't this test's. Btrfs lists each of its subvolumes under the one
+    /// device in `/proc/locks`, and subvolumes reuse inode numbers.
+    #[test]
+    fn a_sharer_in_another_process_is_not_this_ones() {
+        let locks = "\
+            3: FLOCK  ADVISORY  WRITE 100 00:25:191426148 0 EOF\n\
+            3: -> FLOCK  ADVISORY  READ 200 00:25:191426148 0 EOF\n";
+        assert!(waits_to_share(locks, 200, 191426148), "its own wait");
+        assert!(!waits_to_share(locks, 100, 191426148), "another's wait");
+        assert!(!waits_to_share(locks, 200, 1426148), "another inode");
     }
 
     /// The test keeps `ahead.lock`, as the merge slot's holder does while it
@@ -827,8 +860,7 @@ mod tests {
 
         drop(held);
         wait_for_a_sharer(&path, "ahead.lock");
-        let next = open(&path, "place-0.lock").map_err(|e| e.0).unwrap();
-        assert!(next.try_lock().is_ok(), "the queue kept the place");
+        let next = take_when_free(&path, "place-0.lock");
         assert!(queued.try_recv().is_err(), "both have the one place");
 
         drop((ahead, next));

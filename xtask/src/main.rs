@@ -44,7 +44,8 @@ commands:
   score [--json]   run the tests, and print the scores
   gaps [--json]    list the failing steps, missed budgets, and unproven promises
   run <command>    run a command under a shared hold of the activity lock
-  journey          run the journey against a release build
+  journey [<step>] run the journey against a release build, or one step
+                   and the steps it needs
   bench            compare the budgets with the base build
   report [--json]  print the nightly report
   nightly          run the slow checks on main, and post the report
@@ -94,7 +95,9 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         ["gaps", "--json"] => gaps::run(true),
         ["gaps", ..] => Err(Problem(format!("`gaps` takes only `--json`\n\n{USAGE}"))),
         ["run", command @ ..] => lock::run(command),
-        ["journey"] => journey::run(),
+        ["journey"] => journey::run(None),
+        ["journey", step] => journey::run(Some(step)),
+        ["journey", ..] => Err(Problem(format!("`journey` takes `[<step>]`\n\n{USAGE}"))),
         ["bench"] => bench::run(),
         ["report"] => report::run(false),
         ["report", "--json"] => report::run(true),
@@ -153,8 +156,8 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "spec" | "score" | "journey" | "bench" | "next" | "nightly"
-            | "refresh" | "remove"),
+            command @ ("gate" | "spec" | "score" | "bench" | "next" | "nightly" | "refresh"
+            | "remove"),
             extra,
             ..,
         ] => Err(Problem(format!(

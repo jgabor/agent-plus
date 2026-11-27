@@ -61,11 +61,24 @@ pub struct Outcome {
 }
 
 /// Prints each step and the count. It exits 0 whenever it could run, because
-/// what fails a merge is a count lower than the base's.
-pub fn run() -> Result<Verdict, Problem> {
+/// what fails a merge is a count lower than the base's. Given a step, it runs
+/// only that step and the steps it needs, prints no count, and fails unless
+/// that step passes.
+pub fn run(named: Option<&str>) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
+    let only = named
+        .map(|step| {
+            step.parse::<i64>()
+                .map_err(|_| Problem(format!("`journey` takes a step id, but got `{step}`")))
+        })
+        .transpose()?;
     let _hold = lock::shared(&root)?;
-    let (passing, steps) = tally(&walk(&root, &Keys::new(), |line| println!("{line}"))?);
+    let outcomes = walk(&root, &Keys::new(), only, |line| println!("{line}"))?;
+    if let Some(id) = only {
+        let passed = outcomes.iter().any(|o| o.id == id && o.state == "pass");
+        return Ok(if passed { Verdict::Pass } else { Verdict::Fail });
+    }
+    let (passing, steps) = tally(&outcomes);
     println!("journey {passing} of {steps}");
     Ok(Verdict::Pass)
 }
@@ -81,7 +94,7 @@ pub fn count(root: &Path) -> Result<(usize, usize), Problem> {
 /// only with its provider's key in `keys`, and only it sees that key, under
 /// the provider's variable in [`PROVIDERS`].
 pub fn outcomes(root: &Path, keys: &Keys) -> Result<Vec<Outcome>, Problem> {
-    walk(root, keys, |line| eprintln!("{line}"))
+    walk(root, keys, None, |line| eprintln!("{line}"))
 }
 
 /// The milestones, in roadmap order.
@@ -106,8 +119,17 @@ pub fn tally(outcomes: &[Outcome]) -> (usize, usize) {
     (passing, outcomes.len())
 }
 
-fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>, Problem> {
-    let steps = read_steps(root)?;
+/// Runs every step, or with `only`, that step and the steps it needs.
+fn walk(
+    root: &Path,
+    keys: &Keys,
+    only: Option<i64>,
+    report: impl Fn(&str),
+) -> Result<Vec<Outcome>, Problem> {
+    let mut steps = read_steps(root)?;
+    if let Some(id) = only {
+        steps = needed(steps, id)?;
+    }
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
     // Checked once, because each step's store shares the tree's copies.
@@ -144,6 +166,26 @@ fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>,
         });
     }
     Ok(outcomes)
+}
+
+/// The step `id`, and each step it needs, directly or through another step,
+/// in journey order.
+fn needed(steps: Vec<Step>, id: i64) -> Result<Vec<Step>, Problem> {
+    if !steps.iter().any(|step| step.id == id) {
+        return Err(Problem(format!("{JOURNEY_FILE} has no step {id}")));
+    }
+    let mut wanted = HashSet::from([id]);
+    // A step needs only earlier steps, so one pass from the last step finds
+    // them all.
+    for step in steps.iter().rev() {
+        if wanted.contains(&step.id) {
+            wanted.extend(&step.needs);
+        }
+    }
+    Ok(steps
+        .into_iter()
+        .filter(|step| wanted.contains(&step.id))
+        .collect())
 }
 
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {

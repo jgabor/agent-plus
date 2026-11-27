@@ -52,8 +52,14 @@ fn workspace_with(name: &str, journey: &str, files: &[(&str, &str)]) -> PathBuf 
 }
 
 fn journey(root: &Path) -> Output {
+    journey_with(root, &[])
+}
+
+/// Runs `journey` with `args` after it.
+fn journey_with(root: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_xtask"))
         .arg("journey")
+        .args(args)
         .current_dir(root)
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("XTASK_ACTIVITY_HELD")
@@ -344,6 +350,113 @@ fn steps_run_in_id_order() {
     assert_journey(&root, "pass step 1\npass step 2\njourney 2 of 2\n");
 }
 
+/// Writes a marker named for the step that runs it, beside the steps'
+/// directories, where only this run of the journey finds it.
+const MARK: &str = "#!/bin/sh\ntouch \"$HOME/../../ran-$(basename \"$(dirname \"$HOME\")\")\"\n";
+
+/// The steps that left a marker in this run, in id order.
+fn marked(root: &Path) -> Vec<String> {
+    let mut ran: Vec<String> = fs::read_dir(root.join("target/journey"))
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            Some(name.strip_prefix("ran-")?.to_string())
+        })
+        .collect();
+    ran.sort();
+    ran
+}
+
+#[test]
+fn a_named_step_runs_with_the_steps_it_needs_and_no_other() {
+    let toml = format!(
+        "{}{}{}{}{}",
+        step(1, "", "harness/journey/mark.sh"),
+        step(2, "1", "harness/journey/mark.sh"),
+        step(3, "", "harness/journey/mark.sh"),
+        step(4, "2", "harness/journey/mark.sh"),
+        step(5, "4", "harness/journey/mark.sh"),
+    );
+    let root = workspace("named", &toml, &[("harness/journey/mark.sh", MARK)]);
+    let output = journey_with(&root, &["4"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "pass step 1\npass step 2\npass step 4\n",
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(marked(&root), ["step-1", "step-2", "step-4"]);
+}
+
+#[test]
+fn a_named_step_that_fails_exits_1() {
+    let toml = format!(
+        "{}{}",
+        step(1, "", "harness/journey/mark.sh"),
+        step(2, "1", "harness/journey/fail.sh"),
+    );
+    let root = workspace(
+        "named-fails",
+        &toml,
+        &[
+            ("harness/journey/mark.sh", MARK),
+            ("harness/journey/fail.sh", FAIL),
+        ],
+    );
+    let output = journey_with(&root, &["2"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "pass step 1\nfail step 2\n");
+    assert_eq!(marked(&root), ["step-1"]);
+}
+
+#[test]
+fn a_named_step_whose_need_fails_is_skipped_and_exits_1() {
+    let toml = format!(
+        "{}{}",
+        step(1, "", "harness/journey/fail.sh"),
+        step(2, "1", "harness/journey/mark.sh"),
+    );
+    let root = workspace(
+        "named-need-fails",
+        &toml,
+        &[
+            ("harness/journey/mark.sh", MARK),
+            ("harness/journey/fail.sh", FAIL),
+        ],
+    );
+    let output = journey_with(&root, &["2"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "fail step 1\nskip step 2\n");
+    assert!(marked(&root).is_empty());
+}
+
+#[test]
+fn a_named_step_that_spends_is_skipped_and_exits_1() {
+    let toml = format!(
+        "{}[[step]]\nid = 2\nname = \"s\"\nmilestone = \"m\"\nneeds = [1]\nscript = \"harness/journey/mark.sh\"\nspend = true\n",
+        step(1, "", "harness/journey/mark.sh"),
+    );
+    let root = workspace("named-spends", &toml, &[("harness/journey/mark.sh", MARK)]);
+    let output = journey_with(&root, &["2"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "pass step 1\nskip step 2\n");
+    assert_eq!(marked(&root), ["step-1"]);
+}
+
+#[test]
+fn a_named_step_that_does_not_exist_is_a_problem_before_anything_builds() {
+    let root = workspace(
+        "named-missing",
+        &step(1, "", "harness/journey/mark.sh"),
+        &[("harness/journey/mark.sh", MARK)],
+    );
+    let output = journey_with(&root, &["7"]);
+    assert_eq!(output.status.code(), Some(2), "{}", stdout(&output));
+    assert!(stderr(&output).contains("step 7"), "{}", stderr(&output));
+    assert!(!root.join("target/x86_64-unknown-linux-musl").exists());
+}
+
 #[test]
 fn a_build_failure_is_a_problem() {
     let root = workspace(
@@ -390,14 +503,16 @@ fn a_repeated_step_id_is_a_problem() {
 }
 
 #[test]
-fn a_journey_needs_no_arguments() {
+fn a_journey_takes_only_a_step_id() {
     let root = workspace("extra", &step(1, "", "harness/journey/one.sh"), &[]);
-    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .args(["journey", "--nope"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    for args in [&["--nope"][..], &["1", "2"]] {
+        let output = journey_with(&root, args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(
+            !root.join("target/x86_64-unknown-linux-musl").exists(),
+            "{args:?}"
+        );
+    }
 }
 
 #[test]

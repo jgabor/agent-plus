@@ -2,7 +2,7 @@
 //! A run of the tests also takes one of a set number of places, so that only
 //! that many run at once.
 
-use crate::{Problem, Verdict, limit, workspace};
+use crate::{Problem, Verdict, limit, refresh, workspace};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -11,9 +11,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, OnceLock};
 use std::thread;
+use std::time::Instant;
 
 /// Set to the lock directory on a command that runs under a hold, so a nested
 /// `xtask` doesn't wait behind a pending bench for a lock its parent has.
@@ -513,12 +515,12 @@ fn couldnt_take(name: &str, error: io::Error) -> Problem {
     Problem(format!("couldn't take {name}: {error}"))
 }
 
+/// Looks at the command before it waits, so a command that can't run ends at
+/// once, however long the wait would be.
 pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
     let (program, arguments) = command
         .split_first()
         .ok_or_else(|| Problem("`run` needs a command to run".to_string()))?;
-    let root = workspace::root()?;
-    let hold = testing(&root)?;
     let path = find(program)
         .ok_or_else(|| Problem(format!("couldn't run `{program}`: no such executable")))?;
     if let Some(interpreter) = missing_interpreter(&path) {
@@ -526,6 +528,7 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
             "couldn't run `{program}`: no such interpreter `{interpreter}`"
         )));
     }
+    let hold = testing_heard(&workspace::root()?)?;
     let mut child = limit::scope(program, arguments, None)?;
     hold.pass_to(&mut child);
     let status = child.status().map_err(|e| {
@@ -537,6 +540,32 @@ pub fn run(command: &[&str]) -> Result<Verdict, Problem> {
     } else {
         Verdict::Fail
     })
+}
+
+/// `testing`, which says on stderr what it waits for as each wait starts, and
+/// how long it waited once it has its hold. So a wait doesn't look like a slow
+/// build.
+fn testing_heard(root: &Path) -> Result<Hold, Problem> {
+    let started = Instant::now();
+    let waited = Arc::new(AtomicBool::new(false));
+    let heard = Arc::clone(&waited);
+    watch(Box::new(move |wait| {
+        let what = match wait {
+            Some(Wait::Place) => "a place, because other runs hold every one",
+            Some(Wait::Activity) => "the activity lock, because a bench holds it or waits for it",
+            None => return,
+        };
+        heard.store(true, Ordering::Relaxed);
+        eprintln!("note: waiting for {what}");
+    }));
+    let hold = testing(root)?;
+    if waited.load(Ordering::Relaxed) {
+        eprintln!(
+            "note: waited {}, and starts the command",
+            refresh::took(started.elapsed())
+        );
+    }
+    Ok(hold)
 }
 
 /// `systemd-run` exits 1 for a program it can't start, which would look like a

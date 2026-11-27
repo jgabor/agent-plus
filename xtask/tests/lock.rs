@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
@@ -710,13 +711,7 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let (line, lines) = std::sync::mpsc::channel();
-    let output = BufReader::new(run.stderr.take().unwrap());
-    thread::spawn(move || {
-        for text in output.lines() {
-            let _ = line.send(text.unwrap());
-        }
-    });
+    let lines = stderr_lines(&mut run);
     common::meet(&root.join("ready-a"), false);
     common::meet(&root.join("ready-b"), false);
     let pending = turnstile(&root);
@@ -747,4 +742,131 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
     drop((bench, pending));
     assert!(run.wait().unwrap().success());
     assert!(root.join("third").exists());
+}
+
+/// A channel that gets each line of `child`'s stderr, and ends as it closes.
+fn stderr_lines(child: &mut Child) -> Receiver<String> {
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (line, lines) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for text in stderr.lines() {
+            let _ = line.send(text.unwrap());
+        }
+    });
+    lines
+}
+
+/// The status and stderr of `xtask run` with `command`, in a host with one
+/// place. A run that waits for the place fails the test instead of hanging it,
+/// and the limit only ends a test that already failed.
+fn exits_without_waiting(root: &Path, command: &[&str]) -> (Option<i32>, String) {
+    let mut run = xtask(root, &[&["run"][..], command].concat())
+        .env(PLACES_ENV, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = stderr_lines(&mut run);
+    let mut stderr = String::new();
+    loop {
+        match lines.recv_timeout(common::LIMIT) {
+            Ok(text) => stderr += &(text + "\n"),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => kept(run, "it waited for a place"),
+        }
+    }
+    (run.wait().unwrap().code(), stderr)
+}
+
+/// A command that can't run is refused before the run waits for a place, so
+/// it ends at once even when every place is held.
+#[test]
+fn a_bad_command_ends_at_once_while_every_place_is_held() {
+    let root = workspace("bad-command-held");
+    let holder = start_holder_in(&root, 1);
+    for (command, says) in [
+        (&[][..], "needs a command"),
+        (&["--help"][..], "--help"),
+        (&["no-such-program-here"][..], "no-such-program-here"),
+    ] {
+        let (code, stderr) = exits_without_waiting(&root, command);
+        assert_eq!(code, Some(2), "{command:?}: {stderr}");
+        assert!(stderr.contains(says), "{command:?}: {stderr}");
+        assert!(!stderr.contains("waiting"), "{command:?}: {stderr}");
+    }
+    holder.finish();
+}
+
+/// `xtask run true`, and a channel that gets each line of its stderr.
+fn waiter_heard(root: &Path, places: usize) -> (Child, Receiver<String>) {
+    let mut child = xtask(root, &["run", "true"])
+        .env(PLACES_ENV, places.to_string())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = stderr_lines(&mut child);
+    (child, lines)
+}
+
+/// Reads stderr up to the line that says the run waits, which the run prints
+/// before it waits, so this needs no fixed wait. Then lets the run go on, and
+/// returns everything the run printed on stderr. A run that never says it
+/// waits is stopped, and the limit only ends a test that already failed.
+fn heard_waiting(mut child: Child, lines: Receiver<String>, release: impl FnOnce()) -> Vec<String> {
+    let mut heard = Vec::new();
+    loop {
+        let Ok(line) = lines.recv_timeout(common::LIMIT) else {
+            kept(child, &format!("it never said it waits: {heard:?}"));
+        };
+        let waits = line.contains("waiting");
+        heard.push(line);
+        if waits {
+            break;
+        }
+    }
+    release();
+    let status = child.wait().unwrap();
+    heard.extend(lines);
+    assert!(status.success(), "{heard:?}");
+    heard
+}
+
+fn count(heard: &[String], text: &str) -> usize {
+    heard.iter().filter(|line| line.contains(text)).count()
+}
+
+#[test]
+fn a_run_that_waits_for_a_place_says_so_once_and_how_long_it_waited() {
+    let root = workspace("says-place");
+    let holder = start_holder_in(&root, 1);
+    let (child, stderr) = waiter_heard(&root, 1);
+    let heard = heard_waiting(child, stderr, || holder.finish());
+    assert_eq!(count(&heard, "waiting for a place"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
+}
+
+#[test]
+fn a_run_that_waits_for_the_activity_lock_says_so_once_and_how_long_it_waited() {
+    let root = workspace("says-activity");
+    let bench = activity(&root);
+    bench.lock().unwrap();
+    let (child, stderr) = waiter_heard(&root, 1);
+    let heard = heard_waiting(child, stderr, || bench.unlock().unwrap());
+    assert_eq!(
+        count(&heard, "waiting for the activity lock"),
+        1,
+        "{heard:?}"
+    );
+    assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
+}
+
+#[test]
+fn a_run_that_does_not_wait_says_nothing_of_waits() {
+    let root = workspace("says-nothing");
+    let output = run(&root, &["true"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("wait"), "{stderr}");
 }

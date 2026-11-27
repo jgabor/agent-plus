@@ -655,7 +655,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` outside `xtask/tests/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
-| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit. On macOS it runs with no memory limit, and says so on stderr |
+| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit. It refuses a command that it can't start before it waits for either. When it has to wait for one, it says so on stderr once as the wait starts, and when it starts the command, it says how long it waited. On macOS it runs with no memory limit, and says so on stderr |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 | `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |

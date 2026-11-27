@@ -213,6 +213,8 @@ fn build(args: &Args) -> Result<(), String> {
     };
     let instructions = agentfile::parse_for(&source, ap::adapter::reserved).map_err(report)?;
     let mut lock = read_lock(&path.with_extension("lock"), &context)?;
+    // What the lockfile on disk pins, before `ap update` forgets it.
+    let on_disk = lock.sources.clone();
     if args.update
         && let Ok(settings) = Settings::read(&instructions)
     {
@@ -294,7 +296,7 @@ fn build(args: &Args) -> Result<(), String> {
     let lock_path = context.join("Agentfile.lock");
     let sources = settle_sources(&instructions, &lock, &cache)
         .map_err(|(line, error)| format!("{shown}:{line}: {error}"))?;
-    let sources_changed = sources != lock.sources;
+    let sources_changed = sources != on_disk;
     lock.sources = sources;
     let changed = lock::settle(
         &lock_path,

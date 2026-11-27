@@ -391,9 +391,9 @@ directory) and writes an image into the local store.
   commit for every source, and the digest of every file `ap` downloads.
   Builds reuse locked resolutions; `ap update` resolves them again and
   rebuilds the agent. An `AGENT` that names an exact version keeps the
-  digest the lockfile records for it. Commit the lockfile for reproducible builds. The
-  lockfile covers what `ap` installs at build time, not what the agent
-  downloads while it runs.
+  digest the lockfile records for it. Commit the lockfile for reproducible
+  builds. The lockfile covers what `ap` installs at build time, not what
+  the agent downloads while it runs.
 - **No compiler.** `ap build` assembles layers. It never invokes a
   compiler. An Agentfile with no remote source needs nothing beyond the
   `ap` binary to build (see [Host requirements](#host-requirements)).
@@ -1157,6 +1157,8 @@ REPO https://codeberg.org/forgejo/forgejo ~/src/forgejo
 - By default, `REPO` stores only the pinned commit (depth 1), leaves Git LFS
   pointers unresolved, and does not fetch submodules. `history` stores
   the full history.
+- In the guest, the repository belongs to the user `agent`. A directory
+  that `REPO` makes above it, outside `/home/agent`, belongs to root.
 - The clone's `origin` is the source's repository. When the ref names a
   branch, the clone is on that branch, and it tracks the branch on
   `origin`. Otherwise its `HEAD` is detached at the commit.

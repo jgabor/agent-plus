@@ -2579,6 +2579,8 @@ fn a_repo_lands_in_git_under_home_at_its_pinned_commit() {
 
 // spec(REPO): By default, `REPO` stores only the pinned commit (depth 1), leaves Git LFS pointers unresolved, and does not fetch submodules.
 // spec(REPO): `history` stores the full history.
+// spec(REPO): In the guest, the repository belongs to the user `agent`.
+// spec(REPO): A directory that `REPO` makes above it, outside `/home/agent`, belongs to root.
 #[test]
 fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
     let scratch = Scratch::new("repo-history");
@@ -2586,7 +2588,7 @@ fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
     let url = &remote.url;
     let dir = scratch.project(
         "notes",
-        &with_repo(&format!("REPO {url}\nREPO {url} ~/full history\n")),
+        &with_repo(&format!("REPO {url}\nREPO {url} /opt/full history\n")),
     );
     let out = scratch.build(&dir, &[]);
     let lines = layer_lines(&out);
@@ -2594,7 +2596,7 @@ fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
         lines.contains(&("built".to_string(), format!("REPO {url}"))),
         "{out}"
     );
-    let full = format!("REPO {url} ~/full history");
+    let full = format!("REPO {url} /opt/full history");
     assert!(
         lines.contains(&("built".to_string(), full.clone())),
         "{out}"
@@ -2605,7 +2607,12 @@ fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
     let shallow = repo_layer(&scratch, "notes", &format!("REPO {url}"));
     let shallow = unpacked(&scratch, &shallow, "/home/agent/git/tools");
     let whole = repo_layer(&scratch, "notes", &full);
-    let whole = unpacked(&scratch, &whole, "/home/agent/full");
+    let agent = (guest::agent::ID as u16, guest::agent::ID as u16);
+    for (path, owner) in common::erofs::read_image(&whole).1 {
+        let ours = path.starts_with("/opt/full");
+        assert_eq!(owner, if ours { agent } else { (0, 0) }, "{path}");
+    }
+    let whole = unpacked(&scratch, &whole, "/opt/full");
     for repo in [&shallow, &whole] {
         check_clone(repo, &remote.work, remote.head());
         assert_eq!(fs::read_to_string(repo.join("big.bin")).unwrap(), POINTER);
@@ -2677,6 +2684,12 @@ fn a_rebuild_reuses_the_locked_commit_and_update_resolves_it_again() {
         &moved,
     );
     assert_ne!(moved, locked);
+
+    // A source the Agentfile no longer names leaves the lock.
+    fs::write(dir.join("Agentfile"), with_repo("")).unwrap();
+    let output = scratch.ap(&dir, &["update"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(source_lines(&dir).is_empty());
 }
 
 /// A commit the lockfile locks, which neither the store nor the download

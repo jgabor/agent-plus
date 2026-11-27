@@ -433,3 +433,18 @@ fn only_the_pinned_os_layer_moves_between_the_store_and_a_tree() {
     let [_, plain] = os_store(&root);
     assert_eq!(fs::read_to_string(plain).unwrap(), "wrong\n");
 }
+
+#[test]
+fn a_whole_os_layer_replaces_part_of_one_in_the_store() {
+    // The store's uncompressed copy matches the pin, but its frame is gone,
+    // so the tree doesn't get it, and the layer the tests fetch replaces it.
+    let body = format!("assert!(!tree.exists());\n    {}", write_os("os"));
+    let root = os_workspace("os-part", &body);
+    store_os(&root, "os\n");
+    let [zstd, plain] = os_store(&root);
+    fs::remove_file(&zstd).unwrap();
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(zstd).unwrap(), "frame\n");
+    assert_eq!(fs::read_to_string(plain).unwrap(), "os\n");
+}

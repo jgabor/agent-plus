@@ -2,7 +2,7 @@
 
 use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, base, bench, floors, ledger, lock, score, testrun, toml};
+use crate::{Problem, Verdict, base, bench, floors, ledger, lock, score, testrun};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::{fs, io};
@@ -216,7 +216,8 @@ struct Kept {
     tree: PathBuf,
     store: PathBuf,
     /// The files in a directory, relative to it, or none for a file. The last
-    /// one has the pinned digest.
+    /// one has the pinned digest. Each names the digest, so copies of two
+    /// pins never mix.
     files: Vec<PathBuf>,
 }
 
@@ -235,13 +236,17 @@ impl Kept {
                 files: Vec::new(),
             });
         }
-        if let Some(os) = Os::find(root) {
+        // t1's tests keep the OS layer in a store that holds only it, as
+        // `ap build` keeps a layer: compressed, then uncompressed.
+        if let Some(digest) = pinned(root, "guest/os/pin.toml") {
             kept.push(Kept {
                 name: "os",
-                files: os.layers().into(),
-                digest: os.digest,
-                tree: os.seed,
+                tree: root.join("target/guest").join(format!("os-{digest}")),
                 store: store.join("os"),
+                files: ["zstd-layers", "plain-layers"]
+                    .map(|directory| Path::new(directory).join(&digest))
+                    .into(),
+                digest,
             });
         }
         Ok(kept)
@@ -249,17 +254,21 @@ impl Kept {
 
     /// Copies it from the store to the tree, or from the tree to the store,
     /// unless the side it goes to holds it. The copy replaces what was there
-    /// only once its digest matches, so a reader never sees part of one. It
-    /// saves a download, so a failure only warns.
+    /// only once its digest matches, so a reader finds a whole copy or none.
+    /// It saves a download, so a failure only warns.
     fn copy(&self, side: Side) {
         let (from, to) = match side {
             Side::Tree => (&self.store, &self.tree),
             Side::Store => (&self.tree, &self.store),
         };
-        if self.whole(to) || !from.exists() {
+        if self.whole(to) || !self.paths(from).iter().all(|path| path.is_file()) {
             return;
         }
         let partial = to.with_extension(format!("{}.part", process::id()));
+        let remove = |path: &Path| {
+            let _ = fs::remove_file(path).or_else(|_| fs::remove_dir_all(path));
+        };
+        remove(&partial);
         let name = self.name;
         if let Err(e) = self.copy_files(from, &partial) {
             eprintln!("{name}: couldn't copy {}: {e}", from.display());
@@ -267,41 +276,41 @@ impl Kept {
             eprintln!("{name}: {} doesn't match pin.toml", from.display());
         } else {
             if to.is_dir() {
-                let _ = fs::remove_dir_all(to);
+                remove(to);
             }
-            if let Err(e) = fs::rename(&partial, to) {
+            // Another gate may have put a whole copy there first.
+            if let Err(e) = fs::rename(&partial, to)
+                && !self.whole(to)
+            {
                 eprintln!("{name}: couldn't move it to {}: {e}", to.display());
             }
         }
-        let _ = fs::remove_file(&partial).or_else(|_| fs::remove_dir_all(&partial));
+        remove(&partial);
     }
 
     fn copy_files(&self, from: &Path, to: &Path) -> io::Result<()> {
-        to.parent().map_or(Ok(()), fs::create_dir_all)?;
-        if self.files.is_empty() {
-            return fs::copy(from, to).map(drop);
-        }
-        for file in &self.files {
-            let target = to.join(file);
-            target.parent().map_or(Ok(()), fs::create_dir_all)?;
-            fs::copy(from.join(file), target)?;
+        for (from, to) in self.paths(from).into_iter().zip(self.paths(to)) {
+            to.parent().map_or(Ok(()), fs::create_dir_all)?;
+            fs::copy(from, to)?;
         }
         Ok(())
     }
 
+    /// Its files, under `path`.
+    fn paths(&self, path: &Path) -> Vec<PathBuf> {
+        if self.files.is_empty() {
+            return vec![path.to_path_buf()];
+        }
+        self.files.iter().map(|file| path.join(file)).collect()
+    }
+
     /// Whether `path` holds every file, and the last has the pinned digest.
     fn whole(&self, path: &Path) -> bool {
-        if self.files.is_empty() {
-            return whole(&[path], &self.digest);
-        }
-        whole(
-            &self
-                .files
-                .iter()
-                .map(|file| path.join(file))
-                .collect::<Vec<_>>(),
-            &self.digest,
-        )
+        let paths = self.paths(path);
+        paths.iter().all(|path| path.is_file())
+            && paths
+                .last()
+                .is_some_and(|last| bench::is_copy(last, &self.digest).unwrap_or(false))
     }
 }
 
@@ -311,54 +320,10 @@ enum Side {
     Store,
 }
 
-/// The pinned `OS minimal` layer, as t1's tests keep it in the tree: in a
-/// store under `target/guest` that holds only that layer.
-pub struct Os {
-    pub digest: String,
-    pub seed: PathBuf,
-}
-
-impl Os {
-    /// `None` when the workspace pins no OS layer.
-    pub fn find(root: &Path) -> Option<Os> {
-        let digest = pinned(root, "guest/os/pin.toml")?;
-        let seed = root.join("target/guest").join(format!("os-{digest}"));
-        Some(Os { digest, seed })
-    }
-
-    /// The layer's files, as a store keeps them, relative to the store: its
-    /// frame, then its uncompressed copy, which has the pinned digest.
-    pub fn layers(&self) -> [PathBuf; 2] {
-        ["zstd-layers", "plain-layers"].map(|directory| Path::new(directory).join(&self.digest))
-    }
-
-    /// Whether the tree holds both files, and the uncompressed one matches the
-    /// pin. t1 checks the frame itself before it uses one.
-    pub fn in_tree(&self) -> bool {
-        whole(
-            &self.layers().map(|layer| self.seed.join(layer)),
-            &self.digest,
-        )
-    }
-}
-
 /// The digest that the pin at `file` names, or `None` if it names none.
 fn pinned(root: &Path, file: &str) -> Option<String> {
     let text = fs::read_to_string(root.join(file)).unwrap_or_default();
-    let pin = toml::document(&text).unwrap_or_default();
-    pin.str("sha256").map(str::to_string)
-}
-
-/// Whether every file exists, and the last one has this digest.
-fn whole(files: &[impl AsRef<Path>], digest: &str) -> bool {
-    files.iter().all(|file| file.as_ref().exists())
-        && files
-            .last()
-            .is_some_and(|last| matches(last.as_ref(), digest))
-}
-
-fn matches(path: &Path, digest: &str) -> bool {
-    path.exists() && bench::sha256(path).is_ok_and(|actual| actual == digest)
+    bench::pinned_digest(file, &text).ok()
 }
 
 pub fn record(name: &'static str, passed: bool, failed: &mut Failed) {

@@ -264,8 +264,9 @@ fn steps_share_a_download_cache_and_each_starts_with_an_empty_store() {
 const OS_DIGEST: &str = "6adc3cbcc7923c4ff9cbe6a1dd13e7f4cf99dd072363ce88feca9fdbf55c9f24";
 
 /// A journey of steps 4, 5, and 6, whose workspace pins the layer `os\n`, and
-/// whose tree holds a copy with an uncompressed file of `plain`, if any. Each
-/// step's script is `script`, with the store it would start with in `$store`.
+/// a kernel with the same bytes. Its tree holds copies of both whose bytes
+/// are `plain`, if any. Each step's script is `script`, with the store it
+/// would start with in `$store`, and the pinned digest in `$layer`.
 fn os_workspace(name: &str, plain: Option<&str>, script: &str) -> PathBuf {
     let pin =
         format!("version = \"1\"\nurl = \"https://example.com/os\"\nsha256 = \"{OS_DIGEST}\"\n");
@@ -284,10 +285,15 @@ fn os_workspace(name: &str, plain: Option<&str>, script: &str) -> PathBuf {
     );
     let mut files = vec![
         ("guest/os/pin.toml", pin.as_str()),
+        ("guest/kernel/pin.toml", pin.as_str()),
         ("harness/journey/os.sh", script.as_str()),
     ];
     if let Some(plain) = plain {
-        files.extend([(zstd.as_str(), "frame\n"), (uncompressed.as_str(), plain)]);
+        files.extend([
+            (zstd.as_str(), "frame\n"),
+            (uncompressed.as_str(), plain),
+            ("target/guest/vmlinux", plain),
+        ]);
     }
     workspace(name, &toml, &files)
 }
@@ -295,9 +301,9 @@ fn os_workspace(name: &str, plain: Option<&str>, script: &str) -> PathBuf {
 #[test]
 fn every_step_but_the_fifth_starts_with_the_os_layer_from_the_tree() {
     // Step 5 proves that `ap build` fetches the layer, so its store starts
-    // empty. Every other step's store holds the tree's copy, as a build
-    // leaves a layer it fetched.
-    let script = "if [ \"${PWD##*/step-}\" = 5/work ]; then\n  [ ! -e \"$store\" ]\nelse\n  [ \"$(cat \"$store/zstd-layers/$layer\")\" = frame ]\n  [ \"$(cat \"$store/plain-layers/$layer\")\" = os ]\nfi\n";
+    // empty. Every other step's store holds the tree's copies, where a
+    // download leaves them.
+    let script = "if [ \"${PWD##*/step-}\" = 5/work ]; then\n  [ ! -e \"$store\" ]\nelse\n  [ \"$(cat \"$store/zstd-layers/$layer\")\" = frame ]\n  [ \"$(cat \"$store/plain-layers/$layer\")\" = os ]\n  [ \"$(cat \"$store/layers/$layer\")\" = os ]\nfi\n";
     let root = os_workspace("os", Some("os\n"), script);
     assert_journey(
         &root,

@@ -1,6 +1,6 @@
 //! `cargo xtask journey`: real use of `ap`, step by step, from a release build.
 
-use crate::gate::Os;
+use crate::bench::Copies;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
 use crate::{Problem, Verdict, lock, score};
@@ -16,10 +16,8 @@ const FAKE_HARNESS: &str = "fake-harness";
 /// The server on your host that step 10 reaches from the guest.
 const FAKE_UPSTREAM: &str = "fake-upstream";
 /// The step that proves `ap build` fetches the OS layer, so its store starts
-/// without one.
+/// empty.
 const FETCHES_OS: i64 = 5;
-/// Where `ap` keeps its store, under a step's `HOME`.
-const STORE: &str = ".local/share/ap";
 
 /// The model providers a step can spend on, each with the variable that
 /// carries its paid-check key into the step, as a user's `AUTH key` run gets
@@ -112,8 +110,8 @@ fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>,
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
-    // Checked once, because each step's store shares the tree's copy.
-    let os = Os::find(root).filter(Os::in_tree);
+    // Checked once, because each step's store shares the tree's copies.
+    let copies = Copies::find(root)?;
 
     let mut passed = HashSet::new();
     let mut spending = HashSet::new();
@@ -130,7 +128,7 @@ fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>,
             || !step.needs.iter().all(|need| passed.contains(need))
         {
             "skip"
-        } else if run_step(root, &journey, &bin, os.as_ref(), step, given)? {
+        } else if run_step(root, &journey, &bin, &copies, step, given)? {
             passed.insert(step.id);
             "pass"
         } else {
@@ -360,7 +358,7 @@ fn run_step(
     root: &Path,
     journey: &Path,
     bin: &Path,
-    os: Option<&Os>,
+    copies: &Copies,
     step: &Step,
     key: Option<(&str, &str)>,
 ) -> Result<bool, Problem> {
@@ -380,16 +378,14 @@ fn run_step(
     let work = directory.join("work");
     // Downloads outlast a step, so a harness is downloaded once per journey.
     // The store lives under each step's own home, so it starts empty, but for
-    // the tree's copy of the OS layer.
+    // the tree's copies of the guest files.
     let cache = journey.join("cache");
     for path in [&home, &work, &cache] {
         fs::create_dir_all(path)
             .map_err(|e| Problem(format!("couldn't create {}: {e}", path.display())))?;
     }
-    if let Some(os) = os
-        && step.id != FETCHES_OS
-    {
-        put_os(os, &home.join(STORE))?;
+    if step.id != FETCHES_OS {
+        copies.put(&home)?;
     }
     let mut command = Command::new("/bin/sh");
     command
@@ -408,24 +404,6 @@ fn run_step(
         .status()
         .map_err(|e| Problem(format!("couldn't run {}: {e}", step.script)))?;
     Ok(status.success())
-}
-
-/// Puts the tree's copy of the OS layer in the store at `store`, as a build
-/// that fetched it leaves it. A store replaces or removes a layer's file, and
-/// never writes into it, so a step's store can share the tree's.
-fn put_os(os: &Os, store: &Path) -> Result<(), Problem> {
-    for layer in os.layers() {
-        let (from, to) = (os.seed.join(&layer), store.join(&layer));
-        let problem = |e: io::Error| Problem(format!("couldn't put {}: {e}", to.display()));
-        fs::create_dir_all(to.parent().unwrap_or(store)).map_err(problem)?;
-        match fs::hard_link(&from, &to) {
-            Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-                fs::copy(&from, &to).map(drop).map_err(problem)?;
-            }
-            linked => linked.map_err(problem)?,
-        }
-    }
-    Ok(())
 }
 
 /// Escape checks are tests in the package `t1`.

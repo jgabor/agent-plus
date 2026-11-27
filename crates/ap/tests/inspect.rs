@@ -303,8 +303,14 @@ fn usage_lists_inspect() {
 /// Builds the agent `name`, a Claude Code agent with these `NETWORK` rules,
 /// and approves them.
 fn network_agent(scratch: &Scratch, name: &str, rules: &[&str]) {
-    let lines: String = rules.iter().map(|rule| format!("NETWORK {rule}\n")).collect();
-    let dir = scratch.project(name, &format!("AGENT claude\nOS minimal\n{lines}POLICY -\n"));
+    let lines: String = rules
+        .iter()
+        .map(|rule| format!("NETWORK {rule}\n"))
+        .collect();
+    let dir = scratch.project(
+        name,
+        &format!("AGENT claude\nOS minimal\n{lines}POLICY -\n"),
+    );
     let file = scratch.root.join(format!("{name}.grants"));
     fs::write(&file, format!("AGENT claude\n{lines}POLICY -\n")).unwrap();
     scratch.build(&scratch.home, &dir, &file);
@@ -390,13 +396,22 @@ fn inspect_network_reads_each_form_of_destination() {
         &scratch,
         "forms",
         &[
-            ("https://github.com/x", "+ https://github.com/x  NETWORK +github.com"),
-            ("http://github.com", "+ http://github.com  NETWORK +github.com"),
+            (
+                "https://github.com/x",
+                "+ https://github.com/x  NETWORK +github.com",
+            ),
+            (
+                "http://github.com",
+                "+ http://github.com  NETWORK +github.com",
+            ),
             ("github.com", "+ github.com  NETWORK +github.com"),
             ("github.com:22", "+ github.com:22  NETWORK +github.com"),
             ("1.1.1.1", "+ 1.1.1.1  NETWORK +1.1.1.1"),
             ("1.1.1.1:53", "+ 1.1.1.1:53  NETWORK +1.1.1.1"),
-            ("[2606:4700::1111]", "+ [2606:4700::1111]  NETWORK +[2606:4700::1111]"),
+            (
+                "[2606:4700::1111]",
+                "+ [2606:4700::1111]  NETWORK +[2606:4700::1111]",
+            ),
             (
                 "[2606:4700::1111]:443",
                 "+ [2606:4700::1111]:443  NETWORK +[2606:4700::1111]",
@@ -445,7 +460,12 @@ fn inspect_network_refuses_what_it_can_t_read() {
     }
     for args in [
         &["inspect", "--grants", "unread", "--network=github.com"][..],
-        &["inspect", "unread", "--network=github.com", "--network=x.com"],
+        &[
+            "inspect",
+            "unread",
+            "--network=github.com",
+            "--network=x.com",
+        ],
         &["inspect", "unread", "--network"],
     ] {
         let output = scratch.ap(args);
@@ -503,12 +523,18 @@ fn inspect_network_without_a_port_meets_the_rules_for_every_port() {
             ("github.com", "- github.com  the default"),
             ("github.com:22", "+ github.com:22  NETWORK +github.com:22"),
             ("example.com", "+ example.com  NETWORK +example.com"),
-            ("example.com:443", "- example.com:443  NETWORK -example.com:443"),
+            (
+                "example.com:443",
+                "- example.com:443  NETWORK -example.com:443",
+            ),
             (
                 "https://example.com/",
                 "- https://example.com/  NETWORK -example.com:443",
             ),
-            ("http://example.com/", "+ http://example.com/  NETWORK +example.com"),
+            (
+                "http://example.com/",
+                "+ http://example.com/  NETWORK +example.com",
+            ),
             (
                 "http://example.com:443/",
                 "- http://example.com:443/  NETWORK -example.com:443",
@@ -584,7 +610,10 @@ fn inspect_network_decides_an_address_by_the_ip_rules_and_loopback() {
         &[
             ("10.1.2.3", "+ 10.1.2.3  NETWORK +10.1.0.0/16"),
             ("10.2.0.1:22", "- 10.2.0.1:22  NETWORK -10.0.0.0/8"),
-            ("[::ffff:10.2.0.1]", "- [::ffff:10.2.0.1]  NETWORK -10.0.0.0/8"),
+            (
+                "[::ffff:10.2.0.1]",
+                "- [::ffff:10.2.0.1]  NETWORK -10.0.0.0/8",
+            ),
             ("192.0.2.1", "+ 192.0.2.1  the default"),
             ("127.0.0.1:8080", &format!("- 127.0.0.1:8080  {loopback}")),
             ("[::1]", &format!("- [::1]  {loopback}")),
@@ -599,7 +628,10 @@ fn inspect_network_decides_a_name_by_name_and_says_what_a_run_still_checks() {
     let scratch = Scratch::new("network-names");
     network_agent(&scratch, "names", &["+", "-1.1.1.1", "-evil.net"]);
     let (status, out, err) = ask(&scratch, "names", "one.one.one.one");
-    assert_eq!((status, out.as_str()), (Some(0), "+ one.one.one.one  the default\n"));
+    assert_eq!(
+        (status, out.as_str()),
+        (Some(0), "+ one.one.one.one  the default\n")
+    );
     assert_eq!(
         err,
         "ap: a run can still deny a connection to one.one.one.one: by an IP rule or your host's loopback, for the address it resolves to, or by the name check\n"

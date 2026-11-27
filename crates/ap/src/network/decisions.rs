@@ -132,7 +132,10 @@ pub enum Asked {
         port: Option<u16>,
         request: Option<(Scheme, String)>,
     },
-    Address { address: IpAddr, port: Option<u16> },
+    Address {
+        address: IpAddr,
+        port: Option<u16>,
+    },
 }
 
 impl Asked {
@@ -176,7 +179,12 @@ impl Asked {
             return Err(format!("`{shown}` isn't a destination"));
         };
         match (rule.destination, target) {
-            (Destination::Url { scheme, host, port, .. }, Some(target)) => Ok(Asked::Name {
+            (
+                Destination::Url {
+                    scheme, host, port, ..
+                },
+                Some(target),
+            ) => Ok(Asked::Name {
                 name: host,
                 port,
                 request: Some((scheme, target)),

@@ -354,7 +354,7 @@ fn steps_run_in_id_order() {
 /// directories, where only this run of the journey finds it.
 const MARK: &str = "#!/bin/sh\ntouch \"$HOME/../../ran-$(basename \"$(dirname \"$HOME\")\")\"\n";
 
-/// The steps that left a marker in this run, in id order.
+/// The steps that left a marker in this run, sorted by name.
 fn marked(root: &Path) -> Vec<String> {
     let mut ran: Vec<String> = fs::read_dir(root.join("target/journey"))
         .unwrap()

@@ -178,9 +178,9 @@ directory, and only `HOME` and `PATH` in its environment.
 `cargo xtask journey <step>` builds the same binaries, then runs that step and
 each step it needs, directly or through another, in id order, and no other
 step. It prints a line for each of them, as `journey` does, but no count. It
-exits 1 unless the named step passes, so a step that spends, which it skips,
-exits 1. It exits 2 for a step that isn't in the journey, before anything
-builds.
+exits 1 unless the named step passes, so a step that it skips, because the
+step spends or a step it needs doesn't pass, exits 1. It exits 2 for a step
+that isn't in the journey, before anything builds.
 
 Step 5 proves that `ap build` fetches the pinned `OS minimal` layer, so its
 store starts empty. Every other step's store starts with the tree's copies of

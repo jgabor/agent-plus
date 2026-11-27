@@ -386,14 +386,17 @@ fn write_os(plain: &str) -> String {
 /// The OS layer that the gate keeps in the shared git directory: its frame,
 /// then its uncompressed copy.
 fn os_store(root: &Path) -> [PathBuf; 2] {
-    ["zstd-layer", "plain-layer"].map(|file| root.join(".git/xtask/os").join(file))
+    ["zstd-layers", "plain-layers"]
+        .map(|directory| root.join(".git/xtask/os").join(directory).join(OS_DIGEST))
 }
 
 /// Keeps a layer in the store with a frame of `frame\n` and an uncompressed
 /// copy of `plain`.
 fn store_os(root: &Path, plain: &str) {
     let [zstd, plain_file] = os_store(root);
-    fs::create_dir_all(zstd.parent().unwrap()).unwrap();
+    for file in [&zstd, &plain_file] {
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+    }
     fs::write(zstd, "frame\n").unwrap();
     fs::write(plain_file, plain).unwrap();
 }

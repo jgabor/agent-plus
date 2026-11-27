@@ -109,13 +109,13 @@ pub fn check(
     if let Some(merging) = merging {
         (merging.starting)("tests");
     }
-    let kernel = Kernel::find(root)?;
-    if let Some(kernel) = &kernel {
-        kernel.copy(&kernel.store, &kernel.tree);
+    let kept = Kept::find(root)?;
+    for kept in &kept {
+        kept.copy(Side::Tree);
     }
     let mut results = testrun::run_except(root, hold, Some(T2_PACKAGE))?;
-    if let Some(kernel) = &kernel {
-        kernel.copy(&kernel.tree, &kernel.store);
+    for kept in &kept {
+        kept.copy(Side::Store);
     }
     record("tests", results.all_passed(), &mut failed);
     let has_t2 = workspace::packages(root)?
@@ -207,55 +207,158 @@ fn compare_with_base(
     Ok(())
 }
 
-/// The pinned guest kernel, which t1's tests fetch into the tree. A store in
-/// the shared git directory keeps it, so that a fresh tree needn't fetch it.
-struct Kernel {
+/// A pinned guest file, or a directory of files, that t1's tests fetch into
+/// the tree. A store in the shared git directory keeps it, so that a fresh
+/// tree needn't fetch it.
+struct Kept {
+    name: &'static str,
     digest: String,
     tree: PathBuf,
     store: PathBuf,
+    /// The files in a directory, relative to it, or none for a file. The last
+    /// one has the pinned digest.
+    files: Vec<PathBuf>,
 }
 
-impl Kernel {
-    /// `None` when the workspace pins no digest. A pin that t1 can't read
-    /// fails its tests, so the gate needn't say so.
-    fn find(root: &Path) -> Result<Option<Kernel>, Problem> {
-        let text = fs::read_to_string(root.join("guest/kernel/pin.toml")).unwrap_or_default();
-        let pin = toml::document(&text).unwrap_or_default();
-        let Some(toml::Value::Str(digest)) = pin.get("sha256") else {
-            return Ok(None);
-        };
-        Ok(Some(Kernel {
-            digest: digest.clone(),
-            tree: root.join("target/guest/vmlinux"),
-            store: lock::directory(root)?.join("kernel/vmlinux"),
-        }))
+impl Kept {
+    /// What the workspace pins. A pin that t1 can't read fails its tests, so
+    /// the gate needn't say so.
+    fn find(root: &Path) -> Result<Vec<Kept>, Problem> {
+        let store = lock::directory(root)?;
+        let mut kept = Vec::new();
+        if let Some(digest) = pinned(root, "guest/kernel/pin.toml") {
+            kept.push(Kept {
+                name: "kernel",
+                digest,
+                tree: root.join("target/guest/vmlinux"),
+                store: store.join("kernel/vmlinux"),
+                files: Vec::new(),
+            });
+        }
+        if let Some(os) = Os::find(root) {
+            kept.push(Kept {
+                name: "os",
+                files: os.layers().into(),
+                digest: os.digest,
+                tree: os.seed,
+                store: store.join("os"),
+            });
+        }
+        Ok(kept)
     }
 
-    /// Copies a pinned kernel from `from` to `to`, unless `to` has one. The
-    /// copy moves into place only once its digest matches, so a reader never
-    /// sees part of one. It saves a download, so a failure only warns.
-    fn copy(&self, from: &Path, to: &Path) {
-        if self.pinned(to) || !from.exists() {
+    /// Copies it from the store to the tree, or from the tree to the store,
+    /// unless the side it goes to holds it. The copy replaces what was there
+    /// only once its digest matches, so a reader never sees part of one. It
+    /// saves a download, so a failure only warns.
+    fn copy(&self, side: Side) {
+        let (from, to) = match side {
+            Side::Tree => (&self.store, &self.tree),
+            Side::Store => (&self.tree, &self.store),
+        };
+        if self.whole(to) || !from.exists() {
             return;
         }
         let partial = to.with_extension(format!("{}.part", process::id()));
-        let copied = to
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| fs::copy(from, &partial));
-        if let Err(e) = copied {
-            eprintln!("kernel: couldn't copy {}: {e}", from.display());
-        } else if !self.pinned(&partial) {
-            eprintln!("kernel: {} doesn't match pin.toml", from.display());
-        } else if let Err(e) = fs::rename(&partial, to) {
-            eprintln!("kernel: couldn't move it to {}: {e}", to.display());
+        let name = self.name;
+        if let Err(e) = self.copy_files(from, &partial) {
+            eprintln!("{name}: couldn't copy {}: {e}", from.display());
+        } else if !self.whole(&partial) {
+            eprintln!("{name}: {} doesn't match pin.toml", from.display());
+        } else {
+            if to.is_dir() {
+                let _ = fs::remove_dir_all(to);
+            }
+            if let Err(e) = fs::rename(&partial, to) {
+                eprintln!("{name}: couldn't move it to {}: {e}", to.display());
+            }
         }
-        let _ = fs::remove_file(&partial);
+        let _ = fs::remove_file(&partial).or_else(|_| fs::remove_dir_all(&partial));
     }
 
-    fn pinned(&self, path: &Path) -> bool {
-        path.exists() && bench::sha256(path).is_ok_and(|digest| digest == self.digest)
+    fn copy_files(&self, from: &Path, to: &Path) -> io::Result<()> {
+        to.parent().map_or(Ok(()), fs::create_dir_all)?;
+        if self.files.is_empty() {
+            return fs::copy(from, to).map(drop);
+        }
+        for file in &self.files {
+            let target = to.join(file);
+            target.parent().map_or(Ok(()), fs::create_dir_all)?;
+            fs::copy(from.join(file), target)?;
+        }
+        Ok(())
     }
+
+    /// Whether `path` holds every file, and the last has the pinned digest.
+    fn whole(&self, path: &Path) -> bool {
+        if self.files.is_empty() {
+            return whole(&[path], &self.digest);
+        }
+        whole(
+            &self
+                .files
+                .iter()
+                .map(|file| path.join(file))
+                .collect::<Vec<_>>(),
+            &self.digest,
+        )
+    }
+}
+
+/// Where a kept file is copied to.
+enum Side {
+    Tree,
+    Store,
+}
+
+/// The pinned `OS minimal` layer, as t1's tests keep it in the tree: in a
+/// store under `target/guest` that holds only that layer.
+pub struct Os {
+    pub digest: String,
+    pub seed: PathBuf,
+}
+
+impl Os {
+    /// `None` when the workspace pins no OS layer.
+    pub fn find(root: &Path) -> Option<Os> {
+        let digest = pinned(root, "guest/os/pin.toml")?;
+        let seed = root.join("target/guest").join(format!("os-{digest}"));
+        Some(Os { digest, seed })
+    }
+
+    /// The layer's files, as a store keeps them, relative to the store: its
+    /// frame, then its uncompressed copy, which has the pinned digest.
+    pub fn layers(&self) -> [PathBuf; 2] {
+        ["zstd-layers", "plain-layers"].map(|directory| Path::new(directory).join(&self.digest))
+    }
+
+    /// Whether the tree holds both files, and the uncompressed one matches the
+    /// pin. t1 checks the frame itself before it uses one.
+    pub fn in_tree(&self) -> bool {
+        whole(
+            &self.layers().map(|layer| self.seed.join(layer)),
+            &self.digest,
+        )
+    }
+}
+
+/// The digest that the pin at `file` names, or `None` if it names none.
+fn pinned(root: &Path, file: &str) -> Option<String> {
+    let text = fs::read_to_string(root.join(file)).unwrap_or_default();
+    let pin = toml::document(&text).unwrap_or_default();
+    pin.str("sha256").map(str::to_string)
+}
+
+/// Whether every file exists, and the last one has this digest.
+fn whole(files: &[impl AsRef<Path>], digest: &str) -> bool {
+    files.iter().all(|file| file.as_ref().exists())
+        && files
+            .last()
+            .is_some_and(|last| matches(last.as_ref(), digest))
+}
+
+fn matches(path: &Path, digest: &str) -> bool {
+    path.exists() && bench::sha256(path).is_ok_and(|actual| actual == digest)
 }
 
 pub fn record(name: &'static str, passed: bool, failed: &mut Failed) {

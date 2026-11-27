@@ -108,7 +108,7 @@ fn gaps_with_issues(root: &Path, issues: &[(u64, &str, &str)]) -> Output {
         .map(|(number, title, body)| {
             let body = body.replace('\r', "\\r").replace('\n', "\\n");
             format!(
-                "{{\"number\":{number},\"state\":\"OPEN\",\"title\":\"{title}\",\"body\":\"{body}\",\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null}}"
+                "{{\"number\":{number},\"state\":\"OPEN\",\"title\":\"{title}\",\"body\":\"{body}\",\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null,\"createdAt\":\"2026-01-01T00:00:00Z\"}}"
             )
         })
         .collect();

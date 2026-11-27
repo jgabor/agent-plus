@@ -686,9 +686,9 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
 /// run that takes hours still counts the same days.
 fn days_ago(days: u64) -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let seconds = now.as_secs() - days * 86400 - 12 * 3600;
+    let seconds = now.as_secs() - days * DAY - DAY / 2;
     // Howard Hinnant's algorithm, from days since 1970 to a civil date.
-    let z = seconds / 86400 + 719468;
+    let z = seconds / DAY + 719468;
     let era = z / 146097;
     let doe = z % 146097;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
@@ -697,7 +697,7 @@ fn days_ago(days: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + u64::from(month <= 2);
-    let rest = seconds % 86400;
+    let rest = seconds % DAY;
     format!(
         "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
         rest / 3600,

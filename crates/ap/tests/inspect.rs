@@ -663,8 +663,19 @@ fn inspect_network_decides_a_name_by_name_and_says_what_a_run_still_checks() {
         assert_eq!(status, Some(sign), "{destination}");
         assert_eq!(err, "", "{destination}");
     }
-    // Your host's name is decided by name too, as a run's lookup decides it
-    // before its loopback address meets an IP rule.
+    // An IP rule never decides a name, though it may deny every address.
+    network_agent(
+        &scratch,
+        "walled",
+        &["-", "+github.com", "-0.0.0.0/0", "-[::]/0"],
+    );
+    answers(
+        &scratch,
+        "walled",
+        &[("github.com", "+ github.com  NETWORK +github.com")],
+    );
+    // Your host's name is decided by name too, before its loopback address
+    // meets an IP rule.
     network_agent(
         &scratch,
         "yours",

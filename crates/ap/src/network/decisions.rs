@@ -72,12 +72,13 @@ impl Rule {
         port: u16,
         request: Option<Request>,
     ) -> Rule {
-        if !(proxied == Proxied::Loopback && request.is_some()) {
+        if !(proxied == Proxied::Loopback && (request.is_some() || address.is_none())) {
             return Rule::proxied(network, proxied);
         }
-        // A request on a connection to your host, which got there, is
-        // denied by a `-` rule, its path, or else the default, not by its
-        // loopback, and never by a `+` IP rule.
+        // A request on a connection to your host, which got there, or a
+        // connection to your host by name alone, is denied by a `-` rule,
+        // its path, or else the default, not by its loopback, and never by
+        // a `+` IP rule.
         let decision = match (name, address) {
             (_, Some(address)) => {
                 let connection = Connection {
@@ -243,9 +244,8 @@ pub struct Answer {
 
 /// Whether the network process with `args`, which [`super::arguments`]
 /// made, allows a connection to `asked`, and the rule that decides. A name
-/// is decided as a run decides it before it resolves: refused if the
-/// resolver refuses it, and else by name alone. A destination without a
-/// port is decided on a port that no rule names. `None` when `args` can't
+/// is decided by name alone, as before it resolves, and a destination
+/// without a port on a port that no rule names. `None` when `args` can't
 /// be read.
 pub fn answer(args: &[OsString], asked: &Asked) -> Option<Answer> {
     let (network, harness) = super::rules(args).ok()?;
@@ -261,13 +261,7 @@ pub fn answer(args: &[OsString], asked: &Asked) -> Option<Answer> {
                 request: None,
             };
             let proxied = net::proxied(&network, &harness, &connection);
-            let rule = Rule::decided(&network, proxied, (None, Some(*address)), port, None);
-            (proxied.allows(), rule)
-        }
-        // A run looks the name up first, and the resolver refuses a name
-        // that no connection to could be allowed.
-        Asked::Name { name, .. } if !net::could_allow(&network, &harness, name) => {
-            (false, Rule::by(&network, net::refusing(&network, name)))
+            (proxied.allows(), Rule::proxied(&network, proxied))
         }
         Asked::Name {
             name,

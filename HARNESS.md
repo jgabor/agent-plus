@@ -315,6 +315,16 @@ built from a package's `tests/` directory, or from the packages `t1`, `t2`,
 `fuzz`, `fake-upstream`, and `fake-vm`. Every other path there counts, and a
 test fails when a package is on neither side of that rule.
 
+**Spec findings first.** Before the tests, the gate checks what in its
+`spec` check needs no test result: a quote or a waiver that matches no
+sentence, a check of a waived sentence, a spec comment that isn't above a
+test, a check's name used twice in its package, and the commands that
+SPEC.md, the milestones, and the README must agree on. On such a finding it
+prints `fail spec` and stops, and starts no test, so `merge` and `prepare`
+stop there too. Otherwise the `spec` check runs after the tests, for a
+promise that a `t2` check quotes and no passing check in another tier
+proves. `cargo xtask spec` reports the same findings in seconds.
+
 **Level spec count.** When the spec count is level with its base's, the gate
 says that the PR body needs a `Hill: none, <reason>` line unless the journey
 or a budget rises, and still passes.
@@ -630,7 +640,8 @@ is a failure, and 2 is bad usage or an environment error.
 | Command | Behavior |
 |---|---|
 | `cargo xtask gate` | Runs T0, T1, the floors, and T2 for an [adapter change](#check-tiers), compares counts with the base, and prints the result. It posts no status |
-| `cargo xtask score` | Prints the three scores |
+| `cargo xtask spec` | Prints each finding of the gate's `spec` check that needs no test result, and exits 1 if there is one. It runs no test, and takes no [place](#check-tiers) |
+| `cargo xtask score` | Runs the tests, and prints the three scores |
 | `cargo xtask gaps` | Names the first milestone on the roadmap with a step that doesn't pass. Then lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
 | `cargo xtask journey` | Runs the journey against a release build |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |

@@ -26,6 +26,16 @@ pub struct Score {
     pub unproven: Vec<Sentence>,
 }
 
+impl Score {
+    fn verdict(&self) -> Verdict {
+        if self.findings.is_empty() {
+            Verdict::Pass
+        } else {
+            Verdict::Fail
+        }
+    }
+}
+
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
     let mut hold = lock::testing(&root)?;
@@ -58,11 +68,15 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
             println!("budgets {met} of {targets}");
         }
     }
-    Ok(if score.findings.is_empty() {
-        Verdict::Pass
-    } else {
-        Verdict::Fail
-    })
+    Ok(score.verdict())
+}
+
+/// `cargo xtask spec`: the findings that need no test result, so it runs no
+/// test and takes no place.
+pub fn run_spec() -> Result<Verdict, Problem> {
+    let score = before_tests(&workspace::root()?)?;
+    report_findings(&score);
+    Ok(score.verdict())
 }
 
 pub fn report_findings(score: &Score) {
@@ -72,6 +86,16 @@ pub fn report_findings(score: &Score) {
 }
 
 pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
+    tally(root, Some(results))
+}
+
+/// The score before any test has run, which proves nothing. Its findings are
+/// all of `compute`'s but the one that reads a test's result.
+pub fn before_tests(root: &Path) -> Result<Score, Problem> {
+    tally(root, None)
+}
+
+fn tally(root: &Path, results: Option<&Results>) -> Result<Score, Problem> {
     let text = fs::read_to_string(root.join("SPEC.md"))
         .map_err(|e| Problem(format!("couldn't read SPEC.md: {e}")))?;
     let units = spec::extract(&text).map_err(|e| Problem(format!("SPEC.md: {e}")))?;
@@ -136,7 +160,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
                 ));
                 continue;
             }
-            let passed = results.passed(&package.name, &function);
+            let passed = results.is_some_and(|results| results.passed(&package.name, &function));
             for quote in quotes {
                 let key = (quote.heading, quote.text);
                 if promises.contains(&key) {
@@ -166,6 +190,7 @@ pub fn compute(root: &Path, results: &Results) -> Result<Score, Problem> {
     }
     for sentence in &ordered {
         if let Some((shown, line)) = in_t2.get(sentence)
+            && results.is_some()
             && !elsewhere.contains(sentence)
         {
             findings.push(format!(

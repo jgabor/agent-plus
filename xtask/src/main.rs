@@ -40,7 +40,8 @@ usage: cargo xtask <command>
 
 commands:
   gate             run the checks a change must pass
-  score [--json]   print the scores
+  spec             check the spec quotes and waivers, without the tests
+  score [--json]   run the tests, and print the scores
   gaps [--json]    list the failing steps, missed budgets, and unproven promises
   run <command>    run a command under a shared hold of the activity lock
   journey          run the journey against a release build
@@ -86,6 +87,7 @@ pub struct Problem(pub String);
 fn run(args: &[&str]) -> Result<Verdict, Problem> {
     match args {
         ["gate"] => gate::run(),
+        ["spec"] => score::run_spec(),
         ["score"] => score::run(false),
         ["score", "--json"] => score::run(true),
         ["gaps"] => gaps::run(false),
@@ -151,8 +153,8 @@ fn run(args: &[&str]) -> Result<Verdict, Problem> {
         }
         [] => Err(Problem(format!("no command given\n\n{USAGE}"))),
         [
-            command @ ("gate" | "score" | "journey" | "bench" | "next" | "nightly" | "refresh"
-            | "remove"),
+            command @ ("gate" | "spec" | "score" | "journey" | "bench" | "next" | "nightly"
+            | "refresh" | "remove"),
             extra,
             ..,
         ] => Err(Problem(format!(

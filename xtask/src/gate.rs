@@ -106,6 +106,14 @@ pub fn check(
         let passed = cargo_passes(root, check.args)?;
         record(check.name, passed, &mut failed);
     }
+    // No test result can change these findings, so the tests don't start.
+    let early = score::before_tests(root)?;
+    if !early.findings.is_empty() {
+        score::report_findings(&early);
+        record("spec", false, &mut failed);
+        println!("gate: fail");
+        return Ok((failed, early));
+    }
     if let Some(merging) = merging {
         (merging.starting)("tests");
     }

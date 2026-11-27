@@ -178,6 +178,30 @@ fn every_check_runs_after_a_failure() {
     assert!(out.contains("pass tests"), "{out:?}");
 }
 
+/// A test that quotes no sentence in the spec, and leaves a marker when it
+/// runs.
+const STALE: &str = r#"// spec(A): Gone.
+#[test]
+fn stale() {
+    let marks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::write(marks.join("finished"), "").unwrap();
+}
+"#;
+
+#[test]
+fn a_stale_quote_fails_the_gate_before_the_tests() {
+    let root = workspace("stale-quote", STALE);
+    let output = xtask(&root, &["gate"]);
+    let (out, err) = (stdout(&output), stderr(&output));
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("demo/src/lib.rs:1"), "{err}");
+    assert!(out.contains("pass lint\n"), "{out:?}");
+    assert!(out.contains("fail spec\n"), "{out:?}");
+    assert!(out.ends_with("gate: fail\n"), "{out:?}");
+    assert!(!out.contains(" tests\n"), "{out:?}");
+    assert!(!root.join("finished").exists(), "{err}");
+}
+
 #[test]
 fn check_output_stays_off_stdout() {
     let root = workspace("streams", GOOD);

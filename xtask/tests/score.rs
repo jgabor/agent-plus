@@ -90,9 +90,9 @@ fn with_packages(name: &str, packages: &[(&str, &str)]) -> PathBuf {
     root
 }
 
-fn score_in(root: &Path) -> (Option<i32>, String, String) {
+fn xtask_in(root: &Path, command: &str) -> (Option<i32>, String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .arg("score")
+        .arg(command)
         .current_dir(root)
         .env_remove("CARGO_TARGET_DIR")
         .output()
@@ -108,7 +108,7 @@ fn score_in(root: &Path) -> (Option<i32>, String, String) {
 #[test]
 fn a_promise_only_a_t2_check_quotes_fails() {
     let root = with_packages("t2-only", &[("t2", CHECK_ONE)]);
-    let (code, _, stderr) = score_in(&root);
+    let (code, _, stderr) = xtask_in(&root, "score");
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("crates/t2/src/lib.rs:1"), "{stderr}");
     assert!(stderr.contains("another tier"), "{stderr}");
@@ -117,7 +117,7 @@ fn a_promise_only_a_t2_check_quotes_fails() {
 #[test]
 fn a_t2_quote_passes_with_a_check_in_another_package() {
     let root = with_packages("t2-and-demo", &[("t2", CHECK_ONE), ("demo", CHECK_ONE)]);
-    let (code, stdout, stderr) = score_in(&root);
+    let (code, stdout, stderr) = xtask_in(&root, "score");
     assert_eq!(code, Some(0), "{stderr}");
     assert_eq!(stdout, "spec 1 of 2\n");
 }
@@ -128,7 +128,7 @@ fn a_check_linked_to_a_fake_is_not_another_tier() {
         "t2-and-fake",
         &[("t2", CHECK_ONE), ("fake-demo", CHECK_ONE)],
     );
-    let (code, _, stderr) = score_in(&root);
+    let (code, _, stderr) = xtask_in(&root, "score");
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("another tier"), "{stderr}");
 }
@@ -137,7 +137,29 @@ fn a_check_linked_to_a_fake_is_not_another_tier() {
 fn an_ignored_check_is_not_another_tier() {
     let ignored = "// spec(A): One.\n#[test]\n#[ignore]\nfn one() {}\n";
     let root = with_packages("t2-and-ignored", &[("t2", CHECK_ONE), ("demo", ignored)]);
-    let (code, _, stderr) = score_in(&root);
+    let (code, _, stderr) = xtask_in(&root, "score");
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("another tier"), "{stderr}");
+}
+
+/// A check whose test leaves a marker in its package when it runs.
+const MARKS: &str = "// spec(A): Gone.\n#[test]\nfn one() {\n    std::fs::write(std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"marker\"), \"\").unwrap();\n}\n";
+
+#[test]
+fn spec_reports_a_stale_quote_without_running_a_test() {
+    let root = with_packages("spec-stale", &[("demo", MARKS)]);
+    let (code, stdout, stderr) = xtask_in(&root, "spec");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("crates/demo/src/lib.rs:1"), "{stderr}");
+    assert!(stderr.contains("Gone."), "{stderr}");
+    assert_eq!(stdout, "");
+    assert!(!root.join("crates/demo/marker").exists(), "{stderr}");
+}
+
+#[test]
+fn spec_leaves_what_needs_a_test_result_to_the_tests() {
+    let root = with_packages("spec-t2-only", &[("t2", CHECK_ONE)]);
+    let (code, _, stderr) = xtask_in(&root, "spec");
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(stderr, "");
 }

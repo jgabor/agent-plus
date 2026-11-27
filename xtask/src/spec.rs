@@ -60,10 +60,20 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
             }
         } else {
             let body = trimmed.strip_prefix("> ").unwrap_or(trimmed);
-            if let Some(item) = list_item(body) {
+            // As in CommonMark, a numbered item interrupts a paragraph or a
+            // bullet only from 1, so a wrapped "125. " continues it.
+            let item = list_item(body).filter(|(_, number)| {
+                number.is_none_or(|n| {
+                    n.trim_start_matches('0') == "1"
+                        || extractor.block.is_empty()
+                        || extractor.in_numbered_item
+                })
+            });
+            if let Some((item, number)) = item {
                 extractor.flush();
                 extractor.marked_item = false;
                 extractor.in_item = true;
+                extractor.in_numbered_item = number.is_some();
                 extractor.block.push(item);
             } else {
                 extractor.block.push(body);
@@ -82,6 +92,8 @@ struct Extractor<'a> {
     units: Vec<Unit>,
     /// The current block began as a list item.
     in_item: bool,
+    /// The current block began as a numbered list item.
+    in_numbered_item: bool,
     /// A marker earlier in this list item covers what follows it.
     marked_item: bool,
     keep_marked: bool,
@@ -95,6 +107,7 @@ impl Extractor<'_> {
         let marked = MARKERS.iter().any(|m| text.contains(m)) || self.marked_item;
         self.marked_item = marked && (self.in_item || self.marked_item);
         self.in_item = false;
+        self.in_numbered_item = false;
         (!text.is_empty() && (self.keep_marked || !marked)).then_some(text)
     }
 
@@ -278,14 +291,16 @@ fn is_separator(line: &str) -> bool {
         && line.bytes().all(|b| matches!(b, b'|' | b'-' | b':' | b' '))
 }
 
-fn list_item(line: &str) -> Option<&str> {
+/// Returns a list item's text, and its number if it is numbered.
+fn list_item(line: &str) -> Option<(&str, Option<&str>)> {
     for marker in ["- ", "* ", "+ "] {
         if let Some(item) = line.strip_prefix(marker) {
-            return Some(item);
+            return Some((item, None));
         }
     }
     let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-    (digits > 0).then(|| line[digits..].strip_prefix(". "))?
+    let item = (digits > 0).then(|| line[digits..].strip_prefix(". "))??;
+    Some((item, Some(&line[..digits])))
 }
 
 fn backticks(bytes: &[u8]) -> usize {
@@ -483,6 +498,30 @@ mod tests {
                 "Nested."
             ]
         );
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_list_item() {
+        let spec = "# A\n\n- It exits with\n  125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_paragraph() {
+        let spec = "# A\n\nIt exits with\n125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn numbered_items_follow_each_other() {
+        let spec = "# A\n\n1. One\n2. Two\n3. Three\n";
+        assert_eq!(texts(spec), ["One", "Two", "Three"]);
+    }
+
+    #[test]
+    fn a_first_numbered_item_interrupts_a_paragraph() {
+        let spec = "# A\n\nThese apply\n1. One\n2. Two\n";
+        assert_eq!(texts(spec), ["These apply", "One", "Two"]);
     }
 
     #[test]

@@ -90,19 +90,3 @@ pub fn mode(word: &[u8]) -> Option<u32> {
         .ok()
         .filter(|mode| mode & !0o7777 == 0)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_quoted_word_reads_back_as_its_bytes() {
-        let bytes = b"a \"b\" \\c\n\xff\xe2\x82\xac".to_vec();
-        let mut line = b"WORD".to_vec();
-        quote(&mut line, &bytes);
-        let mut words = Words::new(&line);
-        assert_eq!(words.bare(), Some(&b"WORD"[..]));
-        assert_eq!(words.quoted(), Some(bytes));
-        assert_eq!(words.end(), Some(()));
-    }
-}

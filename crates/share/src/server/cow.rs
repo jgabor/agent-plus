@@ -43,6 +43,23 @@
 //! record, and a copy's times are set by the times process, which reaches
 //! the tree alone.
 //!
+//! A share of kept state is one of these with no root, so it shows only
+//! what the guest wrote, and its directory is its pending directory. It
+//! writes no `BASE`, and its next server reads its records back, so the
+//! next run sees the same files. A last line with no newline is one a
+//! server stopped writing, so it goes. It takes what overlayfs needs of its
+//! upper layer, which a share of your files refuses: a chown to the owner a
+//! file has, `RENAME_WHITEOUT`, which leaves a whiteout, a `CHAR` numbered
+//! 0 0, `RENAME_EXCHANGE`, and extended attributes, each one a record:
+//!
+//! ```text
+//! XATTR "upper/build" "trusted.overlay.opaque" "y"
+//! XATTR "upper/build" "trusted.overlay.opaque" none
+//! ```
+//!
+//! The first sets the attribute, and the second removes it. A `DELETE`
+//! removes the attributes of everything it removes.
+//!
 //! A guest's node is a path. Each request resolves it again, one layer at a
 //! time, beneath the root or the tree, following no symlink. A directory
 //! that has your files beneath it can't be renamed, as in overlayfs, so a
@@ -76,6 +93,9 @@ const PATH_FLAGS: i32 = libc::O_PATH | libc::O_NOFOLLOW;
 const READ_FLAGS: i32 = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 /// How a file that holds POSIX locks on the agent's copy opens.
 const LOCK_FLAGS: i32 = libc::O_RDWR | libc::O_NOFOLLOW | libc::O_NONBLOCK;
+
+/// A path's extended attributes, by name.
+type Xattrs = BTreeMap<Vec<u8>, Vec<u8>>;
 
 /// The whiteout that overlayfs makes, a character device numbered 0, 0.
 const WHITEOUT: Entry = Entry::Special {
@@ -207,7 +227,7 @@ pub(super) struct Cow {
     entries: BTreeMap<Vec<u8>, Entry>,
     /// The extended attributes of each path that has any, by name, in a
     /// share of kept state.
-    xattrs: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>>,
+    xattrs: BTreeMap<Vec<u8>, Xattrs>,
     /// The paths with a `BASE` record.
     based: BTreeSet<Vec<u8>>,
     nodes: BTreeMap<u64, Node>,
@@ -404,7 +424,7 @@ fn valid_path(path: &[u8]) -> bool {
 #[derive(Default)]
 struct Kept {
     entries: BTreeMap<Vec<u8>, Entry>,
-    xattrs: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>>,
+    xattrs: BTreeMap<Vec<u8>, Xattrs>,
     len: u64,
 }
 
@@ -1118,7 +1138,7 @@ impl Cow {
 
     /// Takes the extended attributes of `path` and of everything beneath
     /// it away, and returns them by what follows `path` in each path.
-    fn take_xattrs(&mut self, path: &[u8]) -> Vec<(Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>)> {
+    fn take_xattrs(&mut self, path: &[u8]) -> Vec<(Vec<u8>, Xattrs)> {
         let found: Vec<_> = (self.xattrs.keys())
             .filter(|key| *key == path || beneath(key, path))
             .cloned()
@@ -1131,7 +1151,7 @@ impl Cow {
     }
 
     /// Records each of `held`, the extended attributes of `path`.
-    fn set_xattrs(&mut self, path: &[u8], held: BTreeMap<Vec<u8>, Vec<u8>>) -> Result<(), i32> {
+    fn set_xattrs(&mut self, path: &[u8], held: Xattrs) -> Result<(), i32> {
         for (name, value) in &held {
             self.record(xattr_line(path, name, Some(value)))?;
         }
@@ -2027,23 +2047,13 @@ impl Cow {
         let field = |at| u64_at(body, at).ok_or(libc::EINVAL);
         let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
         let valid = word(0)?;
+        if valid & (FATTR_UID | FATTR_GID) != 0 && !self.keeps_owner(node, valid, body)? {
+            return Err(libc::EPERM);
+        }
         let path = match self.path(node) {
-            Err(libc::ENOENT) if valid & FATTR_FH != 0 && valid & (FATTR_UID | FATTR_GID) == 0 => {
-                return self.setattr_open(node, body);
-            }
+            Err(libc::ENOENT) if valid & FATTR_FH != 0 => return self.setattr_open(node, body),
             path => path?,
         };
-        if valid & (FATTR_UID | FATTR_GID) != 0 {
-            // A share of kept state lets the guest give a file the owner it
-            // has, which changes nothing, as overlayfs does with each file
-            // it copies up.
-            let (uid, gid) = self.owner.guest(&self.view(&path)?.stat()?);
-            let same = (valid & FATTR_UID == 0 || word(76)? == uid)
-                && (valid & FATTR_GID == 0 || word(80)? == gid);
-            if !self.kept() || !same {
-                return Err(libc::EPERM);
-            }
-        }
         self.copy_up(&path)?;
         let entry = self.view(&path)?.entry.ok_or(libc::EIO)?;
         let dir = matches!(entry, Entry::Dir { .. });
@@ -2086,6 +2096,20 @@ impl Cow {
             &self.attributes(node, &self.view(&path)?)?,
             self.owner,
         ))
+    }
+
+    /// Whether `SETATTR`'s owner, in `body`, is the one the guest sees
+    /// `node` have. A share of kept state lets the guest give a file the
+    /// owner it has, which changes nothing, as overlayfs does with each file
+    /// it copies up.
+    fn keeps_owner(&self, node: u64, valid: u32, body: &[u8]) -> Result<bool, i32> {
+        if !self.kept() {
+            return Ok(false);
+        }
+        let (uid, gid) = self.owner.guest(&self.view(&self.path(node)?)?.stat()?);
+        let word = |at| u32_at(body, at).ok_or(libc::EINVAL);
+        Ok((valid & FATTR_UID == 0 || word(76)? == uid)
+            && (valid & FATTR_GID == 0 || word(80)? == gid))
     }
 
     /// `SETATTR` for a node that is gone, through the agent's copy that a

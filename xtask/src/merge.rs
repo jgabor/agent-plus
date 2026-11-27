@@ -9,7 +9,7 @@ use crate::accepts::{
 };
 use crate::forge::{Gh, PullRequest};
 use crate::lock::{self, Hold};
-use crate::{Problem, Verdict, base, bench, ledger, waits, workspace};
+use crate::{Problem, Verdict, base, bench, journey, ledger, testrun, waits, workspace};
 use std::env;
 use std::fs;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -57,6 +57,11 @@ const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
 /// Set in the xtask of `main` that a merge runs, to the head on which the
 /// merge posted a `pending` that nothing has ended yet.
 const POSTED: &str = "XTASK_MERGE_POSTED";
+/// Set in the xtask of `main` that a merge runs, to the seconds that the
+/// merge waited for the slot, which that xtask's record counts.
+const WAITED: &str = "XTASK_MERGE_WAITED";
+/// How many test programs the record names, of those that took longest.
+const SLOWEST: usize = 10;
 /// Runs the xtask of `main` in the shell's own process, which it names in
 /// `WORKER_OF`, as it would be named if this merge ran it with `exec`.
 const AS_WORKER: &str = "export XTASK_MERGE_WORKER_OF=$$; exec \"$0\" \"$@\"";
@@ -219,9 +224,28 @@ fn sequence(
         drop(place);
     }
     let Proof {
-        record, accepted, ..
+        mut record,
+        accepted,
+        ..
     } = proof;
     status.proven();
+    let (steps, mut downloads) = journey::walked().unzip();
+    if let Some(downloads) = &mut downloads {
+        let (layers, files) = bench::fetched();
+        downloads.layers += layers;
+        downloads.files += files;
+    }
+    let seconds = ledger::Seconds {
+        spent: status.spent(),
+        steps: steps.unwrap_or_default(),
+        programs: testrun::slowest(SLOWEST),
+    };
+    println!("{command}: {}", seconds.show());
+    if let Some(downloads) = &downloads {
+        println!("{command}: {}", downloads.show());
+    }
+    record.seconds = Some(seconds);
+    record.downloads = downloads;
 
     if let Some(why) = again(|| changed_during_proof(&gh, &root, &scoring, &fetched.main))? {
         status.failed(&why);
@@ -321,6 +345,7 @@ fn run_the_checks_of(
         Some(head) => command.env(POSTED, head),
         None => command.env_remove(POSTED),
     };
+    command.env(WAITED, status.waited().to_string());
     // It is the xtask of `main`, which takes the slot ahead anyway.
     lock::keep_turn_from(&mut command);
     let mut checks = command
@@ -475,6 +500,67 @@ struct Said {
     /// Whether the proof passed, so that what stops it after is no fault of
     /// the change.
     proven: bool,
+    clock: Clock,
+}
+
+/// Where a merge's time goes: what it waits for, or what its proof is doing,
+/// from what `Status` hears.
+struct Clock {
+    now: Option<(&'static str, Instant)>,
+    /// The seconds of each wait, and then of each phase in the order it began.
+    spent: Vec<(&'static str, f64)>,
+}
+
+impl Default for Clock {
+    fn default() -> Clock {
+        let waits = ["slot", "place", "activity_lock"];
+        Clock {
+            now: None,
+            spent: waits.into_iter().map(|wait| (wait, 0.0)).collect(),
+        }
+    }
+}
+
+impl Clock {
+    /// Counts what went before, and goes on with `what`, or stops.
+    fn switch(&mut self, what: Option<&'static str>) {
+        if let Some((name, start)) = self.now.take() {
+            self.add(name, start.elapsed().as_secs_f64());
+        }
+        self.now = what.map(|name| (name, Instant::now()));
+    }
+
+    /// The seconds spent on `name` so far.
+    fn total(&mut self, name: &'static str) -> f64 {
+        let now = self.now.map(|(name, _)| name);
+        self.switch(now);
+        let spent = self.spent.iter().find(|(spent, _)| *spent == name);
+        spent.map_or(0.0, |(_, seconds)| *seconds)
+    }
+
+    fn add(&mut self, name: &'static str, seconds: f64) {
+        match self.spent.iter_mut().find(|(spent, _)| *spent == name) {
+            Some((_, total)) => *total += seconds,
+            None => self.spent.push((name, seconds)),
+        }
+    }
+}
+
+/// The key in a record for what a status says the merge waits for, or what
+/// the proof is doing.
+fn spent_on(said: &str) -> Option<&'static str> {
+    Some(match said {
+        "the merge slot" => "slot",
+        "a place" => "place",
+        "the activity lock" => "activity_lock",
+        "lint" => "lint",
+        "tests" => "tests",
+        "t2" => "t2",
+        "journey" => "journey",
+        "bench" => "bench",
+        "its own xtask" => "own_xtask",
+        _ => return None,
+    })
 }
 
 impl Status {
@@ -490,12 +576,15 @@ impl Status {
     /// lock. In the xtask of `main`, it goes on from what the merge posted.
     fn watched(root: &Path, number: u64) -> Arc<Status> {
         let status = Arc::new(Status::new(root, number));
-        if runs_the_checks_of_main()
-            && let Ok(head) = env::var(POSTED)
-        {
+        if runs_the_checks_of_main() {
             let mut said = status.said();
-            said.head = Some(head);
-            said.open = true;
+            if let Ok(head) = env::var(POSTED) {
+                said.head = Some(head);
+                said.open = true;
+            }
+            if let Some(waited) = env::var(WAITED).ok().and_then(|text| text.parse().ok()) {
+                said.clock.add("slot", waited);
+            }
         }
         let watched = Arc::downgrade(&status);
         lock::watch(Box::new(move |wait| {
@@ -548,6 +637,7 @@ impl Status {
     fn waits(&self, what: &str) {
         let mut said = self.said();
         said.waiting = true;
+        said.clock.switch(spent_on(what));
         if self.post(&mut said, "pending", &format!("Waiting: {what}")) {
             said.open = true;
         }
@@ -560,7 +650,9 @@ impl Status {
         if !std::mem::take(&mut said.waiting) {
             return;
         }
-        if let Some(phase) = said.phase.clone() {
+        let phase = said.phase.clone();
+        said.clock.switch(phase.as_deref().and_then(spent_on));
+        if let Some(phase) = phase {
             self.post(&mut said, "pending", &format!("Proving: {phase}"));
         }
     }
@@ -570,11 +662,27 @@ impl Status {
         said.phase = Some(phase.to_string());
         said.waiting = false;
         said.open = true;
+        said.clock.switch(spent_on(phase));
         self.post(&mut said, "pending", &format!("Proving: {phase}"));
     }
 
     fn proven(&self) {
         self.said().proven = true;
+    }
+
+    /// The seconds of each wait, and of each phase of the proof.
+    fn spent(&self) -> Vec<(String, f64)> {
+        let mut said = self.said();
+        said.clock.switch(None);
+        let spent = said.clock.spent.iter();
+        spent
+            .map(|(name, seconds)| (name.to_string(), *seconds))
+            .collect()
+    }
+
+    /// The seconds that this merge has waited for the slot.
+    fn waited(&self) -> f64 {
+        self.said().clock.total("slot")
     }
 
     fn failed(&self, why: &str) {
@@ -1415,9 +1523,50 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
 
 #[cfg(test)]
 mod tests {
-    use super::{GOING, SLOT, TREE_PATH, WAITING, left_after, long};
+    use super::{Clock, GOING, SLOT, TREE_PATH, WAITING, left_after, long, spent_on};
     use std::path::Path;
     use std::time::Duration;
+
+    #[test]
+    fn the_clock_lists_each_wait_then_each_phase_in_the_order_it_began() {
+        let mut clock = Clock::default();
+        for (name, seconds) in [
+            ("tests", 3.0),
+            ("place", 1.0),
+            ("lint", 2.0),
+            ("tests", 4.0),
+        ] {
+            clock.add(name, seconds);
+        }
+        assert_eq!(
+            clock.spent,
+            [
+                ("slot", 0.0),
+                ("place", 1.0),
+                ("activity_lock", 0.0),
+                ("tests", 7.0),
+                ("lint", 2.0),
+            ]
+        );
+        clock.switch(Some("journey"));
+        clock.switch(None);
+        assert_eq!(clock.spent.last().map(|(name, _)| *name), Some("journey"));
+        assert_eq!(clock.total("slot"), 0.0);
+    }
+
+    #[test]
+    fn each_wait_and_phase_that_a_status_says_has_a_key() {
+        for (said, key) in [
+            ("the merge slot", "slot"),
+            ("a place", "place"),
+            ("the activity lock", "activity_lock"),
+            ("its own xtask", "own_xtask"),
+            ("t2", "t2"),
+        ] {
+            assert_eq!(spent_on(said), Some(key));
+        }
+        assert_eq!(spent_on("anything else"), None);
+    }
 
     #[test]
     fn a_wait_costs_none_of_the_timeout_and_only_the_slot_starts_it_again() {

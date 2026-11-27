@@ -1,6 +1,7 @@
 //! `cargo xtask journey`: real use of `ap`, step by step, from a release build.
 
 use crate::bench::Copies;
+use crate::ledger::Downloads;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
 use crate::{Problem, Verdict, lock, score};
@@ -9,6 +10,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 pub const JOURNEY_FILE: &str = "harness/journey.toml";
 const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -58,6 +61,18 @@ pub struct Outcome {
     /// The step spends money, or needs a step that does, so the merge sequence
     /// leaves it out.
     pub spends: bool,
+}
+
+/// What a journey timed and fetched: each step that ran, by its id, with its
+/// seconds, and what its stores and its download cache gained.
+pub type Walked = (Vec<(i64, f64)>, Downloads);
+
+/// What this process's last journey timed and fetched, for the ledger.
+static WALKED: Mutex<Option<Walked>> = Mutex::new(None);
+
+/// What the last journey that this process walked timed and fetched.
+pub fn walked() -> Option<Walked> {
+    WALKED.lock().unwrap_or_else(PoisonError::into_inner).take()
 }
 
 /// Prints each step and the count. It exits 0 whenever it could run, because
@@ -135,6 +150,9 @@ fn walk(
     // Checked once, because each step's store shares the tree's copies.
     let copies = Copies::find(root)?;
 
+    let cache = journey.join("cache");
+    let cached = files_under(&cache)?;
+    let mut timed = Vec::new();
     let mut passed = HashSet::new();
     let mut spending = HashSet::new();
     let mut outcomes = Vec::new();
@@ -150,11 +168,16 @@ fn walk(
             || !step.needs.iter().all(|need| passed.contains(need))
         {
             "skip"
-        } else if run_step(root, &journey, &bin, &copies, step, given)? {
-            passed.insert(step.id);
-            "pass"
         } else {
-            "fail"
+            let start = Instant::now();
+            let ran = run_step(root, &journey, &bin, &copies, step, given)?;
+            timed.push((step.id, start.elapsed().as_secs_f64()));
+            if ran {
+                passed.insert(step.id);
+                "pass"
+            } else {
+                "fail"
+            }
         };
         report(&format!("{word} step {}", step.id));
         outcomes.push(Outcome {
@@ -165,6 +188,12 @@ fn walk(
             spends,
         });
     }
+    let (layers, files) = copies.fetched();
+    let fetched = Downloads {
+        layers,
+        files: files + files_under(&cache)?.difference(&cached).count(),
+    };
+    *WALKED.lock().unwrap_or_else(PoisonError::into_inner) = Some((timed, fetched));
     Ok(outcomes)
 }
 
@@ -186,6 +215,36 @@ fn needed(steps: Vec<Step>, id: i64) -> Result<Vec<Step>, Problem> {
         .into_iter()
         .filter(|step| wanted.contains(&step.id))
         .collect())
+}
+
+/// Every file under `directory`, which may not exist.
+fn files_under(directory: &Path) -> Result<HashSet<PathBuf>, Problem> {
+    let mut files = HashSet::new();
+    let mut left = vec![directory.to_path_buf()];
+    while let Some(directory) = left.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(Problem(format!(
+                    "couldn't read {}: {e}",
+                    directory.display()
+                )));
+            }
+        };
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| Problem(format!("couldn't read {}: {e}", directory.display())))?;
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => left.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    files.insert(entry.path());
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn read_steps(root: &Path) -> Result<Vec<Step>, Problem> {
@@ -426,7 +485,9 @@ fn run_step(
         fs::create_dir_all(path)
             .map_err(|e| Problem(format!("couldn't create {}: {e}", path.display())))?;
     }
-    if step.id != FETCHES_OS {
+    if step.id == FETCHES_OS {
+        copies.watch(&home);
+    } else {
         copies.put(&home)?;
     }
     let mut command = Command::new("/bin/sh");

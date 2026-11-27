@@ -1,6 +1,7 @@
 //! Runs each package's tests, a few packages at a time, and keeps the result
 //! of every test by name.
 
+use crate::ledger::Program;
 use crate::lock::{self, Hold};
 use crate::{Problem, limit, workspace};
 use std::collections::HashMap;
@@ -10,13 +11,30 @@ use std::path::Path;
 use std::process::{Child, Stdio};
 use std::slice::Iter;
 use std::sync::mpsc::{Sender, channel};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
+use std::time::Instant;
 
 /// How many packages' tests run at once. On 16 CPUs, four at a time took a
 /// run of every package from 413 seconds to 190.
 const AT_ONCE: usize = 4;
 /// Replaces `AT_ONCE`, so that a test can run fewer.
 const AT_ONCE_OVERRIDE: &str = "XTASK_PACKAGES_AT_ONCE";
+
+/// Every test program that this process's runs ran, for the ledger.
+static PROGRAMS: Mutex<Vec<Program>> = Mutex::new(Vec::new());
+
+/// The `count` test programs that took longest in this process's runs,
+/// longest first.
+pub fn slowest(count: usize) -> Vec<Program> {
+    let mut programs = PROGRAMS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    programs.sort_by(|a, b| b.seconds.total_cmp(&a.seconds));
+    programs.truncate(count);
+    programs
+}
 
 pub struct Results {
     by_test: HashMap<(String, String), bool>,
@@ -35,6 +53,12 @@ impl Results {
     }
 
     fn record(&mut self, package: &str, ended: Ended) {
+        let mut programs = PROGRAMS.lock().unwrap_or_else(PoisonError::into_inner);
+        programs.extend(ended.programs.into_iter().map(|(name, seconds)| Program {
+            package: package.to_string(),
+            name,
+            seconds,
+        }));
         for (function, passed) in ended.tests {
             self.by_test
                 .entry((package.to_string(), function))
@@ -46,10 +70,36 @@ impl Results {
 }
 
 /// What one package's `cargo test` reported: each test's function name and
-/// whether it passed, and whether the whole run passed.
+/// whether it passed, each test program's seconds, and whether the whole run
+/// passed.
 struct Ended {
     tests: Vec<(String, bool)>,
+    programs: Vec<(String, f64)>,
     passed: bool,
+}
+
+/// Times each test program from the lines in which cargo says it runs one.
+/// One program runs at a time, so each ends as the next starts, or as cargo
+/// ends.
+#[derive(Default)]
+struct Timing {
+    running: Option<(String, Instant)>,
+    ended: Vec<(String, f64)>,
+}
+
+impl Timing {
+    fn hear(&mut self, line: &str) {
+        if let Some(name) = program_of(line) {
+            self.end();
+            self.running = Some((name.to_string(), Instant::now()));
+        }
+    }
+
+    fn end(&mut self) {
+        if let Some((name, start)) = self.running.take() {
+            self.ended.push((name, start.elapsed().as_secs_f64()));
+        }
+    }
 }
 
 pub fn run(root: &Path, hold: &mut Hold) -> Result<Results, Problem> {
@@ -194,7 +244,12 @@ fn spawn(root: &Path, package: &str, hold: &Hold) -> Result<Child, Problem> {
 /// only the result, and a line from one package is never broken by another's.
 fn watch(mut child: Child) -> Result<Ended, Problem> {
     let stderr = child.stderr.take().expect("stderr was piped");
-    let errors = thread::spawn(move || forward(stderr, |_| {}));
+    let errors = thread::spawn(move || {
+        let mut timing = Timing::default();
+        let read = forward(stderr, |line| timing.hear(line));
+        timing.end();
+        read.map(|()| timing.ended)
+    });
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut tests = Vec::new();
     let read = forward(stdout, |line| {
@@ -206,9 +261,10 @@ fn watch(mut child: Child) -> Result<Ended, Problem> {
     let status = child
         .wait()
         .map_err(|e| Problem(format!("couldn't wait for `cargo test`: {e}")))?;
-    read.and(errors)?;
+    let programs = read.and(errors)?;
     Ok(Ended {
         tests,
+        programs,
         passed: status.success(),
     })
 }
@@ -244,9 +300,40 @@ fn parse_result(line: &str) -> Option<(&str, bool)> {
     Some((path.rsplit("::").next()?, status.trim() == "ok"))
 }
 
+/// The test program that a line of cargo's says it runs: `tests/ledger.rs`
+/// for `Running tests/ledger.rs (target/debug/deps/ledger-1f)`, and
+/// `doc-tests` for `Doc-tests ap`. Cargo right-aligns its verb in 12
+/// columns, which a test's own output rarely does.
+fn program_of(line: &str) -> Option<&str> {
+    if line.starts_with("   Doc-tests ") {
+        return Some("doc-tests");
+    }
+    let rest = line.strip_prefix("     Running ")?.trim_end();
+    Some(rest.rsplit_once(" (").map_or(rest, |(name, _)| name))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_result;
+    use super::{parse_result, program_of};
+
+    #[test]
+    fn names_each_program_that_cargo_runs() {
+        for (line, name) in [
+            (
+                "     Running unittests src/lib.rs (target/debug/deps/ap-0f3a)\n",
+                Some("unittests src/lib.rs"),
+            ),
+            (
+                "     Running tests/ledger.rs (target/debug/deps/ledger-9c1e)\n",
+                Some("tests/ledger.rs"),
+            ),
+            ("   Doc-tests ap\n", Some("doc-tests")),
+            ("   Compiling ap v0.0.0\n", None),
+            ("Running tests/ledger.rs\n", None),
+        ] {
+            assert_eq!(program_of(line), name, "{line:?}");
+        }
+    }
 
     #[test]
     fn reads_a_passing_test() {

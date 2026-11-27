@@ -42,6 +42,66 @@ fn a_merge_records_pushes_verifies_and_squashes() {
     );
 }
 
+/// A journey step that fetches the pinned OS layer into its store, and a file
+/// into the download cache.
+const FETCHES: &str = "#!/bin/sh\nmkdir -p \"$HOME/.local/share/ap/zstd-layers\" \"$XDG_CACHE_HOME/ap\"\necho os >\"$HOME/.local/share/ap/zstd-layers/0a0a\"\necho harness >\"$XDG_CACHE_HOME/ap/harness\"\n";
+const OS_PIN: &str = "url = \"https://example.com/os\"\nsha256 = \"0a0a\"\n";
+
+#[test]
+fn a_proof_records_and_prints_where_its_time_went_and_what_it_fetched() {
+    let base = record(0, 1, "");
+    let repo = Repo::with(
+        "spent",
+        &[
+            ("harness/ledger/3.toml", base.as_str()),
+            ("guest/os/pin.toml", OS_PIN),
+        ],
+        &[("harness/journey/one.sh", FETCHES)],
+    );
+    let output = repo.merge();
+    assert_merged(&repo, &output);
+    let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
+    let (_, spent) = record.split_once("\n[seconds]\n").expect(&record);
+    let keys: Vec<&str> = spent
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(" = ").map(|(key, _)| key))
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "slot",
+            "place",
+            "activity_lock",
+            "lint",
+            "tests",
+            "journey",
+            "steps",
+            "programs"
+        ],
+        "{record}"
+    );
+    assert!(spent.contains("\nsteps = { 1 = "), "{record}");
+    assert!(
+        spent.contains("{ package = \"demo\", name = \"unittests src/lib.rs\", seconds = "),
+        "{record}"
+    );
+    assert!(
+        record.ends_with("\n\n[downloads]\nlayers = 1\nfiles = 1"),
+        "{record}"
+    );
+    let printed = stdout(&output);
+    for line in [
+        "merge: where the proof's time went, in seconds:\n",
+        "\n  lint ",
+        "\n  step 1 ",
+        "\n  demo unittests src/lib.rs ",
+        "\nmerge: the proof fetched 1 layer and 1 file\n",
+    ] {
+        assert!(printed.contains(line), "{line:?} in {printed}");
+    }
+}
+
 #[test]
 fn a_merge_leaves_the_callers_checkout_alone() {
     let repo = Repo::new("alone");

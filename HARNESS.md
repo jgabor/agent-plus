@@ -598,6 +598,21 @@ run_ms = 930
 idle_mib = 58
 noop_build_ms = 71
 binary_bytes = 9312000
+
+[seconds]
+slot = 12.3
+place = 0.0
+activity_lock = 2.1
+lint = 41.2
+tests = 190.3
+t2 = 61.0
+journey = 205.1
+steps = { 1 = 0.3, 5 = 31.8 }
+programs = [{ package = "xtask", name = "tests/nightly.rs", seconds = 41.2 }]
+
+[downloads]
+layers = 1
+files = 2
 ```
 
 | Field | Meaning |
@@ -606,6 +621,14 @@ binary_bytes = 9312000
 | `spec`, `journey` | Scores at that commit |
 | `reason` | Required when a budget is outside its band, otherwise empty |
 | `budgets` | Every budget's latest value. One this change didn't measure carries over from the previous record. The pinned sizes are read for every record |
+| `seconds` | Where the proof's time went: the waits for the merge slot, a place, and the activity lock, then each phase that ran, in the order it began: `lint`, `tests`, `t2`, `journey`, `bench`, and `own_xtask`. `steps` holds each journey step that ran, by its id, and `programs` the ten test programs that took longest, by package and cargo's name for each |
+| `downloads` | What the journey and the bench fetched: the pinned OS layers their stores gained, and the other files that they and the journey's download cache gained |
+
+`seconds` and `downloads` decide nothing, and no check reads them. `merge`,
+`prepare`, and `land` write both, and print them as the proof ends. A record
+without them is still valid. `downloads` counts files, not bytes, because
+systemd counts the bytes a unit receives with a BPF program, and the user
+manager that the proof runs under can't attach one.
 
 A change's base scores are those of the newest record in the history of its
 base, or zero if there is none.

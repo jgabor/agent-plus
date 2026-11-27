@@ -33,6 +33,8 @@ const AHEAD: &str = "ahead.lock";
 /// Kept by a merge while the xtask of `main` that it runs takes the slot
 /// again, which every other merge lets it have first.
 const TURN: &str = "turn.lock";
+/// Where the waiters for the merge slot keep their numbers, as `Ticket` says.
+const QUEUE: &str = "merge-queue";
 /// Set to the lock directory on a merge that runs during a turn its parent
 /// keeps, so that it takes the slot ahead, as the xtask of `main` does.
 const TURN_INHERITED: &str = "XTASK_TURN_HELD";
@@ -317,13 +319,22 @@ pub fn claim_slot(root: &Path) -> Result<Hold, Problem> {
 }
 
 /// Held for a whole merge, so that only one runs at a time and each is tested
-/// on top of the last. `waiting` runs before a wait, if another run holds it.
-/// While a merge keeps its turn, another that gets the slot lets it go, and
-/// waits for the turn to end. The merge whose turn it is passes `ahead`.
+/// on top of the last. `waiting` runs before a wait, if another run holds it,
+/// or waits for it first. Those that wait get it in the order they came, as
+/// `Ticket` says. While a merge keeps its turn, another that gets the slot
+/// lets it go, and waits for the turn to end, and keeps its place in the
+/// queue. The merge whose turn it is passes `ahead`, and skips the queue.
 pub fn merge_slot(root: &Path, ahead: bool, waiting: impl FnOnce()) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     let mut waiting = Some(waiting);
     let mut wait = || waiting.take().map_or((), |waiting| waiting());
+    // Given back once this holds the slot, so the next in the queue waits on
+    // the slot itself.
+    let _ticket = if ahead {
+        None
+    } else {
+        Some(Ticket::take(&directory, &mut wait)?)
+    };
     loop {
         let slot = slot(&directory, "merge.lock", &mut wait)?;
         if ahead || !kept(&directory, TURN)? {
@@ -335,6 +346,88 @@ pub fn merge_slot(root: &Path, ahead: bool, waiting: impl FnOnce()) -> Result<Ho
             .lock_shared()
             .map_err(|e| Problem(format!("couldn't wait for {TURN}: {e}")))?;
     }
+}
+
+/// A place in the queue for the merge slot: a numbered file in `QUEUE`,
+/// which its waiter keeps locked. A waiter takes the number after the highest,
+/// and waits until no lower number is kept. `flock` wakes waiters in no set
+/// order, so only the first in the queue waits on the slot itself. The kernel
+/// frees a killed waiter's lock, so it holds no one up, and the next to take a
+/// number removes its file.
+struct Ticket {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Ticket {
+    fn take(directory: &Path, wait: &mut impl FnMut()) -> Result<Ticket, Problem> {
+        let couldnt = |e: io::Error| Problem(format!("couldn't join the queue for the slot: {e}"));
+        let queue = directory.join(QUEUE);
+        fs::create_dir_all(&queue).map_err(couldnt)?;
+        // So that no other waiter takes the same number, or removes a new
+        // file before its waiter locks it.
+        let numbering = open(directory, "merge-queue.lock")?;
+        numbering.lock().map_err(couldnt)?;
+        let existing = numbers(&queue)?;
+        for &number in &existing {
+            if !kept(&queue, &ticket(number))? {
+                let _ = fs::remove_file(queue.join(ticket(number)));
+            }
+        }
+        let number = existing.last().map_or(0, |last| last + 1);
+        let path = queue.join(ticket(number));
+        let file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .map_err(couldnt)?;
+        file.lock().map_err(couldnt)?;
+        drop(numbering);
+        let taken = Ticket { path, _file: file };
+        loop {
+            let mut before = None;
+            for earlier in numbers(&queue)?.into_iter().take_while(|&n| n < number) {
+                if kept(&queue, &ticket(earlier))? {
+                    before = Some(earlier);
+                }
+            }
+            let Some(before) = before else {
+                return Ok(taken);
+            };
+            wait();
+            match File::open(queue.join(ticket(before))) {
+                Ok(file) => file.lock_shared().map_err(couldnt)?,
+                // Gone as it was read, when its waiter took the slot.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(couldnt(e)),
+            }
+        }
+    }
+}
+
+impl Drop for Ticket {
+    /// Removed while it is still locked, so nobody takes it for a dead one.
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn ticket(number: u64) -> String {
+    format!("{number}.lock")
+}
+
+/// The numbers in the queue, lowest first.
+fn numbers(queue: &Path) -> Result<Vec<u64>, Problem> {
+    let entries = fs::read_dir(queue)
+        .map_err(|e| Problem(format!("couldn't read {}: {e}", queue.display())))?;
+    let mut numbers: Vec<u64> = entries
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?.strip_suffix(".lock")?.parse().ok()
+        })
+        .collect();
+    numbers.sort_unstable();
+    Ok(numbers)
 }
 
 /// Kept by a merge from the slot to its proof, while the xtask of `main` that
@@ -544,9 +637,15 @@ fn free_place(
 }
 
 /// Whether something keeps the lock on `name`: the merge slot's holder, which
-/// waits for a place, or a merge that keeps its turn.
+/// waits for a place, a merge that keeps its turn, or a waiter for the slot.
+/// A file that is gone is kept by nobody.
 fn kept(directory: &Path, name: &str) -> Result<bool, Problem> {
-    match open(directory, name)?.try_lock_shared() {
+    let file = match File::open(directory.join(name)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(Problem(format!("couldn't open {name}: {e}"))),
+    };
+    match file.try_lock_shared() {
         Ok(()) => Ok(false),
         Err(TryLockError::WouldBlock) => Ok(true),
         Err(TryLockError::Error(e)) => Err(Problem(format!("couldn't read {name}: {e}"))),
@@ -594,7 +693,7 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bench_waits, open, take_exclusive, take_place, take_shared};
+    use super::{Ticket, bench_waits, open, take_exclusive, take_place, take_shared};
     use std::fs::{self, TryLockError};
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
@@ -734,6 +833,31 @@ mod tests {
 
         drop((ahead, next));
         queued.recv().unwrap().send(()).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// A number that no waiter keeps, as a killed waiter leaves, holds no one
+    /// up, and the next waiter removes it.
+    #[test]
+    fn a_number_nobody_keeps_is_removed() {
+        let path = directory("queue");
+        let queue = path.join("merge-queue");
+        fs::create_dir_all(&queue).unwrap();
+        fs::write(queue.join("4.lock"), "").unwrap();
+        let names = || {
+            let mut names: Vec<String> = fs::read_dir(&queue)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let ticket = Ticket::take(&path, &mut || panic!("it waited"))
+            .map_err(|e| e.0)
+            .unwrap();
+        assert_eq!(names(), ["5.lock"]);
+        drop(ticket);
+        assert!(names().is_empty(), "{:?}", names());
         fs::remove_dir_all(&path).unwrap();
     }
 

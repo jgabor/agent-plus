@@ -819,6 +819,12 @@ Only one merge runs at a time, under an exclusive lock on a file in the shared
 git directory. The kernel releases the lock when the process exits, so a killed
 merge can't keep the slot.
 
+The slot is a queue. `merge`, `prepare`, `land`, and the refresh get it in the
+order they began to wait for it. Each waiter takes the next number, a file it
+locks in the same directory, and waits until no lower number is locked, so
+only the first in the queue waits on the slot itself. A waiter that is killed
+loses its number, and holds no one up.
+
 `cargo xtask merge` runs every step. `cargo xtask prepare` stops before the
 squash, and leaves the owner a complete PR to merge with any button. `cargo
 xtask land` follows `prepare`'s rules, and goes on through the squash. Only
@@ -832,11 +838,13 @@ moved by then, it builds again. Before the command lets the slot go to run
 that xtask, it takes a second lock, its turn, and keeps it until that xtask
 ends. Another merge, or a refresh, that gets the slot during a turn lets it
 go, and waits for the turn to end, so the command keeps its place from the slot
-to its proof. Nothing that a merge starts inherits the slot or the turn, except
-`gh pr merge`, which keeps the slot. The rebase and the proof run in another
-worktree, whose path is padded to 160 bytes. That is longer than a worker's
-worktree, and shorter than a `#!` line may be, so a check that passes only in a
-short path fails here too.
+to its proof. The one that waits keeps its number, so it is still first once
+the turn ends. What takes the slot ahead in a turn, as the xtask of `main`
+does, takes no number. Nothing that a merge starts inherits the slot or the
+turn, except `gh pr merge`, which keeps the slot. The rebase and the proof run
+in another worktree, whose path is padded to 160 bytes. That is longer than a
+worker's worktree, and shorter than a `#!` line may be, so a check that passes
+only in a short path fails here too.
 
 These worktrees, and the tree the bench builds its base in, are kept in the
 system's temp directory, or in `/var/tmp` when only that one is on a disk,
@@ -868,9 +876,9 @@ to be staged: teach the reader first, and change the file in a later PR.
    xtask that starts a command can be any, so this only saves a wait. `main`'s
    xtask checks again in step 4, and decides.
 2. Take the merge slot, and read the PR again. If another run holds the slot,
-   the command first says that it waits for it, and posts that on the PR, so a
-   queue doesn't look like a hang. If it waited, and then refuses the PR, it
-   posts `failure` with why.
+   or waits for it first, the command first says that it waits for it, and
+   posts that on the PR, so a queue doesn't look like a hang. If it waited,
+   and then refuses the PR, it posts `failure` with why.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased

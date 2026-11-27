@@ -10,6 +10,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -83,7 +84,7 @@ enum Measure {
     Pinned(Guest),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum Guest {
     Os,
     Kernel,
@@ -125,7 +126,25 @@ impl Guest {
 /// The guest files that the tree holds copies of, as paths in the tree and in
 /// a store. Every store of the bench starts with them, so no command it runs
 /// downloads one, and so does every journey step's but one.
-pub struct Copies(Vec<(PathBuf, String)>);
+pub struct Copies {
+    copies: Vec<(PathBuf, String)>,
+    /// The files a store keeps of each guest file that the tree pins, and
+    /// whether it is the OS layer.
+    pinned: Vec<(bool, Vec<String>)>,
+    /// Each home whose store this watches, with the pinned OS layers and other
+    /// guest files that it held as the watch began.
+    watched: Mutex<Vec<(PathBuf, (usize, usize))>>,
+}
+
+/// The pinned OS layers and other guest files that this process's bench
+/// fetched, for the ledger.
+static FETCHED: Mutex<(usize, usize)> = Mutex::new((0, 0));
+
+/// The pinned OS layers and other guest files that this process's bench
+/// fetched.
+pub fn fetched() -> (usize, usize) {
+    *FETCHED.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 impl Copies {
     /// The copies of the guest files that the tree's pins name. A copy whose
@@ -135,6 +154,7 @@ impl Copies {
     /// are checked.
     pub fn find(root: &Path) -> Result<Copies, Problem> {
         let mut copies = Vec::new();
+        let mut pinned = Vec::new();
         for guest in [Guest::Os, Guest::Kernel] {
             let pin = guest.pin();
             let text = fs::read_to_string(root.join(pin)).unwrap_or_default();
@@ -142,6 +162,8 @@ impl Copies {
                 continue;
             };
             let stored = guest.stored(&digest);
+            let in_store = stored.iter().map(|(_, store)| store.clone()).collect();
+            pinned.push((guest == Guest::Os, in_store));
             if stored.iter().all(|(tree, _)| root.join(tree).is_file())
                 && is_copy(&root.join(guest.copy(&digest)), &digest)?
             {
@@ -152,14 +174,76 @@ impl Copies {
                 );
             }
         }
-        Ok(Copies(copies))
+        Ok(Copies {
+            copies,
+            pinned,
+            watched: Mutex::default(),
+        })
+    }
+
+    /// Counts the guest files that `commit` pins as well, which a build of
+    /// `commit` fetches where the tree pins others.
+    pub fn count_pins_of(&mut self, root: &Path, commit: &str) {
+        for guest in [Guest::Os, Guest::Kernel] {
+            let at = format!("{commit}:{}", guest.pin());
+            let Ok(text) = base::git_text(root, &["show", &at]) else {
+                continue;
+            };
+            let Ok(digest) = pinned_digest(guest.pin(), &text) else {
+                continue;
+            };
+            let stored = guest.stored(&digest).into_iter();
+            let in_store: Vec<String> = stored.map(|(_, store)| store).collect();
+            if !self.pinned.iter().any(|(_, files)| *files == in_store) {
+                self.pinned.push((guest == Guest::Os, in_store));
+            }
+        }
+    }
+
+    /// Watches the store under `home`, so that `fetched` counts the pinned
+    /// guest files it gains from now on.
+    pub fn watch(&self, home: &Path) {
+        let held = self.held(home);
+        let mut watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
+        watched.push((home.to_path_buf(), held));
+    }
+
+    /// The pinned OS layers, and the other pinned guest files, that the
+    /// stores this watches have gained.
+    pub fn fetched(&self) -> (usize, usize) {
+        let watched = self.watched.lock().unwrap_or_else(PoisonError::into_inner);
+        watched.iter().fold(
+            (0, 0),
+            |(layers, files), (home, (had_layers, had_files))| {
+                let (now_layers, now_files) = self.held(home);
+                (
+                    layers + now_layers.saturating_sub(*had_layers),
+                    files + now_files.saturating_sub(*had_files),
+                )
+            },
+        )
+    }
+
+    /// How many of the pinned OS layers, and of the other pinned guest
+    /// files, the store that `ap` keeps under `home` holds.
+    fn held(&self, home: &Path) -> (usize, usize) {
+        let store = home.join(".local/share/ap");
+        let held = self
+            .pinned
+            .iter()
+            .filter(|(_, files)| files.iter().any(|file| store.join(file).is_file()));
+        held.fold((0, 0), |(layers, files), (layer, _)| match layer {
+            true => (layers + 1, files),
+            false => (layers, files + 1),
+        })
     }
 
     /// Puts the copies in the store that `ap` keeps under `home`, where a
-    /// download leaves them. A file the store holds already stays.
+    /// download leaves them, and watches it. A file the store holds already
+    /// stays.
     pub fn put(&self, home: &Path) -> Result<(), Problem> {
         let store = home.join(".local/share/ap");
-        for (from, to) in &self.0 {
+        for (from, to) in &self.copies {
             let to = store.join(to);
             let problem = |e: io::Error| {
                 Problem(format!(
@@ -180,6 +264,7 @@ impl Copies {
                 _ => {}
             }
         }
+        self.watch(home);
         Ok(())
     }
 }
@@ -400,7 +485,9 @@ pub fn compare(
         None
     };
     drop(hold);
-    let copies = Copies::find(root)?;
+    let mut copies = Copies::find(root)?;
+    // The base's `ap` fetches what the base pins.
+    copies.count_pins_of(root, &commit);
 
     waiting(true)?;
     let measuring = lock::exclusive(root);
@@ -415,6 +502,10 @@ pub fn compare(
         &copies,
     )?;
     drop(measuring);
+    let (layers, files) = copies.fetched();
+    let mut fetched = FETCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    *fetched = (fetched.0 + layers, fetched.1 + files);
+    drop(fetched);
 
     let any_over = rows.iter().any(|row| row.over);
     let reason = match (any_over, pr_body) {
@@ -1291,11 +1382,72 @@ fn over_band(base: f64, candidate: f64, band: Band) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Band, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, choose_temp, median, over_band,
+        Band, Copies, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, choose_temp, median,
+        over_band,
     };
+    use std::fs;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_store_fetched_only_the_pinned_files_it_gained_after_its_copies() {
+        // The digest of `OS`, and one for a kernel the tree holds no copy of.
+        const OS: &str = "an OS layer\n";
+        const OS_SHA256: &str = "572930e188290325e9b80a82a61d0e0b57c5ef392bed9d14f5fc5665eeec0e5c";
+        const KERNEL_SHA256: &str = "0ea0";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/unit/copies-fetched");
+        if root.exists() {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        let write = |path: PathBuf, content: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        };
+        for (guest, digest) in [("os", OS_SHA256), ("kernel", KERNEL_SHA256)] {
+            let pin = format!("url = \"https://example.com\"\nsha256 = \"{digest}\"\n");
+            write(root.join(format!("guest/{guest}/pin.toml")), &pin);
+        }
+        for kind in ["plain-layers", "zstd-layers"] {
+            let copy = format!("target/guest/os-{OS_SHA256}/{kind}/{OS_SHA256}");
+            write(root.join(copy), OS);
+        }
+        // A base that pins another kernel.
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        let base_pin = "url = \"https://example.com\"\nsha256 = \"0b0b\"\n";
+        write(root.join("guest/kernel/pin.toml"), base_pin);
+        git(&["init", "-q"]);
+        git(&["add", "guest"]);
+        git(&["commit", "-q", "-m", "base"]);
+        let pin = format!("url = \"https://example.com\"\nsha256 = \"{KERNEL_SHA256}\"\n");
+        write(root.join("guest/kernel/pin.toml"), &pin);
+
+        let mut copies = Copies::find(&root).unwrap();
+        copies.count_pins_of(&root, "HEAD");
+        let (put, watched) = (root.join("put"), root.join("watched"));
+        copies.put(&put).unwrap();
+        copies.watch(&watched);
+        assert_eq!(copies.fetched(), (0, 0));
+        let store = |home: &Path, file: &str| home.join(".local/share/ap").join(file);
+        write(
+            store(&put, &format!("layers/{KERNEL_SHA256}")),
+            "a kernel\n",
+        );
+        write(store(&watched, &format!("zstd-layers/{OS_SHA256}")), OS);
+        assert_eq!(copies.fetched(), (1, 1));
+        write(store(&put, "layers/0b0b"), "the base's kernel\n");
+        assert_eq!(copies.fetched(), (1, 2));
+    }
 
     #[test]
     fn the_noop_lockfile_pins_the_harness_by_its_digest() {

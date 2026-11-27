@@ -25,6 +25,155 @@ pub struct Record {
     pub steps: usize,
     pub reason: String,
     pub budgets: BTreeMap<String, f64>,
+    /// Where the proof's time went. Older records have none.
+    pub seconds: Option<Seconds>,
+    /// What the proof fetched. Older records have none.
+    pub downloads: Option<Downloads>,
+}
+
+/// Where a proof's time went, in seconds. It decides nothing.
+#[derive(Debug, PartialEq)]
+pub struct Seconds {
+    /// Each wait, then each phase that ran, as `lint` or `own_xtask`.
+    pub spent: Vec<(String, f64)>,
+    /// Each journey step that ran, by its id.
+    pub steps: Vec<(i64, f64)>,
+    /// The test programs that took longest, longest first.
+    pub programs: Vec<Program>,
+}
+
+/// One test program that a package's `cargo test` ran, named as cargo names
+/// it, such as `tests/ledger.rs`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Program {
+    pub package: String,
+    pub name: String,
+    pub seconds: f64,
+}
+
+/// What the journey and the bench fetched: the pinned OS layers that their
+/// stores gained, and the other files that they and the journey's download
+/// cache gained.
+#[derive(Debug, PartialEq)]
+pub struct Downloads {
+    pub layers: usize,
+    pub files: usize,
+}
+
+impl Seconds {
+    fn render(&self) -> String {
+        let mut text = String::new();
+        for (name, seconds) in &self.spent {
+            text.push_str(&format!("{name} = {}\n", tenths(*seconds)));
+        }
+        let steps: Vec<String> = self
+            .steps
+            .iter()
+            .map(|(id, seconds)| format!("{id} = {}", tenths(*seconds)))
+            .collect();
+        text.push_str(&format!("steps = {{ {} }}\n", steps.join(", ")));
+        let programs: Vec<String> = self
+            .programs
+            .iter()
+            .map(|program| {
+                format!(
+                    "{{ package = {}, name = {}, seconds = {} }}",
+                    toml::quoted(&program.package),
+                    toml::quoted(&program.name),
+                    tenths(program.seconds)
+                )
+            })
+            .collect();
+        text.push_str(&format!("programs = [{}]\n", programs.join(", ")));
+        text
+    }
+
+    fn parse(table: &Table) -> Result<Seconds, String> {
+        let mut seconds = Seconds {
+            spent: Vec::new(),
+            steps: Vec::new(),
+            programs: Vec::new(),
+        };
+        for (name, value) in table.entries() {
+            match (name, value) {
+                ("steps", Value::Table(steps)) => {
+                    for (key, value) in steps.entries() {
+                        let id = key
+                            .parse()
+                            .map_err(|_| format!("step `{key}` isn't an id"))?;
+                        seconds.steps.push((id, number(value, key)?));
+                    }
+                }
+                ("programs", Value::Arr(programs)) => {
+                    for program in programs {
+                        let Value::Table(program) = program else {
+                            return Err("a program isn't a table".to_string());
+                        };
+                        seconds.programs.push(Program {
+                            package: string(program, "package")?,
+                            name: string(program, "name")?,
+                            seconds: match program.get("seconds") {
+                                Some(value) => number(value, "seconds")?,
+                                None => return Err("a program has no `seconds`".to_string()),
+                            },
+                        });
+                    }
+                }
+                ("steps", _) => return Err("`steps` isn't a table".to_string()),
+                ("programs", _) => return Err("`programs` isn't an array".to_string()),
+                (name, value) => seconds.spent.push((name.to_string(), number(value, name)?)),
+            }
+        }
+        Ok(seconds)
+    }
+
+    /// The lines that `merge` prints once a proof ends.
+    pub fn show(&self) -> String {
+        let mut text = "where the proof's time went, in seconds:".to_string();
+        let mut line = |what: String, seconds: f64| {
+            text.push_str(&format!("\n  {what} {}", tenths(seconds)));
+        };
+        for (name, seconds) in &self.spent {
+            line(name.replace('_', " "), *seconds);
+        }
+        for (id, seconds) in &self.steps {
+            line(format!("step {id}"), *seconds);
+        }
+        for program in &self.programs {
+            line(
+                format!("{} {}", program.package, program.name),
+                program.seconds,
+            );
+        }
+        text
+    }
+}
+
+impl Downloads {
+    pub fn show(&self) -> String {
+        let plural = |count: usize, word: &str| match count {
+            1 => format!("1 {word}"),
+            _ => format!("{count} {word}s"),
+        };
+        format!(
+            "the proof fetched {} and {}",
+            plural(self.layers, "layer"),
+            plural(self.files, "file")
+        )
+    }
+}
+
+/// Seconds to a tenth, which is all a slow step needs.
+fn tenths(seconds: f64) -> String {
+    format!("{seconds:.1}")
+}
+
+fn number(value: &Value, name: &str) -> Result<f64, String> {
+    match value {
+        Value::Int(number) => Ok(*number as f64),
+        Value::Float(number) => Ok(*number),
+        _ => Err(format!("`{name}` isn't a number")),
+    }
 }
 
 impl Record {
@@ -46,6 +195,15 @@ impl Record {
             toml::quoted(&self.reason),
         );
         push_budgets(&mut text, &self.budgets);
+        if let Some(seconds) = &self.seconds {
+            text.push_str("\n[seconds]\n");
+            text.push_str(&seconds.render());
+        }
+        if let Some(Downloads { layers, files }) = &self.downloads {
+            text.push_str(&format!(
+                "\n[downloads]\nlayers = {layers}\nfiles = {files}\n"
+            ));
+        }
         text
     }
 
@@ -69,6 +227,13 @@ impl Record {
             steps: count(journey, "steps")?,
             reason: string(&table, "reason")?,
             budgets: read_values(&table, "budgets")?,
+            seconds: optional(&table, "seconds", Seconds::parse)?,
+            downloads: optional(&table, "downloads", |downloads| {
+                Ok(Downloads {
+                    layers: count(downloads, "layers")?,
+                    files: count(downloads, "files")?,
+                })
+            })?,
         })
     }
 }
@@ -160,14 +325,22 @@ fn push_budgets(text: &mut String, budgets: &BTreeMap<String, f64>) {
 fn read_values(table: &Table, key: &str) -> Result<BTreeMap<String, f64>, String> {
     let mut budgets = BTreeMap::new();
     for (name, value) in section(table, key)?.entries() {
-        let value = match value {
-            Value::Int(number) => *number as f64,
-            Value::Float(number) => *number,
-            _ => return Err(format!("budget `{name}` isn't a number")),
-        };
+        let value = number(value, name).map_err(|e| format!("budget {e}"))?;
         budgets.insert(name.to_string(), value);
     }
     Ok(budgets)
+}
+
+/// The table under `key`, read with `parse`, or `None` if there is none.
+fn optional<T>(
+    table: &Table,
+    key: &str,
+    parse: impl Fn(&Table) -> Result<T, String>,
+) -> Result<Option<T>, String> {
+    match table.get(key) {
+        Some(_) => section(table, key).and_then(parse).map(Some),
+        None => Ok(None),
+    }
 }
 
 fn section<'a>(table: &'a Table, key: &str) -> Result<&'a Table, String> {
@@ -276,6 +449,8 @@ pub fn compose(
         steps: scores.steps,
         reason,
         budgets,
+        seconds: None,
+        downloads: None,
     })
 }
 
@@ -420,7 +595,7 @@ fn read_at(root: &Path, commit: &str, path: &str) -> Result<Record, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Measured, Record};
+    use super::{Downloads, Measured, Program, Record, Seconds};
     use std::collections::BTreeMap;
 
     fn sample(reason: &str) -> Record {
@@ -441,6 +616,8 @@ mod tests {
                 ("boot_ms".to_string(), 141.2),
                 ("run_ms".to_string(), 930.0),
             ]),
+            seconds: None,
+            downloads: None,
         }
     }
 
@@ -493,6 +670,55 @@ mod tests {
         );
     }
 
+    fn spent() -> (Seconds, Downloads) {
+        let seconds = Seconds {
+            spent: vec![
+                ("slot".to_string(), 12.3),
+                ("place".to_string(), 0.0),
+                ("lint".to_string(), 41.24),
+            ],
+            steps: vec![(1, 0.3), (5, 30.0)],
+            programs: vec![Program {
+                package: "xtask".to_string(),
+                name: "tests/nightly.rs".to_string(),
+                seconds: 41.2,
+            }],
+        };
+        (
+            seconds,
+            Downloads {
+                layers: 1,
+                files: 3,
+            },
+        )
+    }
+
+    #[test]
+    fn where_the_time_went_round_trips_after_the_budgets() {
+        let mut record = sample("");
+        let (seconds, downloads) = spent();
+        record.seconds = Some(seconds);
+        record.downloads = Some(downloads);
+        let text = record.render();
+        assert!(
+            text.ends_with(
+                "run_ms = 930\n\n[seconds]\nslot = 12.3\nplace = 0.0\nlint = 41.2\nsteps = { 1 = 0.3, 5 = 30.0 }\nprograms = [{ package = \"xtask\", name = \"tests/nightly.rs\", seconds = 41.2 }]\n\n[downloads]\nlayers = 1\nfiles = 3\n"
+            ),
+            "{text}"
+        );
+        let read = Record::parse(&text).unwrap();
+        record.seconds.as_mut().unwrap().spent[2].1 = 41.2;
+        assert_eq!(read, record);
+    }
+
+    #[test]
+    fn a_record_without_the_time_or_the_downloads_reads() {
+        let text = sample("").render();
+        assert!(!text.contains("[seconds]") && !text.contains("[downloads]"));
+        let record = Record::parse(&text).unwrap();
+        assert_eq!((record.seconds, record.downloads), (None, None));
+    }
+
     #[test]
     fn a_missing_or_mistyped_field_is_an_error() {
         let good = sample("").render();
@@ -504,6 +730,28 @@ mod tests {
             ("steps = 19", "steps = \"19\""),
             ("[budgets]\n", ""),
             ("boot_ms = 141.2\n", "boot_ms = \"fast\"\n"),
+        ] {
+            assert!(good.contains(from), "{from}");
+            let text = good.replace(from, to);
+            assert!(Record::parse(&text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_mistyped_time_or_download_is_an_error() {
+        let mut record = sample("");
+        let (seconds, downloads) = spent();
+        record.seconds = Some(seconds);
+        record.downloads = Some(downloads);
+        let good = record.render();
+        for (from, to) in [
+            ("steps = { 1 = 0.3, 5 = 30.0 }", "steps = 1"),
+            ("steps = { 1 = 0.3,", "steps = { one = 0.3,"),
+            ("programs = [", "programs = 2.5\nignored = ["),
+            (", seconds = 41.2 }]", " }]"),
+            ("lint = 41.2", "lint = \"slow\""),
+            ("layers = 1", "layers = \"one\""),
+            ("files = 3\n", ""),
         ] {
             assert!(good.contains(from), "{from}");
             let text = good.replace(from, to);

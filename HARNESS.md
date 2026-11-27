@@ -1037,8 +1037,9 @@ with the PR. With the slot, it reads the PR and its issue again, since another
 run can merge the PR while the refresh waits. A PR that is no longer open,
 whose auto-merge was turned off, or whose issue lost `land-needed`, is left as
 it is. The refresh says why in one line, proves and posts nothing for it, and
-doesn't fail the run for it. The PR's `prepare` runs in that turn, and takes the slot ahead of
-every other merge, as the xtask of `main` does in a merge. The refresh takes
+doesn't fail the run for it. The PR's `prepare` runs in that turn, and takes
+the slot ahead of every other merge, as the xtask of `main` does in a merge.
+The refresh takes
 the slot back the same way for the squash. So no merge moves `main` between a
 PR's proof and its squash. The refresh lets both go before it proves `main`.
 

@@ -934,8 +934,6 @@ impl Repo {
             assert!(Instant::now() < deadline, "{}", self.calls());
             thread::sleep(Duration::from_millis(10));
         }
-        // It says so before it waits, so give it time to go on if it didn't wait.
-        thread::sleep(Duration::from_millis(500));
         meanwhile();
         held.unlock().unwrap();
         let mut output = child.wait_with_output().unwrap();
@@ -957,6 +955,8 @@ fn a_refresh_waits_for_the_merge_slot() {
     let repo = Repo::armed_behind("refresh-slot");
     let head = repo.head();
     let output = repo.refresh_waiting(|| {
+        // It says so before it waits, so give it time to go on if it didn't.
+        thread::sleep(Duration::from_millis(500));
         let calls = repo.calls();
         assert!(!calls.contains("gh pr view"), "{calls}");
         assert!(!calls.contains("git worktree add"), "{calls}");

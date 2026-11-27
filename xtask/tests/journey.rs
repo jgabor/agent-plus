@@ -699,9 +699,13 @@ fn the_binary_is_built_without_a_c_compiler() {
     assert_journey(&root, "pass step 1\njourney 1 of 1\n");
 }
 
-/// Runs step 13 from the directory `scripts`, with no key, in a new working
-/// directory under `name`, and returns its output and the `step.sh` it wrote.
-fn other_harness(name: &str, scripts: &Path) -> (Output, String) {
+/// The repository's journey scripts.
+fn scripts() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/journey")
+}
+
+/// A new, empty directory under `name` for a test of step 13.
+fn new_dir(name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("other-harness")
         .join(name);
@@ -709,6 +713,13 @@ fn other_harness(name: &str, scripts: &Path) -> (Output, String) {
         fs::remove_dir_all(&dir).unwrap();
     }
     fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Runs step 13 from the directory `scripts`, with no key, in a new working
+/// directory under `name`, and returns its output and the `step.sh` it wrote.
+fn other_harness(name: &str, scripts: &Path) -> (Output, String) {
+    let dir = new_dir(name);
     let output = Command::new("/bin/sh")
         .arg(scripts.join("13-other-harness.sh"))
         .current_dir(&dir)
@@ -732,8 +743,7 @@ fn agentfile(step: &str) -> Vec<&str> {
 
 #[test]
 fn step_13_names_its_codex_model_without_a_key() {
-    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/journey");
-    let (output, step) = other_harness("names", &scripts);
+    let (output, step) = other_harness("names", &scripts());
     // With no key, the step stops at step 12's check for one, so every check
     // of its own text has passed.
     assert_eq!(output.status.code(), Some(1));
@@ -748,11 +758,8 @@ fn step_13_names_its_codex_model_without_a_key() {
 
 #[test]
 fn step_13_fails_when_its_agentfile_names_no_model() {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/journey");
-    let scripts = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("other-harness")
-        .join("no-model-scripts");
-    fs::create_dir_all(&scripts).unwrap();
+    let source = scripts();
+    let scripts = new_dir("no-model-scripts");
     fs::copy(
         source.join("13-other-harness.sh"),
         scripts.join("13-other-harness.sh"),

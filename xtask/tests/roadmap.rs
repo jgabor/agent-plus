@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
 
@@ -156,6 +157,7 @@ struct Issue<'a> {
     labels: &'a [&'a str],
     body: &'a str,
     parent: Option<u64>,
+    created: &'a str,
 }
 
 const PLAIN: Issue = Issue {
@@ -165,6 +167,7 @@ const PLAIN: Issue = Issue {
     labels: &[],
     body: "",
     parent: None,
+    created: "2026-01-01T00:00:00Z",
 };
 
 impl Issue<'_> {
@@ -173,12 +176,13 @@ impl Issue<'_> {
             format!("{{\"number\":{parent},\"url\":\"https://github.com/o/r/issues/{parent}\"}}")
         });
         format!(
-            "{{\"number\":{0},\"state\":{1},\"title\":{2},\"body\":{3},\"labels\":[{4}],\"url\":\"https://github.com/o/r/issues/{0}\",\"parent\":{parent}}}",
+            "{{\"number\":{0},\"state\":{1},\"title\":{2},\"body\":{3},\"labels\":[{4}],\"url\":\"https://github.com/o/r/issues/{0}\",\"parent\":{parent},\"createdAt\":{5}}}",
             self.number,
             quoted(self.state),
             quoted(self.title),
             quoted(self.body),
             labels(self.labels),
+            quoted(self.created),
         )
     }
 }
@@ -636,7 +640,7 @@ fn the_roadmap_reads_github_and_writes_nothing() {
     assert_eq!(
         repo.calls(),
         [
-            "issue list --state all --limit 2000 --json number,state,title,body,labels,parent,url",
+            "issue list --state all --limit 2000 --json number,state,title,body,labels,parent,url,createdAt",
             "pr list --state open --limit 1000 --json number,title,labels,url,isCrossRepository,headRefName,headRefOid,closingIssuesReferences,autoMergeRequest",
         ]
     );
@@ -676,6 +680,80 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
         ),
         "{text}"
     );
+}
+
+/// GitHub's form of the time this many days ago, and half a day more, so a
+/// run that takes hours still counts the same days.
+fn days_ago(days: u64) -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let seconds = now.as_secs() - days * 86400 - 12 * 3600;
+    // Howard Hinnant's algorithm, from days since 1970 to a civil date.
+    let z = seconds / 86400 + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    let rest = seconds % 86400;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest / 60 % 60,
+        rest % 60
+    )
+}
+
+/// An action only the owner can take comes before anything else that waits
+/// on the owner, the oldest first, and isn't also an issue to label.
+#[test]
+fn the_owners_actions_come_first_and_oldest_first() {
+    let repo = Repo::new("actions");
+    let (one, two, nine) = (days_ago(1), days_ago(2), days_ago(9));
+    let action = &["action-needed"];
+    let issues = [
+        Issue {
+            number: 60,
+            title: "Turn the timer on, on the Linux machine",
+            labels: action,
+            created: &two,
+            ..PLAIN
+        },
+        Issue {
+            number: 61,
+            title: "Set the `<token>` secret",
+            labels: action,
+            created: &nine,
+            ..PLAIN
+        },
+        Issue {
+            number: 62,
+            title: "Done, so it waits on nobody",
+            state: "CLOSED",
+            labels: action,
+            created: &nine,
+            ..PLAIN
+        },
+        Issue {
+            number: 63,
+            title: "Stuck on a question",
+            labels: &["auto:merge", "answer-needed"],
+            ..PLAIN
+        },
+        Issue {
+            number: 64,
+            title: "Enable the setting",
+            labels: action,
+            created: &one,
+            ..PLAIN
+        },
+    ];
+    repo.set(&issues, &[]);
+    let text = repo.details();
+    let waiting = "## Waiting on the owner\n\n### To do\n\n- #61 Set the `<token>` secret (open 9 days)\n- #60 Turn the timer on, on the Linux machine (open 2 days)\n- #64 Enable the setting (open 1 day)\n\n### To merge\n\nNothing.\n\n### To answer\n\n- #63 Stuck on a question\n\n### To label or close\n\nNothing.\n\n## Busy";
+    assert!(text.contains(waiting), "{text}");
 }
 
 fn parent_line(repo: &Repo, issues: &[Issue]) -> String {

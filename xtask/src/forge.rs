@@ -3,6 +3,7 @@
 use crate::Problem;
 use crate::json::{self, Json};
 use crate::lock::Hold;
+use crate::work;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Write};
 use std::os::unix::process::CommandExt;
@@ -69,6 +70,8 @@ pub struct RoadmapIssue {
     pub labels: Vec<String>,
     /// The issue that GitHub lists this one under, as a sub-issue.
     pub parent: Option<u64>,
+    /// When the issue was opened, in seconds since 1970.
+    pub created: i64,
 }
 
 /// An open PR, as far as `refresh` and the roadmap need one.
@@ -411,7 +414,7 @@ impl Gh {
 
     /// The issues in `state`, which is `open`, `closed`, or `all`.
     pub fn roadmap_issues(&self, state: &str) -> Result<Vec<RoadmapIssue>, Problem> {
-        self.listed(state, "number,state,title,body,labels,parent,url")?
+        self.listed(state, "number,state,title,body,labels,parent,url,createdAt")?
             .iter()
             .map(|item| read_roadmap_issue(item).ok_or_else(|| unexpected("gh issue list")))
             .collect()
@@ -659,6 +662,7 @@ fn read_roadmap_issue(value: &Json) -> Option<RoadmapIssue> {
         body: value.get("body")?.as_str()?.to_string(),
         labels: read_labels(value)?,
         parent: parent_here(value)?,
+        created: work::seconds(value.get("createdAt")?.as_str()?)?,
     })
 }
 

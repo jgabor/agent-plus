@@ -1,7 +1,7 @@
 //! `cargo xtask refresh`: proves each `land-needed` PR that the owner approved
 //! by arming auto-merge on the newest `main`, and merges it.
 
-use crate::forge::{Gh, OpenPr};
+use crate::forge::{Armed, Gh, OpenPr};
 use crate::lock::Hold;
 use crate::work::LAND_NEEDED;
 use crate::{Problem, Verdict, accepts, base, lock, merge, workspace};
@@ -28,14 +28,9 @@ pub fn run() -> Result<Verdict, Problem> {
         return Ok(Verdict::Pass);
     };
     let gh = Gh::new(&root);
-    let waiting: BTreeSet<u64> = gh
-        .open_issues()?
-        .into_iter()
-        .filter(|issue| issue.labels.iter().any(|label| label == LAND_NEEDED))
-        .map(|issue| issue.number)
-        .collect();
+    let waiting = land_needed(&gh)?;
     let mut prs = gh.open_prs()?;
-    prs.retain(|pr| pr.auto_merge && pr.closing_issues.iter().any(|n| waiting.contains(n)));
+    prs.retain(|pr| pr.auto_merge && closes_one(pr, &waiting));
     // GitHub numbers PRs in the order they were opened.
     prs.sort_by_key(|pr| pr.number);
 
@@ -85,6 +80,21 @@ pub fn run() -> Result<Verdict, Problem> {
             );
         })?;
         let turn = lock::merge_turn(&root)?;
+        // Another run can merge the PR while this one waits for the slot, and
+        // the owner can take the approval or the issue back.
+        match changed(&gh, pr) {
+            Ok(None) => {}
+            Ok(Some(why)) => {
+                println!("refresh: PR {} is left as it is, because {why}", pr.number);
+                continue;
+            }
+            Err(Problem(message)) => {
+                eprintln!("refresh: PR {}: {message}", pr.number);
+                row.said = message;
+                verdict = Verdict::Fail;
+                continue;
+            }
+        }
         // A merge earlier in this run can leave this PR behind.
         let (seen, stale) = match needs_proof(&root, &gh, pr) {
             Ok(seen) => seen,
@@ -263,11 +273,8 @@ fn merge_if_armed(gh: &Gh, pr: &OpenPr, head: &str, slot: &Hold) -> Result<Lande
     // the PR's issues itself.
     let mut close = false;
     if now.state != "MERGED" {
-        if now.state != "OPEN" {
-            return Ok(Landed::Open(format!("it is {}", now.state)));
-        }
-        if !now.auto_merge {
-            return Ok(Landed::Open("its auto-merge was turned off".to_string()));
+        if let Some(why) = unapproved(&now) {
+            return Ok(Landed::Open(why));
         }
         if now.head != head {
             return Ok(Landed::Open(format!(
@@ -315,6 +322,45 @@ fn merge_if_armed(gh: &Gh, pr: &OpenPr, head: &str, slot: &Hold) -> Result<Lande
         }
     }
     Ok(Landed::Merged(left))
+}
+
+/// The open issues that have `land-needed`.
+fn land_needed(gh: &Gh) -> Result<BTreeSet<u64>, Problem> {
+    Ok(gh
+        .open_issues()?
+        .into_iter()
+        .filter(|issue| issue.labels.iter().any(|label| label == LAND_NEEDED))
+        .map(|issue| issue.number)
+        .collect())
+}
+
+/// Whether the PR closes one of these issues.
+fn closes_one(pr: &OpenPr, issues: &BTreeSet<u64>) -> bool {
+    pr.closing_issues.iter().any(|n| issues.contains(n))
+}
+
+/// Why the owner's approval no longer stands for the PR, if it doesn't.
+fn unapproved(now: &Armed) -> Option<String> {
+    if now.state != "OPEN" {
+        return Some(format!("it is {}", now.state));
+    }
+    if !now.auto_merge {
+        return Some("its auto-merge was turned off".to_string());
+    }
+    None
+}
+
+/// Why the run should leave a PR it listed, now that it holds the slot: the
+/// PR merged or closed, its auto-merge was turned off, or its issue lost
+/// `land-needed`. `None` when the PR is still one to prove or merge.
+fn changed(gh: &Gh, pr: &OpenPr) -> Result<Option<String>, Problem> {
+    if let Some(why) = unapproved(&gh.armed(pr.number)?) {
+        return Ok(Some(why));
+    }
+    if !closes_one(pr, &land_needed(gh)?) {
+        return Ok(Some(format!("its issue no longer has `{LAND_NEEDED}`")));
+    }
+    Ok(None)
 }
 
 /// What this head's proof accepted that the comment before its own didn't

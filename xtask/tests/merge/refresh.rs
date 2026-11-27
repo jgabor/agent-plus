@@ -915,6 +915,37 @@ impl Repo {
         held.lock().unwrap();
         held
     }
+
+    /// A refresh that waits for the merge slot, which another run holds while
+    /// `meanwhile` runs.
+    fn refresh_waiting(&self, meanwhile: impl FnOnce()) -> Output {
+        let held = self.hold("merge.lock");
+        let said = self.temp.join("refresh.err");
+        let child = self
+            .command(env!("CARGO_BIN_EXE_xtask"))
+            .arg("refresh")
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(&said).unwrap())
+            .spawn()
+            .unwrap();
+        let waits = "refresh: PR 9 waits for the merge slot, which another run holds\n";
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !fs::read_to_string(&said).unwrap().contains(waits) {
+            assert!(Instant::now() < deadline, "{}", self.calls());
+            thread::sleep(Duration::from_millis(10));
+        }
+        meanwhile();
+        held.unlock().unwrap();
+        let mut output = child.wait_with_output().unwrap();
+        output.stderr = fs::read(&said).unwrap();
+        output
+    }
+}
+
+/// What a queued PR shows once the refresh waits for the merge slot.
+fn waited_on(head: &str) -> [(String, String); 2] {
+    ["pending Queued, next", "pending Waiting: the merge slot"]
+        .map(|text| (head.to_string(), text.to_string()))
 }
 
 /// The refresh takes the merge slot before it proves a PR, as a worker's merge
@@ -923,37 +954,14 @@ impl Repo {
 fn a_refresh_waits_for_the_merge_slot() {
     let repo = Repo::armed_behind("refresh-slot");
     let head = repo.head();
-    let held = repo.hold("merge.lock");
-    let said = repo.temp.join("refresh.err");
-    let child = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .arg("refresh")
-        .stdout(Stdio::piped())
-        .stderr(fs::File::create(&said).unwrap())
-        .spawn()
-        .unwrap();
-    let waits = "refresh: PR 9 waits for the merge slot, which another run holds\n";
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !fs::read_to_string(&said).unwrap().contains(waits) {
-        assert!(Instant::now() < deadline, "{}", repo.calls());
-        thread::sleep(Duration::from_millis(10));
-    }
-    // It says so before it waits, so give it time to go on if it didn't wait.
-    thread::sleep(Duration::from_millis(500));
-    let calls = repo.calls();
-    assert!(!calls.contains("gh pr view"), "{calls}");
-    assert!(!calls.contains("git worktree add"), "{calls}");
-    let said_on = |text: &str| (head.clone(), text.to_string());
-    assert_eq!(
-        posts(&repo),
-        [
-            said_on("pending Queued, next"),
-            said_on("pending Waiting: the merge slot")
-        ]
-    );
-    held.unlock().unwrap();
-    let mut output = child.wait_with_output().unwrap();
-    output.stderr = fs::read(&said).unwrap();
+    let output = repo.refresh_waiting(|| {
+        // It says so before it waits, so give it time to go on if it didn't.
+        thread::sleep(Duration::from_millis(500));
+        let calls = repo.calls();
+        assert!(!calls.contains("gh pr view"), "{calls}");
+        assert!(!calls.contains("git worktree add"), "{calls}");
+        assert_eq!(posts(&repo), waited_on(&head));
+    });
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -963,6 +971,59 @@ fn a_refresh_waits_for_the_merge_slot() {
     );
     let calls = repo.calls();
     assert!(calls.contains(&merged(9, &repo.head())), "{calls}");
+}
+
+/// A PR that changed while the refresh waited for the slot is left as it is,
+/// and the run still passes.
+fn assert_left(repo: &Repo, output: &Output, head: &str, why: &str) {
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(output),
+        stderr(output)
+    );
+    let line = format!("refresh: PR 9 is left as it is, because {why}\n");
+    assert!(stdout(output).contains(&line), "{}", stdout(output));
+    let calls = repo.calls();
+    // Only the read before the wait fetched the branch.
+    assert_eq!(calls.matches("refs/heads/7-x:").count(), 1, "{calls}");
+    for call in [
+        "git worktree add",
+        "gh pr merge",
+        "/labels/",
+        "gh pr comment",
+    ] {
+        assert!(!calls.contains(call), "{calls}");
+    }
+    assert_eq!(posts(repo), waited_on(head));
+}
+
+/// A worker's `prepare` can merge the PR while the refresh waits, and GitHub
+/// deletes its branch.
+#[test]
+fn a_refresh_leaves_a_pr_that_merged_while_it_waited() {
+    let repo = Repo::armed_behind("refresh-merged-meanwhile");
+    let head = repo.head();
+    let output = repo.refresh_waiting(|| {
+        fs::write(repo.bin.join("merged-9"), "").unwrap();
+        repo.origin(&["update-ref", "-d", "refs/heads/7-x"]);
+    });
+    assert_left(&repo, &output, &head, "it is MERGED");
+}
+
+/// The owner can take the PR's issue back while the refresh waits.
+#[test]
+fn a_refresh_leaves_a_pr_whose_issue_lost_land_needed_while_it_waited() {
+    let repo = Repo::armed_behind("refresh-unlabeled-meanwhile");
+    let head = repo.head();
+    let output = repo.refresh_waiting(|| repo.set_land_needed(&[]));
+    assert_left(
+        &repo,
+        &output,
+        &head,
+        "its issue no longer has `land-needed`",
+    );
 }
 
 /// A worker's merge that comes during the refresh's proof waits until the
@@ -1509,7 +1570,9 @@ fn a_refresh_merges_no_pr_whose_head_moved() {
     let output = repo
         .command(env!("CARGO_BIN_EXE_xtask"))
         .arg("refresh")
-        .env("RUN_ON", "state,headRefOid,autoMergeRequest")
+        // A PR behind `main` has its status read first after the proof,
+        // which is after the refresh read its head.
+        .env("RUN_ON", "/commits/")
         .env(
             "RUN_COMMAND",
             repo.update_ref("refs/heads/7-x", "refs/heads/main"),
@@ -1523,11 +1586,12 @@ fn a_refresh_merges_no_pr_whose_head_moved() {
         stdout(&output),
         stderr(&output)
     );
-    let calls = repo.calls();
+    let out = stdout(&output);
     assert!(
-        calls.contains("state,headRefOid,autoMergeRequest"),
-        "{calls}"
+        out.contains("refresh: PR 9 stays open, because its head moved from "),
+        "{out}"
     );
+    let calls = repo.calls();
     assert!(!calls.contains("gh pr merge"), "{calls}");
     assert!(!calls.contains("/labels/"), "{calls}");
 }

@@ -9,14 +9,18 @@
 //! `default`, `harness`, `loopback`, `path`, or `http`. `ap run` reads each
 //! report as data, and keeps it in the run's log, with the time it came and
 //! the rule as the Agentfile wrote it.
+//!
+//! `ap inspect --network` names the rule that decides a destination the
+//! same way, as SPEC.md's `ap inspect` section says, from the same
+//! functions of [`net`] that the network process decides with.
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentfile::{Instruction, Network};
-use net::{Blocked, By, Proxied};
+use agentfile::{Destination, Instruction, Network, Scheme, Sign};
+use net::{Blocked, By, Connection, Proxied, Request};
 
 use super::blocked::{self, TAG};
 
@@ -57,6 +61,208 @@ impl Rule {
             Proxied::Loopback => Rule::Loopback,
         }
     }
+
+    /// The rule of `network` that decided `connection`, which
+    /// [`net::proxied`] decided as `proxied`.
+    pub(super) fn decided(network: &Network, proxied: Proxied, connection: &Connection) -> Rule {
+        match (proxied, connection.request) {
+            // A request on a connection to your host, which got there, is
+            // denied by a `-` rule, its path, or else the default, not by
+            // its loopback, and never by a `+` IP rule.
+            (Proxied::Loopback, Some(_)) => {
+                match net::decide(&network.rules, Sign::Deny, connection) {
+                    net::Decision {
+                        sign: Sign::Deny,
+                        by,
+                    } => Rule::by(network, by),
+                    _ => Rule::Default,
+                }
+            }
+            _ => Rule::proxied(network, proxied),
+        }
+    }
+
+    /// What `ap logs` calls this rule, of `rules`, which [`written`] gave.
+    fn named(&self, rules: &[String]) -> Option<String> {
+        Some(match self {
+            Rule::Numbered(number) => format!("NETWORK {}", rules.get(*number)?),
+            Rule::Default => "the default".to_owned(),
+            Rule::Harness => "the harness's hosts".to_owned(),
+            Rule::Loopback => {
+                "your host's loopback, which only host.ap.internal reaches".to_owned()
+            }
+            Rule::Path => "the request path".to_owned(),
+            Rule::NotHttp => "the host's URL rules, which only HTTP meets".to_owned(),
+        })
+    }
+}
+
+/// The rules in a network process's `args`, which [`super::arguments`]
+/// made, as the Agentfile wrote them, in their order. A bare rule sets the
+/// default, and has no number.
+fn written(args: &[OsString]) -> Vec<String> {
+    let rules = args.iter().position(|arg| arg == super::RULES);
+    let rules = rules.map_or(&[][..], |at| &args[at + 1..]);
+    (rules.iter())
+        .filter_map(|arg| {
+            let text = arg.to_str()?;
+            let read = Network::read(&[line(text)]).ok()?;
+            (!read.rules.is_empty()).then(|| text.to_owned())
+        })
+        .collect()
+}
+
+/// `text` as the argument of a `NETWORK` line.
+fn line(text: &str) -> Instruction {
+    Instruction {
+        line: 1,
+        name: "NETWORK".to_owned(),
+        arguments: vec![text.to_owned()],
+        text: None,
+    }
+}
+
+/// A destination that `ap inspect --network` asks about.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// A name, on its port, if it has one. A URL also has its request: its
+    /// scheme, and its target, from the path on.
+    Name {
+        name: String,
+        port: Option<u16>,
+        request: Option<(Scheme, String)>,
+    },
+    Address { address: IpAddr, port: Option<u16> },
+}
+
+impl Asked {
+    /// Reads a destination as a `NETWORK` rule writes one, without its
+    /// sign: a URL, a host, a host with a port, or an address with or
+    /// without a port. A URL's path may be one that a rule can't have,
+    /// since the proxy decides such a path too. The error says what is
+    /// wrong.
+    pub fn read(text: &str) -> Result<Asked, String> {
+        let shown = agentfile::print_argument(text);
+        if text.starts_with(['+', '-']) {
+            return Err(format!(
+                "`{shown}` is a rule. Ask about its destination without the sign, or add the rule to a run with `ap run --network`"
+            ));
+        }
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(format!(
+                "`{shown}` isn't a destination: a URL, a host, or an address"
+            ));
+        }
+        let unread = |errors: Vec<agentfile::Error>| {
+            let messages: Vec<String> = errors.into_iter().map(|error| error.message).collect();
+            messages.join("; ")
+        };
+        // A URL's authority is read as a rule's, and its target as the proxy
+        // reads a request's.
+        let (rule, target) = match text.split_once("://") {
+            Some((scheme, rest)) => {
+                let at = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                let (authority, target) = rest.split_at(at);
+                let target = match target.starts_with('/') {
+                    true => target.to_owned(),
+                    false => format!("/{target}"),
+                };
+                (format!("+{scheme}://{authority}"), Some(target))
+            }
+            None => (format!("+{text}"), None),
+        };
+        let read = Network::read(&[line(&rule)]).map_err(unread)?;
+        let Some(rule) = read.rules.into_iter().next() else {
+            return Err(format!("`{shown}` isn't a destination"));
+        };
+        match (rule.destination, target) {
+            (Destination::Url { scheme, host, port, .. }, Some(target)) => Ok(Asked::Name {
+                name: host,
+                port,
+                request: Some((scheme, target)),
+            }),
+            (Destination::Host { name, port }, None) => Ok(Asked::Name {
+                name,
+                port,
+                request: None,
+            }),
+            (
+                Destination::Address {
+                    network,
+                    prefix,
+                    port,
+                },
+                None,
+            ) if prefix == if network.is_ipv4() { 32 } else { 128 } => Ok(Asked::Address {
+                address: network,
+                port,
+            }),
+            _ => Err(format!(
+                "`{shown}` is a block of addresses. Ask about one address"
+            )),
+        }
+    }
+}
+
+/// What `ap inspect --network` answers.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answer {
+    /// Whether the rules allow the destination.
+    pub allows: bool,
+    /// The rule that decides, as `ap logs` names it.
+    pub rule: String,
+}
+
+/// Whether the network process with `args`, which [`super::arguments`]
+/// made, allows a connection to `asked`, and the rule that decides. A name
+/// is decided by name alone, as before it resolves, and a destination
+/// without a port on a port that no rule names. `None` when `args` can't
+/// be read.
+pub fn answer(args: &[OsString], asked: &Asked) -> Option<Answer> {
+    let (network, harness) = super::rules(args).ok()?;
+    let harness: Vec<&str> = harness.iter().map(String::as_str).collect();
+    let any_port = net::any_port(&network);
+    let (proxied, connection) = match asked {
+        Asked::Address { address, port } => {
+            let connection = Connection {
+                name: None,
+                address: *address,
+                port: port.unwrap_or(any_port),
+                request: None,
+            };
+            (net::proxied(&network, &harness, &connection), connection)
+        }
+        Asked::Name {
+            name,
+            port,
+            request,
+        } => {
+            let port = match request {
+                Some((Scheme::Https, _)) => port.unwrap_or(443),
+                Some((Scheme::Http, _)) => port.unwrap_or(80),
+                None => port.unwrap_or(any_port),
+            };
+            let request = (request.as_ref()).map(|(scheme, target)| Request {
+                scheme: *scheme,
+                target,
+            });
+            let proxied = net::by_name(&network, &harness, name, port, request);
+            // `by_name` refuses only your host as loopback, and your host's
+            // address is its loopback.
+            let connection = Connection {
+                name: Some(name),
+                address: Ipv4Addr::LOCALHOST.into(),
+                port,
+                request,
+            };
+            (proxied, connection)
+        }
+    };
+    let rule = Rule::decided(&network, proxied, &connection);
+    Some(Answer {
+        allows: proxied.allows(),
+        rule: rule.named(&written(args))?,
+    })
 }
 
 /// The report of a decision: whether it allows, the rule that decided, and
@@ -110,23 +316,10 @@ impl Keeper {
     /// [`super::arguments`] made in `log`, which `ap run` writes its output
     /// to too.
     pub fn new(args: &[OsString], log: File) -> Keeper {
-        let rules = args.iter().position(|arg| arg == super::RULES);
-        let rules = rules.map_or(&[][..], |at| &args[at + 1..]);
-        let rules = (rules.iter())
-            .filter_map(|arg| {
-                let text = arg.to_str()?;
-                let line = Instruction {
-                    line: 1,
-                    name: "NETWORK".to_owned(),
-                    arguments: vec![text.to_owned()],
-                    text: None,
-                };
-                // A bare rule sets the default, and has no number.
-                let read = Network::read(&[line]).ok()?;
-                (!read.rules.is_empty()).then(|| text.to_owned())
-            })
-            .collect();
-        Keeper { rules, log }
+        Keeper {
+            rules: written(args),
+            log,
+        }
     }
 
     /// Takes one report, and returns whether it was a decision. A report
@@ -146,16 +339,7 @@ impl Keeper {
     /// The line that `ap logs` prints for a report, after the time.
     fn line(&self, message: &[u8]) -> Option<String> {
         let (allow, rule, about) = read(message)?;
-        let rule = match rule {
-            Rule::Numbered(number) => format!("NETWORK {}", self.rules.get(number)?),
-            Rule::Default => "the default".to_owned(),
-            Rule::Harness => "the harness's hosts".to_owned(),
-            Rule::Loopback => {
-                "your host's loopback, which only host.ap.internal reaches".to_owned()
-            }
-            Rule::Path => "the request path".to_owned(),
-            Rule::NotHttp => "the host's URL rules, which only HTTP meets".to_owned(),
-        };
+        let rule = rule.named(&self.rules)?;
         let destination = match about {
             Blocked::Lookup(name) => name,
             Blocked::Connection {

@@ -18,6 +18,21 @@ pub fn default_root(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Opti
     }
 }
 
+/// The instructions that `agent`'s Agentfile declared, in order, numbered
+/// from line 1. A record holds only what a build accepted, so its lines
+/// read cleanly.
+pub fn declared(agent: &::store::Agent) -> Vec<agentfile::Instruction> {
+    (1..)
+        .zip(&agent.declared)
+        .map(|(line, declared)| agentfile::Instruction {
+            line,
+            name: declared.name.clone(),
+            arguments: declared.arguments.clone(),
+            text: None,
+        })
+        .collect()
+}
+
 fn absolute(value: Option<&OsStr>) -> Option<&Path> {
     value.map(Path::new).filter(|path| path.is_absolute())
 }

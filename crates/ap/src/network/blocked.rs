@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::fmt::Write;
 use std::net::IpAddr;
 
-use agentfile::{Network, Sign};
+use agentfile::Network;
 use net::Blocked;
 
 use super::decisions::{self, Rule};
@@ -184,21 +184,7 @@ impl Reporter {
             request,
         };
         let proxied = net::proxied(&self.network, &harness, &connection);
-        let rule = match (proxied, request) {
-            // A request on a connection to your host, which got there, is
-            // denied by a `-` rule, its path, or else the default, not by
-            // its loopback, and never by a `+` IP rule.
-            (net::Proxied::Loopback, Some(_)) => {
-                match net::decide(&self.network.rules, Sign::Deny, &connection) {
-                    net::Decision {
-                        sign: Sign::Deny,
-                        by,
-                    } => Rule::by(&self.network, by),
-                    _ => Rule::Default,
-                }
-            }
-            _ => Rule::proxied(&self.network, proxied),
-        };
+        let rule = Rule::decided(&self.network, proxied, &connection);
         self.send_decision(allow, &rule, name, address, port);
     }
 

@@ -52,7 +52,7 @@ mod secrets;
 
 pub use authority::{Authority, Leaf};
 pub use blocked::{Reports, report};
-pub use decisions::Keeper;
+pub use decisions::{Answer, Asked, Keeper, answer};
 pub use decrypt::{Decryption, roots};
 pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;

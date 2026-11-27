@@ -69,6 +69,32 @@ pub fn decide<'a>(
     default: Sign,
     connection: &Connection,
 ) -> Decision<'a> {
+    decision(rules, default, &Asked::from(connection))
+}
+
+/// A connection as [`decide`] and [`proxied`] read it, with its address
+/// unknown when only its name is.
+struct Asked<'a> {
+    name: Option<&'a str>,
+    address: Option<IpAddr>,
+    port: u16,
+    request: Option<Request<'a>>,
+}
+
+impl<'a> From<&Connection<'a>> for Asked<'a> {
+    fn from(connection: &Connection<'a>) -> Asked<'a> {
+        Asked {
+            name: connection.name,
+            address: Some(connection.address),
+            port: connection.port,
+            request: connection.request,
+        }
+    }
+}
+
+/// Decides `connection` as [`decide`] does, by its name alone when its
+/// address is unknown.
+fn decision<'a>(rules: &'a [NetworkRule], default: Sign, connection: &Asked) -> Decision<'a> {
     let name = connection.name.map(|name| {
         let name = name.to_ascii_lowercase();
         match name.strip_suffix('.') {
@@ -97,7 +123,8 @@ pub fn decide<'a>(
         let request = connection.request.zip(path.as_deref());
         name_decision(rules, &name, connection.port, request)
     });
-    let by_address = address_decision(rules, connection.address, connection.port);
+    let by_address =
+        (connection.address).and_then(|address| address_decision(rules, address, connection.port));
     let rule = match (by_name, by_address) {
         (Some(name), Some(address)) if name.sign != address.sign => {
             if name.sign == Sign::Deny {
@@ -164,13 +191,42 @@ impl Proxied<'_> {
 /// loopback or unspecified address is refused, unless the connection is to
 /// [`YOUR_HOST`] and a `+` rule for that name decides it.
 pub fn proxied<'a>(network: &'a Network, harness: &[&str], connection: &Connection) -> Proxied<'a> {
+    proxied_at(network, harness, &Asked::from(connection))
+}
+
+/// Decides a connection to `name` on `port`, with `request` on it, as
+/// [`proxied`] does, but by its name alone, as before the name resolves:
+/// no IP rule decides it, and its address is refused as loopback only for
+/// [`YOUR_HOST`], whose address is your host's loopback.
+pub fn by_name<'a>(
+    network: &'a Network,
+    harness: &[&str],
+    name: &str,
+    port: u16,
+    request: Option<Request>,
+) -> Proxied<'a> {
+    let asked = Asked {
+        name: Some(name),
+        address: None,
+        port,
+        request,
+    };
+    proxied_at(network, harness, &asked)
+}
+
+/// Decides `connection` as [`proxied`] does, by its name alone when its
+/// address is unknown.
+fn proxied_at<'a>(network: &'a Network, harness: &[&str], connection: &Asked) -> Proxied<'a> {
     let name = connection.name.map(|name| {
         let name = name.to_ascii_lowercase();
         name.strip_suffix('.').map(str::to_owned).unwrap_or(name)
     });
-    let loopback = refused(connection.address);
+    let loopback = match connection.address {
+        Some(address) => refused(address),
+        None => name.as_deref() == Some(YOUR_HOST),
+    };
     if name.as_deref() == Some(YOUR_HOST) {
-        let decision = decide(&network.rules, Sign::Deny, connection);
+        let decision = decision(&network.rules, Sign::Deny, connection);
         return match decision.by {
             By::Rule(_) if decision.sign == Sign::Deny => Proxied::Decided(decision),
             By::Rule(rule) if !matches!(rule.destination, Destination::Address { .. }) => {
@@ -186,7 +242,7 @@ pub fn proxied<'a>(network: &'a Network, harness: &[&str], connection: &Connecti
     if loopback {
         return Proxied::Loopback;
     }
-    let decision = decide(&network.rules, network.default, connection);
+    let decision = decision(&network.rules, network.default, connection);
     let harness_host = name
         .as_deref()
         .is_some_and(|name| harness.iter().any(|host| host.eq_ignore_ascii_case(name)));
@@ -330,15 +386,7 @@ pub fn could_allow(network: &Network, harness: &[&str], name: &str) -> bool {
 pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
     let name = name.to_ascii_lowercase();
     let name = name.strip_suffix('.').unwrap_or(&name);
-    // A port that no rule names, so that only a rule for every port matches.
-    let port = (1..=u16::MAX).find(|&port| {
-        !network.rules.iter().any(|rule| match &rule.destination {
-            Destination::Host { port: only, .. }
-            | Destination::Address { port: only, .. }
-            | Destination::Url { port: only, .. } => *only == Some(port),
-        })
-    });
-    let port = port.unwrap_or(0);
+    let port = any_port(network);
     let rule = name_decision(&network.rules, name, port, None);
     if let Some(rule) = rule.filter(|rule| rule.sign == Sign::Deny) {
         return By::Rule(rule);
@@ -366,6 +414,19 @@ pub fn refusing<'a>(network: &'a Network, name: &str) -> By<'a> {
             address_decision(&network.rules, address, port).filter(|rule| rule.sign == Sign::Deny)
         })
         .map_or(By::Default, By::Rule)
+}
+
+/// A port that no rule of `network` names, so that only a rule for every
+/// port matches a connection on it.
+pub fn any_port(network: &Network) -> u16 {
+    let port = (1..=u16::MAX).find(|&port| {
+        !network.rules.iter().any(|rule| match &rule.destination {
+            Destination::Host { port: only, .. }
+            | Destination::Address { port: only, .. }
+            | Destination::Url { port: only, .. } => *only == Some(port),
+        })
+    });
+    port.unwrap_or(0)
 }
 
 /// Something that `NETWORK` blocked.

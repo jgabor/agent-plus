@@ -1033,7 +1033,11 @@ that finds no PR to prove only reads GitHub, so it is cheap to run often.
 For each PR it goes on to prove or merge, the refresh takes the merge slot.
 If another run holds it, the refresh says that it waits for it, and posts that
 on a queued PR. Then it takes the slot's turn, and keeps it until it is done
-with the PR. The PR's `prepare` runs in that turn, and takes the slot ahead of
+with the PR. With the slot, it reads the PR and its issue again, since another
+run can merge the PR while the refresh waits. A PR that is no longer open,
+whose auto-merge was turned off, or whose issue lost `land-needed`, is left as
+it is. The refresh says why in one line, proves and posts nothing for it, and
+doesn't fail the run for it. The PR's `prepare` runs in that turn, and takes the slot ahead of
 every other merge, as the xtask of `main` does in a merge. The refresh takes
 the slot back the same way for the squash. So no merge moves `main` between a
 PR's proof and its squash. The refresh lets both go before it proves `main`.

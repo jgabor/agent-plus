@@ -1195,15 +1195,22 @@ Recognized formats:
 |---|---|---|
 | Claude Code | `.claude-plugin/plugin.json` | `.claude-plugin/marketplace.json` |
 | Agent Plugins 1.0 | `plugin.json` at the plugin root, with `$schema` set to `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json` | none |
-| Codex | `plugin.json` at the plugin root, with `.codex-plugin/plugin.json` as a fallback | `.agents/plugins/marketplace.json` |
+| Codex | The Agent Plugins 1.0 `plugin.json` at the plugin root, with `.codex-plugin/plugin.json` as a fallback | `.agents/plugins/marketplace.json` |
 
 A plugin that ships several manifests is read from the one native to the
 target harness, then from Agent Plugins 1.0, then from the others in table
-order. A Codex plugin is read as Codex reads it: with a root `plugin.json`,
-its name, skills, and MCP servers come from that manifest, as Agent Plugins
-1.0 says, and `ap` reads `.codex-plugin/plugin.json` only for where the
-hooks are, and only when the root manifest has no `extensions.com.openai`
-object.
+order. A directory with neither a plugin manifest nor a marketplace
+manifest is read as a Claude Code plugin with no manifest, from Claude
+Code's default locations, and is named after the directory.
+
+A root `plugin.json` is read as Codex reads it, whatever the target harness.
+
+- The plugin's name comes from `plugin.json`, its skills from `skills/`,
+  and its MCP servers from `mcp.json`, as Agent Plugins 1.0 says.
+- Its hooks come from the `hooks` key of the manifest's
+  `extensions.com.openai` object. When that object is absent, they come
+  from the `hooks` key of `.codex-plugin/plugin.json`. Without that key,
+  they come from `hooks/hooks.json`.
 
 The plugin is parsed into a neutral model with these components: skills,
 commands, subagents, hooks, and MCP servers. That model is then rendered for

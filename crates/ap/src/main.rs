@@ -31,7 +31,7 @@ const USAGE: &str = "usage: ap --version
        ap fmt [--check] [dir]
        ap build [--strict] [--replace] [--approve=file] [-t name] [dir]
        ap ls
-       ap inspect [--grants] agent
+       ap inspect [--grants | --network=destination] agent
        ap rm [--force] agent
        ap run [-i] [-p prompt] [--network=rule]... agent
        ap ps [-a]

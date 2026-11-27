@@ -281,7 +281,7 @@ fn inspect_takes_one_agent_and_only_grants() {
         let output = scratch.ap(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
         assert!(
-            stderr(&output).contains("ap inspect [--grants] agent\n"),
+            stderr(&output).contains("ap inspect [--grants | --network=destination] agent\n"),
             "{}",
             stderr(&output)
         );
@@ -294,8 +294,430 @@ fn usage_lists_inspect() {
     let output = scratch.ap(&[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("ap inspect [--grants] agent\n"),
+        stderr(&output).contains("ap inspect [--grants | --network=destination] agent\n"),
         "{}",
         stderr(&output)
     );
+}
+
+/// Builds the agent `name`, a Claude Code agent with these `NETWORK` rules,
+/// and approves them.
+fn network_agent(scratch: &Scratch, name: &str, rules: &[&str]) {
+    let lines: String = rules
+        .iter()
+        .map(|rule| format!("NETWORK {rule}\n"))
+        .collect();
+    let dir = scratch.project(
+        name,
+        &format!("AGENT claude\nOS minimal\n{lines}POLICY -\n"),
+    );
+    let file = scratch.root.join(format!("{name}.grants"));
+    fs::write(&file, format!("AGENT claude\n{lines}POLICY -\n")).unwrap();
+    scratch.build(&scratch.home, &dir, &file);
+}
+
+/// Asks whether `agent` may reach `destination`, and returns the exit
+/// status, standard output, and standard error.
+fn ask(scratch: &Scratch, agent: &str, destination: &str) -> (Option<i32>, String, String) {
+    let flag = format!("--network={destination}");
+    let output = scratch.ap(&["inspect", agent, &flag]);
+    (output.status.code(), stdout(&output), stderr(&output))
+}
+
+/// Fails unless `agent` answers each destination with the line that
+/// follows it, and the status of its sign.
+fn answers(scratch: &Scratch, agent: &str, expected: &[(&str, &str)]) {
+    for (destination, line) in expected {
+        let (status, out, err) = ask(scratch, agent, destination);
+        let sign = if line.starts_with('+') { 0 } else { 1 };
+        assert_eq!(out, format!("{line}\n"), "{destination}: {err}");
+        assert_eq!(status, Some(sign), "{destination}: {err}");
+    }
+}
+
+/// The rules of the example under NETWORK in SPEC.md.
+const EXAMPLE: &[&str] = &[
+    "-",
+    "+github.com",
+    "-gist.github.com",
+    "+https://codeberg.org/forgejo/forgejo",
+];
+
+// spec(ap inspect): It prints one line: `+` or `-`, the destination as you wrote it, and the rule that decides, named as `ap logs` names it for a network decision.
+// spec(ap inspect): It exits 0 for `+` and 1 for `-`.
+// spec(ap inspect): It decides from the agent's approved rules and its harness's hosts, as a run with no `--network` flag does.
+#[test]
+fn inspect_network_answers_with_the_sign_and_the_rule_that_decides() {
+    let scratch = Scratch::new("network-example");
+    network_agent(&scratch, "example", EXAMPLE);
+    answers(
+        &scratch,
+        "example",
+        &[
+            (
+                "https://github.com/torvalds/linux",
+                "+ https://github.com/torvalds/linux  NETWORK +github.com",
+            ),
+            (
+                "https://gist.github.com/x",
+                "- https://gist.github.com/x  NETWORK -gist.github.com",
+            ),
+            (
+                "https://codeberg.org/forgejo/forgejo/issues",
+                "+ https://codeberg.org/forgejo/forgejo/issues  NETWORK +https://codeberg.org/forgejo/forgejo",
+            ),
+            (
+                "https://codeberg.org/other/repo",
+                "- https://codeberg.org/other/repo  the default",
+            ),
+            (
+                "https://api.anthropic.com/v1/messages",
+                "+ https://api.anthropic.com/v1/messages  the harness's hosts",
+            ),
+            (
+                "https://api.openai.com/v1/responses",
+                "- https://api.openai.com/v1/responses  the default",
+            ),
+            ("GitHub.com", "+ GitHub.com  NETWORK +github.com"),
+        ],
+    );
+}
+
+// spec(ap inspect): A destination is written as a `NETWORK` rule writes one, without the sign: a URL, a host, a host with a port, or an address with or without a port.
+#[test]
+fn inspect_network_reads_each_form_of_destination() {
+    let scratch = Scratch::new("network-forms");
+    network_agent(
+        &scratch,
+        "forms",
+        &["-", "+github.com", "+1.1.1.1", "+[2606:4700::1111]"],
+    );
+    answers(
+        &scratch,
+        "forms",
+        &[
+            (
+                "https://github.com/x",
+                "+ https://github.com/x  NETWORK +github.com",
+            ),
+            (
+                "http://github.com",
+                "+ http://github.com  NETWORK +github.com",
+            ),
+            ("github.com", "+ github.com  NETWORK +github.com"),
+            ("github.com:22", "+ github.com:22  NETWORK +github.com"),
+            ("1.1.1.1", "+ 1.1.1.1  NETWORK +1.1.1.1"),
+            ("1.1.1.1:53", "+ 1.1.1.1:53  NETWORK +1.1.1.1"),
+            (
+                "[2606:4700::1111]",
+                "+ [2606:4700::1111]  NETWORK +[2606:4700::1111]",
+            ),
+            (
+                "[2606:4700::1111]:443",
+                "+ [2606:4700::1111]:443  NETWORK +[2606:4700::1111]",
+            ),
+            ("1.0.0.1:53", "- 1.0.0.1:53  the default"),
+        ],
+    );
+}
+
+// spec(ap inspect): A destination with a sign is bad usage, and the message says that `ap run --network` is where a rule goes.
+#[test]
+fn inspect_network_refuses_a_rule_with_its_sign() {
+    let scratch = Scratch::new("network-sign");
+    network_agent(&scratch, "signed", EXAMPLE);
+    for destination in ["+github.com", "-gist.github.com", "+", "-"] {
+        let (status, out, err) = ask(&scratch, "signed", destination);
+        assert_eq!(status, Some(2), "{destination}: {err}");
+        assert_eq!(out, "");
+        assert!(err.contains("`ap run --network`"), "{destination}: {err}");
+    }
+}
+
+// spec(ap inspect): A destination it can't read is bad usage, and so is `--network` with `--grants`.
+#[test]
+fn inspect_network_refuses_what_it_can_t_read() {
+    let scratch = Scratch::new("network-unreadable");
+    network_agent(&scratch, "unread", EXAMPLE);
+    for destination in [
+        "",
+        "ftp://github.com/x",
+        "https://",
+        "https://github.com:0/x",
+        "https://1.1.1.1/x",
+        "https://github.com/a b",
+        "kagi..com",
+        "github.com:99999",
+        "10.0.0.0/8",
+        "[2606:4700::]/32",
+        "2606:4700::1",
+        "github.com/x",
+    ] {
+        let (status, out, err) = ask(&scratch, "unread", destination);
+        assert_eq!(status, Some(2), "{destination:?}: {err}");
+        assert_eq!(out, "", "{destination:?}");
+        assert!(err.starts_with("ap: "), "{destination:?}: {err}");
+    }
+    for args in [
+        &["inspect", "--grants", "unread", "--network=github.com"][..],
+        &[
+            "inspect",
+            "unread",
+            "--network=github.com",
+            "--network=x.com",
+        ],
+        &["inspect", "unread", "--network"],
+    ] {
+        let output = scratch.ap(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(stdout(&output), "", "{args:?}");
+        assert!(
+            stderr(&output).contains("ap inspect [--grants | --network=destination] agent\n"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+// spec(ap inspect): It starts no VM, resolves no name, and connects nowhere.
+#[test]
+fn inspect_network_answers_from_the_rules_alone() {
+    let scratch = Scratch::new("network-alone");
+    network_agent(&scratch, "alone", &["+", "+host.ap.internal"]);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let host = format!("host.ap.internal:{port}");
+    // A run would find `localhost` at your host's loopback, and refuse it.
+    answers(
+        &scratch,
+        "alone",
+        &[
+            (&host, &format!("+ {host}  NETWORK +host.ap.internal")),
+            ("localhost", "+ localhost  the default"),
+        ],
+    );
+    let accepted = listener.accept();
+    assert!(
+        matches!(&accepted, Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "{accepted:?}"
+    );
+    let runs = scratch.ap(&["ps", "-a"]);
+    assert_eq!(stdout(&runs).lines().count(), 1, "{}", stdout(&runs));
+}
+
+// spec(ap inspect): A destination without a port meets only the rules for every port.
+// spec(ap inspect): A URL without a port has its scheme's port.
+#[test]
+fn inspect_network_without_a_port_meets_the_rules_for_every_port() {
+    let scratch = Scratch::new("network-ports");
+    network_agent(
+        &scratch,
+        "ports",
+        &[
+            "-",
+            "+github.com:22",
+            "+example.com",
+            "-example.com:443",
+            "+1.1.1.1:53",
+        ],
+    );
+    answers(
+        &scratch,
+        "ports",
+        &[
+            ("github.com", "- github.com  the default"),
+            ("github.com:22", "+ github.com:22  NETWORK +github.com:22"),
+            ("example.com", "+ example.com  NETWORK +example.com"),
+            (
+                "example.com:443",
+                "- example.com:443  NETWORK -example.com:443",
+            ),
+            (
+                "https://example.com/",
+                "- https://example.com/  NETWORK -example.com:443",
+            ),
+            (
+                "http://example.com/",
+                "+ http://example.com/  NETWORK +example.com",
+            ),
+            (
+                "http://example.com:443/",
+                "- http://example.com:443/  NETWORK -example.com:443",
+            ),
+            ("1.1.1.1", "- 1.1.1.1  the default"),
+            ("1.1.1.1:53", "+ 1.1.1.1:53  NETWORK +1.1.1.1:53"),
+        ],
+    );
+}
+
+// spec(ap inspect): For a URL on a host with URL rules, it treats the path as the proxy does, so a path the proxy denies for its form is denied here too.
+#[test]
+fn inspect_network_treats_a_url_path_as_the_proxy_does() {
+    let scratch = Scratch::new("network-paths");
+    network_agent(
+        &scratch,
+        "paths",
+        &["-", "+https://github.com/jgabor", "+gitlab.com"],
+    );
+    let path = "the request path";
+    answers(
+        &scratch,
+        "paths",
+        &[
+            (
+                "https://github.com/jgabor/agent-plus",
+                "+ https://github.com/jgabor/agent-plus  NETWORK +https://github.com/jgabor",
+            ),
+            (
+                "https://github.com/%6Agabor/x",
+                "+ https://github.com/%6Agabor/x  NETWORK +https://github.com/jgabor",
+            ),
+            (
+                "https://github.com/jgabor-evil",
+                "- https://github.com/jgabor-evil  the default",
+            ),
+            (
+                "https://github.com/jgabor/../x",
+                &format!("- https://github.com/jgabor/../x  {path}"),
+            ),
+            (
+                "https://github.com/jgabor%2Fx",
+                &format!("- https://github.com/jgabor%2Fx  {path}"),
+            ),
+            (
+                "https://github.com/jgabor//x",
+                &format!("- https://github.com/jgabor//x  {path}"),
+            ),
+            (
+                "https://github.com/jgabor/a;b",
+                &format!("- https://github.com/jgabor/a;b  {path}"),
+            ),
+            (
+                "https://github.com/jgabor/x?tab=readme",
+                "+ https://github.com/jgabor/x?tab=readme  NETWORK +https://github.com/jgabor",
+            ),
+            (
+                "https://github.com/jgabor/x#readme",
+                &format!("- https://github.com/jgabor/x#readme  {path}"),
+            ),
+            // A host without URL rules has no path to check.
+            (
+                "https://gitlab.com/a//b",
+                "+ https://gitlab.com/a//b  NETWORK +gitlab.com",
+            ),
+        ],
+    );
+}
+
+// spec(ap inspect): For an address, it gives what the IP rules and your host's loopback say.
+#[test]
+fn inspect_network_decides_an_address_by_the_ip_rules_and_loopback() {
+    let scratch = Scratch::new("network-addresses");
+    network_agent(
+        &scratch,
+        "addresses",
+        &["+", "-10.0.0.0/8", "+10.1.0.0/16", "+127.0.0.1"],
+    );
+    let loopback = "your host's loopback, which only host.ap.internal reaches";
+    answers(
+        &scratch,
+        "addresses",
+        &[
+            ("10.1.2.3", "+ 10.1.2.3  NETWORK +10.1.0.0/16"),
+            ("10.2.0.1:22", "- 10.2.0.1:22  NETWORK -10.0.0.0/8"),
+            (
+                "[::ffff:10.2.0.1]",
+                "- [::ffff:10.2.0.1]  NETWORK -10.0.0.0/8",
+            ),
+            ("192.0.2.1", "+ 192.0.2.1  the default"),
+            ("127.0.0.1:8080", &format!("- 127.0.0.1:8080  {loopback}")),
+            ("[::1]", &format!("- [::1]  {loopback}")),
+        ],
+    );
+}
+
+// spec(ap inspect): For a name, it gives the decision by name.
+// spec(ap inspect): When that is `+`, it says on standard error that a run can still deny the connection: by an IP rule or your host's loopback, for the address the name resolves to, or by the name check.
+#[test]
+fn inspect_network_decides_a_name_by_name_and_says_what_a_run_still_checks() {
+    let scratch = Scratch::new("network-names");
+    network_agent(&scratch, "names", &["+", "-1.1.1.1", "-evil.net"]);
+    let (status, out, err) = ask(&scratch, "names", "one.one.one.one");
+    assert_eq!(
+        (status, out.as_str()),
+        (Some(0), "+ one.one.one.one  the default\n")
+    );
+    assert_eq!(
+        err,
+        "ap: a run can still deny a connection to one.one.one.one: by an IP rule or your host's loopback, for the address it resolves to, or by the name check\n"
+    );
+    for (destination, line) in [
+        ("api.evil.net", "- api.evil.net  NETWORK -evil.net"),
+        ("1.1.1.1", "- 1.1.1.1  NETWORK -1.1.1.1"),
+        ("1.0.0.1", "+ 1.0.0.1  the default"),
+    ] {
+        let (status, out, err) = ask(&scratch, "names", destination);
+        assert_eq!(out, format!("{line}\n"), "{destination}");
+        let sign = if line.starts_with('+') { 0 } else { 1 };
+        assert_eq!(status, Some(sign), "{destination}");
+        assert_eq!(err, "", "{destination}");
+    }
+    // An IP rule never decides a name, though it may deny every address.
+    network_agent(
+        &scratch,
+        "walled",
+        &["-", "+github.com", "-0.0.0.0/0", "-[::]/0"],
+    );
+    answers(
+        &scratch,
+        "walled",
+        &[("github.com", "+ github.com  NETWORK +github.com")],
+    );
+    // Your host's name is decided by name too, before its loopback address
+    // meets an IP rule.
+    network_agent(
+        &scratch,
+        "yours",
+        &["-", "+https://host.ap.internal/allowed", "-127.0.0.1"],
+    );
+    network_agent(&scratch, "closed", &["-"]);
+    for (agent, destination, line) in [
+        (
+            "yours",
+            "https://host.ap.internal/allowed",
+            "+ https://host.ap.internal/allowed  NETWORK +https://host.ap.internal/allowed",
+        ),
+        (
+            "yours",
+            "https://host.ap.internal/denied",
+            "- https://host.ap.internal/denied  the default",
+        ),
+        (
+            "closed",
+            "host.ap.internal",
+            "- host.ap.internal  the default",
+        ),
+        (
+            "closed",
+            "host.ap.internal:8080",
+            "- host.ap.internal:8080  the default",
+        ),
+    ] {
+        answers(&scratch, agent, &[(destination, line)]);
+    }
+}
+
+// spec(ap inspect): If the agent doesn't exist, or has no approved grants, it says so on standard error and exits with status 125.
+#[test]
+fn inspect_network_exits_125_when_it_can_t_answer() {
+    let scratch = Scratch::new("network-unknown");
+    let (status, out, err) = ask(&scratch, "missing", "github.com");
+    assert_eq!((status, out.as_str()), (Some(125), ""));
+    assert_eq!(err, "ap: no agent named missing\n");
+    network_agent(&scratch, "unapproved", EXAMPLE);
+    fs::remove_dir_all(scratch.home.join(".local/share/ap/approvals")).unwrap();
+    let (status, out, err) = ask(&scratch, "unapproved", "github.com");
+    assert_eq!((status, out.as_str()), (Some(125), ""));
+    assert!(err.starts_with("ap: no grants are approved for "), "{err}");
 }

@@ -3,7 +3,9 @@ set -eu
 
 # Runs the fake harness under host, address, and URL rules, and under a
 # closed network, and tries the network from inside each guest with
-# `ap exec`. The journey puts the fake upstream next to `ap`. It answers on
+# `ap exec`. Before a run, `ap inspect --network` answers for some of the
+# destinations it tries, as the guest and `ap logs` find them. The journey
+# puts the fake upstream next to `ap`. It answers on
 # your host's loopback, which the guest reaches as `host.ap.internal`, and
 # on your host's address on its route out. Each check reads what the guest
 # got back, what reached the upstream, what `ap logs` shows, and the hosts
@@ -189,9 +191,30 @@ blocked() {
   fi
 }
 
+# Fails unless `ap inspect` answers whether the agent `$1` may reach `$2`
+# with the line `$3`, and exits 0 for its `+` or 1 for its `-`.
+asked() {
+  status=0
+  ap inspect "$1" --network="$2" </dev/null >"$1.asked" 2>"$1.asked.err" ||
+    status=$?
+  holds "$1.asked" "$3"
+  case "$3" in
+    +*) sign=0 ;;
+    *) sign=1 ;;
+  esac
+  if [ "$status" -ne "$sign" ]; then
+    echo "ap inspect $1 --network=$2 exited $status, not $sign:" >&2
+    cat "$1.asked.err" >&2
+    exit 1
+  fi
+}
+
 # Under a host rule for your host, it connects, and another name neither
 # resolves nor connects.
 build host - +host.ap.internal
+asked host "host.ap.internal:$plain" \
+  "+ host.ap.internal:$plain  NETWORK +host.ap.internal"
+asked host "other.example:$plain" "- other.example:$plain  the default"
 run host '' "
 tcp host host.ap.internal $plain
 lookup other other.example
@@ -231,6 +254,10 @@ blocked closed \
 # `SSL_CERT_FILE` names.
 url="https://host.ap.internal:$tls"
 build url - "+$url/allowed"
+asked url "$url/allowed/repo/info/refs" \
+  "+ $url/allowed/repo/info/refs  NETWORK +$url/allowed"
+asked url "$url/denied/repo/info/refs" \
+  "- $url/denied/repo/info/refs  the default"
 run url "SSL_CERT_FILE=$PWD/upstream/ca.pem" "
 echo \"allowed \$(timeout 20 git ls-remote $url/allowed/repo 2>&1 | head -1)\"
 echo \"denied \$(timeout 20 git ls-remote $url/denied/repo 2>&1 | head -1)\"
@@ -260,6 +287,8 @@ blocked url 'host.ap.internal  NETWORK +host.ap.internal'
 # Under an address rule, that address connects, and another doesn't. No
 # name resolves, so your host's name doesn't either.
 build address - "+$address"
+asked address "$address:$port" "+ $address:$port  NETWORK +$address"
+asked address "192.0.2.7:$port" "- 192.0.2.7:$port  the default"
 run address '' "
 tcp address $address $port
 tcp other 192.0.2.7 $port

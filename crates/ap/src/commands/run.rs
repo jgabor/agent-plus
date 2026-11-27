@@ -797,16 +797,7 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         .map_err(|error| fail(error.to_string()))?
         .ok_or_else(missing)?;
 
-    // A record holds only what a build accepted, so its lines read cleanly.
-    let instructions: Vec<Instruction> = (1..)
-        .zip(&record.declared)
-        .map(|(line, declared)| Instruction {
-            line,
-            name: declared.name.clone(),
-            arguments: declared.arguments.clone(),
-            text: None,
-        })
-        .collect();
+    let instructions = ap::store::declared(&record);
     let unreadable = |errors: Vec<agentfile::Error>| {
         let messages: Vec<String> = errors.into_iter().map(|error| error.message).collect();
         fail(format!("agent {name} can't run: {}", messages.join("; ")))

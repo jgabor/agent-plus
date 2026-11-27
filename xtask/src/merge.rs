@@ -58,8 +58,11 @@ const CHECKS_OF: &str = "XTASK_MERGE_CHECKS_OF";
 /// merge posted a `pending` that nothing has ended yet.
 const POSTED: &str = "XTASK_MERGE_POSTED";
 /// Set in the xtask of `main` that a merge runs, to the seconds that the
-/// merge waited for the slot, which that xtask's record counts.
+/// merge waited for each lock, as `slot=12.3 activity_lock=2.1`, which that
+/// xtask's record counts.
 const WAITED: &str = "XTASK_MERGE_WAITED";
+/// What a merge can wait for, by its key in a record.
+const WAITS: [&str; 3] = ["slot", "place", "activity_lock"];
 /// How many test programs the record names, of those that took longest.
 const SLOWEST: usize = 10;
 /// Runs the xtask of `main` in the shell's own process, which it names in
@@ -345,7 +348,7 @@ fn run_the_checks_of(
         Some(head) => command.env(POSTED, head),
         None => command.env_remove(POSTED),
     };
-    command.env(WAITED, status.waited().to_string());
+    command.env(WAITED, status.waited());
     // It is the xtask of `main`, which takes the slot ahead anyway.
     lock::keep_turn_from(&mut command);
     let mut checks = command
@@ -513,10 +516,9 @@ struct Clock {
 
 impl Default for Clock {
     fn default() -> Clock {
-        let waits = ["slot", "place", "activity_lock"];
         Clock {
             now: None,
-            spent: waits.into_iter().map(|wait| (wait, 0.0)).collect(),
+            spent: WAITS.into_iter().map(|wait| (wait, 0.0)).collect(),
         }
     }
 }
@@ -530,12 +532,28 @@ impl Clock {
         self.now = what.map(|name| (name, Instant::now()));
     }
 
-    /// The seconds spent on `name` so far.
-    fn total(&mut self, name: &'static str) -> f64 {
+    /// The seconds of each wait so far, as `WAITED` holds them.
+    fn waited(&mut self) -> String {
         let now = self.now.map(|(name, _)| name);
         self.switch(now);
-        let spent = self.spent.iter().find(|(spent, _)| *spent == name);
-        spent.map_or(0.0, |(_, seconds)| *seconds)
+        let waited = self.spent.iter().filter(|(name, _)| WAITS.contains(name));
+        let waited: Vec<String> = waited
+            .map(|(name, seconds)| format!("{name}={seconds}"))
+            .collect();
+        waited.join(" ")
+    }
+
+    /// Adds the waits that `waited` gave.
+    fn add_waited(&mut self, waited: &str) {
+        for (name, seconds) in waited
+            .split_whitespace()
+            .filter_map(|it| it.split_once('='))
+        {
+            let wait = WAITS.into_iter().find(|wait| *wait == name);
+            if let (Some(wait), Ok(seconds)) = (wait, seconds.parse()) {
+                self.add(wait, seconds);
+            }
+        }
     }
 
     fn add(&mut self, name: &'static str, seconds: f64) {
@@ -582,8 +600,8 @@ impl Status {
                 said.head = Some(head);
                 said.open = true;
             }
-            if let Some(waited) = env::var(WAITED).ok().and_then(|text| text.parse().ok()) {
-                said.clock.add("slot", waited);
+            if let Ok(waited) = env::var(WAITED) {
+                said.clock.add_waited(&waited);
             }
         }
         let watched = Arc::downgrade(&status);
@@ -680,9 +698,9 @@ impl Status {
             .collect()
     }
 
-    /// The seconds that this merge has waited for the slot.
-    fn waited(&self) -> f64 {
-        self.said().clock.total("slot")
+    /// The seconds that this merge has waited for each lock, for `WAITED`.
+    fn waited(&self) -> String {
+        self.said().clock.waited()
     }
 
     fn failed(&self, why: &str) {
@@ -1551,7 +1569,24 @@ mod tests {
         clock.switch(Some("journey"));
         clock.switch(None);
         assert_eq!(clock.spent.last().map(|(name, _)| *name), Some("journey"));
-        assert_eq!(clock.total("slot"), 0.0);
+    }
+
+    #[test]
+    fn the_xtask_of_main_counts_every_wait_of_the_merge_that_ran_it() {
+        let mut merge = Clock::default();
+        merge.add("slot", 12.5);
+        merge.add("activity_lock", 90.0);
+        merge.add("lint", 1.0);
+        let waited = merge.waited();
+        assert_eq!(waited, "slot=12.5 place=0 activity_lock=90");
+        let mut main = Clock::default();
+        main.add("place", 1.0);
+        main.add_waited(&waited);
+        main.add_waited("lint=5 slot=x");
+        assert_eq!(
+            main.spent,
+            [("slot", 12.5), ("place", 1.0), ("activity_lock", 90.0)]
+        );
     }
 
     #[test]

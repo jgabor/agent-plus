@@ -626,9 +626,11 @@ files = 2
 
 `seconds` and `downloads` decide nothing, and no check reads them. `merge`,
 `prepare`, and `land` write both, and print them as the proof ends. A record
-without them is still valid. `downloads` counts files, not bytes, because
-systemd counts the bytes a unit receives with a BPF program, and the user
-manager that the proof runs under can't attach one.
+without them is still valid. When the PR's own xtask proves it too, its
+proof counts only in `own_xtask`, and the steps, the programs, and the
+downloads are those of `main`'s xtask. `downloads` counts files, not bytes,
+because systemd counts the bytes a unit receives with a BPF program, and the
+user manager that the proof runs under can't attach one.
 
 A change's base scores are those of the newest record in the history of its
 base, or zero if there is none.

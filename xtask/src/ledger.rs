@@ -119,6 +119,9 @@ impl Seconds {
                         });
                     }
                 }
+                ("steps" | "programs", _) => {
+                    return Err(format!("`{name}` isn't a table of seconds"));
+                }
                 (name, value) => seconds.spent.push((name.to_string(), number(value, name)?)),
             }
         }
@@ -127,9 +130,9 @@ impl Seconds {
 
     /// The lines that `merge` prints once a proof ends.
     pub fn show(&self) -> String {
-        let mut text = "where the proof's time went, in seconds:\n".to_string();
+        let mut text = "where the proof's time went, in seconds:".to_string();
         let mut line = |what: String, seconds: f64| {
-            text.push_str(&format!("  {what} {}\n", tenths(seconds)));
+            text.push_str(&format!("\n  {what} {}", tenths(seconds)));
         };
         for (name, seconds) in &self.spent {
             line(name.replace('_', " "), *seconds);
@@ -728,6 +731,28 @@ mod tests {
             ("steps = 19", "steps = \"19\""),
             ("[budgets]\n", ""),
             ("boot_ms = 141.2\n", "boot_ms = \"fast\"\n"),
+        ] {
+            assert!(good.contains(from), "{from}");
+            let text = good.replace(from, to);
+            assert!(Record::parse(&text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_mistyped_time_or_download_is_an_error() {
+        let mut record = sample("");
+        let (seconds, downloads) = spent();
+        record.seconds = Some(seconds);
+        record.downloads = Some(downloads);
+        let good = record.render();
+        for (from, to) in [
+            ("steps = { 1 = 0.3, 5 = 30.0 }", "steps = 1"),
+            ("steps = { 1 = 0.3,", "steps = { one = 0.3,"),
+            ("programs = [", "programs = 2.5\nignored = ["),
+            (", seconds = 41.2 }]", " }]"),
+            ("lint = 41.2", "lint = \"slow\""),
+            ("layers = 1", "layers = \"one\""),
+            ("files = 3\n", ""),
         ] {
             assert!(good.contains(from), "{from}");
             let text = good.replace(from, to);

@@ -681,8 +681,8 @@ fn a_kept_record_has_the_sizes_that_the_rebased_tree_pins() {
     let output = repo.xtask(&["prepare", "9", "--keep-budgets"]);
     assert_prepared(&repo, &output);
     let record = repo.origin(&["show", &format!("{}:harness/ledger/7.toml", repo.head())]);
-    let budgets = format!("[budgets]\nkernel_bytes = {}\n{KEPT}", new.len());
-    assert!(record.ends_with(budgets.trim_end()), "{record}");
+    let budgets = format!("\n[budgets]\nkernel_bytes = {}\n{KEPT}\n[seconds]\n", new.len());
+    assert!(record.contains(&budgets), "{record}");
 }
 
 /// Commits after the record mean that it doesn't describe this branch.

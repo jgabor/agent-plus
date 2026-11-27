@@ -1,6 +1,6 @@
 //! `cargo xtask journey`: real use of `ap`, step by step, from a release build.
 
-use crate::bench::Copies;
+use crate::bench::{self, Copies};
 use crate::ledger::Downloads;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
@@ -151,7 +151,13 @@ fn walk(
     let copies = Copies::find(root)?;
 
     let cache = journey.join("cache");
-    let cached = files_under(&cache)?;
+    let mut cached = files_under(&cache)?;
+    // The steps put the fake harness in the cache by its digest, so that no
+    // build downloads it.
+    let fake = bin.join(FAKE_HARNESS);
+    if fake.is_file() {
+        cached.insert(cache.join("ap").join(bench::sha256(&fake)?));
+    }
     let mut timed = Vec::new();
     let mut passed = HashSet::new();
     let mut spending = HashSet::new();

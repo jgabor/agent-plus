@@ -181,6 +181,25 @@ impl Copies {
         })
     }
 
+    /// Counts the guest files that `commit` pins as well, which a build of
+    /// `commit` fetches where the tree pins others.
+    pub fn count_pins_of(&mut self, root: &Path, commit: &str) {
+        for guest in [Guest::Os, Guest::Kernel] {
+            let at = format!("{commit}:{}", guest.pin());
+            let Ok(text) = base::git_text(root, &["show", &at]) else {
+                continue;
+            };
+            let Ok(digest) = pinned_digest(guest.pin(), &text) else {
+                continue;
+            };
+            let stored = guest.stored(&digest).into_iter();
+            let in_store: Vec<String> = stored.map(|(_, store)| store).collect();
+            if !self.pinned.iter().any(|(_, files)| *files == in_store) {
+                self.pinned.push((guest == Guest::Os, in_store));
+            }
+        }
+    }
+
     /// Watches the store under `home`, so that `fetched` counts the pinned
     /// guest files it gains from now on.
     pub fn watch(&self, home: &Path) {
@@ -466,7 +485,9 @@ pub fn compare(
         None
     };
     drop(hold);
-    let copies = Copies::find(root)?;
+    let mut copies = Copies::find(root)?;
+    // The base's `ap` fetches what the base pins.
+    copies.count_pins_of(root, &commit);
 
     waiting(true)?;
     let measuring = lock::exclusive(root);
@@ -1391,15 +1412,40 @@ mod tests {
             let copy = format!("target/guest/os-{OS_SHA256}/{kind}/{OS_SHA256}");
             write(root.join(copy), OS);
         }
-        let copies = Copies::find(&root).unwrap();
+        // A base that pins another kernel.
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(&root)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        };
+        let base_pin = "url = \"https://example.com\"\nsha256 = \"0b0b\"\n";
+        write(root.join("guest/kernel/pin.toml"), base_pin);
+        git(&["init", "-q"]);
+        git(&["add", "guest"]);
+        git(&["commit", "-q", "-m", "base"]);
+        let pin = format!("url = \"https://example.com\"\nsha256 = \"{KERNEL_SHA256}\"\n");
+        write(root.join("guest/kernel/pin.toml"), &pin);
+
+        let mut copies = Copies::find(&root).unwrap();
+        copies.count_pins_of(&root, "HEAD");
         let (put, watched) = (root.join("put"), root.join("watched"));
         copies.put(&put).unwrap();
         copies.watch(&watched);
         assert_eq!(copies.fetched(), (0, 0));
-        let store = |home: &Path, file: String| home.join(".local/share/ap").join(file);
-        write(store(&put, format!("layers/{KERNEL_SHA256}")), "a kernel\n");
-        write(store(&watched, format!("zstd-layers/{OS_SHA256}")), OS);
+        let store = |home: &Path, file: &str| home.join(".local/share/ap").join(file);
+        write(
+            store(&put, &format!("layers/{KERNEL_SHA256}")),
+            "a kernel\n",
+        );
+        write(store(&watched, &format!("zstd-layers/{OS_SHA256}")), OS);
         assert_eq!(copies.fetched(), (1, 1));
+        write(store(&put, "layers/0b0b"), "the base's kernel\n");
+        assert_eq!(copies.fetched(), (1, 2));
     }
 
     #[test]

@@ -89,12 +89,13 @@ pub fn run() -> Result<Verdict, Problem> {
 }
 
 /// Runs every check, and returns those that failed and the spec score that
-/// the tests earned. A T2 check that didn't run earns nothing.
+/// the tests earned. A T2 check that didn't run earns nothing. A spec finding
+/// that needs no test result stops it before the tests, with no score.
 pub fn check(
     root: &Path,
     hold: &mut Hold,
     merging: Option<&Merging>,
-) -> Result<(Failed, score::Score), Problem> {
+) -> Result<(Failed, Option<score::Score>), Problem> {
     require_tools(root)?;
     let mut failed = Failed::new();
     let findings = floors::check(root)?;
@@ -106,6 +107,30 @@ pub fn check(
         let passed = cargo_passes(root, check.args)?;
         record(check.name, passed, &mut failed);
     }
+    // No test result can change these findings, so the tests don't start.
+    let early = score::before_tests(root)?;
+    let score = if early.findings.is_empty() {
+        Some(test(root, hold, merging, &mut failed)?)
+    } else {
+        score::report_findings(&early);
+        record("spec", false, &mut failed);
+        None
+    };
+    let word = match verdict(&failed) {
+        Verdict::Pass => "pass",
+        Verdict::Fail => "fail",
+    };
+    println!("gate: {word}");
+    Ok((failed, score))
+}
+
+/// Runs the tests, and the checks that need their results.
+fn test(
+    root: &Path,
+    hold: &mut Hold,
+    merging: Option<&Merging>,
+    failed: &mut Failed,
+) -> Result<score::Score, Problem> {
     if let Some(merging) = merging {
         (merging.starting)("tests");
     }
@@ -117,7 +142,7 @@ pub fn check(
     for kept in &kept {
         kept.copy(Side::Store);
     }
-    record("tests", results.all_passed(), &mut failed);
+    record("tests", results.all_passed(), failed);
     let has_t2 = workspace::packages(root)?
         .iter()
         .any(|package| package.name == T2_PACKAGE);
@@ -126,21 +151,16 @@ pub fn check(
             (merging.starting)(T2_PACKAGE);
         }
         let passed = testrun::run_package(root, T2_PACKAGE, hold, &mut results)?;
-        record("t2", passed, &mut failed);
+        record("t2", passed, failed);
     } else if has_t2 {
         println!("skip t2");
         eprintln!("t2: no change touches an adapter path, so T2 didn't run. HARNESS.md lists them");
     }
     let score = score::compute(root, &results)?;
     score::report_findings(&score);
-    record("spec", score.findings.is_empty(), &mut failed);
-    compare_with_base(root, &score, merging, &mut failed)?;
-    let word = match verdict(&failed) {
-        Verdict::Pass => "pass",
-        Verdict::Fail => "fail",
-    };
-    println!("gate: {word}");
-    Ok((failed, score))
+    record("spec", score.findings.is_empty(), failed);
+    compare_with_base(root, &score, merging, failed)?;
+    Ok(score)
 }
 
 /// Whether the tree, with its untracked files, differs from its base on an

@@ -253,10 +253,10 @@ pub fn prove(
     let mut hold = place.share()?;
     telling(SLOT)?;
     let merging = Merging { prepare, starting };
-    let (failed, score) = gate::check(tree, &mut hold, Some(&merging))?;
-    if !failed.is_empty() {
-        return Ok(Err(failed));
-    }
+    let score = match gate::check(tree, &mut hold, Some(&merging))? {
+        (failed, Some(score)) if failed.is_empty() => score,
+        (failed, _) => return Ok(Err(failed)),
+    };
     starting("journey");
     let (passing, steps) = journey::count(tree)?;
     let mut place = Some(hold.keep_place());

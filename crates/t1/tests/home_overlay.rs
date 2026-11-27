@@ -5,6 +5,11 @@
 //! the same host directory, and the home probe mounts the overlay before it
 //! runs a script. One changes the home, and the next finds each change. The
 //! guest runs through the API `ap boot` uses.
+//!
+//! It reads the host's extended attributes as Linux names them, so it
+//! builds on Linux alone.
+
+#![cfg(target_os = "linux")]
 
 use ap::boot::{self, Guest, Layer, Report, Shares};
 use ap::fetch;

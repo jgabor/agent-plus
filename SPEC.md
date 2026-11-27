@@ -270,6 +270,10 @@ Every ref resolves to a commit at build time and is recorded in the
 lockfile. A local path is useful when you develop a plugin or skill and want
 to try it in a sandbox.
 
+`ap build` fetches a remote source, which is any form but a local path,
+with the `git` on your host. It allows `git` only the `https` and `ssh`
+transports, and `git` checks nothing out and runs no hook.
+
 `ap build` fetches each source without credentials first. A private source
 then uses your own git credentials: your ssh-agent and the credential
 helpers in your global git configuration. They are used on your host, only
@@ -389,8 +393,9 @@ directory) and writes an image into the local store.
   rebuilds the agent. Commit the lockfile for reproducible builds. The
   lockfile covers what `ap` installs at build time, not what the agent
   downloads while it runs.
-- **No compiler.** `ap build` assembles layers. It never invokes a compiler,
-  and it needs nothing beyond the `ap` binary.
+- **No compiler.** `ap build` assembles layers. It never invokes a
+  compiler. An Agentfile with no remote source needs nothing beyond the
+  `ap` binary to build (see [Host requirements](#host-requirements)).
 - **Translation.** The harness adapter renders `SYSTEM`, `PLUGIN`, `SKILL`,
   and `MCP` into the harness's own files. Anything it cannot translate is a
   build warning. `ap build --strict` turns warnings into errors.
@@ -463,11 +468,18 @@ directory) and writes an image into the local store.
   that fails with a `No space left on device` error.
 - **Updates.** Harness self-updates are disabled. The harness version
   changes only through the Agentfile and the lockfile.
-- **Sign-in.** When the guest asks to open a URL, `ap` opens only `https`
-  URLs, and only after you confirm. Sign-in pages often redirect to a local
-  callback (`http://localhost:<port>` or `http://127.0.0.1:<port>`). When
-  the URL names such a callback as its `redirect_uri`, as the harness's own
-  sign-in page and an MCP server's OAuth page do, `ap` binds that callback
+- **Sign-in.** When the guest asks to open a URL, `ap run` asks you first.
+  It asks only for a URL that starts with `https://` and a host, and refuses
+  any other URL without asking. The question shows the URL escaped as
+  approval prompts are (see [Grants](#grants)), on one line at the bottom
+  of your terminal, and no is the default. One question is open at a time,
+  and a request that arrives while one is open is dropped. On yes, `ap`
+  starts your host's opener, `xdg-open` on Linux, with the URL as its one
+  argument and no shell. When `ap run` has no terminal, it opens nothing.
+  Sign-in pages often redirect to a local callback
+  (`http://localhost:<port>` or `http://127.0.0.1:<port>`). When the URL
+  names such a callback as its `redirect_uri`, as the harness's own sign-in
+  page and an MCP server's OAuth page do, `ap` binds that callback
   port on the host's `127.0.0.1` and forwards one connection into the
   guest, or gives up after five minutes. It relays that connection without
   parsing it, so the guest sees whatever the browser sends, which can
@@ -686,7 +698,15 @@ powers the VM off if the harness hasn't exited 10 seconds later.
 ### ap reset
 
 [PERSIST](#persist) specifies `ap reset <agent>`, and [Grants](#grants)
-specifies `ap reset <digest>`. [SHARE](#share) says when it refuses.
+specifies `ap reset <digest>`.
+
+- On success, `ap reset <agent>` prints nothing and exits 0.
+- If the store has no such agent, it says so on standard error and exits 1.
+- While a run of the agent is active, it refuses, even with `--force`. It
+  names each active run on standard error and exits 1.
+- Without `--force`, while the agent has pending changes, it lists the runs
+  that have them on standard error, newest first, and exits 1 (see
+  [SHARE](#share)).
 
 ### ap secret
 
@@ -1890,10 +1910,12 @@ PERMISSIONS +read:<path> | -read:<path>
 PERMISSIONS +write:<path> | -write:<path>
 ```
 
-`PERMISSIONS` decides which guest files the agent can read and write. `ap`'s
-filesystem enforces the rules, so they hold for every process in the guest,
+`PERMISSIONS` decides which files in shares and in persisted state the
+agent can read and write. `ap`'s filesystem serves those files and enforces
+the rules on your host, so they hold for every process in the guest,
 whichever harness runs: the harness, plugin code, and any script the agent
-starts.
+starts. A rule for a guest path outside every share and persisted state is
+an error that names the path, at build time and at run time.
 
 ```
 SHARE . rw
@@ -2343,6 +2365,10 @@ The first `ap build` of this Agentfile asks you to approve its grants.
 
 On every host, `ap apply` needs `git` to import a branch (see
 [SHARE](#share)).
+
+On every host, `ap build` needs `git` to fetch a remote source (see
+[Sources](#sources)). Without it, a build with a remote source fails and
+says that it needs `git`.
 
 The guest's CPU architecture always matches the host's. Debian builds the
 same packages for both.

@@ -175,6 +175,13 @@ count out of all steps. It exits 0 whenever it could run, because what fails a
 merge is a count lower than the base's. Each step gets a new `HOME` and working
 directory, and only `HOME` and `PATH` in its environment.
 
+`cargo xtask journey <step>` builds the same binaries, then runs that step and
+each step it needs, directly or through another, in id order, and no other
+step. It prints a line for each of them, as `journey` does, but no count. It
+exits 1 unless the named step passes, so a step that it skips, because the
+step spends or a step it needs doesn't pass, exits 1. It exits 2 for a step
+that isn't in the journey, before anything builds.
+
 Step 5 proves that `ap build` fetches the pinned `OS minimal` layer, so its
 store starts empty. Every other step's store starts with the tree's copies of
 the layer and the kernel in `target/guest`, as the bench's stores do, so that
@@ -644,7 +651,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask spec` | Prints each finding of the gate's `spec` check that needs no test result, and exits 1 if there is one. It runs no test, and takes no [place](#check-tiers) |
 | `cargo xtask score` | Runs the tests, and prints the three scores |
 | `cargo xtask gaps` | Names the first milestone on the roadmap with a step that doesn't pass. Then lists failing steps in journey order, each with its milestone, then missed budgets, then unproven promises in SPEC order |
-| `cargo xtask journey` | Runs the journey against a release build |
+| `cargo xtask journey [<step>]` | Runs the journey against a release build. Given a step, it runs only that step and the steps it needs, and exits 1 unless that step passes |
 | `cargo xtask bench` | Takes the measuring slot, and compares with the base |
 | `cargo xtask next` | Prints claimable issues as JSON |
 | `cargo xtask claim <issue> [--thread <link>]` | Claims an issue for the current branch, prints the status comment id and the thread it replaced as JSON, and exits 1 if another claim wins |

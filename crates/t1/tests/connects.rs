@@ -230,7 +230,7 @@ fn side_by_side(lines: &[String]) -> String {
     let mut script = String::from("{\n");
     for (at, line) in lines.iter().enumerate() {
         script +=
-            &format!("{{\n{line}}} | while IFS= read -r said; do echo \"{at} $said\"; done &\n");
+            &format!("{{\n{line}\n}} | while IFS= read -r said; do echo \"{at} $said\"; done &\n");
     }
     script + "wait\n} | sort -s -n -k1,1 | cut -d' ' -f2-\n"
 }

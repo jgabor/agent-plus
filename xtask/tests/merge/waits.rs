@@ -317,7 +317,7 @@ fn an_approval_covers_an_owner_action_only_if_it_listed_it() {
     ] {
         let repo = falling(name);
         repo.set_body(WITH_ACTION);
-        repo.set_action(Some(&["action-needed", "land-needed"]));
+        repo.set_action(Some(&["action-needed"]));
         repo.approved(approved);
         let (output, _) = repo.refresh_summed_up();
         assert_eq!(

@@ -1112,6 +1112,11 @@ user namespace. The gate finds such a fault within one merge of the commit
 that brought it, and it blocks no PR. The gate on the owner's machines still
 decides every merge.
 
+Every job in `.github/workflows/` runs on `ubuntu-26.04`, which it names, and
+not on `ubuntu-latest`, which GitHub moves to a new release without notice. So
+a check there changes only when a PR here changes it. Moving to a newer image
+is a PR of its own.
+
 - The job that runs the gate has a token that can only read. It posts no
   `xtask/gate` status, and it merges and labels nothing.
 - A newer push replaces a run that is queued, not one that runs.

@@ -139,7 +139,7 @@ spend = true
 
 [[step]]
 id = 13
-name = "The same Agentfile works with one line changed to the other harness"
+name = "The same Agentfile works on the other harness, with only its harness and model changed"
 milestone = "Network and secrets"
 needs = [12]
 script = "harness/journey/13-other-harness.sh"

@@ -120,8 +120,8 @@ fn sequence(
                 return refuse(&why);
             }
             // `main`'s xtask, which a merge runs next, checks under the slot.
-            Decision::Ready { pr, issue } if !runs_the_checks_of_main() => {
-                if fails_before_the_slot(&root, &gh, number, &pr, issue, mode)? {
+            Decision::Ready { pr, issue, actions } if !runs_the_checks_of_main() => {
+                if fails_before_the_slot(&root, &gh, number, &pr, issue, &actions, mode)? {
                     return Ok(Verdict::Fail);
                 }
             }
@@ -141,7 +141,7 @@ fn sequence(
     status.goes_on();
     report_slot()?;
     Tree::sweep(&root)?;
-    let (pr, issue) = match decide(&gh, number, mode, thread)? {
+    let (pr, issue, actions) = match decide(&gh, number, mode, thread)? {
         Decision::Merged => {
             status.close();
             Tree::clear(&root, &Tree::path(&root, number)?);
@@ -153,7 +153,7 @@ fn sequence(
             status.stops(&why);
             return refuse(&why);
         }
-        Decision::Ready { pr, issue } => (pr, issue),
+        Decision::Ready { pr, issue, actions } => (pr, issue, actions),
     };
 
     let fetched = fetch(&root, &pr.head_ref)?;
@@ -190,6 +190,7 @@ fn sequence(
         mode,
         thread,
         pr: &pr,
+        actions: &actions,
         gated: &gated,
         kept: kept.as_ref(),
         slot: Some(&slot),
@@ -879,9 +880,13 @@ fn changed_during_proof(
                 "PR {number} was merged while this merge was running"
             )));
         }
-        Decision::Ready { pr, issue } => {
+        Decision::Ready { pr, issue, actions } => {
             let was = scoring.pr;
-            if issue != scoring.issue || pr.head_ref != was.head_ref || pr.body != was.body {
+            if issue != scoring.issue
+                || pr.head_ref != was.head_ref
+                || pr.body != was.body
+                || actions != scoring.actions
+            {
                 return Ok(Some(format!(
                     "PR {number} changed during the merge, and the checks read what it said before. Run it again"
                 )));
@@ -1090,6 +1095,7 @@ fn fails_before_the_slot(
     number: u64,
     pr: &PullRequest,
     issue: u64,
+    actions: &[String],
     mode: Mode,
 ) -> Result<bool, Problem> {
     let Some(fetched) = Early::fetch(root, number, &pr.head_ref)? else {
@@ -1109,7 +1115,7 @@ fn fails_before_the_slot(
     let merged = String::from_utf8_lossy(&merged.stdout);
     let tree = merged.lines().next().unwrap_or_default();
     let waiting = if mode == Mode::Merge {
-        waits::reasons(root, main, tree)?
+        waits::reasons(root, main, tree, actions)?
     } else {
         Vec::new()
     };
@@ -1364,7 +1370,9 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
         }
     };
     let tree = workspace::root()?;
-    let pr = Gh::new(&tree).pull_request(number)?;
+    let gh = Gh::new(&tree);
+    let pr = gh.pull_request(number)?;
+    let actions = waits::owner_actions(number, &pr.body, || gh.open_issues())?.map_err(Problem)?;
     let [issue] = pr.closing_issues[..] else {
         return Err(Problem(format!(
             "PR {number} needs to close exactly one issue"
@@ -1380,6 +1388,7 @@ pub fn prove_here(pr: &str, mode: &str, keep: Option<&str>) -> Result<Verdict, P
         mode,
         thread: None,
         pr: &pr,
+        actions: &actions,
         gated: &gated,
         kept: kept.as_ref(),
         slot: None,

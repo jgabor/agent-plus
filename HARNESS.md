@@ -464,10 +464,15 @@ Files outside any single lane follow these rules:
 
 ### What waits for the owner
 
-`cargo xtask merge` reads a PR's diff with `main` to decide whether the PR
-waits for the owner. The owner's merge is for awareness, not a security
-boundary. A PR waits when it:
+`cargo xtask merge` reads a PR's diff with `main`, and its body, to decide
+whether the PR waits for the owner. The owner's merge is for awareness, not a
+security boundary. A PR waits when it:
 
+- leaves the owner an action, which a line of its body names as
+  `Owner action: #123`. The issue has to be open and have `action-needed`,
+  or `merge` and `prepare` refuse the PR. This reason comes first, with the
+  issue's number and title, because the owner's merge is the one moment sure
+  to reach them.
 - changes or removes a SPEC.md unit that `main` has. A unit ignores
   whitespace, so a reflowed paragraph doesn't wait.
 - adds a waiver to `harness/waived.txt`.
@@ -484,15 +489,15 @@ boundary. A PR waits when it:
   decides when it says what waits for the owner, what a count or a floor is
   and whether one fell, which checks a proof runs, or what makes a check pass.
 
-Each of these lowers the bar for later PRs, or can't be undone by a revert.
+Each of the others lowers the bar for later PRs, or can't be undone by a revert.
 Everything else merges under `auto:merge`: a new SPEC.md sentence with its
 check, AGENTS.md, HARNESS.md, the task briefs, the rest of `harness/`, and the
 rest of `xtask/`, such as the timeout and the slot in `merge.rs`, and how
 `bench.rs` measures a budget. Nightly mutation testing is what notices a
-weakened test that kept its count. The xtask built from `main` decides, so a
-PR can't let itself through. `merge` fails a PR that waits with `fail owner`,
-and names each reason. `prepare` passes it, and its comment lists each reason
-under "Merging this PR at `<head>` accepts:".
+weakened test that kept its count. The xtask built from `main` decides, so a PR
+can't let itself through. `merge` fails a PR that waits with `fail owner`, and
+names each reason. `prepare` passes it, and its comment lists each reason under
+"Merging this PR at `<head>` accepts:".
 
 ## Data formats
 

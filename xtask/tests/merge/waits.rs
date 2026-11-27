@@ -260,14 +260,22 @@ fn a_pr_that_leaves_the_owner_an_action_waits() {
     repo.set_body(WITH_ACTION);
     repo.set_action(Some(&["action-needed"]));
     let output = repo.merge();
-    assert!(stderr(&output).contains(ACTION_REASON), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(ACTION_REASON),
+        "{}",
+        stderr(&output)
+    );
     assert!(!repo.calls().contains("clippy"), "{}", repo.calls());
     assert_waits(&repo, ACTION_REASON);
     let listed = format!(
         "Merging this PR at `{}` accepts:\n\n- {ACTION_REASON}\n- it changes `.github/workflows/x.yml`\n",
         repo.head()
     );
-    assert!(repo.pr_comments().contains(&listed), "{}", repo.pr_comments());
+    assert!(
+        repo.pr_comments().contains(&listed),
+        "{}",
+        repo.pr_comments()
+    );
 }
 
 /// The line names an issue that the owner has to act on, or it says nothing.
@@ -296,7 +304,11 @@ fn an_owner_action_that_names_no_waiting_issue_is_refused() {
 fn an_approval_covers_an_owner_action_only_if_it_listed_it() {
     use super::refresh::{falling, merged};
     for (name, approved, merges) in [
-        ("refresh-action-new", &["journey fell from 2 to 1"][..], false),
+        (
+            "refresh-action-new",
+            &["journey fell from 2 to 1"][..],
+            false,
+        ),
         (
             "refresh-action-approved",
             &[ACTION_REASON, "journey fell from 2 to 1"][..],
@@ -318,6 +330,11 @@ fn an_approval_covers_an_owner_action_only_if_it_listed_it() {
         let calls = repo.calls();
         assert_eq!(calls.contains(&merged(9, &repo.head())), merges, "{calls}");
         let open = format!("its proof accepts what the owner didn't approve: {ACTION_REASON}.");
-        assert_eq!(stdout(&output).contains(&open), !merges, "{}", stdout(&output));
+        assert_eq!(
+            stdout(&output).contains(&open),
+            !merges,
+            "{}",
+            stdout(&output)
+        );
     }
 }

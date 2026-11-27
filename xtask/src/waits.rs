@@ -1,9 +1,12 @@
-//! What makes a PR wait for the owner, read from its diff with its base.
+//! What makes a PR wait for the owner, read from its diff with its base and
+//! from its body.
 //!
 //! The owner's merge is for awareness. A PR waits when it lowers the bar that
-//! later PRs are held to, or changes what this file decides. Everything else
-//! merges under `auto:merge`. A count that fell is compared in `accepts.rs`.
+//! later PRs are held to, changes what this file decides, or leaves the owner
+//! an action. Everything else merges under `auto:merge`. A count that fell is
+//! compared in `accepts.rs`.
 
+use crate::forge::OpenIssue;
 use crate::toml::{self, Table, Value};
 use crate::{Problem, base, spec};
 use std::collections::HashSet;
@@ -60,15 +63,26 @@ const RUNS: [&str; 20] = [
     "xtask/src/workspace.rs",
 ];
 
-/// Each reason that `head` waits for the owner, compared with `commit`.
-pub fn reasons(root: &Path, commit: &str, head: &str) -> Result<Vec<String>, Problem> {
+/// What starts a line of a PR's body that names an action only the owner can
+/// take after the merge, as in `Owner action: #123`. The issue says what to do.
+const OWNER_ACTION: &str = "Owner action:";
+const ACTION_NEEDED: &str = "action-needed";
+
+/// Each reason that `head` waits for the owner, compared with `commit`, after
+/// the owner actions that its PR's body names, which come first.
+pub fn reasons(
+    root: &Path,
+    commit: &str,
+    head: &str,
+    actions: &[String],
+) -> Result<Vec<String>, Problem> {
     let listing = base::git_text(
         root,
         &["diff", "--name-only", "--no-renames", "-z", commit, head],
     )?;
     let changed: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
     let touched = |path: &str| changed.contains(&path);
-    let mut reasons = Vec::new();
+    let mut reasons = actions.to_vec();
     if touched(SPEC) {
         reasons.extend(rewritten_units(root, commit, head)?);
     }
@@ -115,6 +129,57 @@ pub fn reasons(root: &Path, commit: &str, head: &str) -> Result<Vec<String>, Pro
         }
     }
     Ok(reasons)
+}
+
+/// Each owner action that the `Owner action:` lines of PR `number`'s body
+/// name, as a reason that it waits for the owner. It reads the open issues
+/// from `open`, and only when a line names one. The error says why a line
+/// names no issue that waits for the owner.
+pub fn owner_actions(
+    number: u64,
+    body: &str,
+    open: impl FnOnce() -> Result<Vec<OpenIssue>, Problem>,
+) -> Result<Result<Vec<String>, String>, Problem> {
+    let line = format!("the `{OWNER_ACTION}` line of PR {number}");
+    let mut named = Vec::new();
+    for value in body
+        .lines()
+        .filter_map(|text| text.trim().strip_prefix(OWNER_ACTION))
+    {
+        // As in `Closes #123.`
+        let value = value.trim();
+        let issue = value.strip_suffix('.').unwrap_or(value).strip_prefix('#');
+        match issue.and_then(|issue| issue.parse::<u64>().ok()) {
+            Some(issue) => named.push(issue),
+            None => {
+                return Ok(Err(format!(
+                    "{line} reads `{value}`, and it needs to read `#<issue>`"
+                )));
+            }
+        }
+    }
+    if named.is_empty() {
+        return Ok(Ok(Vec::new()));
+    }
+    let open = open()?;
+    let mut reasons = Vec::new();
+    for issue in named {
+        let Some(found) = open.iter().find(|found| found.number == issue) else {
+            return Ok(Err(format!(
+                "{line} names issue {issue}, which isn't an open issue"
+            )));
+        };
+        if !found.labels.iter().any(|label| label == ACTION_NEEDED) {
+            return Ok(Err(format!(
+                "{line} names issue {issue}, which doesn't have the label `{ACTION_NEEDED}`"
+            )));
+        }
+        reasons.push(format!(
+            "it leaves the owner an action, #{issue}: {}",
+            found.title
+        ));
+    }
+    Ok(Ok(reasons))
 }
 
 /// A file as a commit has it, or `None` if it isn't there.

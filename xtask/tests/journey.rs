@@ -698,3 +698,79 @@ fn the_binary_is_built_without_a_c_compiler() {
     );
     assert_journey(&root, "pass step 1\njourney 1 of 1\n");
 }
+
+/// Runs step 13 from the directory `scripts`, with no key, in a new working
+/// directory under `name`, and returns its output and the `step.sh` it wrote.
+fn other_harness(name: &str, scripts: &Path) -> (Output, String) {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("other-harness")
+        .join(name);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    fs::create_dir_all(&dir).unwrap();
+    let output = Command::new("/bin/sh")
+        .arg(scripts.join("13-other-harness.sh"))
+        .current_dir(&dir)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", &dir)
+        .output()
+        .unwrap();
+    let step = fs::read_to_string(dir.join("step.sh")).unwrap_or_default();
+    (output, step)
+}
+
+/// The lines of the Agentfile that `step` builds.
+fn agentfile(step: &str) -> Vec<&str> {
+    step.lines()
+        .skip_while(|line| *line != "cat >repo/Agentfile <<'EOF'")
+        .skip(1)
+        .take_while(|line| *line != "EOF")
+        .collect()
+}
+
+#[test]
+fn step_13_names_its_codex_model_without_a_key() {
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/journey");
+    let (output, step) = other_harness("names", &scripts);
+    // With no key, the step stops at step 12's check for one, so every check
+    // of its own text has passed.
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        stderr(&output),
+        "CODEX_API_KEY is empty, so the step can't sign Codex in\n"
+    );
+    let lines = agentfile(&step);
+    assert!(lines.contains(&"AGENT codex"), "{lines:?}");
+    assert!(lines.contains(&"MODEL gpt-6-luna"), "{lines:?}");
+}
+
+#[test]
+fn step_13_fails_when_its_agentfile_names_no_model() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/journey");
+    let scripts = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("other-harness")
+        .join("no-model-scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::copy(
+        source.join("13-other-harness.sh"),
+        scripts.join("13-other-harness.sh"),
+    )
+    .unwrap();
+    let twelve = fs::read_to_string(source.join("12-prompt.sh")).unwrap();
+    let without: String = twelve
+        .lines()
+        .filter(|line| !line.starts_with("MODEL "))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    assert_ne!(without, twelve);
+    fs::write(scripts.join("12-prompt.sh"), without).unwrap();
+    let (output, _) = other_harness("no-model", &scripts);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("can't build on it: expected 1 lines matching ^MODEL gpt-6-luna$"),
+        "{}",
+        stderr(&output)
+    );
+}

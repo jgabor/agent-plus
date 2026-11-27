@@ -301,7 +301,7 @@ from `~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it as
 `~/.config/agent-plus/paid-checks/openai-api-key`, and gives it only to step
 13, as `CODEX_API_KEY`. Nothing prints a key. Without its file, a step
 doesn't run. Claude Code runs on Haiku 5.5, `claude-haiku-5-5`, and Codex on
-its default model.
+GPT-6 Luna, `gpt-6-luna`, the cheapest model that each harness lists.
 
 T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out.
 T0 lints the whole workspace twice: once for Linux, and once for

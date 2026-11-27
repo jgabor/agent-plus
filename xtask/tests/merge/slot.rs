@@ -196,15 +196,17 @@ fn a_merge_keeps_its_turn_from_the_slot_to_its_proof() {
 /// `main`, starts `merge 10` then, and lets `first` go on once that merge says
 /// it waits for the slot. Gives back how each ended, and what the merge said.
 pub(super) fn merge_ten_during(repo: &Repo, first: &[&str]) -> (Output, Output, Vec<String>) {
-    let (first, mut then, heard) = during(repo, first, &[&["merge", "10"]]);
-    (first, then.remove(0), heard)
+    let (first, mut then) = during(repo, first, &[&["merge", "10"]]);
+    let second = then.remove(0);
+    let heard = stderr(&second).lines().map(String::from).collect();
+    (first, second, heard)
 }
 
 /// Runs `xtask` with `first`, which pauses at its build of the xtask of
 /// `main`. Starts each of `then` in turn, once the one before it says that it
 /// waits for the slot, and lets `first` go on once the last says so. Gives
-/// back how each ended, and what those in `then` said.
-fn during(repo: &Repo, first: &[&str], then: &[&[&str]]) -> (Output, Vec<Output>, Vec<String>) {
+/// back how each ended.
+fn during(repo: &Repo, first: &[&str], then: &[&[&str]]) -> (Output, Vec<Output>) {
     let building = repo.bin.join("building");
     let go = repo.bin.join("go");
     // Bounded, so that a failed test leaves nothing waiting for good.
@@ -232,10 +234,20 @@ fn during(repo: &Repo, first: &[&str], then: &[&[&str]]) -> (Output, Vec<Output>
         .map(|args| Waiter::start(repo, args, deadline))
         .collect();
     fs::write(&go, "").unwrap();
-    // A run that never ends fails the test instead of hanging it.
-    let (done, ended) = mpsc::channel::<()>();
     let mut pids = vec![first.id()];
     pids.extend(waiters.iter().map(|waiter| waiter.child.id()));
+    let done = bounded(pids);
+    let first = first.wait_with_output().unwrap();
+    let then = waiters.into_iter().map(Waiter::end).collect();
+    let _ = done.send(());
+    (first, then)
+}
+
+/// Kills `pids` unless the test sends on what this gives back within five
+/// minutes, so that a run that never ends fails the test instead of hanging
+/// it. A test that panics drops it, which kills them at once.
+fn bounded(pids: Vec<u32>) -> mpsc::Sender<()> {
+    let (done, ended) = mpsc::channel::<()>();
     thread::spawn(move || {
         if ended.recv_timeout(Duration::from_secs(300)).is_err() {
             for pid in pids {
@@ -245,19 +257,7 @@ fn during(repo: &Repo, first: &[&str], then: &[&[&str]]) -> (Output, Vec<Output>
             }
         }
     });
-    let first = first.wait_with_output().unwrap();
-    let mut heard = Vec::new();
-    let then = waiters
-        .into_iter()
-        .map(|waiter| {
-            let output = waiter.child.wait_with_output().unwrap();
-            heard.extend(waiter.heard);
-            heard.extend(waiter.lines.try_iter());
-            output
-        })
-        .collect();
-    let _ = done.send(());
-    (first, then, heard)
+    done
 }
 
 /// A run of `xtask` that has said it waits for the merge slot.
@@ -307,6 +307,15 @@ impl Waiter {
             lines,
         }
     }
+
+    /// How it ended, with all it said on stderr.
+    fn end(self) -> Output {
+        let mut output = self.child.wait_with_output().unwrap();
+        let mut said = self.heard;
+        said.extend(self.lines.iter());
+        output.stderr = said.join("\n").into_bytes();
+        output
+    }
 }
 
 /// Three runs wait for the slot, one after another, behind a merge that hands
@@ -329,10 +338,10 @@ fn waiters_get_the_merge_slot_in_the_order_they_came() {
         .map(|((command, _, _), number)| [*command, number.as_str()])
         .collect();
     let then: Vec<&[&str]> = then.iter().map(|args| &args[..]).collect();
-    let (first, then, heard) = during(&repo, &["merge", "9"], &then);
+    let (first, then) = during(&repo, &["merge", "9"], &then);
     assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
     for output in &then {
-        assert_eq!(output.status.code(), Some(0), "{heard:?}");
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
     }
     let calls = repo.calls();
     let mut took = vec![calls.find("gh pr merge 9 ").expect(&calls)];
@@ -367,19 +376,9 @@ fn a_waiter_keeps_its_place_while_it_waits_for_a_turn() {
     ];
     turn.unlock().unwrap();
     slot.unlock().unwrap();
-    let (done, ended) = mpsc::channel::<()>();
-    let pids: Vec<u32> = waiters.iter().map(|waiter| waiter.child.id()).collect();
-    thread::spawn(move || {
-        if ended.recv_timeout(Duration::from_secs(300)).is_err() {
-            for pid in pids {
-                let _ = Command::new("kill")
-                    .args(["-KILL", &pid.to_string()])
-                    .status();
-            }
-        }
-    });
+    let done = bounded(waiters.iter().map(|waiter| waiter.child.id()).collect());
     for waiter in waiters {
-        let output = waiter.child.wait_with_output().unwrap();
+        let output = waiter.end();
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     }
     let _ = done.send(());
@@ -406,20 +405,22 @@ fn a_killed_waiter_holds_no_one_up() {
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut killed = Waiter::start(&repo, &["merge", "9"], deadline);
     let second = Waiter::start(&repo, &["merge", "10"], deadline);
-    // The pid of a child this test started.
+    // The pid of a child this test started. Its supervisor goes first, and its
+    // watcher then kills the rest, which leaves the first number behind.
     killed.child.kill().unwrap();
     assert_eq!(killed.child.wait().unwrap().code(), None);
-    held.unlock().unwrap();
-    let (done, ended) = mpsc::channel::<()>();
-    let pid = second.child.id();
-    thread::spawn(move || {
-        if ended.recv_timeout(Duration::from_secs(120)).is_err() {
-            let _ = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
-                .status();
+    let first = directory.join("merge-queue/0.lock");
+    loop {
+        let left = fs::File::open(&first).expect("the killed waiter's number is gone");
+        if left.try_lock_shared().is_ok() {
+            break;
         }
-    });
-    let output = second.child.wait_with_output().unwrap();
+        assert!(Instant::now() < deadline, "the killed waiter still waits");
+        thread::sleep(Duration::from_millis(10));
+    }
+    held.unlock().unwrap();
+    let done = bounded(vec![second.child.id()]);
+    let output = second.end();
     let _ = done.send(());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(repo.calls().contains("gh pr merge 10 "), "{}", repo.calls());

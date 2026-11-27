@@ -395,9 +395,11 @@ impl Ticket {
                 return Ok(taken);
             };
             wait();
-            // Gone as it was read, when its waiter took the slot.
-            if let Ok(file) = File::open(queue.join(ticket(before))) {
-                file.lock_shared().map_err(couldnt)?;
+            match File::open(queue.join(ticket(before))) {
+                Ok(file) => file.lock_shared().map_err(couldnt)?,
+                // Gone as it was read, when its waiter took the slot.
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(couldnt(e)),
             }
         }
     }
@@ -691,7 +693,7 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bench_waits, open, take_exclusive, take_place, take_shared};
+    use super::{Ticket, bench_waits, open, take_exclusive, take_place, take_shared};
     use std::fs::{self, TryLockError};
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
@@ -831,6 +833,31 @@ mod tests {
 
         drop((ahead, next));
         queued.recv().unwrap().send(()).unwrap();
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// A number that no waiter keeps, as a killed waiter leaves, holds no one
+    /// up, and the next waiter removes it.
+    #[test]
+    fn a_number_nobody_keeps_is_removed() {
+        let path = directory("queue");
+        let queue = path.join("merge-queue");
+        fs::create_dir_all(&queue).unwrap();
+        fs::write(queue.join("4.lock"), "").unwrap();
+        let names = || {
+            let mut names: Vec<String> = fs::read_dir(&queue)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let ticket = Ticket::take(&path, &mut || panic!("it waited"))
+            .map_err(|e| e.0)
+            .unwrap();
+        assert_eq!(names(), ["5.lock"]);
+        drop(ticket);
+        assert!(names().is_empty(), "{:?}", names());
         fs::remove_dir_all(&path).unwrap();
     }
 

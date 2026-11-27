@@ -877,8 +877,8 @@ to be staged: teach the reader first, and change the file in a later PR.
    xtask checks again in step 4, and decides.
 2. Take the merge slot, and read the PR again. If another run holds the slot,
    or waits for it first, the command first says that it waits for it, and
-   posts that on the PR, so a queue doesn't look like a hang. If it waited, and then refuses the PR, it
-   posts `failure` with why.
+   posts that on the PR, so a queue doesn't look like a hang. If it waited,
+   and then refuses the PR, it posts `failure` with why.
 3. Fetch `main`, rebase the branch onto it, and drop any ledger record an
    earlier attempt left at the tip.
 4. Post `pending` on the branch's current head. Run the gate on the rebased

@@ -135,7 +135,8 @@ desktop in a native window.
 - `ap ls`: list built agents
 - `ap inspect <agent>`: show an agent's layers and its approved grants:
   shares, host env vars, secrets, git credentials, network policy, and the
-  agents it may call
+  agents it may call. With `--network=<destination>`, say whether the agent
+  may reach it, and which rule decides
 - `ap rm <agent>`: remove an agent and its persisted state
 
 #### Runs

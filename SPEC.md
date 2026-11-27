@@ -542,6 +542,38 @@ file changes nothing.
 host environment variables, secrets, git credentials, network policy, and the
 agents it may call. [Grants](#grants) specifies `ap inspect --grants`.
 
+`ap inspect <agent> --network=<destination>` says whether the agent may reach
+a destination, without a run:
+
+```
+$ ap inspect myagent --network=https://gist.github.com/x
+- https://gist.github.com/x  NETWORK -gist.github.com
+```
+
+- It prints one line: `+` or `-`, the destination as you wrote it, and the
+  rule that decides, named as `ap logs` names it for a network decision.
+- It exits 0 for `+` and 1 for `-`.
+- A destination is written as a `NETWORK` rule writes one, without the sign:
+  a URL, a host, a host with a port, or an address with or without a port.
+- A destination with a sign is bad usage, and the message says that
+  `ap run --network` is where a rule goes.
+- A destination it can't read is bad usage, and so is `--network` with
+  `--grants`.
+- It decides from the agent's approved rules and its harness's hosts, as a
+  run with no `--network` flag does.
+- It starts no VM, resolves no name, and connects nowhere.
+- A destination without a port meets only the rules for every port. A URL
+  without a port has its scheme's port.
+- For a URL on a host with URL rules, it treats the path as the proxy does,
+  so a path the proxy denies for its form is denied here too.
+- For an address, it gives what the IP rules and your host's loopback say.
+- For a name, it gives the decision by name. When that is `+`, it says on
+  standard error that a run can still deny the connection: by an IP rule or
+  your host's loopback, for the address the name resolves to, or by the name
+  check.
+- If the agent doesn't exist, or has no approved grants, it says so on
+  standard error and exits with status 125.
+
 ### ap rm
 
 `ap rm <agent>` removes an agent and its persisted state. [Build](#build)

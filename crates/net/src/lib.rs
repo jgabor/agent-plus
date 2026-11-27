@@ -92,6 +92,24 @@ impl<'a> From<&Connection<'a>> for Asked<'a> {
     }
 }
 
+/// Decides a connection to `name` on `port`, with `request` on it, as
+/// [`decide`] does, but by its name alone, as [`by_name`] does.
+pub fn decide_by_name<'a>(
+    rules: &'a [NetworkRule],
+    default: Sign,
+    name: &str,
+    port: u16,
+    request: Option<Request>,
+) -> Decision<'a> {
+    let asked = Asked {
+        name: Some(name),
+        address: None,
+        port,
+        request,
+    };
+    decision(rules, default, &asked)
+}
+
 /// Decides `connection` as [`decide`] does, by its name alone when its
 /// address is unknown.
 fn decision<'a>(rules: &'a [NetworkRule], default: Sign, connection: &Asked) -> Decision<'a> {

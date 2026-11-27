@@ -4,7 +4,8 @@ set -eu
 # Runs the fake harness under host, address, and URL rules, and under a
 # closed network, and tries the network from inside each guest with
 # `ap exec`. Before a run, `ap inspect --network` answers for some of the
-# destinations it tries, as the guest and `ap logs` find them. The journey puts the fake upstream next to `ap`. It answers on
+# destinations it tries, as the guest and `ap logs` find them. The journey
+# puts the fake upstream next to `ap`. It answers on
 # your host's loopback, which the guest reaches as `host.ap.internal`, and
 # on your host's address on its route out. Each check reads what the guest
 # got back, what reached the upstream, what `ap logs` shows, and the hosts

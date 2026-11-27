@@ -16,7 +16,7 @@
 
 use std::ffi::OsString;
 use std::fs::File;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentfile::{Destination, Instruction, Network, Scheme, Sign};
@@ -62,23 +62,43 @@ impl Rule {
         }
     }
 
-    /// The rule of `network` that decided `connection`, which
-    /// [`net::proxied`] decided as `proxied`.
-    pub(super) fn decided(network: &Network, proxied: Proxied, connection: &Connection) -> Rule {
-        match (proxied, connection.request) {
-            // A request on a connection to your host, which got there, is
-            // denied by a `-` rule, its path, or else the default, not by
-            // its loopback, and never by a `+` IP rule.
-            (Proxied::Loopback, Some(_)) => {
-                match net::decide(&network.rules, Sign::Deny, connection) {
-                    net::Decision {
-                        sign: Sign::Deny,
-                        by,
-                    } => Rule::by(network, by),
-                    _ => Rule::Default,
-                }
+    /// The rule of `network` that decided a connection to `name` at
+    /// `address` on `port`, with `request` on it, which [`net::proxied`]
+    /// decided as `proxied`, or [`net::by_name`] did, without an address.
+    pub(super) fn decided(
+        network: &Network,
+        proxied: Proxied,
+        (name, address): (Option<&str>, Option<IpAddr>),
+        port: u16,
+        request: Option<Request>,
+    ) -> Rule {
+        if !(proxied == Proxied::Loopback && request.is_some()) {
+            return Rule::proxied(network, proxied);
+        }
+        // A request on a connection to your host, which got there, is
+        // denied by a `-` rule, its path, or else the default, not by its
+        // loopback, and never by a `+` IP rule.
+        let decision = match (name, address) {
+            (_, Some(address)) => {
+                let connection = Connection {
+                    name,
+                    address,
+                    port,
+                    request,
+                };
+                net::decide(&network.rules, Sign::Deny, &connection)
             }
-            _ => Rule::proxied(network, proxied),
+            (Some(name), None) => {
+                net::decide_by_name(&network.rules, Sign::Deny, name, port, request)
+            }
+            (None, None) => return Rule::Default,
+        };
+        match decision {
+            net::Decision {
+                sign: Sign::Deny,
+                by,
+            } => Rule::by(network, by),
+            _ => Rule::Default,
         }
     }
 
@@ -223,22 +243,31 @@ pub struct Answer {
 
 /// Whether the network process with `args`, which [`super::arguments`]
 /// made, allows a connection to `asked`, and the rule that decides. A name
-/// is decided by name alone, as before it resolves, and a destination
-/// without a port on a port that no rule names. `None` when `args` can't
+/// is decided as a run decides it before it resolves: refused if the
+/// resolver refuses it, and else by name alone. A destination without a
+/// port is decided on a port that no rule names. `None` when `args` can't
 /// be read.
 pub fn answer(args: &[OsString], asked: &Asked) -> Option<Answer> {
     let (network, harness) = super::rules(args).ok()?;
     let harness: Vec<&str> = harness.iter().map(String::as_str).collect();
     let any_port = net::any_port(&network);
-    let (proxied, connection) = match asked {
+    let (allows, rule) = match asked {
         Asked::Address { address, port } => {
+            let port = port.unwrap_or(any_port);
             let connection = Connection {
                 name: None,
                 address: *address,
-                port: port.unwrap_or(any_port),
+                port,
                 request: None,
             };
-            (net::proxied(&network, &harness, &connection), connection)
+            let proxied = net::proxied(&network, &harness, &connection);
+            let rule = Rule::decided(&network, proxied, (None, Some(*address)), port, None);
+            (proxied.allows(), rule)
+        }
+        // A run looks the name up first, and the resolver refuses a name
+        // that no connection to could be allowed.
+        Asked::Name { name, .. } if !net::could_allow(&network, &harness, name) => {
+            (false, Rule::by(&network, net::refusing(&network, name)))
         }
         Asked::Name {
             name,
@@ -255,20 +284,12 @@ pub fn answer(args: &[OsString], asked: &Asked) -> Option<Answer> {
                 target,
             });
             let proxied = net::by_name(&network, &harness, name, port, request);
-            // `by_name` refuses only your host as loopback, and your host's
-            // address is its loopback.
-            let connection = Connection {
-                name: Some(name),
-                address: Ipv4Addr::LOCALHOST.into(),
-                port,
-                request,
-            };
-            (proxied, connection)
+            let rule = Rule::decided(&network, proxied, (Some(name), None), port, request);
+            (proxied.allows(), rule)
         }
     };
-    let rule = Rule::decided(&network, proxied, &connection);
     Some(Answer {
-        allows: proxied.allows(),
+        allows,
         rule: rule.named(&written(args))?,
     })
 }

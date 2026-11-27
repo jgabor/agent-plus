@@ -184,7 +184,7 @@ impl Reporter {
             request,
         };
         let proxied = net::proxied(&self.network, &harness, &connection);
-        let rule = Rule::decided(&self.network, proxied, &connection);
+        let rule = Rule::decided(&self.network, proxied, (name, Some(address)), port, request);
         self.send_decision(allow, &rule, name, address, port);
     }
 

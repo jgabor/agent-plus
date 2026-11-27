@@ -514,7 +514,13 @@ fn inspect_network_without_a_port_meets_the_rules_for_every_port() {
     network_agent(
         &scratch,
         "ports",
-        &["-", "+github.com:22", "+example.com", "-example.com:443"],
+        &[
+            "-",
+            "+github.com:22",
+            "+example.com",
+            "-example.com:443",
+            "+1.1.1.1:53",
+        ],
     );
     answers(
         &scratch,
@@ -539,6 +545,8 @@ fn inspect_network_without_a_port_meets_the_rules_for_every_port() {
                 "http://example.com:443/",
                 "- http://example.com:443/  NETWORK -example.com:443",
             ),
+            ("1.1.1.1", "- 1.1.1.1  the default"),
+            ("1.1.1.1:53", "+ 1.1.1.1:53  NETWORK +1.1.1.1:53"),
         ],
     );
 }
@@ -584,6 +592,14 @@ fn inspect_network_treats_a_url_path_as_the_proxy_does() {
             (
                 "https://github.com/jgabor/a;b",
                 &format!("- https://github.com/jgabor/a;b  {path}"),
+            ),
+            (
+                "https://github.com/jgabor/x?tab=readme",
+                "+ https://github.com/jgabor/x?tab=readme  NETWORK +https://github.com/jgabor",
+            ),
+            (
+                "https://github.com/jgabor/x#readme",
+                &format!("- https://github.com/jgabor/x#readme  {path}"),
             ),
             // A host without URL rules has no path to check.
             (
@@ -643,8 +659,41 @@ fn inspect_network_decides_a_name_by_name_and_says_what_a_run_still_checks() {
     ] {
         let (status, out, err) = ask(&scratch, "names", destination);
         assert_eq!(out, format!("{line}\n"), "{destination}");
-        assert!(status.is_some(), "{destination}");
+        let sign = if line.starts_with('+') { 0 } else { 1 };
+        assert_eq!(status, Some(sign), "{destination}");
         assert_eq!(err, "", "{destination}");
+    }
+    // Your host's name is decided by name too, as a run's lookup decides it
+    // before its loopback address meets an IP rule.
+    network_agent(
+        &scratch,
+        "yours",
+        &["-", "+https://host.ap.internal/allowed", "-127.0.0.1"],
+    );
+    network_agent(&scratch, "closed", &["-"]);
+    for (agent, destination, line) in [
+        (
+            "yours",
+            "https://host.ap.internal/allowed",
+            "+ https://host.ap.internal/allowed  NETWORK +https://host.ap.internal/allowed",
+        ),
+        (
+            "yours",
+            "https://host.ap.internal/denied",
+            "- https://host.ap.internal/denied  the default",
+        ),
+        (
+            "closed",
+            "host.ap.internal",
+            "- host.ap.internal  the default",
+        ),
+        (
+            "closed",
+            "host.ap.internal:8080",
+            "- host.ap.internal:8080  the default",
+        ),
+    ] {
+        answers(&scratch, agent, &[(destination, line)]);
     }
 }
 

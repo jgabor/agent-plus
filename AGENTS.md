@@ -331,7 +331,10 @@ Created with <model> in <harness>.
 - The fold keeps the body short for the owner, with the evidence one click
   away. Leave a blank line after `<summary>`, or GitHub shows the Markdown
   inside as plain text. Keep the lines a program reads outside the fold:
-  `Closes`, `Hill: none`, and `Budget reason`.
+  `Closes`, `Hill: none`, `Budget reason`, and `Owner action`.
+- A PR that leaves the owner [an action](#owner-actions) names its issue in
+  a line that reads `Owner action: #123`, so that the PR waits for the
+  owner's merge.
 - A PR that raises no [count](HARNESS.md#hills) gives the reason in a line
   that reads `Hill: none, <reason>`, or `merge` and `prepare` fail it. A
   cleanup rarely raises one, and a change to this file never does.

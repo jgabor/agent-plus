@@ -17,7 +17,13 @@ const AUTO_MERGE: &str = "auto:merge";
 pub enum Decision {
     Merged,
     Refused(String),
-    Ready { pr: PullRequest, issue: u64 },
+    Ready {
+        pr: PullRequest,
+        issue: u64,
+        /// The owner actions that the PR's body names, each as a reason that
+        /// it waits for the owner.
+        actions: Vec<String>,
+    },
 }
 
 /// Whether this PR may merge, from what GitHub says now. It writes nothing.
@@ -71,7 +77,11 @@ pub fn decide(gh: &Gh, number: u64, mode: Mode, thread: Option<&str>) -> Result<
             "issue {issue} has no `{AUTO_MERGE}` label, so the owner merges PR {number}. Run `cargo xtask prepare {number}` instead"
         ));
     }
-    Ok(Decision::Ready { pr, issue })
+    let actions = match waits::owner_actions(number, &pr.body, || gh.open_issues())? {
+        Ok(actions) => actions,
+        Err(why) => return refused(why),
+    };
+    Ok(Decision::Ready { pr, issue, actions })
 }
 
 /// Whose rules the sequence follows, and how far it goes.
@@ -197,6 +207,8 @@ pub struct Scoring<'a> {
     pub mode: Mode,
     pub thread: Option<&'a str>,
     pub pr: &'a PullRequest,
+    /// What `Decision::Ready` says of the PR's owner actions.
+    pub actions: &'a [String],
     pub gated: &'a str,
     /// The record whose budgets stand in for a bench.
     pub kept: Option<&'a Record>,
@@ -232,7 +244,7 @@ pub fn prove(
     let prepare = mode != Mode::Merge;
     let commit = base::find(tree)?
         .ok_or_else(|| Problem("there is no origin/main after the fetch".to_string()))?;
-    let waiting = waits::reasons(tree, &commit, "HEAD")?;
+    let waiting = waits::reasons(tree, &commit, "HEAD", scoring.actions)?;
     if let Some(failed) = fails_early(tree, &commit, "HEAD", &waiting, number, &pr.body, mode)? {
         return Ok(Err(failed));
     }

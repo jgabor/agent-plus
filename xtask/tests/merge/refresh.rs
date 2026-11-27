@@ -21,7 +21,7 @@ fn unarmed(row: &str) -> String {
     row.replace(ARMED, "null")
 }
 
-fn merged(number: u64, head: &str) -> String {
+pub(super) fn merged(number: u64, head: &str) -> String {
     format!("gh pr merge {number} -R o/r --squash --delete-branch --match-head-commit {head}")
 }
 
@@ -1055,7 +1055,7 @@ fn a_refresh_merges_no_pr_whose_auto_merge_was_turned_off() {
 impl Repo {
     /// The comment that a proof of an earlier head left, which the owner
     /// approved by arming auto-merge.
-    fn approved(&self, reasons: &[&str]) {
+    pub(super) fn approved(&self, reasons: &[&str]) {
         let lines: Vec<String> = reasons.iter().map(|reason| format!("- {reason}")).collect();
         let body = format!(
             "Merging this PR at `0123456789abcdef0123456789abcdef01234567` accepts:\n\n{}\n\n",
@@ -1065,7 +1065,7 @@ impl Repo {
     }
 
     /// A refresh in Actions, and the summary it wrote.
-    fn refresh_summed_up(&self) -> (Output, String) {
+    pub(super) fn refresh_summed_up(&self) -> (Output, String) {
         let summary = self.temp.join("summary.md");
         self.git(&["checkout", "-q", "main"]);
         let output = self
@@ -1080,7 +1080,7 @@ impl Repo {
 }
 
 /// A PR whose journey count falls from 2 to 1, armed and behind `main`.
-fn falling(name: &str) -> Repo {
+pub(super) fn falling(name: &str) -> Repo {
     let repo = with_base(name, 0, 2);
     repo.prepared(BRANCH, 7, "");
     repo.advance_main("later.txt", "x\n");

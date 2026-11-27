@@ -214,3 +214,127 @@ fn a_pr_that_changes_xtask_and_keeps_its_tests_merges() {
     );
     assert_merged(&repo, &repo.merge());
 }
+
+/// The title of issue 12, the action that the PR's body names.
+const ACTION: &str = "Turn the timer on, on the Linux machine";
+const ACTION_REASON: &str =
+    "it leaves the owner an action, #12: Turn the timer on, on the Linux machine";
+const WITH_ACTION: &str = "Closes #7.\n\nHill: none, tooling.\n\nOwner action: #12\n";
+
+impl Repo {
+    /// The open issues: issue 7, which has `land-needed`, and issue 12, with
+    /// `labels`, unless it is closed.
+    fn set_action(&self, labels: Option<&[&str]>) {
+        let mut rows = vec![
+            "{\"number\":7,\"title\":\"t\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false}"
+                .to_string(),
+        ];
+        if let Some(labels) = labels {
+            rows.push(format!(
+                "{{\"number\":12,\"title\":{},\"labels\":{},\"isPinned\":false}}",
+                quoted(ACTION),
+                labels_json(labels)
+            ));
+        }
+        let rows = format!("[{}]\n", rows.join(","));
+        fs::write(self.bin.join("issues.json"), rows).unwrap();
+    }
+
+    fn set_body(&self, body: &str) {
+        self.set_pr(&Pr {
+            body,
+            ..Pr::default()
+        });
+    }
+}
+
+/// The owner's merge is the one moment sure to reach them, so it comes before
+/// anything else that merging accepts, and before the gate runs.
+#[test]
+fn a_pr_that_leaves_the_owner_an_action_waits() {
+    let repo = changing(
+        "waits-action",
+        &[],
+        &[(".github/workflows/x.yml", "name: x\n")],
+    );
+    repo.set_body(WITH_ACTION);
+    repo.set_action(Some(&["action-needed"]));
+    let output = repo.merge();
+    assert!(
+        stderr(&output).contains(ACTION_REASON),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!repo.calls().contains("clippy"), "{}", repo.calls());
+    assert_waits(&repo, ACTION_REASON);
+    let listed = format!(
+        "Merging this PR at `{}` accepts:\n\n- {ACTION_REASON}\n- it changes `.github/workflows/x.yml`\n",
+        repo.head()
+    );
+    assert!(
+        repo.pr_comments().contains(&listed),
+        "{}",
+        repo.pr_comments()
+    );
+}
+
+/// The line names an issue that the owner has to act on, or it says nothing.
+#[test]
+fn an_owner_action_that_names_no_waiting_issue_is_refused() {
+    let repo = Repo::new("action-refused");
+    repo.set_body(WITH_ACTION);
+    repo.set_action(Some(&[]));
+    let unlabeled = "the `Owner action:` line of PR 9 names issue 12, which doesn't have the label `action-needed`";
+    assert_refused(&repo, &repo.merge(), unlabeled);
+    assert_refused(&repo, &repo.prepare(), unlabeled);
+    repo.set_action(None);
+    let closed = "the `Owner action:` line of PR 9 names issue 12, which isn't an open issue";
+    assert_refused(&repo, &repo.prepare(), closed);
+    repo.set_body("Closes #7.\n\nHill: none, tooling.\n\nOwner action: 12\n");
+    assert_refused(
+        &repo,
+        &repo.prepare(),
+        "the `Owner action:` line of PR 9 reads `12`, and it needs to read `#<issue>`",
+    );
+}
+
+/// An approval covers an owner action as it covers any other reason: only if
+/// the comment listed it when the owner armed auto-merge.
+#[test]
+fn an_approval_covers_an_owner_action_only_if_it_listed_it() {
+    use super::refresh::{falling, merged};
+    for (name, approved, merges) in [
+        (
+            "refresh-action-new",
+            &["journey fell from 2 to 1"][..],
+            false,
+        ),
+        (
+            "refresh-action-approved",
+            &[ACTION_REASON, "journey fell from 2 to 1"][..],
+            true,
+        ),
+    ] {
+        let repo = falling(name);
+        repo.set_body(WITH_ACTION);
+        repo.set_action(Some(&["action-needed"]));
+        repo.approved(approved);
+        let (output, _) = repo.refresh_summed_up();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        let calls = repo.calls();
+        assert_eq!(calls.contains(&merged(9, &repo.head())), merges, "{calls}");
+        let open = format!("its proof accepts what the owner didn't approve: {ACTION_REASON}.");
+        assert_eq!(
+            stdout(&output).contains(&open),
+            !merges,
+            "{}",
+            stdout(&output)
+        );
+    }
+}

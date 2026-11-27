@@ -1591,6 +1591,12 @@ impl Cow {
         }
         self.make_parents(&path)?;
         self.base(&path, None)?;
+        if self.kept() {
+            // A server that stopped between making something in the tree
+            // and recording it left it there, empty, with no record.
+            let _ = (self.unlink_upper(&path, 0))
+                .or_else(|_| self.unlink_upper(&path, libc::AT_REMOVEDIR));
+        }
         Ok(path)
     }
 
@@ -1886,6 +1892,9 @@ impl Cow {
         }
         if beneath(into, from) || beneath(from, into) {
             return Err(libc::EINVAL);
+        }
+        if !self.entries.contains_key(from) || !self.entries.contains_key(into) {
+            return Err(libc::EIO);
         }
         let (from_dir, from_name) = split(from);
         let (into_dir, into_name) = split(into);

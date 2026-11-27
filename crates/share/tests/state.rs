@@ -256,10 +256,15 @@ fn a_record_half_written_goes_and_a_bad_one_stops_the_server() {
     file.write_all(b"FILE \"made/half").unwrap();
     drop(file);
 
+    // A server that stopped there may have made the file, too.
+    fs::write(dir.join("tree/made/half"), b"").unwrap();
+
     let mut guest = serve(&dir);
     assert_eq!(fs::read(&records).unwrap(), whole);
     assert_eq!(mode(&mut guest, "made").map(kind), Ok(S_IFDIR));
-    assert_eq!(guest.lookup(1, b"half"), Err(ENOENT));
+    let made = guest.walk("made").unwrap();
+    assert_eq!(guest.lookup(made, b"half"), Err(ENOENT));
+    assert!(guest.create(made, b"half", 0).is_ok());
     drop(guest);
 
     fs::write(&records, b"FILE \"../outside\" 644\n").unwrap();

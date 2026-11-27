@@ -778,7 +778,7 @@ fn build_reports_every_error() {
     // Errors that need the host are reported together, in line order.
     fs::write(
         dir.join("Agentfile"),
-        "AGENT claude\nOS minimal\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO jgabor/agent-plus\n",
+        "AGENT claude\nOS minimal\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO ./local\n",
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -800,7 +800,7 @@ fn a_destination_error_does_not_hide_other_errors() {
     let scratch = Scratch::new("destination-and-more");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nOS minimal\nADD ./data /etc/data\nREPO jgabor/agent-plus\nSYSTEM ./missing.md\n",
+        "AGENT claude\nOS minimal\nADD ./data /etc/data\nREPO ./local\nSYSTEM ./missing.md\n",
     );
     fs::write(dir.join("data"), "one").unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -2723,6 +2723,10 @@ fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
     )
     .unwrap();
     let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    // Nor does the configuration of a repository the build runs in.
+    common::repo::run(&dir, &["init", "-q"]);
+    let helper = format!("!f() {{ touch {}; }}; f", marker.display());
+    common::repo::run(&dir, &["config", "credential.helper", &helper]);
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
@@ -2767,6 +2771,13 @@ fn git_fetches_only_over_https_or_ssh_into_a_bare_repository_and_runs_no_hook() 
     )
     .unwrap();
     let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    // Nor can the configuration of a repository the build runs in, which
+    // would send git elsewhere.
+    common::repo::run(&dir, &["init", "-q"]);
+    let elsewhere = "url.https://localhost:1/.insteadOf";
+    let origin = format!("https://localhost:{}/", remote.server.port);
+    common::repo::run(&dir, &["config", elsewhere, &origin]);
+    common::repo::run(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
     scratch.build(&dir, &[]);
     assert!(!marker.exists(), "a hook ran");
     let fetched = scratch.home.join(".cache/ap/git");

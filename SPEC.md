@@ -1148,7 +1148,8 @@ REPO jgabor/agent-plus history
 REPO https://codeberg.org/forgejo/forgejo ~/src/forgejo
 ```
 
-- `<source>` is a [source](#sources).
+- `<source>` is a [source](#sources). A source with a subdirectory is an
+  error, because `REPO` clones a whole repository.
 - Without `<dest>`, the repository lands in `~/git/<repository name>`. A
   trailing `.git` is not part of the name. Two repositories with the same
   name are an error; give one a destination.

@@ -10,7 +10,16 @@
 //! file its code-mode host is installed from, and then of the file its
 //! bubblewrap is installed from, each `-` for a release that publishes none.
 //! A Codex line that ends before either was written before `ap` installed
-//! it. It holds nothing else yet, so any other line is an error.
+//! it.
+//!
+//! ```text
+//! SOURCE https://github.com/torvalds/linux v6.12 refs/tags/v6.12 adc218676…
+//! ```
+//!
+//! `SOURCE` holds a remote source's repository, the ref the Agentfile names,
+//! or `HEAD` for none, the full name of the ref it resolved through, or `-`
+//! for a commit, and the commit. Each repository and ref has one line, in the
+//! order the Agentfile first names them. Any other line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
 //! download cache, and writes the lockfile, from the [`ORIGINS`] each
@@ -23,7 +32,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use agentfile::{Agent, Harness, read_arguments};
+use agentfile::{Agent, Harness, print_argument, read_arguments};
 
 use graviola::hashing::sha2::Sha256Context;
 
@@ -95,6 +104,18 @@ const MAX_TEXT_BYTES: u64 = 64 * 1024;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Lock {
     pub harness: Option<Locked>,
+    pub sources: Vec<Source>,
+}
+
+/// A remote source a lockfile pins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Source {
+    /// The URL of the repository.
+    pub repository: String,
+    /// The ref as the Agentfile names it, or `HEAD` for none.
+    pub reference: String,
+    /// What it resolved to.
+    pub resolved: crate::source::Resolved,
 }
 
 /// The harness a lockfile pins.
@@ -197,14 +218,86 @@ impl Lock {
                         }
                     }
                 }
+                "SOURCE" => {
+                    let source = match arguments.as_slice() {
+                        [repository, reference, name, commit] => {
+                            let name = match name.as_str() {
+                                "-" => Some(None),
+                                name if name.starts_with("refs/") => Some(Some(name.to_string())),
+                                _ => None,
+                            };
+                            name.zip(git::Id::from_hex(commit).filter(|_| is_commit(commit)))
+                                .map(|(name, commit)| Source {
+                                    repository: repository.clone(),
+                                    reference: reference.clone(),
+                                    resolved: crate::source::Resolved { name, commit },
+                                })
+                        }
+                        _ => None,
+                    };
+                    let Some(source) = source.filter(|source| {
+                        !source.repository.is_empty() && !source.reference.is_empty()
+                    }) else {
+                        return Err(fail(
+                            "`SOURCE` takes a repository, a ref, the full name of the ref it \
+                             resolved through or `-`, and a commit"
+                                .to_string(),
+                        ));
+                    };
+                    if lock.source(&source.repository, &source.reference).is_some() {
+                        return Err(fail(format!(
+                            "a second `SOURCE` for `{}` at `{}`",
+                            source.repository, source.reference
+                        )));
+                    }
+                    lock.sources.push(source);
+                }
                 _ => return Err(fail(format!("unknown line `{word}`"))),
             }
         }
         Ok(lock)
     }
 
+    /// What the lock pins for `reference` in `repository`.
+    pub fn source(&self, repository: &str, reference: &str) -> Option<&crate::source::Resolved> {
+        self.sources
+            .iter()
+            .find(|source| source.repository == repository && source.reference == reference)
+            .map(|source| &source.resolved)
+    }
+
+    /// Forgets what `ap update` resolves again: every source, and the
+    /// harness when `agent` names a channel. An exact version keeps the
+    /// digest its lock records.
+    pub fn forget(&mut self, agent: &Agent) {
+        self.sources.clear();
+        if !is_exact(&agent.version) {
+            self.harness = None;
+        }
+    }
+
+    /// Replaces the lockfile at `path` with this lock.
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        write(path, &self.text())
+    }
+
     /// The text of the lockfile.
     pub fn text(&self) -> String {
+        let mut text = self.harness_text();
+        for source in &self.sources {
+            let name = source.resolved.name.as_deref().unwrap_or("-");
+            text.push_str(&format!(
+                "SOURCE {} {} {} {}\n",
+                print_argument(&source.repository),
+                print_argument(&source.reference),
+                print_argument(name),
+                source.resolved.commit
+            ));
+        }
+        text
+    }
+
+    fn harness_text(&self) -> String {
         match &self.harness {
             Some(locked) => {
                 // A field that a lock doesn't record ends the line.
@@ -621,6 +714,14 @@ pub fn cache(xdg_cache_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<Pat
         Some(cache) => Some(cache.join("ap")),
         None => Some(absolute(home)?.join(".cache/ap")),
     }
+}
+
+/// Whether `text` is a SHA-1 commit in lowercase hex, as the lock writes it.
+fn is_commit(text: &str) -> bool {
+    text.len() == 40
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn is_digest(text: &str) -> bool {

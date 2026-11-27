@@ -9,6 +9,7 @@
 //! only on your repository, and on the agent's objects once it has written
 //! them to a quarantine directory.
 
+use crate::printable;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -614,16 +615,6 @@ pub(super) fn read_at_most(file: File) -> io::Result<Vec<u8>> {
         return Err(larger());
     }
     Ok(contents)
-}
-
-/// `text` with each control character escaped, so that nothing an agent
-/// named, such as a file, can drive your terminal when it is printed.
-pub(super) fn printable(text: &str) -> String {
-    let escape = |c: char| match c.is_control() {
-        true => c.escape_default().to_string(),
-        false => c.to_string(),
-    };
-    text.chars().map(escape).collect()
 }
 
 /// Why a branch import failed, which keeps everything pending.

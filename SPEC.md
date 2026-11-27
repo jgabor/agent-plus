@@ -1914,9 +1914,8 @@ PERMISSIONS +write:<path> | -write:<path>
 agent can read and write. `ap`'s filesystem serves those files and enforces
 the rules on your host, so they hold for every process in the guest,
 whichever harness runs: the harness, plugin code, and any script the agent
-starts. A rule's path must be in a share or in persisted state. A rule for
-any other guest path is an error that names the path, at build time and at
-run time.
+starts. A rule for a guest path outside every share and persisted state is
+an error that names the path, at build time and at run time.
 
 ```
 SHARE . rw

@@ -28,9 +28,10 @@
 //! Each `SECRET`'s value comes from the variable of its name in this
 //! process's environment, or else from the command that `ap secret set`
 //! kept for it, as [`super::secret::value`] says. A run without one fails
-//! with 125, before any VM starts. A `visible` value goes to the harness's environment. A hidden
-//! one goes to the network process, which puts it in requests to its bound
-//! hosts, and the harness gets a placeholder made for this run instead.
+//! with 125, before any VM starts. A `visible` value goes to the harness's
+//! environment. A hidden one goes to the network process, which puts it in
+//! requests to its bound hosts, and the harness gets a placeholder made for
+//! this run instead.
 //! No process that `ap run` starts, such as the run process, the network
 //! process, a share server, or the cleanup process, starts with a hidden
 //! secret's variable.

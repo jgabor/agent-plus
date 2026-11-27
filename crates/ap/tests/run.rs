@@ -608,6 +608,10 @@ fn auth_key_and_token_run_their_variable_s_command() {
         refused(&output, &format!("`AUTH {method}`"));
         let said = String::from_utf8_lossy(&output.stderr);
         assert!(said.contains("exited with status 4"), "{said}");
+        assert!(
+            said.contains(&format!("ap secret show {variable}")),
+            "{said}"
+        );
     }
 }
 

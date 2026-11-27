@@ -15,13 +15,14 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One `ap secret` subcommand, with the secret's name when it takes one.
 pub enum Secret {
@@ -35,11 +36,16 @@ pub enum Secret {
 /// Reads `ap secret`'s arguments. `set`, `show`, and `rm` take exactly one
 /// name, so a value given as an argument is bad usage. A name can't hold
 /// `=`, as in `SECRET`, so `NAME=VALUE` is bad usage too, and its value
-/// isn't printed. A command is UTF-8, and not empty.
+/// isn't printed. A name prints as itself, so it holds no space, quote,
+/// backslash, or control character, and is one word in the file and one
+/// line in `ls`. A command is UTF-8, and not empty.
 pub fn parse(args: &[OsString]) -> Option<Secret> {
     let name = |name: &OsString| {
         let name = name.to_str()?;
-        let valid = !name.is_empty() && !name.starts_with('-') && !name.contains('=');
+        let valid = !name.is_empty()
+            && !name.starts_with('-')
+            && !name.contains('=')
+            && agentfile::print_argument(name) == name;
         valid.then(|| name.to_owned())
     };
     match args {
@@ -73,6 +79,12 @@ fn subcommand(secret: &Secret) -> Result<(), String> {
         ));
     }
     let file = file()?;
+    // `set` and `rm` hold the lock from their read to their write, so two
+    // at once can't lose either's change.
+    let _lock = match secret {
+        Secret::Set(..) | Secret::Rm(_) => Some(lock(&file)?),
+        Secret::Show(_) | Secret::Ls => None,
+    };
     let mut commands = read(&file)?;
     let none = |name: &str| format!("no command is kept for {name}");
     match secret {
@@ -108,6 +120,28 @@ fn file() -> Result<PathBuf, String> {
     }
 }
 
+/// Takes the lock on `file`'s commands, which lasts until the lock file
+/// closes, and makes `file`'s directory, which only the user can open, if
+/// it is missing.
+fn lock(file: &Path) -> Result<File, String> {
+    let failed = |error: io::Error| format!("can't lock {}: {error}", file.display());
+    let dir = file.parent().expect("the file is in a directory");
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(failed)?;
+    let lock = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(".secrets.lock"))
+        .map_err(failed)?;
+    lock.lock().map_err(failed)?;
+    Ok(lock)
+}
+
 /// The commands kept in `file`, by name. A missing file keeps none.
 fn read(file: &Path) -> Result<BTreeMap<String, String>, String> {
     let text = match fs::read_to_string(file) {
@@ -130,31 +164,36 @@ fn read(file: &Path) -> Result<BTreeMap<String, String>, String> {
 }
 
 /// Replaces `file` with these commands, in a new file that only the user
-/// can read, so a reader sees the old file or the new one.
+/// can read, so a reader sees the old file or the new one. The caller
+/// holds the [`lock`], which made the directory.
 fn write(file: &Path, commands: &BTreeMap<String, String>) -> Result<(), String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let failed = |error: io::Error| format!("can't write {}: {error}", file.display());
     let dir = file.parent().expect("the file is in a directory");
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(failed)?;
     let mut text = String::new();
     for (name, command) in commands {
         text.push_str(&format!("{name} {}\n", agentfile::print_argument(command)));
     }
-    let temporary = dir.join(format!(".secrets.{}", std::process::id()));
-    let _ = fs::remove_file(&temporary);
-    let written = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temporary)
-        .and_then(|mut opened| {
-            opened.write_all(text.as_bytes())?;
-            opened.sync_all()
-        })
-        .and_then(|()| fs::rename(&temporary, file));
+    // A crashed process can leave a name behind, and its process id can
+    // come round again.
+    let (temporary, mut opened) = loop {
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let temporary = dir.join(format!(".secrets.{}.{id}", std::process::id()));
+        let options = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary);
+        match options {
+            Ok(opened) => break (temporary, opened),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(failed(error)),
+        }
+    };
+    let written = (opened.write_all(text.as_bytes()))
+        .and_then(|()| opened.sync_all())
+        .and_then(|()| fs::rename(&temporary, file))
+        .and_then(|()| File::open(dir)?.sync_all());
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -176,7 +215,9 @@ pub fn value(name: &str, shown: &str) -> Result<Vec<u8>, String> {
             "{shown} has no value. Set the environment variable `{name}`, or name a command that prints it with `ap secret set {name} --command <command>`"
         ));
     };
-    printed(command).map_err(|ended| format!("{shown} has no value: its command {ended}"))
+    printed(command).map_err(|ended| {
+        format!("{shown} has no value: its command, which `ap secret show {name}` prints, {ended}")
+    })
 }
 
 /// What `command` prints, without its trailing newlines, or how it ended

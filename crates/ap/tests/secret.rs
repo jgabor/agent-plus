@@ -122,6 +122,8 @@ fn set_keeps_the_command_in_a_file_only_you_can_read() {
     let file = scratch.file();
     let mode = fs::metadata(&file).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+    let dir = fs::metadata(file.parent().unwrap()).unwrap().permissions();
+    assert_eq!(dir.mode() & 0o777, 0o700, "{:o}", dir.mode());
     let text = fs::read_to_string(&file).unwrap();
     assert!(text.contains("GITHUB_TOKEN"), "{text}");
     assert!(text.contains(&command), "{text}");
@@ -155,7 +157,7 @@ fn show_prints_the_command_as_given_and_never_runs_it() {
 }
 
 // spec(ap secret): `ap secret set`, `ap secret show`, `ap secret ls`, and `ap secret rm` keep, show, list, and remove the commands that print secrets' values.
-// spec(ap secret): `ap secret ls` prints the names that have a command, one per line, and never their commands.
+// spec(ap secret): `ap secret ls` prints the names that have a command, sorted, one per line, and never their commands.
 // spec(ap secret): `ap secret rm <name>` removes the name and its command.
 // spec(ap secret): Setting a name that has a command replaces its command.
 // spec(ap secret): `ap secret` works the same on every host.
@@ -187,6 +189,11 @@ fn ls_lists_the_names_and_rm_removes_one() {
     );
     assert_eq!(scratch.ok(&["secret", "rm", "GITHUB_TOKEN"]), "");
     assert_eq!(scratch.ok(&["secret", "ls"]), "STRIPE_API_KEY\n");
+    let output = scratch.ap(&["secret", "show", "GITHUB_TOKEN"], "");
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let text = fs::read_to_string(scratch.file()).unwrap();
+    assert!(!text.contains("GITHUB_TOKEN"), "{text}");
+    assert!(!text.contains("op read gh"), "{text}");
     assert_eq!(
         scratch.ok(&["secret", "show", "STRIPE_API_KEY"]),
         "pass show stripe\n"
@@ -279,6 +286,12 @@ fn bad_usage_prints_usage_and_exits_2() {
         &["secret", "set", "A", "--command"][..],
         &["secret", "set", "A", "--command", ""][..],
         &["secret", "set", "A", "--cmd", "true"][..],
+        // A name is one word that prints as itself.
+        &["secret", "set", "A B", "--command", "true"][..],
+        &["secret", "set", "A\nB", "--command", "true"][..],
+        &["secret", "set", "A\"", "--command", "true"][..],
+        &["secret", "set", "A\\B", "--command", "true"][..],
+        &["secret", "show", "A\u{202e}"][..],
         &["secret", "nope"][..],
     ] {
         let output = scratch.ap(args, "");

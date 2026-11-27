@@ -705,8 +705,8 @@ ap secret set GITHUB_TOKEN --command 'pass show github/token'
 - Setting a name that has a command replaces its command.
 - `ap secret show <name>` prints the name's command, as it was given.
 - It never runs the command and never prints a value.
-- `ap secret ls` prints the names that have a command, one per line, and
-  never their commands.
+- `ap secret ls` prints the names that have a command, sorted, one per
+  line, and never their commands.
 - `ap secret rm <name>` removes the name and its command.
 - For a name that has no command, `ap secret show <name>` and
   `ap secret rm <name>` say so on standard error and exit 1.

@@ -40,10 +40,13 @@ if [ -z "${tls:-}" ]; then
   exit 1
 fi
 
-# The secret's value. A pattern that matches it, with one character in
-# brackets, lets the guest look for it without being handed it.
-value=journey-hidden-value-5c9e27b4d1
-pattern='j[o]urney-hidden-value-5c9e27b4d1'
+# The secret's value, new on each run, so another run of this step
+# elsewhere on the machine can't hold it. A pattern that matches it, with
+# one character in brackets, lets the guest look for it without being
+# handed it.
+random=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+value=journey-hidden-value-$random
+pattern="j[o]urney-hidden-value-$random"
 
 # The value is in a file of the step's own, outside `HOME`, and the command
 # that prints it holds only the file's name. The command prints trailing
@@ -123,8 +126,10 @@ fi
 name=$(ap ps </dev/null | sed -n '2s/ .*//p')
 
 # No process on your host holds the value in its arguments. The pattern
-# keeps `grep`'s own arguments from matching.
-if holders=$(grep -lsaE -- "$pattern" /proc/[0-9]*/cmdline); then
+# keeps `grep`'s own arguments from matching. A host with no `/proc` has
+# no arguments to read this way.
+if [ -r /proc/self/cmdline ] &&
+  holders=$(grep -lsaE -- "$pattern" /proc/[0-9]*/cmdline); then
   echo "these processes hold the value in their arguments: $holders" >&2
   exit 1
 fi
@@ -237,7 +242,7 @@ kept other "$other"
 
 # No file under `HOME`, such as the run's log or a record in the store,
 # holds the value.
-if kept=$(grep -rlsaE -- "$pattern" "$HOME"); then
+if kept=$(grep -rlsaE -D skip -- "$pattern" "$HOME"); then
   echo "these files hold the value: $kept" >&2
   exit 1
 fi

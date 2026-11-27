@@ -296,6 +296,14 @@ fn guest_workspace(name: &str, pins: &str, digest: &str, tree: &str, body: &str)
         format!("version = \"1\"\nurl = \"https://example.com/guest\"\nsha256 = \"{digest}\"\n"),
     )
     .unwrap();
+    // A long path in `body` would fail the gate's format check.
+    let output = Command::new("cargo")
+        .args(["fmt", "--all"])
+        .current_dir(&root)
+        .env("PATH", common::path(&[]))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
     let output = Command::new("git")
         .args(["init", "-q"])
         .current_dir(&root)

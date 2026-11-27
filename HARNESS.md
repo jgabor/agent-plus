@@ -1282,6 +1282,10 @@ start to fail on timing, lower the worker slots on Linux to 4.
 
 ## Owner actions
 
+- Do what each open `action-needed` issue says, check it as the issue says,
+  and close it. An action that a change adds gets such an issue, as
+  [Owner actions](AGENTS.md#owner-actions) in AGENTS.md says. Only you close
+  one or remove its label.
 - Add `auto:*` labels to top-level issues. The triage comment on `Roadmap
   details` says which unlabeled issues are ready, which need an answer, and
   which parents are ready to close.

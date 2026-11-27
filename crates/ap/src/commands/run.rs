@@ -690,6 +690,7 @@ fn keep_pending(
         let mode = match opened.mode {
             share::Mode::ReadOnly => share::Mode::ReadOnly,
             share::Mode::ReadWrite => share::Mode::ReadWrite,
+            share::Mode::State => share::Mode::State,
             share::Mode::CopyOnWrite(()) => {
                 if !made {
                     runs.create_pending(run).map_err(&kept)?;

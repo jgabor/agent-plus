@@ -696,6 +696,7 @@ dependencies = [
  "ap",
  "erofs",
  "guest",
+ "libc",
  "rustls",
  "rustls-graviola",
  "share",

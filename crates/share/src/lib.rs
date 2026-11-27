@@ -31,6 +31,7 @@ mod landlock;
 mod macos;
 #[cfg(target_os = "linux")]
 mod namespace;
+pub mod records;
 mod root;
 #[cfg(target_os = "linux")]
 mod server;
@@ -63,6 +64,7 @@ pub const PROGRAM: &str = "ap-share-server";
 const READ_ONLY: &str = "ro";
 const READ_WRITE: &str = "rw";
 const COPY_ON_WRITE: &str = "cow";
+const STATE: &str = "state";
 /// Before a share's mode, names the one file a file share shows.
 const FILE: &str = "file";
 /// Before the shares, names a descriptor the server holds until it exits.
@@ -162,6 +164,7 @@ fn start_one(
             Mode::ReadOnly => command.arg(READ_ONLY).arg(next()),
             Mode::ReadWrite => command.arg(READ_WRITE).arg(next()),
             Mode::CopyOnWrite(_) => command.arg(COPY_ON_WRITE).arg(next()).arg(next()),
+            Mode::State => command.arg(STATE).arg(next()),
         };
     }
     command.stdin(OwnedFd::from(theirs)).stdout(Stdio::null());
@@ -298,7 +301,7 @@ fn open_kept(arg: &OsString) -> io::Result<RawFd> {
 fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
     let usage = || {
         io::Error::other(
-            "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor)...",
+            "usage: ap-share-server [keep descriptor] ([file name] (ro | rw) descriptor | cow descriptor descriptor | state descriptor)...",
         )
     };
     let mut taken: Vec<i32> = kept.into_iter().collect();
@@ -341,6 +344,7 @@ fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
             Some(READ_ONLY) => Mode::ReadOnly,
             Some(READ_WRITE) => Mode::ReadWrite,
             Some(COPY_ON_WRITE) => Mode::CopyOnWrite(take(args.next())?),
+            Some(STATE) => Mode::State,
             _ => return Err(usage()),
         };
         roots.push(Root {

@@ -391,8 +391,20 @@ matching, and device input from the guest. A target for code with an oracle
 compares the two, and a difference fails like a crash. An oracle kept as a
 dev-dependency counts toward the C floor.
 
-**Flaky tests.** A test is never retried. It is fixed, or quarantined with a
-linked issue. Quarantine lowers the spec score, so it needs the owner.
+**Flaky tests.** A busy machine can make a test slower, but can't change its
+result. A test waits for the condition it needs, and never for a set time. It
+asserts no order between two processes or threads unless it forces that
+order. A time limit in a test is either a guard against a hang, set far past
+the slowest run seen, or what the test is about, such as a timeout that stops
+a hung command. A budget is measured by the bench, and never by a test.
+
+A test is never retried. It is fixed, or quarantined with a linked issue.
+Quarantine lowers the spec score, so it needs the owner. The proof of a fix
+forces the order the test fails in, for example by holding one side still,
+so the test fails every time before the fix and passes every time after it.
+A loop under load isn't that proof, because the load differs from one run to
+the next, and a loop misses a failure that comes once in 500 runs. If the
+order can't be forced, the PR says why.
 
 ## Lanes
 

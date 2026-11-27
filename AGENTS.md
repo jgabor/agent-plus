@@ -251,7 +251,8 @@ reproduction, or a transcript of a run. "Tests pass" isn't proof of a behavior.
   no change to the PR's own lines, the Mac's review stands. Anything else it
   changes gets its own review, and if only a Mac can prove it, park.
 - Never weaken, skip, or delete a check to get to green. A flaky test gets
-  fixed, not retried.
+  fixed, not retried, and its proof forces the order it fails in, not a loop
+  under load, as [Flaky tests](HARNESS.md#check-tiers) says.
 
 ### Pull requests
 
@@ -308,7 +309,8 @@ read-only. In T3 Code, use `delegate_task` with a review role.
 - Give the reviewer the intent, the base, the diff, and the check results. Give
   it your conclusions only after it has formed its own.
 - Have the reviewer confirm that no decision a user could observe is left
-  only in the PR body.
+  only in the PR body, and that each test the diff adds or changes keeps
+  [the rules for flaky tests](HARNESS.md#check-tiers).
 - Have the reviewer search for code that the diff repeats, in the diff and
   in the rest of the tree.
 - Rank findings: blocker (the intended case is wrong), should (a real bug

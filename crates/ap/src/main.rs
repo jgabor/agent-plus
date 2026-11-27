@@ -21,7 +21,6 @@ mod commands {
     pub mod ps;
     pub mod rm;
     pub mod run;
-    #[cfg(target_os = "linux")]
     pub mod secret;
     pub mod stop;
 }
@@ -41,7 +40,8 @@ const USAGE: &str = "usage: ap --version
        ap diff agent|run
        ap apply agent|run
        ap discard agent|run
-       ap secret set|rm name
+       ap secret set name [--command command]
+       ap secret show|rm name
        ap secret ls
        ap boot [--timeout N] [-- COMMAND...]";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
@@ -157,7 +157,6 @@ fn main() -> ExitCode {
     {
         return ExitCode::from(commands::discard::run(&name));
     }
-    #[cfg(target_os = "linux")]
     if args.first().is_some_and(|command| command == "secret")
         && let Some(secret) = commands::secret::parse(&args[1..])
     {

@@ -1,13 +1,16 @@
 #!/bin/sh
 set -eu
 
-# Runs the fake harness with a hidden secret bound to your host, given in
-# the environment, and tries it from inside the guest with `ap exec`. The
+# Runs the fake harness with a hidden secret bound to your host, whose
+# value a command kept with `ap secret set --command` prints, with the
+# secret's variable unset, and tries it from inside the guest with
+# `ap exec`. The
 # journey puts the fake upstream next to `ap`, and its HTTPS listener
 # answers on your host's loopback, which the guest reaches as
 # `host.ap.internal`. The checks read what the guest holds, and what
-# reached the upstream. Then a run without the secret's value must fail
-# before the harness starts.
+# reached the upstream, and that the value reached no process's arguments
+# and no file on your host. Then `ap secret rm` removes the command, and a
+# run without the secret's value must fail before the harness starts.
 
 # The journey puts the fake harness next to `ap`. It reaches the agent as
 # its Claude Code, as in step 7, and sleeps after it reports, so the run
@@ -37,10 +40,34 @@ if [ -z "${tls:-}" ]; then
   exit 1
 fi
 
-# The secret's value. A pattern that matches it, with one character in
-# brackets, lets the guest look for it without being handed it.
-value=journey-hidden-value-5c9e27b4d1
-pattern='j[o]urney-hidden-value-5c9e27b4d1'
+# The secret's value, new on each run, so another run of this step
+# elsewhere on the machine can't hold it. A pattern that matches it, with
+# one character in brackets, lets the guest look for it without being
+# handed it.
+random=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+value=journey-hidden-value-$random
+pattern="j[o]urney-hidden-value-$random"
+
+# The value is in a file of the step's own, outside `HOME`, and the command
+# that prints it holds only the file's name. The command prints trailing
+# newlines, which the value doesn't hold.
+printf '%s\n\n' "$value" >secret.value
+command="cat '$PWD/secret.value'"
+if ! ap secret set SECRET --command "$command" </dev/null >secret.set 2>&1; then
+  echo "ap secret set failed:" >&2
+  cat secret.set >&2
+  exit 1
+fi
+if [ "$(ap secret ls </dev/null)" != SECRET ]; then
+  echo "ap secret ls didn't print only SECRET:" >&2
+  ap secret ls </dev/null >&2
+  exit 1
+fi
+if [ "$(ap secret show SECRET </dev/null)" != "$command" ]; then
+  echo "ap secret show SECRET didn't print its command:" >&2
+  ap secret show SECRET </dev/null >&2
+  exit 1
+fi
 
 mkdir hidden
 cat >hidden/Agentfile <<'EOF'
@@ -75,8 +102,9 @@ show() {
   exit 1
 }
 
-# Runs the agent headless with the secret's value in its environment, and
-# the upstream's authority in `SSL_CERT_FILE`, so the proxy trusts it. The
+# Runs the agent headless, with the secret's variable unset, so the run
+# runs its command, and with the upstream's authority in `SSL_CERT_FILE`,
+# so the proxy trusts it. The
 # guest's script prints what its variable holds, then, for a pattern, how
 # many processes' environments and arguments, and how many files, match.
 # A file and a process's arguments hold the placeholder too, so the search
@@ -87,7 +115,7 @@ show() {
 # doesn't. The timeout stops a run that hangs, and with it the VM that its
 # `ap run` holds.
 mkfifo hidden.out
-env SECRET="$value" SSL_CERT_FILE="$PWD/upstream/ca.pem" \
+env SSL_CERT_FILE="$PWD/upstream/ca.pem" \
   timeout -k 10 240 ap run hidden -p 'Use the secret.' </dev/null \
   >hidden.out 2>hidden.err &
 running=$!
@@ -96,6 +124,15 @@ if ! read -r report <&4 || [ "${report#\{\"arguments\":}" = "$report" ]; then
   show hidden.err "ap run hidden didn't start the harness"
 fi
 name=$(ap ps </dev/null | sed -n '2s/ .*//p')
+
+# No process on your host holds the value in its arguments. The pattern
+# keeps `grep`'s own arguments from matching. A host with no `/proc` has
+# no arguments to read this way.
+if [ -r /proc/self/cmdline ] &&
+  holders=$(grep -lsaE -- "$pattern" /proc/[0-9]*/cmdline); then
+  echo "these processes hold the value in their arguments: $holders" >&2
+  exit 1
+fi
 try="
 search() {
   environ=0
@@ -203,8 +240,26 @@ kept() {
 kept bound "$bound"
 kept other "$other"
 
-# Without the secret's value in the environment, the run fails before the
-# harness starts, and the error names the secret.
+# No file under `HOME`, such as the run's log or a record in the store,
+# holds the value.
+if kept=$(grep -rlsaE -D skip -- "$pattern" "$HOME"); then
+  echo "these files hold the value: $kept" >&2
+  exit 1
+fi
+
+# Once `ap secret rm` removes the command, `ap secret ls` doesn't list it,
+# and a run without the secret's value fails before the harness starts,
+# and the error names the secret.
+if ! ap secret rm SECRET </dev/null >secret.rm 2>&1; then
+  echo "ap secret rm SECRET failed:" >&2
+  cat secret.rm >&2
+  exit 1
+fi
+if [ -n "$(ap secret ls </dev/null)" ]; then
+  echo "ap secret ls still lists a secret:" >&2
+  ap secret ls </dev/null >&2
+  exit 1
+fi
 status=0
 timeout -k 10 120 ap run hidden -p 'Use the secret.' </dev/null \
   >unset.out 2>unset.err || status=$?

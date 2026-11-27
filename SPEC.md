@@ -690,23 +690,35 @@ specifies `ap reset <digest>`. [SHARE](#share) says when it refuses.
 
 ### ap secret
 
-`ap secret set`, `ap secret rm`, and `ap secret ls` set, remove, and list the
-secrets in `ap`'s secret store. [SECRET](#secret) says when a run reads them.
+`ap secret set`, `ap secret show`, `ap secret ls`, and `ap secret rm` keep,
+show, list, and remove the commands that print secrets' values.
+[SECRET](#secret) says when a run reads them.
 
-- `ap secret set <name>` reads the value from the terminal with echo off,
-  or from standard input when standard input isn't a terminal. It never
-  takes the value as an argument, so the value stays out of your shell
-  history and the process list.
-- `ap secret ls` prints the names of the stored secrets, one per line, and
-  never their values.
-- If the store doesn't have the name, `ap secret rm <name>` says so on
-  standard error and exits 1.
-- On Linux, v0.1.0 has no secret store, and `ap secret set`,
-  `ap secret rm`, and `ap secret ls` each say so on standard error, say to
-  give the secret in the environment variable that [SECRET](#secret) reads
-  first, and exit 1. Nothing falls back to a file, so `ap` never keeps a
-  secret on disk in the clear.
-- **Planned.** After v0.1.0, `ap` will have a secret store on Linux too.
+```
+ap secret set GITHUB_TOKEN --command 'pass show github/token'
+```
+
+- `ap secret set <name> --command <command>` keeps the command, and no
+  value, in `~/.config/ap/secrets`, a file that only you can read.
+- The command is kept in the clear, so it mustn't hold the secret itself.
+- `ap` never keeps a secret's value on disk in the clear.
+- Setting a name that has a command replaces its command.
+- `ap secret show <name>` prints the name's command, as it was given.
+- It never runs the command and never prints a value.
+- `ap secret ls` prints the names that have a command, sorted, one per
+  line, and never their commands.
+- `ap secret rm <name>` removes the name and its command.
+- For a name that has no command, `ap secret show <name>` and
+  `ap secret rm <name>` say so on standard error and exit 1.
+- v0.1.0 has no secret store on any host.
+- `ap secret set <name>` without `--command` says that v0.1.0 has no secret
+  store, names `--command` beside the environment variable that
+  [SECRET](#secret) reads first, and exits 1. It reads no value.
+- `ap secret set` never takes a value as an argument, so a value stays out
+  of your shell history and the process list.
+- `ap secret` works the same on every host.
+- **Planned.** After v0.1.0, `ap` will have a secret store: the macOS
+  Keychain, and one on Linux.
 
 ### ap acp
 
@@ -1328,10 +1340,21 @@ SECRET AWS_SECRET_ACCESS_KEY visible
 Every `SECRET` is a [grant](#grants).
 
 **Where the value comes from.** At run time, `ap` reads the value from the
-host environment variable `<name>`. If that is unset, it reads `ap`'s secret
-store (`ap secret set <name>`, backed by the OS keychain). On Linux, v0.1.0
-has no secret store, so `ap` reads the value only from the host environment
-variable. A missing value makes the run fail, and the error names the secret.
+host environment variable `<name>`. If that is unset, it runs the command
+that `ap secret set <name> --command` kept (see [ap secret](#ap-secret)). A
+missing value makes the run fail, and the error names the secret.
+
+- `ap run` runs the command with `sh -c` on the host, once per run, before
+  any VM starts.
+- Its standard input and standard error stay on the terminal, so a password
+  manager can prompt.
+- The value is its standard output without the trailing newlines, as
+  `$(...)` gives it.
+- A command that exits with a failure, or prints nothing, fails the run
+  with 125. The error names the secret and how the command ended, and never
+  shows what it printed.
+- An Agentfile can't name a command. Only `ap secret set` on the host can.
+- `AUTH key` and `AUTH token` read their variable in the same way.
 
 **Hidden (the default).** Inside the guest, the environment variable
 `<name>` holds a placeholder. The egress proxy replaces the placeholder with

@@ -1419,6 +1419,7 @@ mod tests {
                 .args(args)
                 .current_dir(&root)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");

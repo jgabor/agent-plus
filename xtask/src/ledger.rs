@@ -119,9 +119,8 @@ impl Seconds {
                         });
                     }
                 }
-                ("steps" | "programs", _) => {
-                    return Err(format!("`{name}` isn't a table of seconds"));
-                }
+                ("steps", _) => return Err("`steps` isn't a table".to_string()),
+                ("programs", _) => return Err("`programs` isn't an array".to_string()),
                 (name, value) => seconds.spent.push((name.to_string(), number(value, name)?)),
             }
         }

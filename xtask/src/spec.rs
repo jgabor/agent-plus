@@ -40,14 +40,13 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
         if !trimmed.is_empty() && !line.starts_with("  ") {
             extractor.marked_item = false;
         }
-        // A line left of the open numbered item's text ends that item. A
-        // numbered line there starts its sibling, and sets the column again.
+        // A line left of the open numbered item's text ends that item, unless
+        // it only continues the paragraph. A numbered line there starts its
+        // sibling, and sets the column again.
         let indent = line.len() - trimmed.len();
-        let leaves_item =
-            !trimmed.is_empty() && extractor.numbered.is_some_and(|column| indent < column);
-        if leaves_item {
-            extractor.numbered = None;
-        }
+        let left = extractor
+            .numbered
+            .take_if(|column| !trimmed.is_empty() && indent < *column);
         if let Some(open) = opens_fence(trimmed) {
             extractor.flush();
             fence = Some(open);
@@ -72,7 +71,7 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
             // from 1, so a wrapped "125. " continues it.
             let item = list_item(body).filter(|(_, number)| {
                 number.is_none_or(|n| {
-                    n.trim_start_matches('0') == "1" || extractor.block.is_empty() || leaves_item
+                    n.trim_start_matches('0') == "1" || extractor.block.is_empty() || left.is_some()
                 })
             });
             if let Some((item, number)) = item {
@@ -84,6 +83,9 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
                 }
                 extractor.block.push(item);
             } else {
+                if !extractor.block.is_empty() {
+                    extractor.numbered = extractor.numbered.or(left);
+                }
                 extractor.block.push(body);
             }
         }
@@ -541,6 +543,12 @@ mod tests {
     fn a_numbered_item_follows_its_nested_bullet_and_paragraph() {
         let spec = "# A\n\n1. One\n   - Sub\n2. Two\n\n   More\n3. Three\n";
         assert_eq!(texts(spec), ["One", "Sub", "Two", "More", "Three"]);
+    }
+
+    #[test]
+    fn a_lazy_line_keeps_its_numbered_item_open() {
+        let spec = "# A\n\n1. One\n  wraps.\n2. Two\n\n# B\n\n> 1. Three\n>    wraps.\n> 2. Four\n";
+        assert_eq!(texts(spec), ["One wraps.", "Two", "Three wraps.", "Four"]);
     }
 
     #[test]

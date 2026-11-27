@@ -17,7 +17,7 @@ const REPORT_ISSUE: &str =
 const WAITING: &str = "[{\"number\":30,\"title\":\"Promises that end in a colon\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":31,\"title\":\"Something else\",\"labels\":[{\"name\":\"auto:pr\"}],\"isPinned\":false}]";
 const WAITING_FOR_EITHER: &str = "[{\"number\":30,\"title\":\"Ready\",\"labels\":[{\"name\":\"land-needed\"}],\"isPinned\":false},{\"number\":32,\"title\":\"Stuck\",\"labels\":[{\"name\":\"answer-needed\"}],\"isPinned\":false}]";
 const CHECKS_PASSED: &str =
-    "\nChecks: 3 passed, 5 skipped (`t2`, `release`, `t3`, `fuzz`, `mutation`)\n";
+    "\nChecks: 3 passed, 6 skipped (`t2`, `release`, `harnesses`, `t3`, `fuzz`, `mutation`)\n";
 
 const GH: &str = r#"printf '%s\n' "$*" >> "$(dirname "$0")/calls"
 case "$1 $2" in
@@ -60,7 +60,7 @@ fn check_state(comment: &str, name: &str) -> &'static str {
         .filter(|w| ["passed", "failed", "skipped"].contains(&w[1].trim_end_matches(',')))
         .filter_map(|w| w[0].parse::<usize>().ok())
         .sum();
-    assert_eq!(counted, 8, "{comment}");
+    assert_eq!(counted, 9, "{comment}");
     let name = format!("`{name}`");
     for (word, state) in [("failed", "fail"), ("skipped", "skip")] {
         let names = line
@@ -1298,6 +1298,127 @@ fn a_passing_t1_release_test_is_reported() {
         "pass",
         "{}",
         repo.comment()
+    );
+}
+
+/// The pins a proof tests, as the real file has them.
+const PINS: &str = "HARNESS claude 2.1.323 604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e\nHARNESS codex 0.171.0 0fd9ae1125788932131a29e296c4fef9995fc4f0c2a2ef6161221786e45ffa8c 8db4b4899dd36d24defa4a0c4f431e9db527fb689e017c88be9f54ea2949e674 6f122933bd4cb7113d11aec2db1b8ba2977ff11b961b26fec65950057aafe28c\n";
+
+/// A stand-in for journey step 8, which the nightly runs with `channel`. It
+/// locks Claude Code ahead of the pin and Codex at it, and records how it
+/// was started, in a home and a cache of its own, with only `ap` added to
+/// `PATH`.
+const CHANNELS: &str = r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s\n' "$*" "$HOME" "$XDG_CACHE_HOME" "$PATH" "${CODEX_API_KEY-none}" > "$HOME/../started"
+[ "$1" = channel ] || exit 3
+command -v ap >/dev/null || exit 4
+mkdir claude codex
+echo "HARNESS claude 2.1.330 $(printf '%064d' 1)" > claude/Agentfile.lock
+echo "HARNESS codex 0.171.0 $(printf '%064d' 2) - -" > codex/Agentfile.lock
+"#;
+
+/// A `t2` package, so that the workspace can hold the pins.
+const T2: [(&str, &str); 3] = [
+    (
+        "crates/t2/Cargo.toml",
+        "[package]\nname = \"t2\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
+    ),
+    ("crates/t2/src/lib.rs", "//! Holds the pins.\n"),
+    ("crates/t2/harnesses.lock", PINS),
+];
+
+#[test]
+fn the_nightly_builds_each_harness_from_its_channel_and_names_its_version() {
+    let files = [&T2[..], &[("harness/journey/08-harnesses.sh", CHANNELS)]].concat();
+    let repo = Repo::with("channels", "fn main() {}\n", &files);
+    repo.set_paid_key("openai", "sk-test");
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "pass", "{comment}");
+    assert!(
+        comment.contains(
+            "\n## Harness channels\n\n\
+             - `claude:stable` gave 2.1.330, ahead of the pin at 2.1.323\n\
+             - `codex:latest` gave 0.171.0, the pinned version\n"
+        ),
+        "{comment}"
+    );
+    let at = repo.root.join("target/harnesses");
+    let started = fs::read_to_string(at.join("started")).unwrap();
+    assert_eq!(
+        started,
+        format!(
+            "channel|{}|{}|{}:/usr/bin:/bin|none\n",
+            at.join("home").display(),
+            at.join("cache").display(),
+            at.join("bin").display()
+        )
+    );
+}
+
+#[test]
+fn a_harness_channel_that_fails_its_check_fails_the_nightly() {
+    // Claude Code comes out behind the pin, and Codex never gets locked.
+    let fails = CHANNELS
+        .replace("2.1.330", "2.1.300")
+        .replace("> codex/Agentfile.lock", "> /dev/null; exit 1");
+    let files = [&T2[..], &[("harness/journey/08-harnesses.sh", &*fails)]].concat();
+    let repo = Repo::with("channels-fail", "fn main() {}\n", &files);
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "fail", "{comment}");
+    assert!(comment.contains("**Failed: harnesses.** "), "{comment}");
+    assert!(
+        comment.contains(
+            "\n## Harness channels\n\n\
+             - `claude:stable` gave 2.1.300, behind the pin at 2.1.323\n\
+             - `codex:latest` gave no version\n"
+        ),
+        "{comment}"
+    );
+}
+
+#[test]
+fn a_night_whose_ap_doesnt_build_reports_no_earlier_channel() {
+    let files = [&T2[..], &[("harness/journey/08-harnesses.sh", CHANNELS)]].concat();
+    let repo = Repo::with(
+        "channels-stale",
+        "fn main() {\n    compile_error!(\"broken\");\n}\n",
+        &files,
+    );
+    // An earlier night's check left its lockfiles.
+    repo.write(
+        "target/harnesses/work/claude/Agentfile.lock",
+        &format!("HARNESS claude 2.1.330 {:064}\n", 1),
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "fail", "{comment}");
+    assert!(
+        comment.contains("\n- `claude:stable` gave no version\n"),
+        "{comment}"
+    );
+}
+
+#[test]
+fn a_channel_check_that_locks_nothing_fails() {
+    let locks_nothing = CHANNELS.replace("> codex/Agentfile.lock", "> /dev/null");
+    let files = [
+        &T2[..],
+        &[("harness/journey/08-harnesses.sh", &*locks_nothing)],
+    ]
+    .concat();
+    let repo = Repo::with("channels-unlocked", "fn main() {}\n", &files);
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "fail", "{comment}");
+    assert!(
+        comment.contains("\n- `codex:latest` gave no version\n"),
+        "{comment}"
     );
 }
 

@@ -7,7 +7,9 @@ use crate::{
     Problem, Verdict, base, bench, bisect, fuzz, gate, journey, ledger, limit, lock, mutation,
     report, roadmap, workspace,
 };
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
 const ISSUE_BODY: &str = "Each night's report is a comment on this issue.";
@@ -26,6 +28,16 @@ const SECONDS: u64 = 6600;
 const SECONDS_OVERRIDE: &str = "XTASK_NIGHTLY_SECONDS";
 /// The report's share: building and posting it, the status, and the roadmap.
 const REPORT_SECONDS: u64 = 600;
+/// Journey step 8, which builds each harness at its pin. Given `channel`, it
+/// builds each from its channel instead, which is this job's check of the
+/// newest releases.
+const HARNESSES_SCRIPT: &str = "harness/journey/08-harnesses.sh";
+/// Where that check runs, apart from the journey.
+const HARNESSES_DIRECTORY: &str = "target/harnesses";
+/// The lockfile line of each harness that a proof tests.
+const PINS: &str = "crates/t2/harnesses.lock";
+/// Each harness, and the channel the check builds it from.
+const CHANNELS: [(&str, &str); 2] = [("claude", "claude:stable"), ("codex", "codex:latest")];
 
 pub fn run() -> Result<Verdict, Problem> {
     let deadline =
@@ -54,6 +66,9 @@ pub fn run() -> Result<Verdict, Problem> {
     checks.push(("t2", t2));
     hold.between()?;
     checks.push(("release", release(&root)));
+    hold.between()?;
+    let (harnessed, channels) = channels(&root);
+    checks.push(("harnesses", harnessed));
     // T3 has no tests yet. The journey's spend steps are its first checks.
     checks.push(("t3", SKIP));
     hold.between()?;
@@ -72,15 +87,17 @@ pub fn run() -> Result<Verdict, Problem> {
     drop(hold);
 
     // A report that can't be built still leaves its result on the commit.
-    let built = report::build(&root).map(|report| match &walked {
-        Ok(outcomes) => report.with_left_out(
-            outcomes
-                .iter()
-                .filter(|o| o.spends && o.state == SKIP)
-                .count(),
-        ),
-        Err(_) => report,
-    });
+    let built = report::build(&root)
+        .map(|report| match &walked {
+            Ok(outcomes) => report.with_left_out(
+                outcomes
+                    .iter()
+                    .filter(|o| o.spends && o.state == SKIP)
+                    .count(),
+            ),
+            Err(_) => report,
+        })
+        .map(|report| report.with_channels(channels));
     let failed = built.is_err() || checks.iter().any(|(_, state)| *state == FAIL);
     let posted = built.and_then(|report| post(&root, &report.markdown(&checks)));
     let (verdict, status, word) = if failed {
@@ -200,6 +217,107 @@ fn tests(root: &Path, package: &str, extra: &[&str]) -> &'static str {
     let args = [&["test", "--locked", "--package", package], extra].concat();
     let passed = gate::cargo_passes(root, &args);
     state(passed.map(|passed| if passed { Verdict::Pass } else { Verdict::Fail }))
+}
+
+/// Builds each harness from its channel, with the real download, and checks
+/// what journey step 8 checks of its pin. Returns the check's state, and a
+/// line for each channel that names the version it gave, against the pin.
+fn channels(root: &Path) -> (&'static str, Vec<String>) {
+    let script = root.join(HARNESSES_SCRIPT);
+    if !script.exists() {
+        return (SKIP, Vec::new());
+    }
+    let mut ran = run_channels(root, &script);
+    let pins = fs::read_to_string(root.join(PINS)).unwrap_or_default();
+    let work = root.join(HARNESSES_DIRECTORY).join("work");
+    let mut lines = Vec::new();
+    for (harness, channel) in CHANNELS {
+        let lock =
+            fs::read_to_string(work.join(harness).join("Agentfile.lock")).unwrap_or_default();
+        lines.push(match (locked(&lock, harness), locked(&pins, harness)) {
+            (None, _) => {
+                if let Ok(Verdict::Pass) = ran {
+                    ran = Err(Problem(format!("{HARNESSES_SCRIPT} locked no {harness}")));
+                }
+                format!("`{channel}` gave no version")
+            }
+            (Some(gave), None) => {
+                ran = Err(Problem(format!("{PINS} pins no {harness}")));
+                format!("`{channel}` gave {gave}, and nothing pins it")
+            }
+            (Some(gave), Some(pin)) => match compare(gave, pin) {
+                Some(Ordering::Equal) => format!("`{channel}` gave {gave}, the pinned version"),
+                Some(Ordering::Greater) => {
+                    format!("`{channel}` gave {gave}, ahead of the pin at {pin}")
+                }
+                Some(Ordering::Less) => {
+                    format!("`{channel}` gave {gave}, behind the pin at {pin}")
+                }
+                None => format!("`{channel}` gave {gave}, which isn't the pin, {pin}"),
+            },
+        });
+    }
+    (state(ran), lines)
+}
+
+/// Runs `script` with `channel`, as the journey runs a step: with a release
+/// `ap` on `PATH`, in a home and a download cache of its own, and with no
+/// other variable.
+fn run_channels(root: &Path, script: &Path) -> Result<Verdict, Problem> {
+    // A night's lockfiles are its own, even when `ap` doesn't build.
+    let at = root.join(HARNESSES_DIRECTORY);
+    let problem = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", at.display()));
+    if at.exists() {
+        fs::remove_dir_all(&at).map_err(problem)?;
+    }
+    let built = journey::build_ap(root, &root.join("target"))?;
+    let [bin, home, work, cache] = ["bin", "home", "work", "cache"].map(|name| at.join(name));
+    for path in [&bin, &home, &work, &cache] {
+        fs::create_dir_all(path).map_err(problem)?;
+    }
+    fs::copy(built, bin.join("ap")).map_err(problem)?;
+    let status = Command::new("/bin/sh")
+        .arg(script)
+        .arg("channel")
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", &home)
+        .env("XDG_CACHE_HOME", &cache)
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(io::stderr()))
+        .status()
+        .map_err(|e| Problem(format!("couldn't run {HARNESSES_SCRIPT}: {e}")))?;
+    Ok(match status.success() {
+        true => Verdict::Pass,
+        false => Verdict::Fail,
+    })
+}
+
+/// The version that a lockfile line in `text` gives `harness`.
+fn locked<'a>(text: &'a str, harness: &str) -> Option<&'a str> {
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix("HARNESS ")?
+                .strip_prefix(harness)?
+                .strip_prefix(' ')
+        })
+        .and_then(|rest| rest.split(' ').next())
+}
+
+/// How the version `gave` compares with `pin`, part by part, or nothing when
+/// they differ and either isn't numbers between dots.
+fn compare(gave: &str, pin: &str) -> Option<Ordering> {
+    if gave == pin {
+        return Some(Ordering::Equal);
+    }
+    let parts = |version: &str| {
+        version
+            .split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect::<Option<Vec<u64>>>()
+    };
+    Some(parts(gave)?.cmp(&parts(pin)?))
 }
 
 /// A step that isn't built yet fails today, so what counts is a count lower

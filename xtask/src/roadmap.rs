@@ -1,16 +1,17 @@
 //! `cargo xtask roadmap`: the milestones and what comes after them, in words
 //! that anyone can read. `--details` prints the owner's view: each milestone's
-//! parent, steps, and proof, and what waits on the owner. Nobody types either
-//! one: every line comes from the journey file, the journey's results, the
-//! README, SPEC.md and the checks that prove it, or GitHub.
+//! parent, steps, and proof, what waits on the owner, and the Rust files that
+//! the most PRs change or that have grown large. Nobody types either one:
+//! every line comes from the journey file, the journey's results, the README,
+//! SPEC.md and the checks that prove it, the history of `main`, or GitHub.
 
 use crate::forge::{Gh, OpenPr, RoadmapIssue};
 use crate::journey::{self, Milestone, Outcome};
 use crate::readme::{self, Line, README_FILE};
 use crate::score::{self, Score, Sentence};
 use crate::spec::{self, Arrives, Command};
-use crate::work::{ANSWER_NEEDED, LAND_NEEDED, PARKED};
-use crate::{Problem, Verdict, lock, report, testrun, workspace};
+use crate::work::{self, ANSWER_NEEDED, LAND_NEEDED, PARKED};
+use crate::{Problem, Verdict, base, lock, report, testrun, workspace};
 use std::fs;
 use std::path::Path;
 
@@ -20,6 +21,12 @@ const ISSUE_TITLE: &str = "Roadmap";
 const DETAILS_TITLE: &str = "Roadmap details";
 const HEADER: &str = "This page shows what works in Agent+ today, and what comes next. The nightly job writes it from the project's checks, so don't edit it.\n";
 const DETAILS_HEADER: &str = "The nightly job writes this issue from `cargo xtask roadmap --details`, so don't edit it. To change it, change `harness/journey.toml` or the issues it lists.\n";
+/// The details list this many of the Rust files that the most commits changed.
+const BUSIEST: usize = 10;
+/// And then every other Rust file with at least this many lines.
+const LARGE: usize = 2000;
+/// The time before HEAD in which a commit counts toward a file, in seconds.
+const WEEK: u64 = 7 * 24 * 3600;
 
 /// Prints the roadmap, or its details, and writes nothing.
 pub fn run(details: bool) -> Result<Verdict, Problem> {
@@ -43,7 +50,8 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
     let text = match &score {
         Some(score) => {
             let proof = (commands.as_slice(), score);
-            self::details(&milestones, &outcomes, &proof, &issues, &prs)
+            let files = rust_files(&root)?;
+            self::details(&milestones, &outcomes, &proof, &issues, &prs, &files)
         }
         None => {
             let details = titled(&issues, DETAILS_TITLE).map(|issue| issue.number);
@@ -87,7 +95,15 @@ pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Pro
     let milestones = journey::milestones(root)?;
     let commands = commands(root)?;
     let proof = (commands.as_slice(), score);
-    let text = details(&milestones, outcomes, &proof, &issues, &gh.open_prs()?);
+    let files = rust_files(root)?;
+    let text = details(
+        &milestones,
+        outcomes,
+        &proof,
+        &issues,
+        &gh.open_prs()?,
+        &files,
+    );
     // The roadmap links to the details, so they are written first.
     let number = match titled(&issues, DETAILS_TITLE) {
         Some(found) => {
@@ -222,6 +238,7 @@ fn details(
     (commands, score): &Proof,
     all: &[RoadmapIssue],
     prs: &[OpenPr],
+    files: &[RustFile],
 ) -> String {
     let mut issues: Vec<&RoadmapIssue> = all.iter().collect();
     issues.sort_by_key(|issue| issue.number);
@@ -292,6 +309,119 @@ fn details(
         .map(|issue| line(issue.number, &issue.title))
         .collect();
     section(&mut text, "### To label or close", unlabeled);
+    text.push_str(&busy(files, &issues));
+    text
+}
+
+/// A Rust file at HEAD, how many commits on `main` changed it in the week
+/// before HEAD, and how many lines it has.
+struct RustFile {
+    path: String,
+    commits: usize,
+    lines: usize,
+}
+
+/// The Rust files at HEAD. A workspace outside a repository, or with no
+/// commit, has none.
+fn rust_files(root: &Path) -> Result<Vec<RustFile>, Problem> {
+    if !root.join(".git").exists() || !base::commit_exists(root, "HEAD")? {
+        return Ok(Vec::new());
+    }
+    let git =
+        |args: &[&str]| base::git_text(root, &[&["-c", "core.quotePath=false"], args].concat());
+    let time = git(&["log", "-1", "--format=%ct", "HEAD"])?;
+    let time: u64 = time
+        .trim()
+        .parse()
+        .map_err(|e| Problem(format!("couldn't read HEAD's commit time {time:?}: {e}")))?;
+    let since = format!("--since=@{}", time.saturating_sub(WEEK));
+    let changed = git(&[
+        "log",
+        "--first-parent",
+        &since,
+        "--format=",
+        "--name-only",
+        "HEAD",
+        "--",
+        "*.rs",
+    ])?;
+    // `git grep` lists no empty file, and exits 1 when it lists none.
+    let args = [
+        "-c",
+        "core.quotePath=false",
+        "grep",
+        "-c",
+        "-e",
+        "",
+        "HEAD",
+        "--",
+        "*.rs",
+    ];
+    let counted = base::git(root, &args)?;
+    if !matches!(counted.status.code(), Some(0 | 1)) {
+        return Err(Problem(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&counted.stderr).trim()
+        )));
+    }
+    let counted = String::from_utf8_lossy(&counted.stdout);
+    let counted: Vec<(&str, usize)> = counted
+        .lines()
+        .filter_map(|line| line.strip_prefix("HEAD:")?.rsplit_once(':'))
+        .filter_map(|(path, count)| Some((path, count.parse().ok()?)))
+        .collect();
+    let lines = |path: &str| {
+        let found = counted.iter().find(|(found, _)| *found == path);
+        found.map_or(0, |(_, count)| *count)
+    };
+    let files = git(&["ls-tree", "-r", "--name-only", "HEAD"])?;
+    Ok(files
+        .lines()
+        .filter(|path| path.ends_with(".rs"))
+        .map(|path| RustFile {
+            path: path.to_string(),
+            commits: changed.lines().filter(|line| *line == path).count(),
+            lines: lines(path),
+        })
+        .collect())
+}
+
+/// The busiest Rust files, and then the other large ones, with the open
+/// issues whose `Touches` overlap each, by the rule the queue uses.
+fn busy(files: &[RustFile], issues: &[&RoadmapIssue]) -> String {
+    let mut rows: Vec<&RustFile> = files.iter().filter(|file| file.commits > 0).collect();
+    rows.sort_by(|a, b| b.commits.cmp(&a.commits).then_with(|| a.path.cmp(&b.path)));
+    rows.truncate(BUSIEST);
+    let mut large: Vec<&RustFile> = files
+        .iter()
+        .filter(|file| file.lines >= LARGE && !rows.iter().any(|row| row.path == file.path))
+        .collect();
+    large.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.path.cmp(&b.path)));
+    rows.extend(large);
+    let mut text = "\n## Busy and large files\n\n".to_string();
+    if rows.is_empty() {
+        text.push_str("Nothing.\n");
+        return text;
+    }
+    let touches: Vec<Vec<String>> = issues
+        .iter()
+        .filter(|issue| issue.open)
+        .map(|issue| work::touches(&issue.body))
+        .collect();
+    text.push_str(
+        "| File | PRs in 7 days | Lines | Open issues that name it |\n|---|---|---|---|\n",
+    );
+    for row in rows {
+        let names =
+            |entries: &&Vec<String>| entries.iter().any(|entry| work::overlap(entry, &row.path));
+        let named = touches.iter().filter(names).count();
+        let path = cell(&format!("`{}`", row.path));
+        text.push_str(&format!(
+            "| {path} | {} | {} | {named} |\n",
+            row.commits, row.lines
+        ));
+    }
     text
 }
 

@@ -1155,7 +1155,7 @@ promises. It has three parts:
 `cargo xtask roadmap --details` prints the details for the owner and the
 agents, and the nightly job makes them the body of the open issue titled
 `Roadmap details`. It files that issue when there is none, and the roadmap
-ends with a link to it. The details have three parts:
+ends with a link to it. The details have four parts:
 
 1. Each milestone, with its commands and its steps as the journey just ran
    them. The milestone's parent is the issue whose body names it in a
@@ -1167,6 +1167,14 @@ ends with a link to it. The details have three parts:
    `answer-needed`, and open issues with no `auto:*` label and no parent in
    this repository. A listed PR stands for the issues it closes, so they are
    left out, and so are the issues that `xtask` writes.
+4. Busy and large files: a table of the 10 Rust files that the most commits
+   on `main` changed in the 7 days before the commit the details are written
+   at, busiest first, and then every other Rust file with 2,000 lines or
+   more, largest first. Each row has the file's count of those commits, each
+   a PR, its lines, and how many open issues have an entry under `Touches`
+   that overlaps it, by the rule the queue uses. A file that `main` no longer
+   has isn't listed. The table only reports. The owner decides which file to
+   split.
 
 The details show each command with how many of its promises are proven. Its
 promises are those under its own heading in SPEC.md, and under each heading

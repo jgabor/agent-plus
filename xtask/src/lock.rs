@@ -789,6 +789,23 @@ mod tests {
         fs::remove_dir_all(&path).unwrap();
     }
 
+    /// Takes the lock on `name` once it frees. A process that another test
+    /// starts keeps a copy of each open file until it runs its program, so a
+    /// lock can stay taken for a moment after its holder lets it go.
+    fn take_when_free(path: &Path, name: &str) -> fs::File {
+        let file = open(path, name).map_err(|e| e.0).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return file,
+                Err(TryLockError::WouldBlock) => {}
+                Err(error) => panic!("{error}"),
+            }
+            assert!(Instant::now() < deadline, "the queue kept {name}");
+            thread::yield_now();
+        }
+    }
+
     /// Returns once something in this process waits to share the lock on
     /// `name`.
     fn wait_for_a_sharer(path: &Path, name: &str) {
@@ -843,8 +860,7 @@ mod tests {
 
         drop(held);
         wait_for_a_sharer(&path, "ahead.lock");
-        let next = open(&path, "place-0.lock").map_err(|e| e.0).unwrap();
-        assert!(next.try_lock().is_ok(), "the queue kept the place");
+        let next = take_when_free(&path, "place-0.lock");
         assert!(queued.try_recv().is_err(), "both have the one place");
 
         drop((ahead, next));

@@ -816,10 +816,14 @@ fn remove_tree(directory: BorrowedFd, name: &CStr) -> io::Result<()> {
 /// recording it left there.
 fn prune(tree: BorrowedFd, path: &[u8], entries: &BTreeMap<Vec<u8>, Entry>) -> io::Result<()> {
     let dir = sys::open_beneath(tree, &c(path), libc::O_PATH | libc::O_DIRECTORY)?;
-    for (name, kind, _) in names(dir.as_fd()).map_err(io::Error::from_raw_os_error)? {
+    for (name, _, _) in names(dir.as_fd()).map_err(io::Error::from_raw_os_error)? {
         let at = join(path, &name);
         match entries.get(&at) {
-            Some(Entry::Dir { .. }) if kind == libc::DT_DIR => prune(tree, &at, entries)?,
+            // A filesystem may not say what kind a name is.
+            Some(Entry::Dir { .. }) => match prune(tree, &at, entries) {
+                Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {}
+                pruned => pruned?,
+            },
             Some(Entry::Deleted) | None => match sys::unlinkat(dir.as_fd(), &c(&name), 0) {
                 Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
                     remove_tree(dir.as_fd(), &c(&name))?;

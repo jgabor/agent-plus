@@ -147,8 +147,8 @@ impl Scratch {
     }
 
     /// Boots the agent's layers with the state directory shared, runs
-    /// `script` in the probe's home, and returns what it printed. The share
-    /// server ends when the machine does.
+    /// `script` in the probe's home, and returns what it printed, once the
+    /// share server has ended too.
     fn boot(&self, layers: &[String], script: &str) -> String {
         let stored = store::Layers::new(self.data());
         let layers = layers
@@ -178,10 +178,11 @@ impl Scratch {
             confine: false,
             input: None,
         };
+        let (processes, sockets) = (servers.started.into_iter())
+            .map(|server| (server.process, server.socket))
+            .unzip::<_, _, Vec<_>, Vec<_>>();
         let shares = Shares {
-            sockets: (servers.started.into_iter())
-                .map(|server| server.socket)
-                .collect(),
+            sockets,
             serving: servers.serving,
         };
         let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
@@ -190,6 +191,11 @@ impl Scratch {
             Report::Stderr(bytes) => stderr.extend_from_slice(bytes),
             Report::Ready(_) | Report::Exec(..) | Report::ExecTook(_) => {}
         });
+        // The machine's end of each socket is closed, so its server is done
+        // with the state, and ends.
+        for mut process in processes {
+            assert!(process.wait().unwrap().success());
+        }
         let stdout = String::from_utf8(stdout).unwrap();
         let stderr = String::from_utf8_lossy(&stderr);
         assert_eq!(

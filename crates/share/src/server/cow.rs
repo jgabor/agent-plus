@@ -47,7 +47,8 @@
 //! what the guest wrote, and its directory is its pending directory. It
 //! writes no `BASE`, and its next server reads its records back, so the
 //! next run sees the same files. A last line with no newline is one a
-//! server stopped writing, so it goes. It takes what overlayfs needs of its
+//! server stopped writing, so it goes, and so does whatever the tree holds
+//! with no record. It takes what overlayfs needs of its
 //! upper layer, which a share of your files refuses: a chown to the owner a
 //! file has, `RENAME_WHITEOUT`, which leaves a whiteout, a `CHAR` numbered
 //! 0 0, `RENAME_EXCHANGE`, and extended attributes, each one a record:
@@ -68,7 +69,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::records::{Words, mode, number, quote};
+use crate::records::{Words, mode, number, quote, valid_path};
 use crate::times::Times;
 
 const TREE: &CStr = c"tree";
@@ -84,6 +85,8 @@ const PERMISSIONS: u32 = 0o7777;
 /// `<linux/limits.h>`.
 const XATTR_NAME_MAX: usize = 255;
 const XATTR_SIZE_MAX: usize = 1 << 16;
+/// The longest list of a file's attributes' names, each ended with a NUL.
+const XATTR_LIST_MAX: usize = 1 << 16;
 /// `setxattr`'s flags: the attribute must be new, or must be there.
 const XATTR_CREATE: u32 = 1;
 const XATTR_REPLACE: u32 = 2;
@@ -409,16 +412,6 @@ fn sized(value: Vec<u8>, size: u32) -> Answer {
     }
 }
 
-/// Whether `path` can name something in a share of kept state: nothing
-/// for its root, or names joined by `/`, none of them empty, `.`, or `..`.
-fn valid_path(path: &[u8]) -> bool {
-    !path.contains(&0)
-        && (path.is_empty()
-            || path
-                .split(|&byte| byte == b'/')
-                .all(|name| !matches!(name, b"" | b"." | b"..")))
-}
-
 /// What a share of kept state holds when its server starts, read from its
 /// records, and how long they are.
 #[derive(Default)]
@@ -464,7 +457,13 @@ impl Kept {
     fn read_line(&mut self, line: &[u8]) -> Option<()> {
         let mut words = Words::new(line);
         let word = words.bare()?;
-        let path = words.quoted().filter(|path| valid_path(path))?;
+        let path = words.quoted()?;
+        // The share's root is `""`, which the guest can change but not
+        // remove or replace.
+        let root = path.is_empty() && matches!(word, b"DIR" | b"XATTR");
+        if !root && !valid_path(&path) {
+            return None;
+        }
         let entry = match word {
             b"FILE" => Entry::File {
                 mode: mode(words.bare()?)?,
@@ -812,6 +811,27 @@ fn remove_tree(directory: BorrowedFd, name: &CStr) -> io::Result<()> {
     sys::unlinkat(directory, name, libc::AT_REMOVEDIR)
 }
 
+/// Removes what the tree of a share of kept state holds beneath `path` with
+/// no record: what a server that stopped between changing the tree and
+/// recording it left there.
+fn prune(tree: BorrowedFd, path: &[u8], entries: &BTreeMap<Vec<u8>, Entry>) -> io::Result<()> {
+    let dir = sys::open_beneath(tree, &c(path), libc::O_PATH | libc::O_DIRECTORY)?;
+    for (name, kind, _) in names(dir.as_fd()).map_err(io::Error::from_raw_os_error)? {
+        let at = join(path, &name);
+        match entries.get(&at) {
+            Some(Entry::Dir { .. }) if kind == libc::DT_DIR => prune(tree, &at, entries)?,
+            Some(Entry::Deleted) | None => match sys::unlinkat(dir.as_fd(), &c(&name), 0) {
+                Err(error) if error.raw_os_error() == Some(libc::EISDIR) => {
+                    remove_tree(dir.as_fd(), &c(&name))?;
+                }
+                removed => removed?,
+            },
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 /// Copies the directory `from`, at `path` in a git directory, into the
 /// directory `to`, but for what `objects` holds. `linked` is set if
 /// `packed-refs`, `refs`, or anything beneath it is a symlink, or if one of
@@ -951,6 +971,7 @@ impl Cow {
         let flags = libc::O_RDWR | libc::O_APPEND;
         let records = sys::create_beneath(directory.as_fd(), RECORDS, flags, FILE_MODE)?;
         let kept = Kept::read(records.as_fd())?;
+        prune(tree.as_fd(), b"", &kept.entries)?;
         Self::serving(None, directory, owner, None, tree, records, kept)
     }
 
@@ -1591,12 +1612,6 @@ impl Cow {
         }
         self.make_parents(&path)?;
         self.base(&path, None)?;
-        if self.kept() {
-            // A server that stopped between making something in the tree
-            // and recording it left it there, empty, with no record.
-            let _ = (self.unlink_upper(&path, 0))
-                .or_else(|_| self.unlink_upper(&path, libc::AT_REMOVEDIR));
-        }
         Ok(path)
     }
 
@@ -1933,7 +1948,7 @@ impl Cow {
             let Some(node) = self.paths.remove(&key) else {
                 continue;
             };
-            let (at, to) = match key.starts_with(from) {
+            let (at, to) = match key == from || beneath(&key, from) {
                 true => (from, into),
                 false => (into, from),
             };
@@ -1969,6 +1984,17 @@ impl Cow {
         let value = value.get(..size).ok_or(libc::EINVAL)?;
         if size > XATTR_SIZE_MAX {
             return Err(libc::E2BIG);
+        }
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(libc::EINVAL);
+        }
+        let names = self.xattrs.get(&path).into_iter().flat_map(BTreeMap::keys);
+        let listed: usize = names
+            .filter(|held| **held != name)
+            .map(|held| held.len() + 1)
+            .sum();
+        if listed + name.len() + 1 > XATTR_LIST_MAX {
+            return Err(libc::ENOSPC);
         }
         let held = self
             .xattrs

@@ -18,7 +18,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use share::records::{Words, mode, number};
+use share::records::{Words, mode, number, valid_path};
 
 use crate::gitignore::Gitignore;
 use crate::unified;
@@ -209,16 +209,6 @@ fn time(word: &[u8]) -> Option<i128> {
     let seconds: i64 = seconds.parse().ok()?;
     let nanoseconds: u32 = nanoseconds.parse().ok().filter(|&n| n < 1_000_000_000)?;
     Some(i128::from(seconds) * 1_000_000_000 + i128::from(nanoseconds))
-}
-
-/// Whether `path` names something beneath a share's root: names joined by
-/// `/`, none of them empty, `.`, or `..`.
-fn valid_path(path: &[u8]) -> bool {
-    !path.is_empty()
-        && !path.contains(&0)
-        && path
-            .split(|&byte| byte == b'/')
-            .all(|name| !matches!(name, b"" | b"." | b".."))
 }
 
 /// Each directory above `path`, from the root's first down.

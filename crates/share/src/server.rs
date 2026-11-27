@@ -1444,9 +1444,12 @@ impl Server {
                      file,
                      mode,
                  }| match mode {
-                    Mode::CopyOnWrite(_) | Mode::State if file.is_some() => Err(io::Error::other(
+                    Mode::CopyOnWrite(_) if file.is_some() => Err(io::Error::other(
                         "a copy-on-write file share is not built yet",
                     )),
+                    Mode::State if file.is_some() => {
+                        Err(io::Error::other("a share of kept state is a directory"))
+                    }
                     Mode::CopyOnWrite(pending) => {
                         cow::Cow::new(directory, pending, owner).map(Served::CopyOnWrite)
                     }

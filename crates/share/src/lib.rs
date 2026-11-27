@@ -11,12 +11,13 @@
 //! [`server`] protects against. It writes a copy-on-write share's changes
 //! beneath that share's pending directory, and reads the share's root
 //! alone. A share of kept state is a pending directory with no root, which
-//! the next run's server shows again. Landlock doesn't cover a file's mode or times. A server with an
-//! `rw` share changes those, so it holds no other share. A server with none
-//! can't change them, and a process of its own, in [`times`], sets the
-//! times of the copies in a copy-on-write share or a share of kept state. A server of `rw` shares runs in
-//! a user namespace of its own, in [`namespace`], so it can change the mode
-//! of a file it can't read. The frames on the socket are the ones
+//! the next run's server shows again. Landlock doesn't cover a file's mode
+//! or times. A server with an `rw` share changes those, so it holds no
+//! other share. A server with none can't change them, and a process of its
+//! own, in [`times`], sets the times of the copies in a copy-on-write share
+//! or a share of kept state. A server of `rw` shares runs in a user
+//! namespace of its own, in [`namespace`], so it can change the mode of a
+//! file it can't read. The frames on the socket are the ones
 //! [`vmm::fs`] describes. A server with no `rw` share can hold one more
 //! file until it exits, such as a run's locked record, so the run stays
 //! active until it has answered its last request. Its filter refuses to
@@ -236,8 +237,9 @@ pub fn inheritable(command: &mut Command, fd: BorrowedFd) -> io::Result<OwnedFd>
 /// The share server's process: `args` are a mode and the number of an
 /// inherited descriptor of a root directory for each share, and for a
 /// copy-on-write share the number of its pending directory's after it. A
-/// share of kept state is `state` and its directory's number. A file share has `file` and the file's name before its mode. The shares
-/// are all `rw`, or none of them are. Before them, `keep` and the number of
+/// share of kept state is `state` and its directory's number. A file share
+/// has `file` and the file's name before its mode. The shares are all
+/// `rw`, or none of them are. Before them, `keep` and the number of
 /// another inherited descriptor name one it holds until it exits, so that a
 /// lock on that file outlives its last answer. A server of `rw` shares
 /// refuses it. It serves requests from its standard input, a socket, until

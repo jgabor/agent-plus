@@ -90,3 +90,13 @@ pub fn mode(word: &[u8]) -> Option<u32> {
         .ok()
         .filter(|mode| mode & !0o7777 == 0)
 }
+
+/// Whether `path` names something beneath a share's root: names joined by
+/// `/`, none of them empty, `.`, or `..`.
+pub fn valid_path(path: &[u8]) -> bool {
+    !path.is_empty()
+        && !path.contains(&0)
+        && path
+            .split(|&byte| byte == b'/')
+            .all(|name| !matches!(name, b"" | b"." | b".."))
+}

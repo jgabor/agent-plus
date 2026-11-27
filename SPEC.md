@@ -1191,24 +1191,51 @@ PLUGIN anthropics/claude-plugins-official context7 github
 
 Recognized formats:
 
-| Format | Manifest |
-|---|---|
-| Claude Code | `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` |
-| Agent Plugins 1.0 | `plugin.json` at the plugin root |
-| Codex | `.codex-plugin/plugin.json` |
+| Format | Plugin manifest | Marketplace manifest |
+|---|---|---|
+| Claude Code | `.claude-plugin/plugin.json` | `.claude-plugin/marketplace.json` |
+| Agent Plugins 1.0 | `plugin.json` at the plugin root, with `$schema` set to `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json` | none |
+| Codex | The Agent Plugins 1.0 `plugin.json` at the plugin root, with `.codex-plugin/plugin.json` as a fallback | `.agents/plugins/marketplace.json` |
 
 A plugin that ships several manifests is read from the one native to the
 target harness, then from Agent Plugins 1.0, then from the others in table
-order.
+order. A root `plugin.json` without the Agent Plugins 1.0 `$schema`, in a
+plugin with no other manifest, is an error that names the `$schema` it has,
+if any.
 
-The plugin is parsed into a neutral model with these components:
-instructions, skills, commands, subagents, hooks, MCP servers, and
-settings. That model is then rendered for the harness version in the
-lockfile.
+Without names, a source with no plugin manifest and no marketplace
+manifest is read as a Claude Code plugin, from Claude Code's default
+locations, and is named after its directory. A source with nothing in
+those locations either is an error.
 
-- A component with no equivalent in that harness (for example, a hook on an
-  event the harness never fires) produces a build warning that names it.
-  `ap build --strict` makes that an error.
+A root `plugin.json` is read as Codex reads it, whatever the target harness.
+
+- The plugin's name comes from `plugin.json`, its skills from `skills/`,
+  and its MCP servers from `mcp.json`, as Agent Plugins 1.0 says.
+- Its hooks come from the `hooks` key of the manifest's
+  `extensions.com.openai` object or, when that object is absent, of
+  `.codex-plugin/plugin.json`. When that key isn't there, they come from
+  `hooks/hooks.json`.
+
+The plugin is parsed into a neutral model with these components: skills,
+commands, subagents, hooks, and MCP servers. That model is then rendered for
+the harness version in the lockfile, as a plugin in the harness's own
+format. Claude Code gets `.claude-plugin/plugin.json`, and Codex gets a root
+`plugin.json` in the Agent Plugins 1.0 format. Each component goes where
+that format keeps it:
+
+| Component | `claude` | `codex` |
+|---|---|---|
+| Skills | `skills/` | `skills/` |
+| Commands | `commands/` | none |
+| Subagents | `agents/` | none |
+| Hooks | `hooks/hooks.json` | `hooks/hooks.json` |
+| MCP servers | `.mcp.json` | `mcp.json` |
+
+- A component with no equivalent in that harness, such as a command or a
+  subagent for Codex, or a hook on an event the harness never fires,
+  produces a build warning that names it. `ap build --strict` makes that an
+  error.
 - Two components with the same name, from any combination of `PLUGIN`,
   `SKILL`, and `MCP` instructions, are an error.
 - Agentfile instructions win over plugin settings: `MODEL`, `EFFORT`,

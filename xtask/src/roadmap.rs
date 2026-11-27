@@ -1,8 +1,9 @@
 //! `cargo xtask roadmap`: the milestones and what comes after them, in words
 //! that anyone can read. `--details` prints the owner's view: each milestone's
-//! parent, steps, and proof, and what waits on the owner. Nobody types either
-//! one: every line comes from the journey file, the journey's results, the
-//! README, SPEC.md and the checks that prove it, or GitHub.
+//! parent, steps, and proof, what waits on the owner, and the Rust files that
+//! the most PRs change or that have grown large. Nobody types either one:
+//! every line comes from the journey file, the journey's results, the README,
+//! SPEC.md and the checks that prove it, the history of `main`, or GitHub.
 
 use crate::forge::{Gh, OpenPr, RoadmapIssue};
 use crate::journey::{self, Milestone, Outcome};
@@ -320,9 +321,10 @@ struct RustFile {
     lines: usize,
 }
 
-/// The Rust files at HEAD. A workspace with no commit has none.
+/// The Rust files at HEAD. A workspace outside a repository, or with no
+/// commit, has none.
 fn rust_files(root: &Path) -> Result<Vec<RustFile>, Problem> {
-    if !base::commit_exists(root, "HEAD")? {
+    if !root.join(".git").exists() || !base::commit_exists(root, "HEAD")? {
         return Ok(Vec::new());
     }
     let git =

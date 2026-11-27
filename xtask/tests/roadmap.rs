@@ -842,7 +842,7 @@ fn busy() -> Repo {
     repo.lines("tools/big1.rs", 2000);
     repo.lines("tools/big2.rs", 2999);
     repo.commit_at(HEAD_TIME - 30 * DAY);
-    // A day and an hour before the week, so it doesn't count.
+    // An hour before the week, so it doesn't count.
     repo.append("tools/old.rs");
     repo.commit_at(HEAD_TIME - 7 * DAY - 3600);
     for commit in 1..=12 {
@@ -893,4 +893,32 @@ fn the_details_list_the_busy_and_large_rust_files() {
     let text = repo.details();
     assert!(text.ends_with(&expected), "{text}");
     assert_eq!(text.matches("## Busy and large files").count(), 1, "{text}");
+}
+
+/// A workspace that isn't a repository has no history to list. The test's
+/// workspace is inside this repository, so git is kept from looking above it.
+#[test]
+fn a_workspace_outside_git_lists_no_files() {
+    let repo = Repo::new("no-git");
+    fs::remove_dir_all(repo.root.join(".git")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["roadmap", "--details"])
+        .current_dir(&repo.root)
+        .env("PATH", common::path(&[&repo.bin]))
+        .env("GIT_CEILING_DIRECTORIES", repo.root.parent().unwrap())
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("XTASK_ACTIVITY_HELD")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.ends_with("\n## Busy and large files\n\nNothing.\n"),
+        "{text}"
+    );
 }

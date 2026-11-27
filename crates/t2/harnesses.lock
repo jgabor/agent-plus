@@ -1,0 +1,6 @@
+# The harnesses a proof tests, each as the line `ap build` writes for it in
+# `Agentfile.lock`. The T2 checks and journey step 8 read them. Claude Code's
+# is the version the adapter's first-run state was read from, and Codex's runs
+# every tool through its code-mode host. Moving a pin is a PR of its own.
+HARNESS claude 2.1.323 604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e
+HARNESS codex 0.171.0 0fd9ae1125788932131a29e296c4fef9995fc4f0c2a2ef6161221786e45ffa8c 8db4b4899dd36d24defa4a0c4f431e9db527fb689e017c88be9f54ea2949e674 6f122933bd4cb7113d11aec2db1b8ba2977ff11b961b26fec65950057aafe28c

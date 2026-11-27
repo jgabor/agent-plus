@@ -13,16 +13,8 @@ use agentfile::Mode;
 use t1::started::Started;
 
 mod common;
-use common::{Interactive, Scratch};
+use common::{Interactive, Scratch, pin};
 
-/// The version that runs every tool through its code-mode host, and the
-/// SHA-256 digests of its Linux x86_64 release, of its code-mode host, and
-/// of its bubblewrap. A pinned one keeps a new release from changing what
-/// this check sees, and a cached download needs no network.
-const VERSION: &str = "0.171.0";
-const DIGEST: &str = "0fd9ae1125788932131a29e296c4fef9995fc4f0c2a2ef6161221786e45ffa8c";
-const HOST: &str = "8db4b4899dd36d24defa4a0c4f431e9db527fb689e017c88be9f54ea2949e674";
-const BWRAP: &str = "6f122933bd4cb7113d11aec2db1b8ba2977ff11b961b26fec65950057aafe28c";
 /// How long the VM may take to start.
 const STARTS_WITHIN: Duration = Duration::from_secs(600);
 /// How long the fake upstream may run, in seconds.
@@ -85,13 +77,15 @@ fn codex_edits_its_workspace_in_its_sandbox() {
 /// terminal, with the fake upstream in `upstream` reachable at
 /// `host.ap.internal`. Returns the run, and its name, once `ap ps` lists it.
 fn start_codex(scratch: &Scratch, upstream: &Path, word: &str) -> (Interactive, String) {
+    let pin = pin("codex");
     scratch.build(
         "codex",
         &format!(
-            "AGENT codex:{VERSION}\nOS minimal\nMODE {word}\nNETWORK -\nNETWORK +host.ap.internal\n\
-             SECRET UPSTREAM @host.ap.internal\n"
+            "AGENT codex:{}\nOS minimal\nMODE {word}\nNETWORK -\nNETWORK +host.ap.internal\n\
+             SECRET UPSTREAM @host.ap.internal\n",
+            pin.version
         ),
-        &format!("HARNESS codex {VERSION} {DIGEST} {HOST} {BWRAP}\n"),
+        &pin.lock,
     );
     // The hidden secret makes the proxy decrypt TLS to the fake upstream,
     // with the run's authority, which the guest trusts. The proxy trusts
@@ -168,7 +162,7 @@ fn runs_the_tool(test: &str, word: &str, mode: Mode) {
     let upstream = scratch.root.join("upstream");
     let (_upstream, port) = start_upstream(&upstream);
     let (_run, name) = start_codex(&scratch, &upstream, word);
-    let arguments = ap::adapter::codex::arguments(VERSION, None, None, mode, false);
+    let arguments = ap::adapter::codex::arguments(pin("codex").version, None, None, mode, false);
     let shown = exec_codex(&scratch, &name, port, arguments);
     let answers = tool_outputs(&upstream);
     assert!(!answers.is_empty(), "{shown}");
@@ -207,7 +201,8 @@ fn a_trusted_codex_projects_rule_runs_a_command_outside_the_sandbox() {
             }
             let made = scratch.ap(&["exec", &name, "sh", "-c", &set_up]);
             assert_eq!(made.status.code(), Some(0), "{made:?}");
-            let mut arguments = ap::adapter::codex::arguments(VERSION, None, None, mode, false);
+            let mut arguments =
+                ap::adapter::codex::arguments(pin("codex").version, None, None, mode, false);
             arguments.extend(["--cd".to_owned(), project.clone()]);
             arguments.extend(ap::adapter::codex::workspace(&[&project]));
             let shown = exec_codex(&scratch, &name, port, arguments);
@@ -257,8 +252,13 @@ fn a_trusted_codex_projects_model_catalog_reaches_the_reviewer_in_auto() {
         for trusted in [false, true] {
             // Every override the adapter sets in `auto`, with the project's
             // trust when it is a share, given to `codex debug models`.
-            let mut arguments =
-                ap::adapter::codex::arguments(VERSION, None, None, Mode::Auto, interactive);
+            let mut arguments = ap::adapter::codex::arguments(
+                pin("codex").version,
+                None,
+                None,
+                Mode::Auto,
+                interactive,
+            );
             if trusted {
                 arguments.extend(ap::adapter::codex::workspace(&[project]));
             }

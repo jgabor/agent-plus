@@ -6,13 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
-use common::{Interactive, Scratch};
+use common::{Interactive, Scratch, pin};
 
-/// The version the adapter's first-run state was read from, and the SHA-256
-/// digest of its Linux x64 release. A pinned one keeps a new release from
-/// changing what this check sees, and a cached download needs no network.
-const VERSION: &str = "2.1.323";
-const DIGEST: &str = "604d29a6869409106b6a1110bdadcc8b72e8654a5a865d23258f938a696e348e";
 /// How long Claude Code may take to start in a guest. A start took 38 to 132
 /// seconds on a loaded machine in journey step 8.
 const STARTS_WITHIN: Duration = Duration::from_secs(600);
@@ -66,10 +61,14 @@ fn visible(screen: &str) -> String {
 #[test]
 fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
     let scratch = Scratch::new("dialogs");
+    let pin = pin("claude");
     scratch.build(
         "claude",
-        &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\n"),
-        &format!("HARNESS claude {VERSION} {DIGEST}\n"),
+        &format!(
+            "AGENT claude:{}\nOS minimal\nNETWORK -\nMODE auto\n",
+            pin.version
+        ),
+        &pin.lock,
     );
     reaches_its_prompt(Interactive::start(scratch.run("claude")));
 }
@@ -80,10 +79,14 @@ fn an_interactive_claude_code_run_reaches_its_prompt_with_no_dialog() {
 #[test]
 fn an_interactive_claude_code_run_in_a_shared_repository_reaches_its_prompt() {
     let scratch = Scratch::new("repository-dialog");
+    let pin = pin("claude");
     scratch.build(
         "claude",
-        &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\n"),
-        &format!("HARNESS claude {VERSION} {DIGEST}\n"),
+        &format!(
+            "AGENT claude:{}\nOS minimal\nNETWORK -\nMODE auto\n",
+            pin.version
+        ),
+        &pin.lock,
     );
     // The least that git takes as a repository. Claude Code reads the
     // quote and the backslash in its name from the state as JSON.
@@ -104,10 +107,14 @@ fn an_interactive_claude_code_run_in_a_shared_repository_reaches_its_prompt() {
 #[test]
 fn an_interactive_run_with_auth_key_doesnt_ask_whether_to_use_it() {
     let scratch = Scratch::new("key-dialog");
+    let pin = pin("claude");
     scratch.build(
         "keyed",
-        &format!("AGENT claude:{VERSION}\nOS minimal\nNETWORK -\nMODE auto\nAUTH key\n"),
-        &format!("HARNESS claude {VERSION} {DIGEST}\n"),
+        &format!(
+            "AGENT claude:{}\nOS minimal\nNETWORK -\nMODE auto\nAUTH key\n",
+            pin.version
+        ),
+        &pin.lock,
     );
     let mut run = scratch.run("keyed");
     run.env("ANTHROPIC_API_KEY", "sk-ant-api03-not-a-real-key-5c0e");

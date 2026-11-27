@@ -5,12 +5,28 @@ set -eu
 # download, and lock each harness, then reads what each one reports before
 # sign-in. The journey keeps downloads in `$XDG_CACHE_HOME/ap` across steps,
 # so each harness is downloaded once.
+#
+# Each harness is built at the version that `crates/t2/harnesses.lock` pins,
+# and its lockfile has to be that pin's line. With `channel`, which is the
+# nightly job's check, each comes from its channel instead, `claude:stable`
+# and `codex:latest`, and its lockfile is what that channel gave.
 
-# Builds the agent `$1` from the harness and channel `$2`, and fails unless
-# the lockfile pins that harness by an exact version and a digest, which for
-# Codex the digests of the code-mode host and of bubblewrap, each or `-`,
-# follow. Each agent is named for
-# its harness, which its grants name under `NETWORK -`.
+pins="$(dirname "$0")/../../crates/t2/harnesses.lock"
+
+# Prints the line that pins the harness `$1`.
+pinned() {
+  if ! grep "^HARNESS $1 " "$pins"; then
+    echo "$pins pins no $1" >&2
+    exit 1
+  fi
+}
+
+# Builds the agent `$1` from the harness and channel or version `$2`, and
+# fails unless the lockfile pins that harness by an exact version and a
+# digest, which for Codex the digests of the code-mode host and of
+# bubblewrap, each or `-`, follow. When a third argument is given, the
+# lockfile has to be that line. Each agent is named for its harness, which
+# its grants name under `NETWORK -`.
 build() {
   mkdir -p "$1"
   printf 'AGENT %s\nNETWORK -\nPOLICY +\n' "$1" >"$1.grants"
@@ -31,6 +47,11 @@ build() {
   if ! grep -Eq "^HARNESS $1 [^ :]+ [0-9a-f]{64}$host\$" "$1/Agentfile.lock" ||
     grep -Eq "^HARNESS $1 (stable|latest) " "$1/Agentfile.lock"; then
     echo "ap build didn't lock $2 to an exact version and digest:" >&2
+    cat "$1/Agentfile.lock" >&2
+    exit 1
+  fi
+  if [ $# -gt 2 ] && [ "$(cat "$1/Agentfile.lock")" != "$3" ]; then
+    echo "ap build didn't lock $2 to the pin, $3:" >&2
     cat "$1/Agentfile.lock" >&2
     exit 1
   fi
@@ -114,8 +135,22 @@ in_home() {
   expect "$1" /home/agent pwd
 }
 
-build claude claude:stable
-build codex codex:latest
+case ${1-} in
+  channel)
+    build claude claude:stable
+    build codex codex:latest
+    ;;
+  '')
+    for harness in claude codex; do
+      pin=$(pinned "$harness")
+      build "$harness" "$harness:$(echo "$pin" | cut -d' ' -f3)" "$pin"
+    done
+    ;;
+  *)
+    echo "usage: $0 [channel]" >&2
+    exit 2
+    ;;
+esac
 
 # Claude Code reports its `init` event before it needs a sign-in. With no
 # credentials, it exits 1 after that, so the probe needs no input. Any other

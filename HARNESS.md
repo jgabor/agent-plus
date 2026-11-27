@@ -279,7 +279,7 @@ journey step names the floor it needs with its `floor` field in
 |---|---|---|---|
 | T0 | Format, lint for Linux and macOS, unit tests, spec quotes, and floors | Every gate | No |
 | T1 | The real `ap` and a real microVM, with the fake harness | Every gate | No |
-| T2 | Real Claude Code and Codex in the guest, with no credentials | Adapter changes, and nightly | No |
+| T2 | Real Claude Code and Codex in the guest, at their pins, with no credentials | Adapter changes, and nightly | No |
 | T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
 | Bench | Budgets, against the base build | Changes that can affect a budget, and nightly | No |
 
@@ -339,6 +339,18 @@ into a store in `target/guest` once, and its tests start their stores from it.
 A gate in a tree that holds it makes no request for it. One ignored t1 test
 has `ap build` download the layer from its real release, and only the nightly
 job runs it.
+
+**Harness versions.** `crates/t2/harnesses.lock` pins the Claude Code and
+the Codex that a proof tests, each as the line `ap build` writes for it in
+`Agentfile.lock`. The T2 checks use those lines as their lockfiles, and
+journey step 8 builds each harness at its pinned version and fails unless
+`ap build` writes the pin's line. So a new release upstream changes no
+proof. The nightly job also runs step 8's script with `channel`, which
+builds `claude:stable` and `codex:latest` with the real download, and checks
+what step 8 checks of the pin, apart from the line itself. That check is
+`harnesses` in the report, and isn't a journey step. Nothing moves a pin by
+itself. Moving one is a PR of its own, which changes `crates/t2/`, so its
+gate runs T2 at the new version, and its journey runs step 8 there.
 
 **Fake harness.** A guest program that implements the adapter contract and
 records its arguments, environment, files, and network view.
@@ -1111,10 +1123,14 @@ does the following on `main`:
 
 1. Run the bench first, because the remaining tiers are long.
 2. Run the gate with T2, the ignored t1 tests that download from a real
-   release, T3, the journey, fuzzing, and mutation testing.
+   release, the check of each harness's channel, T3, the journey, fuzzing,
+   and mutation testing. T2 and the journey test the harnesses at their
+   pins, and the channel check tests the newest release of each.
 3. Post the report to one pinned issue. It leads with what needs the owner:
    a verdict that names each failed check, the three scores, what regressed
-   and why, commits not in the ledger, and what waits on the owner. Then come
+   and why, commits not in the ledger, what waits on the owner, and the
+   version each harness's channel gave, and whether it is ahead of the pin,
+   behind it, or the pinned version. Then come
    each sentence of SPEC.md added, changed, or removed since the last report,
    under its heading and then its PR, and the changes to AGENTS.md and
    HARNESS.md, under each PR, with a line for each file that names the

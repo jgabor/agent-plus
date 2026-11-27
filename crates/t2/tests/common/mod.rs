@@ -16,6 +16,35 @@ use guest::linux::{open_terminal, program_has_ended, take_terminal};
 use guest::protocol::Size;
 use t1::{guest_binary, kernel, os};
 
+/// The lockfile line of each harness a proof tests, which pins it to an
+/// exact version and its digests. A pin keeps a new release from changing
+/// what these checks see, and a cached download needs no network.
+const PINS: &str = include_str!("../../harnesses.lock");
+
+/// A pinned harness.
+pub struct Pin {
+    /// Its exact version, for `AGENT`.
+    pub version: &'static str,
+    /// Its line in `Agentfile.lock`.
+    pub lock: String,
+}
+
+/// The pin of `harness`.
+pub fn pin(harness: &str) -> Pin {
+    let line = PINS
+        .lines()
+        .find(|line| {
+            line.strip_prefix("HARNESS ")
+                .and_then(|rest| rest.strip_prefix(harness))
+                .is_some_and(|rest| rest.starts_with(' '))
+        })
+        .unwrap_or_else(|| panic!("harnesses.lock pins no {harness}"));
+    Pin {
+        version: line.split(' ').nth(2).expect("a pin has a version"),
+        lock: format!("{line}\n"),
+    }
+}
+
 /// How long `ap build` may take, in seconds, downloading the harness
 /// included, and how long any other `ap` command may take.
 const WITHIN: &str = "600";

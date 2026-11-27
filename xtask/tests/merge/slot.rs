@@ -405,6 +405,7 @@ fn a_killed_waiter_holds_no_one_up() {
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut killed = Waiter::start(&repo, &["merge", "9"], deadline);
     let second = Waiter::start(&repo, &["merge", "10"], deadline);
+    let done = bounded(vec![second.child.id()]);
     // The pid of a child this test started. Its supervisor goes first, and its
     // watcher then kills the rest, which leaves the first number behind.
     killed.child.kill().unwrap();
@@ -419,7 +420,6 @@ fn a_killed_waiter_holds_no_one_up() {
         thread::sleep(Duration::from_millis(10));
     }
     held.unlock().unwrap();
-    let done = bounded(vec![second.child.id()]);
     let output = second.end();
     let _ = done.send(());
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));

@@ -922,7 +922,7 @@ impl Share<'_> {
             true => match self.commits(&records) {
                 Ok(commits) => Some(Ok(commits)),
                 Err(git::Error::Io(error)) => return Err(error),
-                Err(git::Error::Corrupt(why)) => Some(Err(branch::printable(&why))),
+                Err(git::Error::Corrupt(why)) => Some(Err(crate::printable(&why))),
             },
             false => None,
         };
@@ -933,7 +933,7 @@ impl Share<'_> {
                 Err(git::Error::Io(error)) => return Err(error),
                 Err(git::Error::Corrupt(why)) => {
                     if let Some(Ok(_)) = commits {
-                        commits = Some(Err(branch::printable(&why)));
+                        commits = Some(Err(crate::printable(&why)));
                     }
                     Some(Replacing::default())
                 }

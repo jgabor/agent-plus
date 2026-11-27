@@ -29,6 +29,7 @@ const USAGE: &str = "usage: ap --version
        ap init [dir]
        ap fmt [--check] [dir]
        ap build [--strict] [--replace] [--approve=file] [-t name] [dir]
+       ap update [--strict] [--replace] [--approve=file] [-t name] [dir]
        ap ls
        ap inspect [--grants | --network=destination] agent
        ap rm [--force] agent
@@ -101,6 +102,11 @@ fn main() -> ExitCode {
         && let Some(build) = commands::build::parse(&args[1..])
     {
         return ExitCode::from(commands::build::run(&build));
+    }
+    if args.first().is_some_and(|command| command == "update")
+        && let Some(update) = commands::build::parse_update(&args[1..])
+    {
+        return ExitCode::from(commands::build::run(&update));
     }
     if args.first().is_some_and(|command| command == "ls")
         && commands::ls::parse(&args[1..]).is_some()

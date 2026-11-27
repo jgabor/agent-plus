@@ -48,19 +48,34 @@ impl Scratch {
     /// approves exactly the grants its Agentfile asks for, since approval
     /// has tests of its own.
     fn ap(&self, dir: &Path, args: &[&str]) -> Output {
+        self.ap_with(dir, args, &[])
+    }
+
+    /// Runs `ap` as [`Scratch::ap`] does, with `env` too. Git trusts the
+    /// certificate of the tests' git server.
+    fn ap_with(&self, dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
         let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-        if args.first().is_some_and(|command| command == "build")
+        if args
+            .first()
+            .is_some_and(|command| command == "build" || command == "update")
             && let Some(file) = self.approval(dir, &args[1..])
         {
             args.push(format!("--approve={}", file.display()));
         }
-        Command::new(env!("CARGO_BIN_EXE_ap"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ap"));
+        command
             .args(args)
             .current_dir(dir)
             .env_clear()
             .env("HOME", &self.home)
-            .output()
-            .unwrap()
+            .env(
+                "GIT_SSL_CAINFO",
+                common::git_server::certificate(&self.root),
+            );
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        command.output().unwrap()
     }
 
     /// Writes the grants that the Agentfile `ap build` would read asks for,
@@ -724,7 +739,7 @@ fn instructions_that_are_not_built_yet_fail() {
     let dir = scratch.project(
         "notes",
         "AGENT claude\nOS minimal\n\
-         REPO jgabor/agent-plus\n\
+         REPO ./local\n\
          PLUGIN anthropics/claude-plugins-official/external_plugins/context7\n\
          SKILL anthropics/skills/skills/algorithmic-art\n\
          MCP anthropics/claude-plugins-official/external_plugins/github\n\
@@ -741,6 +756,7 @@ fn instructions_that_are_not_built_yet_fail() {
         assert!(line.contains(&format!("`{name}`")), "{line}");
         assert!(line.contains("not built yet"), "{line}");
     }
+    assert!(lines[0].contains("`./local`"), "{message}");
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
@@ -763,7 +779,7 @@ fn build_reports_every_error() {
     // Errors that need the host are reported together, in line order.
     fs::write(
         dir.join("Agentfile"),
-        "AGENT claude\nOS minimal\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO jgabor/agent-plus\n",
+        "AGENT claude\nOS minimal\nSHARE ./gone\nSYSTEM ./missing.md\nADD ./absent\nREPO ./local\n",
     )
     .unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -785,7 +801,7 @@ fn a_destination_error_does_not_hide_other_errors() {
     let scratch = Scratch::new("destination-and-more");
     let dir = scratch.project(
         "notes",
-        "AGENT claude\nOS minimal\nADD ./data /etc/data\nREPO jgabor/agent-plus\nSYSTEM ./missing.md\n",
+        "AGENT claude\nOS minimal\nADD ./data /etc/data\nREPO ./local\nSYSTEM ./missing.md\n",
     );
     fs::write(dir.join("data"), "one").unwrap();
     let output = scratch.ap(&dir, &["build"]);
@@ -2353,5 +2369,601 @@ fn the_same_rules_on_another_harnesss_hosts_build() {
             "{agent} {rules}: {}",
             stderr(&output)
         );
+    }
+}
+
+/// A repository that the tests' git server serves, and the work tree its
+/// commits come from. Its first commit has a file, a script, a symlink, a
+/// Git LFS pointer, and a submodule, and its second changes the file.
+struct Remote {
+    server: common::git_server::GitServer,
+    work: PathBuf,
+    bare: PathBuf,
+    url: String,
+    /// The commits, oldest first.
+    commits: Vec<String>,
+}
+
+/// A Git LFS pointer, which `REPO` leaves as it is.
+const POINTER: &str = "version https://git-lfs.github.com/spec/v1\n\
+     oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+     size 12345\n";
+
+impl Remote {
+    fn new(scratch: &Scratch, name: &str) -> Remote {
+        Remote::serve(scratch, name, false)
+    }
+
+    /// A remote whose server is private when `private`.
+    fn serve(scratch: &Scratch, name: &str, private: bool) -> Remote {
+        let served = scratch.root.join("served");
+        let work = scratch.root.join("work").join(name);
+        fs::create_dir_all(&work).unwrap();
+        common::repo::run(&work, &["init", "-q"]);
+        fs::create_dir_all(work.join("bin")).unwrap();
+        fs::write(work.join("bin/run.sh"), "#!/bin/sh\necho run\n").unwrap();
+        fs::set_permissions(
+            work.join("bin/run.sh"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        symlink("bin/run.sh", work.join("run")).unwrap();
+        fs::write(work.join("big.bin"), POINTER).unwrap();
+        fs::write(
+            work.join(".gitattributes"),
+            "big.bin filter=lfs diff=lfs merge=lfs -text\n",
+        )
+        .unwrap();
+        fs::write(
+            work.join(".gitmodules"),
+            "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = https://localhost/lib\n",
+        )
+        .unwrap();
+        common::repo::run(&work, &["add", "."]);
+        let gitlink = "160000,0123456789012345678901234567890123456789,vendor/lib";
+        common::repo::run(&work, &["update-index", "--add", "--cacheinfo", gitlink]);
+        let first = common::repo::commit(&work, "README.md", "one\n", "one");
+        let second = common::repo::commit(&work, "README.md", "two\n", "two");
+        let bare = served.join(format!("{name}.git"));
+        fs::create_dir_all(&served).unwrap();
+        let output = common::repo::git(&served)
+            .args(["clone", "-q", "--bare"])
+            .arg(&work)
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        let server = common::git_server::GitServer::start(&served, private);
+        let url = server.url(&format!("{name}.git"));
+        Remote {
+            server,
+            work,
+            bare,
+            url,
+            commits: vec![first, second],
+        }
+    }
+
+    /// Commits a change to the remote's branch, and returns the commit.
+    fn advance(&mut self, data: &str) -> String {
+        let commit = common::repo::commit(&self.work, "README.md", data, data);
+        common::repo::run(
+            &self.work,
+            &["push", "-q", self.bare.to_str().unwrap(), "main"],
+        );
+        self.commits.push(commit.clone());
+        commit
+    }
+
+    fn head(&self) -> &str {
+        self.commits.last().unwrap()
+    }
+}
+
+/// The image of the layer an agent's `REPO` line put, by its label.
+fn repo_layer(scratch: &Scratch, name: &str, label: &str) -> Vec<u8> {
+    let agent = scratch.agent(name);
+    let layer = (agent.layers.iter())
+        .find(|layer| layer.instruction == label)
+        .unwrap_or_else(|| panic!("no layer {label} in {:?}", agent.layers));
+    Layers::new(scratch.store()).get(&layer.digest).unwrap()
+}
+
+/// Writes the repository at `at` in `image` into a directory of the test's
+/// own, and returns it.
+fn unpacked(scratch: &Scratch, image: &[u8], at: &str) -> PathBuf {
+    let dir = scratch
+        .root
+        .join("unpacked")
+        .join(at.trim_start_matches('/'));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    common::erofs::unpack(image, at, &dir);
+    dir
+}
+
+/// The lines of `Agentfile.lock` in `dir` that lock a source.
+fn source_lines(dir: &Path) -> Vec<String> {
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    lock.lines()
+        .filter(|line| line.starts_with("SOURCE "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Checks the repository at `repo` with the host's `git` as the oracle: it
+/// is clean at `commit`, `git fsck --strict` finds nothing, and its index
+/// is the commit's tree.
+fn check_clone(repo: &Path, work: &Path, commit: &str) {
+    let git = |args: &[&str]| common::repo::run(repo, args);
+    assert_eq!(git(&["rev-parse", "HEAD"]), commit);
+    assert_eq!(git(&["status", "--porcelain", "--untracked-files=all"]), "");
+    git(&["fsck", "--strict", "--no-progress"]);
+    let tree: Vec<String> = common::repo::run(work, &["ls-tree", "-r", commit])
+        .lines()
+        .map(|line| {
+            let (meta, path) = line.split_once('\t').unwrap();
+            let fields: Vec<&str> = meta.split(' ').collect();
+            format!("{} {} 0\t{path}", fields[0], fields[2])
+        })
+        .collect();
+    assert_eq!(
+        git(&["ls-files", "--stage"]).lines().collect::<Vec<_>>(),
+        tree
+    );
+}
+
+/// An Agentfile that locks an exact harness, so `ap update` resolves only
+/// its sources, with `lines` after it.
+fn with_repo(lines: &str) -> String {
+    format!("AGENT claude:2.1.3\nOS minimal\n{lines}")
+}
+
+// spec(REPO): `REPO` clones a git repository into the image at a pinned commit.
+// spec(REPO): Without `<dest>`, the repository lands in `~/git/<repository name>`.
+// spec(Sources): Every ref resolves to a commit at build time and is recorded in the lockfile.
+// spec(Sources): `ap build` fetches a remote source, which is any form but a local path, with the `git` on your host.
+// spec(REPO): The clone's `origin` is the source's repository.
+// spec(REPO): When the ref names a branch, the clone is on that branch, and it tracks the branch on `origin`.
+#[test]
+fn a_repo_lands_in_git_under_home_at_its_pinned_commit() {
+    let scratch = Scratch::new("repo-lands");
+    let remote = Remote::new(&scratch, "tools");
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    let out = scratch.build(&dir, &[]);
+    let label = format!("REPO {}", remote.url);
+    assert!(
+        layer_lines(&out).contains(&("built".to_string(), label.clone())),
+        "{out}"
+    );
+    assert_eq!(
+        source_lines(&dir),
+        [format!(
+            "SOURCE {} HEAD refs/heads/main {}",
+            remote.url,
+            remote.head()
+        )]
+    );
+
+    let image = repo_layer(&scratch, "notes", &label);
+    let (found, owners) = common::erofs::read_image(&image);
+    let at = "/home/agent/git/tools";
+    assert_eq!(
+        found[&format!("{at}/README.md")],
+        common::erofs::Entry::File(0o644, b"two\n".to_vec())
+    );
+    assert_eq!(
+        found[&format!("{at}/bin/run.sh")],
+        common::erofs::Entry::File(0o755, b"#!/bin/sh\necho run\n".to_vec())
+    );
+    assert_eq!(
+        found[&format!("{at}/run")],
+        common::erofs::Entry::Symlink(b"bin/run.sh".to_vec())
+    );
+    let agent = (guest::agent::ID as u16, guest::agent::ID as u16);
+    for (path, owner) in &owners {
+        if path.starts_with("/home/agent") {
+            assert_eq!(*owner, agent, "{path}");
+        } else {
+            assert_eq!(*owner, (0, 0), "{path}");
+        }
+    }
+
+    let repo = unpacked(&scratch, &image, at);
+    check_clone(&repo, &remote.work, remote.head());
+    let git = |args: &[&str]| common::repo::run(&repo, args);
+    assert_eq!(git(&["symbolic-ref", "HEAD"]), "refs/heads/main");
+    assert_eq!(git(&["remote", "get-url", "origin"]), remote.url);
+    assert_eq!(git(&["rev-parse", "@{upstream}"]), remote.head());
+}
+
+// spec(REPO): By default, `REPO` stores only the pinned commit (depth 1), leaves Git LFS pointers unresolved, and does not fetch submodules.
+// spec(REPO): `history` stores the full history.
+// spec(REPO): In the guest, the repository belongs to the user `agent`.
+// spec(REPO): A directory that `REPO` makes above it, outside `/home/agent`, belongs to root.
+#[test]
+fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
+    let scratch = Scratch::new("repo-history");
+    let remote = Remote::new(&scratch, "tools");
+    let url = &remote.url;
+    let dir = scratch.project(
+        "notes",
+        &with_repo(&format!("REPO {url}\nREPO {url} /opt/full history\n")),
+    );
+    let out = scratch.build(&dir, &[]);
+    let lines = layer_lines(&out);
+    assert!(
+        lines.contains(&("built".to_string(), format!("REPO {url}"))),
+        "{out}"
+    );
+    let full = format!("REPO {url} /opt/full history");
+    assert!(
+        lines.contains(&("built".to_string(), full.clone())),
+        "{out}"
+    );
+    // One ref of one repository is locked once.
+    assert_eq!(source_lines(&dir).len(), 1);
+
+    let shallow = repo_layer(&scratch, "notes", &format!("REPO {url}"));
+    let shallow = unpacked(&scratch, &shallow, "/home/agent/git/tools");
+    let whole = repo_layer(&scratch, "notes", &full);
+    let agent = (guest::agent::ID as u16, guest::agent::ID as u16);
+    for (path, owner) in common::erofs::read_image(&whole).1 {
+        let ours = path.starts_with("/opt/full");
+        assert_eq!(owner, if ours { agent } else { (0, 0) }, "{path}");
+    }
+    let whole = unpacked(&scratch, &whole, "/opt/full");
+    for repo in [&shallow, &whole] {
+        check_clone(repo, &remote.work, remote.head());
+        assert_eq!(fs::read_to_string(repo.join("big.bin")).unwrap(), POINTER);
+        assert!(repo.join("vendor/lib").is_dir());
+        assert_eq!(fs::read_dir(repo.join("vendor/lib")).unwrap().count(), 0);
+    }
+    let count = |repo: &Path| common::repo::run(repo, &["rev-list", "--count", "HEAD"]);
+    assert_eq!(count(&shallow), "1");
+    assert_eq!(
+        fs::read_to_string(shallow.join(".git/shallow")).unwrap(),
+        format!("{}\n", remote.head())
+    );
+    assert_eq!(count(&whole), "2");
+    assert!(!whole.join(".git/shallow").exists());
+}
+
+// spec(Build): Builds reuse locked resolutions; `ap update` resolves them again and rebuilds the agent.
+// spec(Build): An `AGENT` that names an exact version keeps the digest the lockfile records for it.
+#[test]
+fn a_rebuild_reuses_the_locked_commit_and_update_resolves_it_again() {
+    let scratch = Scratch::new("repo-locked");
+    let mut remote = Remote::new(&scratch, "tools");
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    let label = format!("REPO {}", remote.url);
+    scratch.build(&dir, &[]);
+    let locked = remote.head().to_string();
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    let requests = remote.server.requests();
+    assert!(requests > 0);
+
+    let moved = remote.advance("three\n");
+    let out = scratch.build(&dir, &[]);
+    assert!(
+        layer_lines(&out).iter().all(|(status, _)| status == "hit"),
+        "{out}"
+    );
+    assert_eq!(
+        remote.server.requests(),
+        requests,
+        "a rebuild made a request"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("Agentfile.lock")).unwrap(),
+        lock
+    );
+
+    let output = scratch.ap(&dir, &["update"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(
+        layer_lines(&out).contains(&("built".to_string(), label.clone())),
+        "{out}"
+    );
+    assert_eq!(
+        source_lines(&dir),
+        [format!(
+            "SOURCE {} HEAD refs/heads/main {moved}",
+            remote.url
+        )]
+    );
+    let harness = |lock: &str| lock.lines().next().unwrap().to_string();
+    let updated = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    assert_eq!(harness(&updated), harness(&lock));
+    assert!(updated.starts_with("HARNESS claude 2.1.3 "), "{updated}");
+    let image = repo_layer(&scratch, "notes", &label);
+    check_clone(
+        &unpacked(&scratch, &image, "/home/agent/git/tools"),
+        &remote.work,
+        &moved,
+    );
+    assert_ne!(moved, locked);
+
+    // A source the Agentfile no longer names leaves the lock.
+    fs::write(dir.join("Agentfile"), with_repo("")).unwrap();
+    let output = scratch.ap(&dir, &["update"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(source_lines(&dir).is_empty());
+}
+
+/// A commit the lockfile locks, which neither the store nor the download
+/// cache holds, is fetched by its commit, even after its branch moved.
+#[test]
+fn a_locked_commit_missing_from_the_cache_is_fetched_by_its_commit() {
+    let scratch = Scratch::new("repo-refetch");
+    let mut remote = Remote::new(&scratch, "tools");
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    scratch.build(&dir, &[]);
+    let locked = remote.head().to_string();
+    remote.advance("three\n");
+    let rm = scratch.ap(&dir, &["rm", "notes"]);
+    assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
+    fs::remove_dir_all(scratch.home.join(".cache/ap/git")).unwrap();
+    let requests = remote.server.requests();
+
+    let out = scratch.build(&dir, &[]);
+    let label = format!("REPO {}", remote.url);
+    assert!(
+        layer_lines(&out).contains(&("built".to_string(), label.clone())),
+        "{out}"
+    );
+    assert!(remote.server.requests() > requests);
+    let image = repo_layer(&scratch, "notes", &label);
+    check_clone(
+        &unpacked(&scratch, &image, "/home/agent/git/tools"),
+        &remote.work,
+        &locked,
+    );
+}
+
+// spec(Sources): `ap build` fetches each source without credentials first.
+#[test]
+fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
+    let scratch = Scratch::new("repo-private");
+    let remote = Remote::serve(&scratch, "secret", true);
+    let marker = scratch.root.join("helper-ran");
+    fs::write(
+        scratch.home.join(".gitconfig"),
+        format!(
+            "[credential]\n\thelper = \"!f() {{ touch {}; echo username=u; echo password=p; }}; f\"\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        scratch.home.join(".netrc"),
+        "machine localhost login u password p\n",
+    )
+    .unwrap();
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    // Nor does the configuration of a repository the build runs in.
+    common::repo::run(&dir, &["init", "-q"]);
+    let helper = format!("!f() {{ touch {}; }}; f", marker.display());
+    common::repo::run(&dir, &["config", "credential.helper", &helper]);
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains(&remote.url), "{message}");
+    assert!(!marker.exists(), "a credential helper ran");
+    assert!(remote.server.requests() > 0);
+    assert!(source_lines(&dir).is_empty());
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+// spec(Sources): It allows `git` only the `https` and `ssh` transports, and `git` checks nothing out and runs no hook.
+#[test]
+fn git_fetches_only_over_https_or_ssh_into_a_bare_repository_and_runs_no_hook() {
+    let scratch = Scratch::new("repo-transports");
+    let remote = Remote::new(&scratch, "tools");
+    let file = format!("file://localhost{}", remote.bare.display());
+    let dir = scratch.project("files", &with_repo(&format!("REPO {file}\n")));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains(&file), "{message}");
+    assert!(message.contains("not allowed"), "{message}");
+
+    // Your own configuration can't give git a hook to run.
+    let hooks = scratch.root.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let marker = scratch.root.join("hook-ran");
+    for hook in [
+        "reference-transaction",
+        "post-checkout",
+        "post-index-change",
+    ] {
+        let path = hooks.join(hook);
+        fs::write(&path, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    fs::write(
+        scratch.home.join(".gitconfig"),
+        format!("[core]\n\thooksPath = {}\n", hooks.display()),
+    )
+    .unwrap();
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {}\n", remote.url)));
+    // Nor can the configuration of a repository the build runs in, which
+    // would send git elsewhere.
+    common::repo::run(&dir, &["init", "-q"]);
+    let elsewhere = "url.https://localhost:1/.insteadOf";
+    let origin = format!("https://localhost:{}/", remote.server.port);
+    common::repo::run(&dir, &["config", elsewhere, &origin]);
+    common::repo::run(&dir, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    scratch.build(&dir, &[]);
+    assert!(!marker.exists(), "a hook ran");
+    let fetched = scratch.home.join(".cache/ap/git");
+    let entries: Vec<PathBuf> = fs::read_dir(&fetched)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    for entry in entries {
+        let bare = common::repo::run(&entry, &["rev-parse", "--is-bare-repository"]);
+        assert_eq!(bare, "true", "{}", entry.display());
+        assert!(!entry.join("README.md").exists());
+    }
+}
+
+// spec(Host requirements): On every host, `ap build` needs `git` to fetch a remote source (see [Sources](#sources)).
+// spec(Host requirements): Without it, a build with a remote source fails and says that it needs `git`.
+#[test]
+fn a_build_with_a_remote_source_and_no_git_says_it_needs_git() {
+    let scratch = Scratch::new("repo-no-git");
+    let empty = scratch.root.join("no-programs");
+    fs::create_dir_all(&empty).unwrap();
+    let dir = scratch.project("notes", &with_repo("REPO https://localhost:1/tools.git\n"));
+    let output = scratch.ap_with(&dir, &["build"], &[("PATH", &empty)]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains("needs `git`"), "{message}");
+    // Without a remote source, the build needs no program.
+    let dir = scratch.project("plain", "AGENT claude:2.1.3\nOS minimal\n");
+    let output = scratch.ap_with(&dir, &["build"], &[("PATH", &empty)]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+// spec(REPO): Two repositories with the same name are an error; give one a destination.
+#[test]
+fn two_repos_with_one_name_fail_before_any_fetch() {
+    let scratch = Scratch::new("repo-one-name");
+    let first = Remote::new(&scratch, "tools");
+    let dir = scratch.project(
+        "notes",
+        &with_repo(&format!(
+            "REPO {}\nREPO https://localhost:1/other/tools\n",
+            first.url
+        )),
+    );
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:4: "), "{message}");
+    assert!(message.contains("destination"), "{message}");
+    assert_eq!(first.server.requests(), 0);
+}
+
+/// A branch, an annotated tag, and a commit each resolve to the commit they
+/// name. A ref that names nothing fails, and the error names the source.
+// spec(REPO): Otherwise its `HEAD` is detached at the commit.
+#[test]
+fn a_ref_resolves_to_the_commit_it_names() {
+    let scratch = Scratch::new("repo-refs");
+    let remote = Remote::new(&scratch, "tools");
+    let [first, second] = [&remote.commits[0], &remote.commits[1]];
+    let tag = ["tag", "-a", "-m", "v1", "v1", first.as_str()];
+    common::repo::run(&remote.bare, &tag);
+    // A branch name that git's configuration would read as a comment.
+    common::repo::run(&remote.bare, &["branch", "odd#name", first.as_str()]);
+    let url = &remote.url;
+    let dir = scratch.project(
+        "notes",
+        &with_repo(&format!(
+            "REPO {url}@main ~/branch\nREPO {url}@v1 ~/tag\nREPO {url}@{first} ~/commit\n\
+             REPO {url}@odd#name ~/odd\n"
+        )),
+    );
+    scratch.build(&dir, &[]);
+    assert_eq!(
+        source_lines(&dir),
+        [
+            format!("SOURCE {url} main refs/heads/main {second}"),
+            format!("SOURCE {url} v1 refs/tags/v1 {first}"),
+            format!("SOURCE {url} {first} - {first}"),
+            format!("SOURCE {url} odd#name refs/heads/odd#name {first}"),
+        ]
+    );
+    let odd = repo_layer(&scratch, "notes", &format!("REPO {url}@odd#name ~/odd"));
+    let odd = unpacked(&scratch, &odd, "/home/agent/odd");
+    assert_eq!(
+        common::repo::run(&odd, &["rev-parse", "@{upstream}"]),
+        *first
+    );
+    for (at, commit, branch) in [
+        ("branch", second, Some("refs/heads/main")),
+        ("tag", first, None),
+        ("commit", first, None),
+    ] {
+        let image = repo_layer(
+            &scratch,
+            "notes",
+            &format!(
+                "REPO {url}@{} ~/{at}",
+                match at {
+                    "branch" => "main".to_string(),
+                    "tag" => "v1".to_string(),
+                    _ => first.clone(),
+                }
+            ),
+        );
+        let repo = unpacked(&scratch, &image, &format!("/home/agent/{at}"));
+        check_clone(&repo, &remote.work, commit);
+        let symbolic = common::repo::git(&repo)
+            .args(["symbolic-ref", "-q", "HEAD"])
+            .output()
+            .unwrap();
+        let symbolic = String::from_utf8(symbolic.stdout).unwrap();
+        assert_eq!(symbolic.trim(), branch.unwrap_or(""), "{at}");
+    }
+
+    let dir = scratch.project("nothing", &with_repo(&format!("REPO {url}@nope\n")));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(
+        message.contains(url.as_str()) && message.contains("`nope`"),
+        "{message}"
+    );
+
+    // A commit the remote doesn't have fails, and the lock doesn't record it.
+    let absent = "0123456789abcdef0123456789abcdef01234567";
+    let dir = scratch.project("absent", &with_repo(&format!("REPO {url}@{absent}\n")));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains(url.as_str()), "{message}");
+    assert!(source_lines(&dir).is_empty());
+}
+
+// spec(REPO): A source with a subdirectory is an error, because `REPO` clones a whole repository.
+#[test]
+fn a_repo_source_with_a_subdirectory_fails() {
+    let scratch = Scratch::new("repo-subdirectory");
+    let dir = scratch.project("notes", &with_repo("REPO jgabor/agent-plus/crates\n"));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains("subdirectory"), "{message}");
+}
+
+/// A `SOURCE` line holds a repository, a ref, the full name of the ref it
+/// resolved through or `-`, and a commit.
+#[test]
+fn a_lock_reads_and_writes_a_source() {
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let text = format!("SOURCE https://localhost/a.git HEAD refs/heads/main {commit}\n");
+    let lock = ap::lock::Lock::read(&text).unwrap();
+    assert_eq!(lock.text(), text);
+    for bad in [
+        "SOURCE https://localhost/a.git HEAD refs/heads/main\n".to_string(),
+        "SOURCE https://localhost/a.git HEAD refs/heads/main abc\n".to_string(),
+        format!("SOURCE https://localhost/a.git HEAD main {commit}\n"),
+        format!("SOURCE https://localhost/a.git HEAD \"refs/heads/a b\" {commit}\n"),
+        format!(
+            "SOURCE https://localhost/a.git HEAD - {commit}\nSOURCE https://localhost/a.git HEAD - {commit}\n"
+        ),
+    ] {
+        assert!(ap::lock::Lock::read(&bad).is_err(), "{bad}");
     }
 }

@@ -3,6 +3,8 @@
 
 #![allow(dead_code, reason = "each test binary uses only some of this module")]
 
+pub mod erofs;
+pub mod git_server;
 pub mod repo;
 
 use std::fs;
@@ -130,16 +132,7 @@ pub struct Server {
 impl Server {
     /// `routes` receives the server's own origin, for writing redirects.
     pub fn start(routes: impl FnOnce(&str) -> Vec<(&'static str, Vec<u8>)>) -> Self {
-        let certs = vec![CertificateDer::from_pem_slice(CERT.as_bytes()).unwrap()];
-        let key = PrivateKeyDer::from_pem_slice(KEY.as_bytes()).unwrap();
-        let config = Arc::new(
-            ServerConfig::builder_with_provider(Arc::new(rustls_graviola::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .unwrap(),
-        );
+        let config = tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let routes = routes(&format!("https://localhost:{port}"));
@@ -180,6 +173,21 @@ impl Server {
     pub fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
     }
+}
+
+/// The configuration of a TLS server that presents the certificate for
+/// `localhost`.
+fn tls_config() -> Arc<ServerConfig> {
+    let certs = vec![CertificateDer::from_pem_slice(CERT.as_bytes()).unwrap()];
+    let key = PrivateKeyDer::from_pem_slice(KEY.as_bytes()).unwrap();
+    Arc::new(
+        ServerConfig::builder_with_provider(Arc::new(rustls_graviola::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .unwrap(),
+    )
 }
 
 fn read_head(stream: &mut impl Read) -> io::Result<String> {

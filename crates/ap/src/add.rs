@@ -160,7 +160,7 @@ fn dir(mode: u16, entries: BTreeMap<Vec<u8>, Entry>) -> erofs::Dir {
 /// Who owns the entry at `path` in a layer whose content lands at
 /// `content`: `agent` for the content and what is in it, and as [`owner`]
 /// says for the directories above it.
-fn entry_owner(content: &[u8], path: &[u8]) -> erofs::Owner {
+pub fn entry_owner(content: &[u8], path: &[u8]) -> erofs::Owner {
     match path.strip_prefix(content) {
         Some(rest) if rest.is_empty() || rest[0] == b'/' => AGENT,
         _ => owner(path),

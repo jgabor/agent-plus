@@ -881,10 +881,16 @@ fn parse_loose_ref(name: &str, contents: &[u8]) -> Result<Target, Error> {
     }
 }
 
-/// Refuses a name that isn't `HEAD` or a full name under `refs/` that `git
-/// check-ref-format` accepts, so no name reaches outside the git directory.
+/// Whether `name` is a full name under `refs/` that `git check-ref-format`
+/// accepts, so that it reaches nowhere outside a git directory.
+pub fn is_ref_name(name: &str) -> bool {
+    name.starts_with("refs/") && format_ok(name.as_bytes())
+}
+
+/// Refuses a name that isn't `HEAD` or a [`is_ref_name`], so no name reaches
+/// outside the git directory.
 fn check_name(name: &str) -> Result<(), Error> {
-    if name == "HEAD" || (name.starts_with("refs/") && format_ok(name.as_bytes())) {
+    if name == "HEAD" || is_ref_name(name) {
         return Ok(());
     }
     Err(corrupt(format!("{name:?} isn't a ref name")))

@@ -8,8 +8,14 @@
 //! if the store doesn't have it. The harness layer comes from the file that
 //! `Agentfile.lock` pins. After approval, a lock that doesn't resolve `AGENT`
 //! resolves again, the file is downloaded into the download cache unless it
-//! holds it, and a changed lock is written, as `ap::lock::settle` says. The
-//! other tiers, and the instructions that need any other fetch, fail.
+//! holds it, and a changed lock is written, as `ap::lock::settle` says. Each
+//! `REPO` the lock doesn't pin resolves then too, as `ap::source` says, and
+//! its layer fetches the commit, unless the store has the layer or the
+//! download cache has the commit. The other tiers, a `REPO` with a local
+//! source, and the instructions that need any other fetch, fail.
+//!
+//! `ap update` builds the same way, once `ap::lock::Lock::forget` has
+//! forgotten what it resolves again.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -22,19 +28,20 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use agentfile::{
-    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Sources,
-    Text,
+    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Source,
+    Sources, Text,
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
 use ap::lock::{self, Companion, Lock, Locked};
 use ap::paths::HostPath;
+use ap::source;
 use graviola::hashing::sha2::Sha256Context;
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 
 /// The instructions that need a fetch or a harness, which `ap build` can't
 /// build yet.
-const NOT_BUILT: [&str; 5] = ["REPO", "PLUGIN", "SKILL", "MCP", "SEAL"];
+const NOT_BUILT: [&str; 4] = ["PLUGIN", "SKILL", "MCP", "SEAL"];
 
 /// Where the prompt goes in the harness configuration layer. The harness gets
 /// it at run time, so it has no file of its own in the harness's directory.
@@ -46,6 +53,8 @@ const BASE_LEVEL: i8 = 3;
 
 /// The arguments of `ap build`.
 pub struct Args {
+    /// Whether this is `ap update`.
+    update: bool,
     strict: bool,
     /// Whether the build may take the name over from another directory.
     replace: bool,
@@ -86,12 +95,20 @@ pub fn parse(args: &[OsString]) -> Option<Args> {
         }
     }
     Some(Args {
+        update: false,
         strict,
         replace,
         approve,
         name,
         dir,
     })
+}
+
+/// Reads `ap update`'s arguments, which are `ap build`'s.
+pub fn parse_update(args: &[OsString]) -> Option<Args> {
+    let mut args = parse(args)?;
+    args.update = true;
+    Some(args)
 }
 
 /// Builds the agent, and returns the exit status. What each layer did goes
@@ -125,6 +142,8 @@ enum Content {
     Fetch(Pin<'static>),
     /// The locked harness, from its files in the download cache.
     Harness(Locked, PathBuf),
+    /// A `REPO`, from its fetch in the download cache.
+    Repo(source::Repo, PathBuf),
 }
 
 fn build(args: &Args) -> Result<(), String> {
@@ -194,6 +213,13 @@ fn build(args: &Args) -> Result<(), String> {
     };
     let instructions = agentfile::parse_for(&source, ap::adapter::reserved).map_err(report)?;
     let mut lock = read_lock(&path.with_extension("lock"), &context)?;
+    // What the lockfile on disk pins, before `ap update` forgets it.
+    let on_disk = lock.sources.clone();
+    if args.update
+        && let Ok(settings) = Settings::read(&instructions)
+    {
+        lock.forget(&settings.agent);
+    }
     let cache = lock::cache(
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
         Some(home.as_os_str()),
@@ -267,8 +293,13 @@ fn build(args: &Args) -> Result<(), String> {
     let agent_line = agent_line(&instructions);
     let agent = Settings::read(&instructions).map_err(report)?.agent;
     let cache = cache.ok_or("ap: HOME isn't an absolute path, so there's no download cache")?;
+    let lock_path = context.join("Agentfile.lock");
+    let sources = settle_sources(&instructions, &lock, &cache)
+        .map_err(|(line, error)| format!("{shown}:{line}: {error}"))?;
+    let sources_changed = sources != on_disk;
+    lock.sources = sources;
     let changed = lock::settle(
-        &context.join("Agentfile.lock"),
+        &lock_path,
         &mut lock,
         &agent,
         &Client::new(),
@@ -280,6 +311,11 @@ fn build(args: &Args) -> Result<(), String> {
         },
     )
     .map_err(|error| format!("{shown}:{agent_line}: {error}"))?;
+    if sources_changed {
+        lock.write(&lock_path)
+            .map_err(|error| format!("ap: {error}"))?;
+    }
+    let changed = changed || sources_changed;
     let codex = (lock.harness.as_ref()).filter(|locked| locked.harness == Harness::Codex);
     if let Some(error) = codex.and_then(|locked| ap::adapter::codex::unsupported(&locked.version)) {
         return Err(format!("{shown}:{agent_line}: {error}"));
@@ -403,6 +439,11 @@ fn store_layers(
             Content::Add(add) => add.image(),
             Content::Image(image) => Ok(image),
             Content::Harness(locked, path) => harness(&locked, &path),
+            Content::Repo(repo, cache) => {
+                source::fetch(&repo.url, &repo.resolved.commit, repo.history, &cache)
+                    .and_then(|fetched| repo.image(&fetched, &cache))
+                    .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", repo.url)))
+            }
             Content::Fetch(_) => unreachable!("a fetch was made above"),
         };
         match image {
@@ -587,6 +628,20 @@ fn plan(
             prompt = (!value.is_empty()).then_some(value);
         }
     }
+    for repo in sources.iter().flat_map(|sources| &sources.repo) {
+        let message = match &repo.source {
+            Source::Local(path) => format!(
+                "`REPO` with a local source, `{}`, is not built yet",
+                agentfile::print_argument(path)
+            ),
+            Source::Remote(remote) if remote.subdirectory.is_some() => format!(
+                "a `REPO` source can't name a subdirectory, because `REPO` clones a whole repository, but `{}` does",
+                remote.repository
+            ),
+            Source::Remote(_) => continue,
+        };
+        errors.push(fail(repo.line, message));
+    }
     // Checking `ADD` and `SHARE` on the host needs their typed values.
     let (Some(settings), Some(sources), Some(files), Some(guest)) =
         (settings, sources, files, guest)
@@ -623,6 +678,8 @@ fn plan(
         // `ap build` resolves the harness after approval, and plans again.
         (None, Some(_)) => {}
     }
+    // `ADD` and `REPO` layers, in line order.
+    let mut placed = Vec::new();
     for add in &sources.add {
         let Some(guest) = guest.iter().find(|path| path.line == add.line) else {
             continue;
@@ -640,7 +697,7 @@ fn plan(
                     label.push(' ');
                     label.push_str(&agentfile::print_argument(destination));
                 }
-                planned.push(Planned {
+                placed.push(Planned {
                     line: add.line,
                     label,
                     key: layer.key.clone(),
@@ -651,6 +708,53 @@ fn plan(
             Err(error) => errors.push(fail(add.line, error.to_string())),
         }
     }
+    for repo in &sources.repo {
+        let line = repo.line;
+        let Source::Remote(remote) = &repo.source else {
+            continue;
+        };
+        if remote.subdirectory.is_some() {
+            continue;
+        }
+        let reference = remote.reference.as_deref().unwrap_or(source::DEFAULT);
+        let (Some(guest), Some(resolved), Some(cache)) = (
+            guest.iter().find(|path| path.line == line),
+            cached.lock.source(&remote.repository, reference),
+            cached.cache,
+        ) else {
+            // A source the lock doesn't pin resolves after approval, and
+            // the build plans again. With no download cache, the harness
+            // fails the plan.
+            continue;
+        };
+        let repo = source::Repo {
+            url: remote.repository.clone(),
+            resolved: resolved.clone(),
+            guest: guest.path.clone(),
+            history: repo.history,
+        };
+        let label = instructions
+            .iter()
+            .find(|instruction| instruction.line == line)
+            .map(|instruction| {
+                let mut label = instruction.name.clone();
+                for argument in &instruction.arguments {
+                    label.push(' ');
+                    label.push_str(&agentfile::print_argument(argument));
+                }
+                label
+            })
+            .unwrap_or_default();
+        placed.push(Planned {
+            line,
+            label,
+            key: repo.key(),
+            level,
+            content: Content::Repo(repo, cache.to_path_buf()),
+        });
+    }
+    placed.sort_by_key(|layer| layer.line);
+    planned.extend(placed);
     for share in &files.share {
         if let Err(error) = resolved.get(&share.source) {
             errors.push(fail(share.line, error.to_string()));
@@ -672,6 +776,49 @@ fn plan(
     });
     warnings.sort_by_key(|warning| warning.line);
     Ok((planned, warnings, prompt.is_some()))
+}
+
+/// What the lock pins for each `REPO` with a remote source, in line order,
+/// one for each repository and ref. A source the lock doesn't pin resolves,
+/// and its commit is fetched into the download cache `cache`. An error
+/// comes with its line.
+fn settle_sources(
+    instructions: &[Instruction],
+    lock: &Lock,
+    cache: &Path,
+) -> Result<Vec<lock::Source>, (usize, String)> {
+    let mut settled: Vec<lock::Source> = Vec::new();
+    let sources = Sources::read(instructions).unwrap_or_default();
+    for repo in &sources.repo {
+        let Source::Remote(remote) = &repo.source else {
+            continue;
+        };
+        let repository = &remote.repository;
+        let reference = remote.reference.as_deref().unwrap_or(source::DEFAULT);
+        if settled
+            .iter()
+            .any(|source| &source.repository == repository && source.reference == reference)
+        {
+            continue;
+        }
+        let resolved = match lock.source(repository, reference) {
+            Some(resolved) => resolved.clone(),
+            // A new resolution is fetched before the lock records it, so
+            // the lock records only a commit the remote has.
+            None => source::resolve(repository, reference, cache)
+                .and_then(|resolved| {
+                    source::fetch(repository, &resolved.commit, repo.history, cache)?;
+                    Ok(resolved)
+                })
+                .map_err(|error| (repo.line, format!("{repository}: {error}")))?,
+        };
+        settled.push(lock::Source {
+            repository: repository.clone(),
+            reference: reference.to_string(),
+            resolved,
+        });
+    }
+    Ok(settled)
 }
 
 /// The warning for an `EFFORT` that the locked harness doesn't take, on the

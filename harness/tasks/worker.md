@@ -84,6 +84,13 @@ can't continue alone, park the issue as AGENTS.md says.
    If the change needs an action that only the owner may take, file its
    `action-needed` issue now, and follow Owner actions in AGENTS.md for the
    PR's body, your status comment, and your last message.
+
+   If the change touches `harness/journey/`, run `cargo xtask journey
+   <step>` for each step whose script it changes, before you run `merge` or
+   `prepare`. It runs the step and the steps it needs, and exits 1 unless
+   the step passes, so fix the change until it does. A step that spends
+   money is skipped and exits 1, and the merge sequence skips it too, so go
+   on.
 7. If the issue has `auto:merge`, run `cargo xtask merge <pr> --thread <id>`.
    If it prints `fail owner`, because the PR waits for the owner, or `fail
    hills`, `fail journey`, or `fail budgets` because a count fell, run `cargo

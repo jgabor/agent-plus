@@ -91,8 +91,8 @@ pub fn resolve(url: &str, reference: &str, cache: &Path) -> io::Result<Resolved>
         };
         let commit = *refs.get(&format!("{candidate}^{{}}")).unwrap_or(id);
         let name = match candidate.as_str() {
-            DEFAULT => symbolic.clone().filter(|name| check_ref(name)),
-            _ => Some(candidate).filter(|name| check_ref(name)),
+            DEFAULT => symbolic.clone().filter(|name| git::is_ref_name(name)),
+            _ => Some(candidate).filter(|name| git::is_ref_name(name)),
         };
         return Ok(Resolved { name, commit });
     }
@@ -279,20 +279,6 @@ fn read_failed(error: git::Error) -> io::Error {
     }
 }
 
-/// Whether `name` is a ref name `git check-ref-format` accepts, so that it
-/// can go in a `.git` as it is.
-pub(crate) fn check_ref(name: &str) -> bool {
-    let bad = |c: char| c.is_ascii_control() || " ~^:?*[\\".contains(c);
-    name.contains('/')
-        && !name.contains("..")
-        && !name.contains("@{")
-        && !name.ends_with('.')
-        && !name.chars().any(bad)
-        && name
-            .split('/')
-            .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"))
-}
-
 /// One `REPO` line, resolved, which [`Repo::image`] turns into a layer.
 #[derive(Clone, Debug)]
 pub struct Repo {
@@ -388,8 +374,9 @@ impl Repo {
         let (head, refs) = match branch {
             Some(branch) => {
                 config.push_str(&format!(
-                    "[branch {}]\n\tremote = origin\n\tmerge = refs/heads/{branch}\n",
-                    quoted(branch)
+                    "[branch {}]\n\tremote = origin\n\tmerge = {}\n",
+                    quoted(branch),
+                    quoted(&format!("refs/heads/{branch}"))
                 ));
                 (
                     format!("ref: refs/heads/{branch}\n"),
@@ -423,17 +410,10 @@ impl Repo {
         ]);
         git.entries
             .insert(b"refs".to_vec(), erofs::Node::Dir(dir(refs)));
-        let mut packs = BTreeMap::new();
-        for entry in fs::read_dir(fetched.join("objects/pack"))? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                let data = fs::read(entry.path())?;
-                packs.insert(entry.file_name().as_bytes().to_vec(), file(0o444, data));
-            }
-        }
-        let objects = BTreeMap::from([(b"pack".to_vec(), erofs::Node::Dir(dir(packs)))]);
-        git.entries
-            .insert(b"objects".to_vec(), erofs::Node::Dir(dir(objects)));
+        git.entries.insert(
+            b"objects".to_vec(),
+            erofs::Node::Dir(objects(&fetched.join("objects"), 0)?),
+        );
         Ok(git)
     }
 }
@@ -454,6 +434,23 @@ fn index(fetched: &Path, commit: &Id, cache: &Path) -> io::Result<Vec<u8>> {
         .arg(commit.to_string());
     run(command, "read-tree")?;
     fs::read(&output)
+}
+
+/// The objects the fetch wrote under `dir`, its packs and any loose
+/// object, as git can't change them.
+fn objects(at: &Path, depth: usize) -> io::Result<erofs::Dir> {
+    let mut entries = BTreeMap::new();
+    for entry in fs::read_dir(at)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let name = entry.file_name().as_bytes().to_vec();
+        if kind.is_dir() && depth == 0 {
+            entries.insert(name, erofs::Node::Dir(objects(&entry.path(), 1)?));
+        } else if kind.is_file() {
+            entries.insert(name, file(0o444, fs::read(entry.path())?));
+        }
+    }
+    Ok(dir(entries))
 }
 
 /// Quotes a value of git's configuration, so that it reads back as it is.

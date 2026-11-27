@@ -628,13 +628,17 @@ fn plan(
     }
     for repo in sources.iter().flat_map(|sources| &sources.repo) {
         let message = match &repo.source {
-            Source::Local(_) => "`REPO` with a local source is not built yet",
-            Source::Remote(remote) if remote.subdirectory.is_some() => {
-                "a `REPO` source can't name a subdirectory, because `REPO` clones a whole repository"
-            }
+            Source::Local(path) => format!(
+                "`REPO` with a local source, `{}`, is not built yet",
+                agentfile::print_argument(path)
+            ),
+            Source::Remote(remote) if remote.subdirectory.is_some() => format!(
+                "a `REPO` source can't name a subdirectory, because `REPO` clones a whole repository, but `{}` does",
+                remote.repository
+            ),
             Source::Remote(_) => continue,
         };
-        errors.push(fail(repo.line, message.to_string()));
+        errors.push(fail(repo.line, message));
     }
     // Checking `ADD` and `SHARE` on the host needs their typed values.
     let (Some(settings), Some(sources), Some(files), Some(guest)) =
@@ -774,7 +778,8 @@ fn plan(
 
 /// What the lock pins for each `REPO` with a remote source, in line order,
 /// one for each repository and ref. A source the lock doesn't pin resolves,
-/// with `cache` as the download cache. An error comes with its line.
+/// and its commit is fetched into the download cache `cache`. An error
+/// comes with its line.
 fn settle_sources(
     instructions: &[Instruction],
     lock: &Lock,
@@ -796,7 +801,13 @@ fn settle_sources(
         }
         let resolved = match lock.source(repository, reference) {
             Some(resolved) => resolved.clone(),
+            // A new resolution is fetched before the lock records it, so
+            // the lock records only a commit the remote has.
             None => source::resolve(repository, reference, cache)
+                .and_then(|resolved| {
+                    source::fetch(repository, &resolved.commit, repo.history, cache)?;
+                    Ok(resolved)
+                })
                 .map_err(|error| (repo.line, format!("{repository}: {error}")))?,
         };
         settled.push(lock::Source {

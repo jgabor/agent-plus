@@ -756,6 +756,7 @@ fn instructions_that_are_not_built_yet_fail() {
         assert!(line.contains(&format!("`{name}`")), "{line}");
         assert!(line.contains("not built yet"), "{line}");
     }
+    assert!(lines[0].contains("`./local`"), "{message}");
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
@@ -2522,6 +2523,8 @@ fn with_repo(lines: &str) -> String {
 // spec(REPO): Without `<dest>`, the repository lands in `~/git/<repository name>`.
 // spec(Sources): Every ref resolves to a commit at build time and is recorded in the lockfile.
 // spec(Sources): `ap build` fetches a remote source, which is any form but a local path, with the `git` on your host.
+// spec(REPO): The clone's `origin` is the source's repository.
+// spec(REPO): When the ref names a branch, the clone is on that branch, and it tracks the branch on `origin`.
 #[test]
 fn a_repo_lands_in_git_under_home_at_its_pinned_commit() {
     let scratch = Scratch::new("repo-lands");
@@ -2620,6 +2623,7 @@ fn a_repo_keeps_one_commit_unless_it_asks_for_history() {
 }
 
 // spec(Build): Builds reuse locked resolutions; `ap update` resolves them again and rebuilds the agent.
+// spec(Build): An `AGENT` that names an exact version keeps the digest the lockfile records for it.
 #[test]
 fn a_rebuild_reuses_the_locked_commit_and_update_resolves_it_again() {
     let scratch = Scratch::new("repo-locked");
@@ -2662,8 +2666,10 @@ fn a_rebuild_reuses_the_locked_commit_and_update_resolves_it_again() {
             remote.url
         )]
     );
-    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
-    assert!(lock.starts_with("HARNESS claude 2.1.3 "), "{lock}");
+    let harness = |lock: &str| lock.lines().next().unwrap().to_string();
+    let updated = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    assert_eq!(harness(&updated), harness(&lock));
+    assert!(updated.starts_with("HARNESS claude 2.1.3 "), "{updated}");
     let image = repo_layer(&scratch, "notes", &label);
     check_clone(
         &unpacked(&scratch, &image, "/home/agent/git/tools"),
@@ -2833,8 +2839,8 @@ fn two_repos_with_one_name_fail_before_any_fetch() {
 }
 
 /// A branch, an annotated tag, and a commit each resolve to the commit they
-/// name. Only a branch is checked out as a branch. A ref that names nothing
-/// fails, and the error names the source.
+/// name. A ref that names nothing fails, and the error names the source.
+// spec(REPO): Otherwise its `HEAD` is detached at the commit.
 #[test]
 fn a_ref_resolves_to_the_commit_it_names() {
     let scratch = Scratch::new("repo-refs");
@@ -2842,11 +2848,14 @@ fn a_ref_resolves_to_the_commit_it_names() {
     let [first, second] = [&remote.commits[0], &remote.commits[1]];
     let tag = ["tag", "-a", "-m", "v1", "v1", first.as_str()];
     common::repo::run(&remote.bare, &tag);
+    // A branch name that git's configuration would read as a comment.
+    common::repo::run(&remote.bare, &["branch", "odd#name", first.as_str()]);
     let url = &remote.url;
     let dir = scratch.project(
         "notes",
         &with_repo(&format!(
-            "REPO {url}@main ~/branch\nREPO {url}@v1 ~/tag\nREPO {url}@{first} ~/commit\n"
+            "REPO {url}@main ~/branch\nREPO {url}@v1 ~/tag\nREPO {url}@{first} ~/commit\n\
+             REPO {url}@odd#name ~/odd\n"
         )),
     );
     scratch.build(&dir, &[]);
@@ -2856,7 +2865,14 @@ fn a_ref_resolves_to_the_commit_it_names() {
             format!("SOURCE {url} main refs/heads/main {second}"),
             format!("SOURCE {url} v1 refs/tags/v1 {first}"),
             format!("SOURCE {url} {first} - {first}"),
+            format!("SOURCE {url} odd#name refs/heads/odd#name {first}"),
         ]
+    );
+    let odd = repo_layer(&scratch, "notes", &format!("REPO {url}@odd#name ~/odd"));
+    let odd = unpacked(&scratch, &odd, "/home/agent/odd");
+    assert_eq!(
+        common::repo::run(&odd, &["rev-parse", "@{upstream}"]),
+        *first
     );
     for (at, commit, branch) in [
         ("branch", second, Some("refs/heads/main")),
@@ -2894,6 +2910,16 @@ fn a_ref_resolves_to_the_commit_it_names() {
         message.contains(url.as_str()) && message.contains("`nope`"),
         "{message}"
     );
+
+    // A commit the remote doesn't have fails, and the lock doesn't record it.
+    let absent = "0123456789abcdef0123456789abcdef01234567";
+    let dir = scratch.project("absent", &with_repo(&format!("REPO {url}@{absent}\n")));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains(url.as_str()), "{message}");
+    assert!(source_lines(&dir).is_empty());
 }
 
 // spec(REPO): A source with a subdirectory is an error, because `REPO` clones a whole repository.

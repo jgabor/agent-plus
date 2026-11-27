@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls::{ServerConnection, StreamOwned};
 
 /// A server whose thread ends with the test process.
 pub struct GitServer {
@@ -27,16 +25,7 @@ impl GitServer {
     /// every request with a 401, as a host does for a private repository
     /// when a client sends no credentials.
     pub fn start(root: &Path, private: bool) -> GitServer {
-        let certs = vec![CertificateDer::from_pem_slice(super::CERT.as_bytes()).unwrap()];
-        let key = PrivateKeyDer::from_pem_slice(super::KEY.as_bytes()).unwrap();
-        let config = Arc::new(
-            ServerConfig::builder_with_provider(Arc::new(rustls_graviola::default_provider()))
-                .with_safe_default_protocol_versions()
-                .unwrap()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)
-                .unwrap(),
-        );
+        let config = super::tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(AtomicUsize::new(0));

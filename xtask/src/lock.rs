@@ -789,27 +789,42 @@ mod tests {
         fs::remove_dir_all(&path).unwrap();
     }
 
-    /// Returns once something waits to share the lock on `name`, which
-    /// `/proc/locks` lists as a blocked request on the file's inode.
+    /// Returns once something in this process waits to share the lock on
+    /// `name`.
     fn wait_for_a_sharer(path: &Path, name: &str) {
-        let inode = fs::metadata(path.join(name)).unwrap().ino().to_string();
+        let inode = fs::metadata(path.join(name)).unwrap().ino();
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let locks = fs::read_to_string("/proc/locks").unwrap();
-            let waits = locks.lines().any(|line| {
-                let words: Vec<&str> = line.split_whitespace().collect();
-                words.get(1) == Some(&"->")
-                    && words.contains(&"READ")
-                    && words
-                        .iter()
-                        .any(|word| word.rsplit(':').next() == Some(&inode) && word.contains(':'))
-            });
-            if waits {
+            if waits_to_share(&locks, std::process::id(), inode) {
                 return;
             }
             assert!(Instant::now() < deadline, "nothing waited to share {name}");
             thread::yield_now();
         }
+    }
+
+    /// Whether `locks`, read from `/proc/locks`, lists a blocked request by
+    /// process `pid` to share the file with inode `inode`.
+    fn waits_to_share(locks: &str, _pid: u32, inode: u64) -> bool {
+        let inode = format!(":{inode}");
+        locks.lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            matches!(words[..], [_, "->", _, _, "READ", _, file, ..] if file.ends_with(&inode))
+        })
+    }
+
+    /// Another process that waits to share a file with the same inode number
+    /// isn't this test's. Btrfs lists each of its subvolumes under the one
+    /// device in `/proc/locks`, and subvolumes reuse inode numbers.
+    #[test]
+    fn a_sharer_in_another_process_is_not_this_ones() {
+        let locks = "\
+            3: FLOCK  ADVISORY  WRITE 100 00:25:191426148 0 EOF\n\
+            3: -> FLOCK  ADVISORY  READ 200 00:25:191426148 0 EOF\n";
+        assert!(waits_to_share(locks, 200, 191426148), "its own wait");
+        assert!(!waits_to_share(locks, 100, 191426148), "another's wait");
+        assert!(!waits_to_share(locks, 200, 1426148), "another inode");
     }
 
     /// The test keeps `ahead.lock`, as the merge slot's holder does while it

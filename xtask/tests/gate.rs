@@ -280,16 +280,20 @@ const KERNEL_DIGEST: &str = "a0c936696eb7d5ee3192bf53b9d281cecbb40ca9db520de72cb
 /// A repository whose pin names the digest of `kernel\n`, and whose test runs
 /// `body` with `tree`, the path of the kernel that t1 fetches.
 fn kernel_workspace(name: &str, body: &str) -> PathBuf {
+    guest_workspace(name, "guest/kernel", KERNEL_DIGEST, "vmlinux", body)
+}
+
+/// A repository whose `<pins>/pin.toml` names `digest`, and whose test runs
+/// `body` with `tree`, the path in `target/guest` that t1 fetches into.
+fn guest_workspace(name: &str, pins: &str, digest: &str, tree: &str, body: &str) -> PathBuf {
     let source = format!(
-        "#[test]\nfn kernel() {{\n    let tree = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../target/guest/vmlinux\");\n    {body}\n}}\n"
+        "#[test]\nfn guest() {{\n    let tree = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"../target/guest/{tree}\");\n    {body}\n}}\n"
     );
     let root = workspace(name, &source);
-    fs::create_dir_all(root.join("guest/kernel")).unwrap();
+    fs::create_dir_all(root.join(pins)).unwrap();
     fs::write(
-        root.join("guest/kernel/pin.toml"),
-        format!(
-            "version = \"1\"\nurl = \"https://example.com/vmlinux\"\nsha256 = \"{KERNEL_DIGEST}\"\n"
-        ),
+        root.join(pins).join("pin.toml"),
+        format!("version = \"1\"\nurl = \"https://example.com/guest\"\nsha256 = \"{digest}\"\n"),
     )
     .unwrap();
     let output = Command::new("git")
@@ -337,4 +341,84 @@ fn only_the_pinned_kernel_moves_between_the_store_and_a_tree() {
     let output = xtask(&root, &["gate"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert_eq!(fs::read_to_string(kernel_store(&root)).unwrap(), "wrong\n");
+}
+
+/// The digest of `os\n`, the uncompressed layer in an OS workspace.
+const OS_DIGEST: &str = "6adc3cbcc7923c4ff9cbe6a1dd13e7f4cf99dd072363ce88feca9fdbf55c9f24";
+
+/// A repository whose OS pin names the digest of `os\n`, and whose test runs
+/// `body` with `tree`, the store in `target/guest` that t1 fetches the layer
+/// into.
+fn os_workspace(name: &str, body: &str) -> PathBuf {
+    guest_workspace(
+        name,
+        "guest/os",
+        OS_DIGEST,
+        &format!("os-{OS_DIGEST}"),
+        body,
+    )
+}
+
+/// The layer's two files in `tree`, as a test body names them: its frame in
+/// `zstd-layers`, and its uncompressed copy in `plain-layers`.
+fn os_tree() -> [String; 2] {
+    ["zstd-layers", "plain-layers"]
+        .map(|directory| format!("tree.join(\"{directory}/{OS_DIGEST}\")"))
+}
+
+/// A test body that writes the layer into `tree` as t1 fetches it, with a
+/// frame of `frame\n` and an uncompressed copy of `plain\n`.
+fn write_os(plain: &str) -> String {
+    let [zstd, uncompressed] = os_tree();
+    format!(
+        "for directory in [\"zstd-layers\", \"plain-layers\"] {{\n        std::fs::create_dir_all(tree.join(directory)).unwrap();\n    }}\n    std::fs::write({zstd}, \"frame\\n\").unwrap();\n    std::fs::write({uncompressed}, \"{plain}\\n\").unwrap();"
+    )
+}
+
+/// The OS layer that the gate keeps in the shared git directory: its frame,
+/// then its uncompressed copy.
+fn os_store(root: &Path) -> [PathBuf; 2] {
+    ["zstd-layer", "plain-layer"].map(|file| root.join(".git/xtask/os").join(file))
+}
+
+/// Keeps a layer in the store with a frame of `frame\n` and an uncompressed
+/// copy of `plain`.
+fn store_os(root: &Path, plain: &str) {
+    let [zstd, plain_file] = os_store(root);
+    fs::create_dir_all(zstd.parent().unwrap()).unwrap();
+    fs::write(zstd, "frame\n").unwrap();
+    fs::write(plain_file, plain).unwrap();
+}
+
+#[test]
+fn a_tree_without_the_os_layer_gets_it_from_the_store() {
+    let [zstd, plain] = os_tree();
+    let body = format!(
+        "assert_eq!(std::fs::read_to_string({zstd}).unwrap(), \"frame\\n\");\n    assert_eq!(std::fs::read_to_string({plain}).unwrap(), \"os\\n\");"
+    );
+    let root = os_workspace("os-out", &body);
+    store_os(&root, "os\n");
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+}
+
+#[test]
+fn the_gate_keeps_the_os_layer_that_the_tests_fetched() {
+    let root = os_workspace("os-in", &write_os("os"));
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let [zstd, plain] = os_store(&root);
+    assert_eq!(fs::read_to_string(zstd).unwrap(), "frame\n");
+    assert_eq!(fs::read_to_string(plain).unwrap(), "os\n");
+}
+
+#[test]
+fn only_the_pinned_os_layer_moves_between_the_store_and_a_tree() {
+    let body = format!("assert!(!tree.exists());\n    {}", write_os("other"));
+    let root = os_workspace("os-wrong", &body);
+    store_os(&root, "wrong\n");
+    let output = xtask(&root, &["gate"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let [_, plain] = os_store(&root);
+    assert_eq!(fs::read_to_string(plain).unwrap(), "wrong\n");
 }

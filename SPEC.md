@@ -1200,12 +1200,13 @@ Recognized formats:
 A plugin that ships several manifests is read from the one native to the
 target harness, then from Agent Plugins 1.0, then from the others in table
 order. A root `plugin.json` without the Agent Plugins 1.0 `$schema`, in a
-plugin with no other manifest, is an error that names the `$schema` it has.
+plugin with no other manifest, is an error that names the `$schema` it has,
+if any.
 
 Without names, a source with no plugin manifest and no marketplace
-manifest is read as a Claude Code plugin with no manifest, from Claude
-Code's default locations, and is named after its directory. A source with
-nothing in those locations either is an error.
+manifest is read as a Claude Code plugin, from Claude Code's default
+locations, and is named after its directory. A source with nothing in
+those locations either is an error.
 
 A root `plugin.json` is read as Codex reads it, whatever the target harness.
 

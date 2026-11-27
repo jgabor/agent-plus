@@ -394,7 +394,7 @@ impl Repo {
     fn set_roadmap_issues(&self, state: &str, body: &str, details: Option<&str>) {
         let issue = |number: u64, state: &str, title: &str, body: &str| {
             format!(
-                "{{\"number\":{number},\"state\":\"{state}\",\"title\":\"{title}\",\"body\":{body:?},\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null}}"
+                "{{\"number\":{number},\"state\":\"{state}\",\"title\":\"{title}\",\"body\":{body:?},\"labels\":[],\"url\":\"https://github.com/o/r/issues/{number}\",\"parent\":null,\"createdAt\":\"2026-01-01T00:00:00Z\"}}"
             )
         };
         let mut issues = vec![issue(158, state, "Roadmap", body)];

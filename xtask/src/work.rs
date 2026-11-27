@@ -14,13 +14,15 @@ const IN_PROGRESS: &str = "in-progress";
 pub const LAND_NEEDED: &str = "land-needed";
 pub const ANSWER_NEEDED: &str = "answer-needed";
 pub const PARKED: [&str; 2] = [LAND_NEEDED, ANSWER_NEEDED];
+/// An issue for something that only the owner can do.
+pub const ACTION_NEEDED: &str = "action-needed";
 /// What marks an issue that has to start on a Mac.
 const HOST_MACOS: &str = "host:macos";
 const STATUS_MARK: &str = "<!-- status -->";
 const DEFAULT_BRANCH: &str = "main";
 
 /// Seconds since 1970, from `2026-11-09T14:00Z`, with or without seconds.
-fn seconds(stamp: &str) -> Option<i64> {
+pub fn seconds(stamp: &str) -> Option<i64> {
     let (date, time) = stamp.strip_suffix('Z')?.split_once('T')?;
     let mut date = date.split('-').map(str::parse::<i64>);
     let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);

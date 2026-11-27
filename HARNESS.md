@@ -1183,10 +1183,14 @@ ends with a link to it. The details have four parts:
    closed. An open parent whose steps all pass is ready to close.
 2. What comes after v0.1.0: the commands that SPEC.md marks as planned or
    proposed, and the open sub-issues of the roadmap issue.
-3. What waits on the owner: open PRs and issues labeled `land-needed` or
-   `answer-needed`, and open issues with no `auto:*` label and no parent in
-   this repository. A listed PR stands for the issues it closes, so they are
-   left out, and so are the issues that `xtask` writes.
+3. What waits on the owner. It begins with what to do: each open issue
+   labeled `action-needed`, oldest first, with how many whole days it has
+   been open when the details are written. With no such issue, that list is
+   left out. Then come open PRs and issues labeled `land-needed` or
+   `answer-needed`, and open issues with no `auto:*` or `action-needed`
+   label and no parent in this repository. A listed PR stands for the issues
+   it closes, so they are left out, and so are the issues that `xtask`
+   writes.
 4. Busy and large files: a table of the 10 Rust files that the most commits
    on `main` changed in the 7 days before the commit the details are written
    at, busiest first, and then every other Rust file with 2,000 lines or

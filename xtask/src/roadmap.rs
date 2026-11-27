@@ -10,7 +10,7 @@ use crate::journey::{self, Milestone, Outcome};
 use crate::readme::{self, Line, README_FILE};
 use crate::score::{self, Score, Sentence};
 use crate::spec::{self, Arrives, Command};
-use crate::work::{self, ANSWER_NEEDED, LAND_NEEDED, PARKED};
+use crate::work::{self, ACTION_NEEDED, ANSWER_NEEDED, LAND_NEEDED, PARKED};
 use crate::{Problem, Verdict, base, lock, report, testrun, workspace};
 use std::fs;
 use std::path::Path;
@@ -51,7 +51,8 @@ pub fn run(details: bool) -> Result<Verdict, Problem> {
         Some(score) => {
             let proof = (commands.as_slice(), score);
             let files = rust_files(&root)?;
-            self::details(&milestones, &outcomes, &proof, &issues, &prs, &files)
+            let now = work::now_seconds()?;
+            self::details(&milestones, &outcomes, &proof, &issues, &prs, &files, now)
         }
         None => {
             let details = titled(&issues, DETAILS_TITLE).map(|issue| issue.number);
@@ -103,6 +104,7 @@ pub fn write(root: &Path, outcomes: &[Outcome], score: &Score) -> Result<(), Pro
         &issues,
         &gh.open_prs()?,
         &files,
+        work::now_seconds()?,
     );
     // The roadmap links to the details, so they are written first.
     let number = match titled(&issues, DETAILS_TITLE) {
@@ -230,8 +232,8 @@ fn gaps(all: &[RoadmapIssue]) -> Vec<String> {
         .collect()
 }
 
-/// The details for the owner and the agents. The same inputs give the same
-/// text, whatever order GitHub listed them in.
+/// The details for the owner and the agents, written at `now`. The same
+/// inputs give the same text, whatever order GitHub listed them in.
 fn details(
     milestones: &[Milestone],
     outcomes: &[Outcome],
@@ -239,6 +241,7 @@ fn details(
     all: &[RoadmapIssue],
     prs: &[OpenPr],
     files: &[RustFile],
+    now: i64,
 ) -> String {
     let mut issues: Vec<&RoadmapIssue> = all.iter().collect();
     issues.sort_by_key(|issue| issue.number);
@@ -295,6 +298,10 @@ fn details(
         .copied()
         .collect();
     text.push_str("\n## Waiting on the owner\n");
+    let to_do = actions(&issues, now);
+    if !to_do.is_empty() {
+        section(&mut text, "### To do", to_do);
+    }
     let to_merge = parked(&waiting, &prs, LAND_NEEDED);
     section(&mut text, "### To merge", to_merge);
     let to_answer = parked(&waiting, &prs, ANSWER_NEEDED);
@@ -303,7 +310,9 @@ fn details(
         .iter()
         .filter(|issue| issue.parent.is_none() && !written(&issue.title))
         .filter(|issue| {
-            let waits = |label: &String| label.starts_with("auto:") || is_parked(label);
+            let waits = |label: &String| {
+                label.starts_with("auto:") || is_parked(label) || label == ACTION_NEEDED
+            };
             !issue.labels.iter().any(waits)
         })
         .map(|issue| line(issue.number, &issue.title))
@@ -533,6 +542,24 @@ fn parent(issues: &[&RoadmapIssue], milestone: &str, done: bool) -> String {
         "#{}, {state}, with {closed} of {total} sub-issues closed.{ready}",
         found.number
     )
+}
+
+/// The open issues for what only the owner can do, the oldest first, each
+/// with how many whole days it has been open at `now`.
+fn actions(issues: &[&RoadmapIssue], now: i64) -> Vec<String> {
+    let mut actions: Vec<&&RoadmapIssue> = issues
+        .iter()
+        .filter(|issue| issue.open && issue.labels.iter().any(|label| label == ACTION_NEEDED))
+        .collect();
+    actions.sort_by_key(|issue| (issue.created, issue.number));
+    actions
+        .iter()
+        .map(|issue| {
+            let days = (now - issue.created).max(0) / 86400;
+            let unit = if days == 1 { "day" } else { "days" };
+            format!("{} (open {days} {unit})", line(issue.number, &issue.title))
+        })
+        .collect()
 }
 
 /// The parked PRs with this label, then the waiting issues with it.

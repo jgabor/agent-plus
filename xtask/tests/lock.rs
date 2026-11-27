@@ -748,3 +748,116 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
     assert!(run.wait().unwrap().success());
     assert!(root.join("third").exists());
 }
+
+/// Waits for `child` to exit, so that a run that waits for a place fails the
+/// test instead of hanging it. The limit only ends a test that already failed.
+fn exits_without_waiting(child: Child) -> Output {
+    let (done, exited) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = done.send(child.wait_with_output().unwrap());
+    });
+    exited
+        .recv_timeout(Duration::from_secs(60))
+        .expect("it waited for a place")
+}
+
+/// A command that can't run is refused before the run waits for a place, so
+/// it ends at once even when every place is held.
+#[test]
+fn a_bad_command_ends_at_once_while_every_place_is_held() {
+    let root = workspace("bad-command-held");
+    let holder = start_holder_in(&root, 1);
+    for (command, says) in [
+        (&[][..], "needs a command"),
+        (&["--help"][..], "--help"),
+        (&["no-such-program-here"][..], "no-such-program-here"),
+    ] {
+        let mut all = vec!["run"];
+        all.extend_from_slice(command);
+        let child = xtask(&root, &all)
+            .env(PLACES_ENV, "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output = exits_without_waiting(child);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{command:?}: {output:?}");
+        assert!(stderr.contains(says), "{command:?}: {stderr}");
+        assert!(!stderr.contains("waiting"), "{command:?}: {stderr}");
+    }
+    holder.finish();
+}
+
+/// `xtask run true`, with its stderr read line by line.
+fn waiter_heard(root: &Path, places: usize) -> (Child, BufReader<std::process::ChildStderr>) {
+    let mut child = xtask(root, &["run", "true"])
+        .env(PLACES_ENV, places.to_string())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    (child, stderr)
+}
+
+/// Reads stderr up to the line that says the run waits, which the run prints
+/// before it waits, so this needs no fixed wait. Then lets the run go on, and
+/// returns everything the run printed on stderr.
+fn heard_waiting(
+    mut child: Child,
+    mut stderr: BufReader<std::process::ChildStderr>,
+    release: impl FnOnce(),
+) -> Vec<String> {
+    let mut heard = Vec::new();
+    loop {
+        let mut line = String::new();
+        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "{heard:?}");
+        let waits = line.contains("waiting");
+        heard.push(line);
+        if waits {
+            break;
+        }
+    }
+    release();
+    for line in stderr.lines() {
+        heard.push(line.unwrap() + "\n");
+    }
+    assert!(child.wait().unwrap().success(), "{heard:?}");
+    heard
+}
+
+fn count(heard: &[String], text: &str) -> usize {
+    heard.iter().filter(|line| line.contains(text)).count()
+}
+
+#[test]
+fn a_run_that_waits_for_a_place_says_so_once_and_how_long_it_waited() {
+    let root = workspace("says-place");
+    let holder = start_holder_in(&root, 1);
+    let (child, stderr) = waiter_heard(&root, 1);
+    let heard = heard_waiting(child, stderr, || holder.finish());
+    assert_eq!(count(&heard, "waiting for a place"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
+}
+
+#[test]
+fn a_run_that_waits_for_the_activity_lock_says_so_once_and_how_long_it_waited() {
+    let root = workspace("says-activity");
+    let bench = activity(&root);
+    bench.lock().unwrap();
+    let (child, stderr) = waiter_heard(&root, 1);
+    let heard = heard_waiting(child, stderr, || bench.unlock().unwrap());
+    assert_eq!(count(&heard, "waiting for the activity lock"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
+}
+
+#[test]
+fn a_run_that_does_not_wait_says_nothing_of_waits() {
+    let root = workspace("says-nothing");
+    let output = run(&root, &["true"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("wait"), "{stderr}");
+}

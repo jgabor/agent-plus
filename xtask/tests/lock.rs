@@ -598,30 +598,7 @@ fn take(file: File) -> Option<File> {
 /// A workspace of packages, each a name and the `lib.rs` it holds.
 fn packages(name: &str, crates: &[(&str, &str)]) -> PathBuf {
     let root = workspace(name);
-    let members: Vec<String> = crates.iter().map(|(name, _)| format!("{name:?}")).collect();
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[workspace]\nmembers = [{}]\nresolver = \"3\"\n",
-            members.join(", ")
-        ),
-    )
-    .unwrap();
-    for (package, source) in crates {
-        fs::create_dir_all(root.join(package).join("src")).unwrap();
-        fs::write(
-            root.join(package).join("Cargo.toml"),
-            format!("[package]\nname = \"{package}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
-        )
-        .unwrap();
-        fs::write(root.join(package).join("src/lib.rs"), source).unwrap();
-    }
-    let lockfile = Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&root)
-        .status()
-        .unwrap();
-    assert!(lockfile.success());
+    common::crates(&root, crates);
     root
 }
 
@@ -706,45 +683,23 @@ fn a_test_run_gives_its_place_to_the_merge_slots_holder_between_packages() {
 }
 
 /// Says at the FIFO `ready-<package>` that its tests run, waits at
-/// `go-<package>`, and writes `done-<package>` as it ends. Each wait fails
-/// after a minute, so that a run this test gave up on ends.
-fn waits_to_end(package: &str, marks: &Path) -> String {
-    let meet = r#"
-fn meet(path: std::path::PathBuf, write: bool) {
-    let (met, done) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if write {
-            std::fs::write(&path, "").unwrap();
-        } else {
-            std::fs::read(&path).unwrap();
-        }
-        let _ = met.send(());
-    });
-    let limit = std::time::Duration::from_secs(60);
-    assert!(done.recv_timeout(limit).is_ok(), "the test never came");
-}
-"#;
+/// `go-<package>`, and writes `done-<package>` as it ends.
+fn waits_to_end(package: &str) -> String {
     format!(
-        "{meet}\n#[test]\nfn waits_to_end() {{\n    let marks = std::path::Path::new({:?});\n    meet(marks.join(\"ready-{package}\"), true);\n    meet(marks.join(\"go-{package}\"), false);\n    std::fs::write(marks.join(\"done-{package}\"), \"\").unwrap();\n}}\n",
-        marks.display().to_string()
+        "{}\n#[test]\nfn waits_to_end() {{\n    meet(\"ready-{package}\", true);\n    meet(\"go-{package}\", false);\n    let marks = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"..\");\n    std::fs::write(marks.join(\"done-{package}\"), \"\").unwrap();\n}}\n",
+        common::MEET
     )
 }
 
-/// Two packages run side by side, and a bench comes while they run. The run
-/// starts no third package until the bench has had its turn, and the bench
-/// gets the activity lock only once both have ended.
+const THIRD: &str = "#[test]\nfn third() {\n    let marks = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"..\");\n    std::fs::write(marks.join(\"third\"), \"\").unwrap();\n}\n";
+
+/// Two packages run side by side, and a bench comes while they run. Once the
+/// first ends, the run still keeps the activity lock while the second runs.
+/// The bench has it once both have ended, and before the third package runs.
 #[test]
 fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
-    let name = "bench-side-by-side";
-    let marks = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("lock")
-        .join(name);
-    let (a, b) = (waits_to_end("a", &marks), waits_to_end("b", &marks));
-    let third = format!(
-        "#[test]\nfn third() {{\n    std::fs::write(std::path::Path::new({:?}).join(\"third\"), \"\").unwrap();\n}}\n",
-        marks.display().to_string()
-    );
-    let root = packages(name, &[("a", &a), ("b", &b), ("c", &third)]);
+    let (a, b) = (waits_to_end("a"), waits_to_end("b"));
+    let root = packages("bench-side-by-side", &[("a", &a), ("b", &b), ("c", THIRD)]);
     for fifo in ["ready-a", "go-a", "ready-b", "go-b"] {
         common::fifo(&root.join(fifo));
     }
@@ -752,22 +707,39 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
         .env(PLACES_ENV, "2")
         .env(AT_ONCE_ENV, "2")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let (line, lines) = std::sync::mpsc::channel();
+    let output = BufReader::new(run.stderr.take().unwrap());
+    thread::spawn(move || {
+        for text in output.lines() {
+            let _ = line.send(text.unwrap());
+        }
+    });
     common::meet(&root.join("ready-a"), false);
     common::meet(&root.join("ready-b"), false);
     let pending = turnstile(&root);
     pending.lock().unwrap();
     common::meet(&root.join("go-a"), true);
-    common::meet(&root.join("go-b"), true);
-    let bench = take(activity(&root)).expect("the run kept the activity lock");
-    for package in ["a", "b"] {
-        assert!(
-            root.join(format!("done-{package}")).exists(),
-            "the bench had the lock while {package} still ran"
-        );
+    // a's tests and doc tests each end in a result line, and b's tests wait.
+    for _ in 0..2 {
+        loop {
+            match lines.recv_timeout(common::LIMIT) {
+                Ok(text) if text.starts_with("test result:") => break,
+                Ok(_) => {}
+                Err(_) => kept(run, "a never ended"),
+            }
+        }
     }
+    if takes_within(&activity(&root), WAIT) {
+        kept(run, "the run let go of the activity lock while b still ran");
+    }
+    common::meet(&root.join("go-b"), true);
+    let Some(bench) = take(activity(&root)) else {
+        kept(run, "the run kept the activity lock for its next package");
+    };
+    assert!(root.join("done-b").exists(), "b still ran");
     assert!(
         !root.join("third").exists(),
         "the next package ran before the bench"

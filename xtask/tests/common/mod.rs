@@ -133,3 +133,58 @@ pub fn wait_until(why: &str, mut ready: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// Writes a workspace of crates into `root`, each a name and the `lib.rs` it
+/// holds, with its lockfile.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub fn crates(root: &Path, crates: &[(&str, &str)]) {
+    let members: Vec<String> = crates.iter().map(|(name, _)| format!("{name:?}")).collect();
+    fs::write(
+        root.join("Cargo.toml"),
+        format!(
+            "[workspace]\nmembers = [{}]\nresolver = \"3\"\n",
+            members.join(", ")
+        ),
+    )
+    .unwrap();
+    for (name, source) in crates {
+        fs::create_dir_all(root.join(name).join("src")).unwrap();
+        fs::write(
+            root.join(name).join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
+        )
+        .unwrap();
+        fs::write(root.join(name).join("src/lib.rs"), source).unwrap();
+    }
+    let output = Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(root)
+        .env("PATH", path(&[]))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+/// The start of a crate from `crates`, with a `meet` for its tests. It meets
+/// the test at the FIFO `name` in the workspace, as `meet` above does, but
+/// fails after a minute, so that a run the test gave up on still ends.
+#[allow(dead_code, reason = "each test binary uses only some of this module")]
+pub const MEET: &str = r#"#![cfg(test)]
+
+fn meet(name: &str, write: bool) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(name);
+    let (met, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if write {
+            std::fs::write(&path, "").unwrap();
+        } else {
+            std::fs::read(&path).unwrap();
+        }
+        let _ = met.send(());
+    });
+    let limit = std::time::Duration::from_secs(60);
+    assert!(done.recv_timeout(limit).is_ok(), "nothing came");
+}
+"#;

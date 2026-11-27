@@ -214,7 +214,8 @@ fn watch(mut child: Child) -> Result<Ended, Problem> {
 }
 
 /// Copies `stream` to our stderr a line at a time, and hands each line to
-/// `each`.
+/// `each`. A last line without a newline gets one, so that the next line on
+/// stderr, which can be another package's, starts a line of its own.
 fn forward(stream: impl Read, mut each: impl FnMut(&str)) -> Result<(), Problem> {
     let mut reader = BufReader::new(stream);
     let mut bytes = Vec::new();
@@ -225,6 +226,9 @@ fn forward(stream: impl Read, mut each: impl FnMut(&str)) -> Result<(), Problem>
             .map_err(|e| Problem(format!("couldn't read test output: {e}")))?;
         if read == 0 {
             return Ok(());
+        }
+        if !bytes.ends_with(b"\n") {
+            bytes.push(b'\n');
         }
         let _ = io::stderr().lock().write_all(&bytes);
         each(&String::from_utf8_lossy(&bytes));

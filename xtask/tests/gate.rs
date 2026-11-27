@@ -6,6 +6,7 @@ use std::process::{Command, Output};
 
 mod common;
 
+const AT_ONCE_ENV: &str = "XTASK_PACKAGES_AT_ONCE";
 const GOOD: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 
 /// A workspace with one crate, whose `lib.rs` holds `source`.
@@ -20,32 +21,8 @@ fn packages(name: &str, crates: &[(&str, &str)]) -> PathBuf {
         fs::remove_dir_all(&root).unwrap();
     }
     fs::create_dir_all(&root).unwrap();
-    let members: Vec<String> = crates.iter().map(|(name, _)| format!("{name:?}")).collect();
-    fs::write(
-        root.join("Cargo.toml"),
-        format!(
-            "[workspace]\nmembers = [{}]\nresolver = \"3\"\n",
-            members.join(", ")
-        ),
-    )
-    .unwrap();
-    for (name, source) in crates {
-        fs::create_dir_all(root.join(name).join("src")).unwrap();
-        fs::write(
-            root.join(name).join("Cargo.toml"),
-            format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n"),
-        )
-        .unwrap();
-        fs::write(root.join(name).join("src/lib.rs"), source).unwrap();
-    }
     fs::write(root.join("SPEC.md"), "# A\n").unwrap();
-    let output = Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&root)
-        .env("PATH", common::path(&[]))
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+    common::crates(&root, crates);
     root
 }
 
@@ -55,6 +32,7 @@ fn xtask(dir: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PATH", common::path(&[]))
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove(AT_ONCE_ENV)
         .output()
         .unwrap()
 }
@@ -124,35 +102,12 @@ fn a_failing_test_fails() {
     assert!(stdout(&output).contains("fail tests"));
 }
 
-/// Meets the other package at the FIFO `name` in the workspace, or fails
-/// after a minute, so that packages run one after another fail and end.
-const MEET: &str = r#"#![cfg(test)]
-
-use std::io::Write;
-
-fn meet(name: &str, write: bool) {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join(name);
-    let (met, done) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        if write {
-            std::fs::write(&path, "").unwrap();
-        } else {
-            std::fs::read(&path).unwrap();
-        }
-        let _ = met.send(());
-    });
-    let limit = std::time::Duration::from_secs(60);
-    assert!(done.recv_timeout(limit).is_ok(), "the other never came");
-}
-"#;
-
 /// Starts a line on stderr, and ends it only after the other package wrote a
 /// whole line of its own.
 const STARTS: &str = r#"
 #[test]
 fn starts_a_line() {
+    use std::io::Write;
     let mut stderr = std::io::stderr();
     stderr.write_all(b"first half, ").unwrap();
     meet("half", true);
@@ -164,6 +119,7 @@ fn starts_a_line() {
 const BETWEEN: &str = r#"
 #[test]
 fn writes_a_line_between() {
+    use std::io::Write;
     meet("half", false);
     std::io::stderr().write_all(b"a whole line\n").unwrap();
     meet("whole", true);
@@ -172,8 +128,8 @@ fn writes_a_line_between() {
 
 #[test]
 fn packages_run_side_by_side_and_keep_their_lines_whole() {
-    let starts = format!("{MEET}{STARTS}");
-    let between = format!("{MEET}{BETWEEN}");
+    let starts = format!("{}{STARTS}", common::MEET);
+    let between = format!("{}{BETWEEN}", common::MEET);
     let root = packages("side-by-side", &[("a", &starts), ("b", &between)]);
     for fifo in ["half", "whole"] {
         common::fifo(&root.join(fifo));
@@ -195,10 +151,18 @@ fn finishes() {
 }
 "#;
 
+/// One package at a time, so that the second waits for the first to fail.
 #[test]
 fn a_failing_package_fails_the_run_and_the_others_finish() {
     let root = packages("one-fails", &[("a", FAILS), ("b", FINISHES)]);
-    let output = xtask(&root, &["gate"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("gate")
+        .current_dir(&root)
+        .env("PATH", common::path(&[]))
+        .env(AT_ONCE_ENV, "1")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stdout(&output).contains("fail tests"));
     assert!(root.join("finished").exists(), "{}", stderr(&output));

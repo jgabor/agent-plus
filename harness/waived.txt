@@ -25,7 +25,6 @@ ap diff	[SHARE](#share) specifies `ap diff`.	Only points to the sections that sp
 ap apply	[SHARE](#share) specifies `ap apply`.	Only points to the sections that specify this, and adds no behavior.
 ap discard	[SHARE](#share) specifies `ap discard`.	Only points to the sections that specify this, and adds no behavior.
 ap reset	[PERSIST](#persist) specifies `ap reset <agent>`, and [Grants](#grants) specifies `ap reset <digest>`.	Only points to the sections that specify this, and adds no behavior.
-ap reset	[SHARE](#share) says when it refuses.	Only points to the sections that specify this, and adds no behavior.
 ap secret	[SECRET](#secret) says when a run reads them.	Only points to the sections that specify this, and adds no behavior.
 AGENT	**Redistribution.** Claude Code is proprietary.	States the license status of a vendor's product.
 OS	Demand decides which toolchains ship.	Describes how the project picks toolchains, not anything ap does.

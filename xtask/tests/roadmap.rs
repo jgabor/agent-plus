@@ -534,6 +534,10 @@ Steps:
 
 - #10 Boot the machine
 - #43 Share \\<src> with `ap run <agent>`
+
+## Busy and large files
+
+Nothing.
 ";
 
 #[test]
@@ -668,7 +672,7 @@ fn a_repository_with_no_issues_still_has_a_roadmap() {
     assert_eq!(text.matches("Parent: none.\n").count(), 3, "{text}");
     assert!(
         text.ends_with(
-            "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n"
+            "## After v0.1.0\n\n- `ap push`: later\n- `ap mcp`: a proposal\n\n## Waiting on the owner\n\n### To merge\n\nNothing.\n\n### To answer\n\nNothing.\n\n### To label or close\n\nNothing.\n\n## Busy and large files\n\nNothing.\n"
         ),
         "{text}"
     );
@@ -775,4 +779,118 @@ fn a_roadmap_that_cant_reach_github_is_an_error() {
     let output = repo.xtask(&["roadmap"]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// The time of the last commit in the history that `busy` writes. It is in
+/// the past, so a count that started from now would find no commit.
+const HEAD_TIME: u64 = 1_790_000_000;
+const DAY: u64 = 86_400;
+
+impl Repo {
+    /// Writes a file of this many lines.
+    fn lines(&self, path: &str, count: usize) {
+        let path = self.root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "//\n".repeat(count)).unwrap();
+    }
+
+    /// Adds a line to a file.
+    fn append(&self, path: &str) {
+        let path = self.root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut text = fs::read_to_string(&path).unwrap_or_default();
+        text.push_str("//\n");
+        fs::write(path, text).unwrap();
+    }
+
+    /// Commits everything, at this time.
+    fn commit_at(&self, time: u64) {
+        let date = format!("{time} +0000");
+        for args in [
+            &["add", "-A"][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "change",
+            ],
+        ] {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(&self.root)
+                .env("GIT_AUTHOR_DATE", &date)
+                .env("GIT_COMMITTER_DATE", &date)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+}
+
+/// A history where `lib/fNN.rs` changed in NN commits in the week before
+/// the last one, and `lib/gone.rs` changed in more, then went.
+fn busy() -> Repo {
+    let repo = Repo::new("busy");
+    repo.lines("lib/f12.rs", 2088);
+    repo.lines("lib/gone.rs", 1);
+    repo.lines("tools/old.rs", 1);
+    repo.lines("tools/under.rs", 1999);
+    repo.lines("tools/big1.rs", 2000);
+    repo.lines("tools/big2.rs", 2999);
+    repo.commit_at(HEAD_TIME - 30 * DAY);
+    // A day and an hour before the week, so it doesn't count.
+    repo.append("tools/old.rs");
+    repo.commit_at(HEAD_TIME - 7 * DAY - 3600);
+    for commit in 1..=12 {
+        for file in commit..=12 {
+            repo.append(&format!("lib/f{file:02}.rs"));
+        }
+        repo.append("lib/gone.rs");
+        repo.append("notes.md");
+        repo.commit_at(HEAD_TIME - 6 * DAY + commit as u64 * 3600);
+    }
+    fs::remove_file(repo.root.join("lib/gone.rs")).unwrap();
+    repo.append("tools/big2.rs");
+    repo.commit_at(HEAD_TIME);
+    repo
+}
+
+/// The 10 busiest Rust files come first, and then every other one with
+/// 2,000 lines or more. A file that is gone, a Markdown file, and a change
+/// from before the week aren't counted.
+#[test]
+fn the_details_list_the_busy_and_large_rust_files() {
+    let repo = busy();
+    let issue = |number: u64, state: &'static str, body: &'static str| Issue {
+        number,
+        state,
+        body,
+        labels: &["auto:merge"],
+        ..PLAIN
+    };
+    repo.set(
+        &[
+            // A directory counts for each file in it.
+            issue(5, "OPEN", "## Touches\n`lib`, `HARNESS.md#roadmap`\n"),
+            issue(6, "OPEN", "## Touches\n`lib/f12.rs`\n\n## Notes\n`tools`\n"),
+            issue(7, "CLOSED", "## Touches\n`lib/f12.rs`, `tools`\n"),
+            // A path counts only in whole parts.
+            issue(8, "OPEN", "## Touches\n`lib/f1`, `tools/big`\n"),
+        ],
+        &[],
+    );
+    let mut rows = String::new();
+    for file in (3..=11).rev() {
+        rows.push_str(&format!("| `lib/f{file:02}.rs` | {file} | {file} | 1 |\n"));
+    }
+    let expected = format!(
+        "\n## Busy and large files\n\n| File | PRs in 7 days | Lines | Open issues that name it |\n|---|---|---|---|\n| `lib/f12.rs` | 12 | 2100 | 2 |\n{rows}| `tools/big2.rs` | 1 | 3000 | 0 |\n| `tools/big1.rs` | 0 | 2000 | 0 |\n"
+    );
+    let text = repo.details();
+    assert!(text.ends_with(&expected), "{text}");
+    assert_eq!(text.matches("## Busy and large files").count(), 1, "{text}");
 }

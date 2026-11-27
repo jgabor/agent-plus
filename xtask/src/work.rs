@@ -233,7 +233,7 @@ fn references(body: &str, phrase: &str) -> Vec<u64> {
 /// Whether two `Touches` entries overlap: one path is a prefix of the other,
 /// in whole parts, and they don't name two different sections of a file. A
 /// section follows the path after `#`, as the heading's link anchor.
-fn overlap(first: &str, second: &str) -> bool {
+pub(crate) fn overlap(first: &str, second: &str) -> bool {
     let split = |entry: &'_ str| -> (Vec<String>, String) {
         let (path, section) = entry
             .split_once('#')

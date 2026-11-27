@@ -9,6 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 
@@ -789,29 +790,35 @@ fn a_bad_command_ends_at_once_while_every_place_is_held() {
     holder.finish();
 }
 
-/// `xtask run true`, with its stderr read line by line.
-fn waiter_heard(root: &Path, places: usize) -> (Child, BufReader<std::process::ChildStderr>) {
+/// `xtask run true`, and a channel that gets each line of its stderr.
+fn waiter_heard(root: &Path, places: usize) -> (Child, Receiver<String>) {
     let mut child = xtask(root, &["run", "true"])
         .env(PLACES_ENV, places.to_string())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let stderr = BufReader::new(child.stderr.take().unwrap());
-    (child, stderr)
+    let (line, lines) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        for read in stderr.lines() {
+            let _ = line.send(read.unwrap());
+        }
+    });
+    (child, lines)
 }
 
 /// Reads stderr up to the line that says the run waits, which the run prints
 /// before it waits, so this needs no fixed wait. Then lets the run go on, and
-/// returns everything the run printed on stderr.
-fn heard_waiting(
-    mut child: Child,
-    mut stderr: BufReader<std::process::ChildStderr>,
-    release: impl FnOnce(),
-) -> Vec<String> {
+/// returns everything the run printed on stderr. A run that never says it
+/// waits is killed, and the limit only ends a test that already failed.
+fn heard_waiting(mut child: Child, lines: Receiver<String>, release: impl FnOnce()) -> Vec<String> {
     let mut heard = Vec::new();
     loop {
-        let mut line = String::new();
-        assert_ne!(stderr.read_line(&mut line).unwrap(), 0, "{heard:?}");
+        let Ok(line) = lines.recv_timeout(Duration::from_secs(60)) else {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("it never said it waits: {heard:?}");
+        };
         let waits = line.contains("waiting");
         heard.push(line);
         if waits {
@@ -819,10 +826,8 @@ fn heard_waiting(
         }
     }
     release();
-    for line in stderr.lines() {
-        heard.push(line.unwrap() + "\n");
-    }
     assert!(child.wait().unwrap().success(), "{heard:?}");
+    heard.extend(lines);
     heard
 }
 
@@ -848,7 +853,11 @@ fn a_run_that_waits_for_the_activity_lock_says_so_once_and_how_long_it_waited() 
     bench.lock().unwrap();
     let (child, stderr) = waiter_heard(&root, 1);
     let heard = heard_waiting(child, stderr, || bench.unlock().unwrap());
-    assert_eq!(count(&heard, "waiting for the activity lock"), 1, "{heard:?}");
+    assert_eq!(
+        count(&heard, "waiting for the activity lock"),
+        1,
+        "{heard:?}"
+    );
     assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
     assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
 }

@@ -493,8 +493,8 @@ fn escaped(data: &str) -> String {
         .replace('\n', "%0A")
 }
 
-/// A proof's length, to the second.
-fn took(length: Duration) -> String {
+/// A length of time, to the second, such as a proof's or a wait's.
+pub fn took(length: Duration) -> String {
     let seconds = length.as_secs();
     match seconds / 60 {
         0 => format!("{seconds}s"),

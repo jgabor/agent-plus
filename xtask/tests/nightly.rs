@@ -1381,6 +1381,48 @@ fn a_harness_channel_that_fails_its_check_fails_the_nightly() {
 }
 
 #[test]
+fn a_night_whose_ap_doesnt_build_reports_no_earlier_channel() {
+    let files = [&T2[..], &[("harness/journey/08-harnesses.sh", CHANNELS)]].concat();
+    let repo = Repo::with(
+        "channels-stale",
+        "fn main() {\n    compile_error!(\"broken\");\n}\n",
+        &files,
+    );
+    // An earlier night's check left its lockfiles.
+    repo.write(
+        "target/harnesses/work/claude/Agentfile.lock",
+        &format!("HARNESS claude 2.1.330 {:064}\n", 1),
+    );
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "fail", "{comment}");
+    assert!(
+        comment.contains("\n- `claude:stable` gave no version\n"),
+        "{comment}"
+    );
+}
+
+#[test]
+fn a_channel_check_that_locks_nothing_fails() {
+    let locks_nothing = CHANNELS.replace("> codex/Agentfile.lock", "> /dev/null");
+    let files = [
+        &T2[..],
+        &[("harness/journey/08-harnesses.sh", &*locks_nothing)],
+    ]
+    .concat();
+    let repo = Repo::with("channels-unlocked", "fn main() {}\n", &files);
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "harnesses"), "fail", "{comment}");
+    assert!(
+        comment.contains("\n- `codex:latest` gave no version\n"),
+        "{comment}"
+    );
+}
+
+#[test]
 fn a_report_that_cant_be_posted_is_an_error() {
     let repo = Repo::new("no-comments");
     fs::write(repo.bin.join("no-comments"), "").unwrap();

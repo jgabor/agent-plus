@@ -31,7 +31,7 @@ edit those issues.
 4. Find the steps that failed:
 
    ```sh
-   grep -E '^fail (bench|gate|t2|release|t3|journey|fuzz|mutation)$' target/nightly.log
+   grep -E '^fail (bench|gate|t2|release|harnesses|t3|journey|fuzz|mutation)$' target/nightly.log
    ```
 
    Leave out `gate` if the log has a line starting `nightly: filed #`,
@@ -79,6 +79,7 @@ edit those issues.
    | `bench` | `xtask/src/bench.rs` |
    | `gate` | `xtask/src/gate.rs` |
    | `t2`, `release`, `t3` | `xtask/src/nightly.rs` |
+   | `harnesses` | `harness/journey/08-harnesses.sh` |
    | `journey` | `xtask/src/journey.rs` |
    | `fuzz` | `xtask/src/fuzz.rs` |
    | `mutation` | `xtask/src/mutation.rs` |

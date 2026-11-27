@@ -1124,7 +1124,7 @@ does the following on `main`:
 1. Run the bench first, because the remaining tiers are long.
 2. Run the gate with T2, the ignored t1 tests that download from a real
    release, the check of each harness's channel, T3, the journey, fuzzing,
-   and mutation testing. T2 and the journey test the harnesses at their
+   and mutation testing. T2 and journey step 8 test the harnesses at their
    pins, and the channel check tests the newest release of each.
 3. Post the report to one pinned issue. It leads with what needs the owner:
    a verdict that names each failed check, the three scores, what regressed

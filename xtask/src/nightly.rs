@@ -235,7 +235,12 @@ fn channels(root: &Path) -> (&'static str, Vec<String>) {
         let lock =
             fs::read_to_string(work.join(harness).join("Agentfile.lock")).unwrap_or_default();
         lines.push(match (locked(&lock, harness), locked(&pins, harness)) {
-            (None, _) => format!("`{channel}` gave no version"),
+            (None, _) => {
+                if let Ok(Verdict::Pass) = ran {
+                    ran = Err(Problem(format!("{HARNESSES_SCRIPT} locked no {harness}")));
+                }
+                format!("`{channel}` gave no version")
+            }
             (Some(gave), None) => {
                 ran = Err(Problem(format!("{PINS} pins no {harness}")));
                 format!("`{channel}` gave {gave}, and nothing pins it")
@@ -259,12 +264,13 @@ fn channels(root: &Path) -> (&'static str, Vec<String>) {
 /// `ap` on `PATH`, in a home and a download cache of its own, and with no
 /// other variable.
 fn run_channels(root: &Path, script: &Path) -> Result<Verdict, Problem> {
-    let built = journey::build_ap(root, &root.join("target"))?;
+    // A night's lockfiles are its own, even when `ap` doesn't build.
     let at = root.join(HARNESSES_DIRECTORY);
     let problem = |e: io::Error| Problem(format!("couldn't prepare {}: {e}", at.display()));
     if at.exists() {
         fs::remove_dir_all(&at).map_err(problem)?;
     }
+    let built = journey::build_ap(root, &root.join("target"))?;
     let [bin, home, work, cache] = ["bin", "home", "work", "cache"].map(|name| at.join(name));
     for path in [&bin, &home, &work, &cache] {
         fs::create_dir_all(path).map_err(problem)?;
@@ -300,8 +306,11 @@ fn locked<'a>(text: &'a str, harness: &str) -> Option<&'a str> {
 }
 
 /// How the version `gave` compares with `pin`, part by part, or nothing when
-/// either isn't numbers between dots.
+/// they differ and either isn't numbers between dots.
 fn compare(gave: &str, pin: &str) -> Option<Ordering> {
+    if gave == pin {
+        return Some(Ordering::Equal);
+    }
     let parts = |version: &str| {
         version
             .split('.')

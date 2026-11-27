@@ -380,7 +380,12 @@ impl Walk<'_> {
 }
 
 fn permissions(stat: &libc::stat) -> u16 {
-    stat.st_mode as u16 & PERMISSIONS
+    // `st_mode` is a `u32` on Linux, and already a `u16` on macOS.
+    #[cfg(target_os = "linux")]
+    let mode = stat.st_mode as u16;
+    #[cfg(target_os = "macos")]
+    let mode = stat.st_mode;
+    mode & PERMISSIONS
 }
 
 /// Opens `name` in `dir` for reading, refusing a symlink.

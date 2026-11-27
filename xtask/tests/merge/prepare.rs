@@ -345,5 +345,10 @@ fn a_failed_merge_posts_failure() {
     let unused = "pub  fn f( ) {\n    let x = 1;\n}\n";
     repo.change_branch("crates/demo/src/lib.rs", unused);
     let head = repo.head();
-    assert_failure_posted(&repo, &repo.merge(), &head, "Failed: format, lint");
+    assert_failure_posted(
+        &repo,
+        &repo.merge(),
+        &head,
+        "Failed: format, lint, lint-macos",
+    );
 }

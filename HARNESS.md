@@ -277,7 +277,7 @@ journey step names the floor it needs with its `floor` field in
 
 | Tier | Runs | Trigger | Model spend |
 |---|---|---|---|
-| T0 | Format, lint, unit tests, spec quotes, and floors | Every gate | No |
+| T0 | Format, lint for Linux and macOS, unit tests, spec quotes, and floors | Every gate | No |
 | T1 | The real `ap` and a real microVM, with the fake harness | Every gate | No |
 | T2 | Real Claude Code and Codex in the guest, with no credentials | Adapter changes, and nightly | No |
 | T3 | A real model turn, on the cheapest model | Nightly, and before a release | Yes |
@@ -296,7 +296,10 @@ from `~/.config/agent-plus/paid-checks/anthropic-api-key`, and gives it as
 doesn't run. Claude Code runs on Haiku 5.5, `claude-haiku-5-5`, and Codex on
 its default model.
 
-T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out. A
+T1 and T2 checks live in the packages `t1` and `t2`, so T0 leaves them out.
+T0 lints the whole workspace twice: once for Linux, and once for
+`aarch64-apple-darwin`. Linux can't link or run a macOS build, but it can
+compile and lint one, so the code that only macOS builds stays checked. A
 change can affect a budget that the bench measures when its diff touches
 `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
 `harness/budgets.toml`, `xtask/src/bench.rs`, or what `ap` and

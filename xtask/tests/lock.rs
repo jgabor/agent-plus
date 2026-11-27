@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
@@ -711,13 +711,7 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let (line, lines) = std::sync::mpsc::channel();
-    let output = BufReader::new(run.stderr.take().unwrap());
-    thread::spawn(move || {
-        for text in output.lines() {
-            let _ = line.send(text.unwrap());
-        }
-    });
+    let lines = stderr_lines(&mut run);
     common::meet(&root.join("ready-a"), false);
     common::meet(&root.join("ready-b"), false);
     let pending = turnstile(&root);
@@ -750,16 +744,38 @@ fn a_test_run_side_by_side_lets_a_waiting_bench_go_before_its_next_package() {
     assert!(root.join("third").exists());
 }
 
-/// Waits for `child` to exit, so that a run that waits for a place fails the
-/// test instead of hanging it. The limit only ends a test that already failed.
-fn exits_without_waiting(child: Child) -> Output {
-    let (done, exited) = std::sync::mpsc::channel();
+/// A channel that gets each line of `child`'s stderr, and ends as it closes.
+fn stderr_lines(child: &mut Child) -> Receiver<String> {
+    let stderr = BufReader::new(child.stderr.take().unwrap());
+    let (line, lines) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let _ = done.send(child.wait_with_output().unwrap());
+        for text in stderr.lines() {
+            let _ = line.send(text.unwrap());
+        }
     });
-    exited
-        .recv_timeout(Duration::from_secs(60))
-        .expect("it waited for a place")
+    lines
+}
+
+/// The status and stderr of `xtask run` with `command`, in a host with one
+/// place. A run that waits for the place fails the test instead of hanging it,
+/// and the limit only ends a test that already failed.
+fn exits_without_waiting(root: &Path, command: &[&str]) -> (Option<i32>, String) {
+    let mut run = xtask(root, &[&["run"][..], command].concat())
+        .env(PLACES_ENV, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let lines = stderr_lines(&mut run);
+    let mut stderr = String::new();
+    loop {
+        match lines.recv_timeout(common::LIMIT) {
+            Ok(text) => stderr += &(text + "\n"),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => kept(run, "it waited for a place"),
+        }
+    }
+    (run.wait().unwrap().code(), stderr)
 }
 
 /// A command that can't run is refused before the run waits for a place, so
@@ -773,17 +789,8 @@ fn a_bad_command_ends_at_once_while_every_place_is_held() {
         (&["--help"][..], "--help"),
         (&["no-such-program-here"][..], "no-such-program-here"),
     ] {
-        let mut all = vec!["run"];
-        all.extend_from_slice(command);
-        let child = xtask(&root, &all)
-            .env(PLACES_ENV, "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let output = exits_without_waiting(child);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(output.status.code(), Some(2), "{command:?}: {output:?}");
+        let (code, stderr) = exits_without_waiting(&root, command);
+        assert_eq!(code, Some(2), "{command:?}: {stderr}");
         assert!(stderr.contains(says), "{command:?}: {stderr}");
         assert!(!stderr.contains("waiting"), "{command:?}: {stderr}");
     }
@@ -797,27 +804,19 @@ fn waiter_heard(root: &Path, places: usize) -> (Child, Receiver<String>) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let stderr = BufReader::new(child.stderr.take().unwrap());
-    let (line, lines) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        for read in stderr.lines() {
-            let _ = line.send(read.unwrap());
-        }
-    });
+    let lines = stderr_lines(&mut child);
     (child, lines)
 }
 
 /// Reads stderr up to the line that says the run waits, which the run prints
 /// before it waits, so this needs no fixed wait. Then lets the run go on, and
 /// returns everything the run printed on stderr. A run that never says it
-/// waits is killed, and the limit only ends a test that already failed.
+/// waits is stopped, and the limit only ends a test that already failed.
 fn heard_waiting(mut child: Child, lines: Receiver<String>, release: impl FnOnce()) -> Vec<String> {
     let mut heard = Vec::new();
     loop {
-        let Ok(line) = lines.recv_timeout(Duration::from_secs(60)) else {
-            child.kill().unwrap();
-            child.wait().unwrap();
-            panic!("it never said it waits: {heard:?}");
+        let Ok(line) = lines.recv_timeout(common::LIMIT) else {
+            kept(child, &format!("it never said it waits: {heard:?}"));
         };
         let waits = line.contains("waiting");
         heard.push(line);
@@ -826,8 +825,9 @@ fn heard_waiting(mut child: Child, lines: Receiver<String>, release: impl FnOnce
         }
     }
     release();
-    assert!(child.wait().unwrap().success(), "{heard:?}");
+    let status = child.wait().unwrap();
     heard.extend(lines);
+    assert!(status.success(), "{heard:?}");
     heard
 }
 

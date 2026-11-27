@@ -260,6 +260,79 @@ fn steps_share_a_download_cache_and_each_starts_with_an_empty_store() {
     assert_journey(&root, "pass step 1\npass step 2\njourney 2 of 2\n");
 }
 
+/// The digest of `os\n`, the uncompressed layer that the OS pin names.
+const OS_DIGEST: &str = "6adc3cbcc7923c4ff9cbe6a1dd13e7f4cf99dd072363ce88feca9fdbf55c9f24";
+
+/// A journey of steps 4, 5, and 6, whose workspace pins the layer `os\n`, and
+/// a kernel with the same bytes. Its tree holds copies of both whose bytes
+/// are `plain`, if any. Each step's script is `script`, with the store it
+/// would start with in `$store`, and the pinned digest in `$layer`.
+fn os_workspace(name: &str, plain: Option<&str>, script: &str) -> PathBuf {
+    let pin =
+        format!("version = \"1\"\nurl = \"https://example.com/os\"\nsha256 = \"{OS_DIGEST}\"\n");
+    let script =
+        format!("#!/bin/sh\nset -eu\nstore=\"$HOME/.local/share/ap\"\nlayer={OS_DIGEST}\n{script}");
+    let toml = format!(
+        "{}{}{}",
+        step(4, "", "harness/journey/os.sh"),
+        step(5, "", "harness/journey/os.sh"),
+        step(6, "", "harness/journey/os.sh"),
+    );
+    let seed = format!("target/guest/os-{OS_DIGEST}");
+    let (zstd, uncompressed) = (
+        format!("{seed}/zstd-layers/{OS_DIGEST}"),
+        format!("{seed}/plain-layers/{OS_DIGEST}"),
+    );
+    let mut files = vec![
+        ("guest/os/pin.toml", pin.as_str()),
+        ("guest/kernel/pin.toml", pin.as_str()),
+        ("harness/journey/os.sh", script.as_str()),
+    ];
+    if let Some(plain) = plain {
+        files.extend([
+            (zstd.as_str(), "frame\n"),
+            (uncompressed.as_str(), plain),
+            ("target/guest/vmlinux", plain),
+        ]);
+    }
+    workspace(name, &toml, &files)
+}
+
+#[test]
+fn every_step_but_the_fifth_starts_with_the_os_layer_from_the_tree() {
+    // Step 5 proves that `ap build` fetches the layer, so its store starts
+    // empty. Every other step's store holds the tree's copies, where a
+    // download leaves them.
+    let script = "if [ \"${PWD##*/step-}\" = 5/work ]; then\n  [ ! -e \"$store\" ]\nelse\n  [ \"$(cat \"$store/zstd-layers/$layer\")\" = frame ]\n  [ \"$(cat \"$store/plain-layers/$layer\")\" = os ]\n  [ \"$(cat \"$store/layers/$layer\")\" = os ]\nfi\n";
+    let root = os_workspace("os", Some("os\n"), script);
+    assert_journey(
+        &root,
+        "pass step 4\npass step 5\npass step 6\njourney 3 of 3\n",
+    );
+    let tree = root.join(format!(
+        "target/guest/os-{OS_DIGEST}/plain-layers/{OS_DIGEST}"
+    ));
+    assert_eq!(fs::read_to_string(tree).unwrap(), "os\n");
+}
+
+#[test]
+fn each_step_starts_with_an_empty_store_when_the_tree_holds_no_os_layer() {
+    let root = os_workspace("no-os", None, "[ ! -e \"$store\" ]\n");
+    assert_journey(
+        &root,
+        "pass step 4\npass step 5\npass step 6\njourney 3 of 3\n",
+    );
+}
+
+#[test]
+fn a_copy_of_the_os_layer_that_does_not_match_its_pin_is_not_used() {
+    let root = os_workspace("wrong-os", Some("other\n"), "[ ! -e \"$store\" ]\n");
+    assert_journey(
+        &root,
+        "pass step 4\npass step 5\npass step 6\njourney 3 of 3\n",
+    );
+}
+
 #[test]
 fn steps_run_in_id_order() {
     let toml = format!(

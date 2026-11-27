@@ -175,6 +175,13 @@ count out of all steps. It exits 0 whenever it could run, because what fails a
 merge is a count lower than the base's. Each step gets a new `HOME` and working
 directory, and only `HOME` and `PATH` in its environment.
 
+Step 5 proves that `ap build` fetches the pinned `OS minimal` layer, so its
+store starts empty. Every other step's store starts with the tree's copies of
+the layer and the kernel in `target/guest`, as the bench's stores do, so that
+a proof downloads each once at most. A copy whose digest isn't its pin's is
+left out. The gate keeps the layer in the shared git directory, as it keeps
+the kernel, and gives it to a fresh tree before the tests run.
+
 The steps, with their `needs` and milestones, are listed only in
 `harness/journey.toml`, in the format under
 [Journey definition](#journey-definition). The `Roadmap details` issue shows

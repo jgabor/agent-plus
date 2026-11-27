@@ -1,5 +1,6 @@
 //! `cargo xtask journey`: real use of `ap`, step by step, from a release build.
 
+use crate::bench::Copies;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
 use crate::{Problem, Verdict, lock, score};
@@ -14,6 +15,9 @@ const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
 const FAKE_HARNESS: &str = "fake-harness";
 /// The server on your host that step 10 reaches from the guest.
 const FAKE_UPSTREAM: &str = "fake-upstream";
+/// The step that proves `ap build` fetches the OS layer, so its store starts
+/// empty.
+const FETCHES_OS: i64 = 5;
 
 /// The model providers a step can spend on, each with the variable that
 /// carries its paid-check key into the step, as a user's `AUTH key` run gets
@@ -106,6 +110,8 @@ fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>,
     let steps = read_steps(root)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
+    // Checked once, because each step's store shares the tree's copies.
+    let copies = Copies::find(root)?;
 
     let mut passed = HashSet::new();
     let mut spending = HashSet::new();
@@ -122,7 +128,7 @@ fn walk(root: &Path, keys: &Keys, report: impl Fn(&str)) -> Result<Vec<Outcome>,
             || !step.needs.iter().all(|need| passed.contains(need))
         {
             "skip"
-        } else if run_step(root, &journey, &bin, step, given)? {
+        } else if run_step(root, &journey, &bin, &copies, step, given)? {
             passed.insert(step.id);
             "pass"
         } else {
@@ -352,6 +358,7 @@ fn run_step(
     root: &Path,
     journey: &Path,
     bin: &Path,
+    copies: &Copies,
     step: &Step,
     key: Option<(&str, &str)>,
 ) -> Result<bool, Problem> {
@@ -370,11 +377,15 @@ fn run_step(
     let home = directory.join("home");
     let work = directory.join("work");
     // Downloads outlast a step, so a harness is downloaded once per journey.
-    // The store lives under each step's own home, so it starts empty.
+    // The store lives under each step's own home, so it starts empty, but for
+    // the tree's copies of the guest files.
     let cache = journey.join("cache");
     for path in [&home, &work, &cache] {
         fs::create_dir_all(path)
             .map_err(|e| Problem(format!("couldn't create {}: {e}", path.display())))?;
+    }
+    if step.id != FETCHES_OS {
+        copies.put(&home)?;
     }
     let mut command = Command::new("/bin/sh");
     command

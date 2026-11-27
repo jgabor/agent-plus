@@ -2,7 +2,7 @@
 
 use crate::lock::Hold;
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, base, bench, floors, ledger, lock, score, testrun, toml};
+use crate::{Problem, Verdict, base, bench, floors, ledger, lock, score, testrun};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::{fs, io};
@@ -109,13 +109,13 @@ pub fn check(
     if let Some(merging) = merging {
         (merging.starting)("tests");
     }
-    let kernel = Kernel::find(root)?;
-    if let Some(kernel) = &kernel {
-        kernel.copy(&kernel.store, &kernel.tree);
+    let kept = Kept::find(root)?;
+    for kept in &kept {
+        kept.copy(Side::Tree);
     }
     let mut results = testrun::run_except(root, hold, Some(T2_PACKAGE))?;
-    if let Some(kernel) = &kernel {
-        kernel.copy(&kernel.tree, &kernel.store);
+    for kept in &kept {
+        kept.copy(Side::Store);
     }
     record("tests", results.all_passed(), &mut failed);
     let has_t2 = workspace::packages(root)?
@@ -207,55 +207,123 @@ fn compare_with_base(
     Ok(())
 }
 
-/// The pinned guest kernel, which t1's tests fetch into the tree. A store in
-/// the shared git directory keeps it, so that a fresh tree needn't fetch it.
-struct Kernel {
+/// A pinned guest file, or a directory of files, that t1's tests fetch into
+/// the tree. A store in the shared git directory keeps it, so that a fresh
+/// tree needn't fetch it.
+struct Kept {
+    name: &'static str,
     digest: String,
     tree: PathBuf,
     store: PathBuf,
+    /// The files in a directory, relative to it, or none for a file. The last
+    /// one has the pinned digest. Each names the digest, so copies of two
+    /// pins never mix.
+    files: Vec<PathBuf>,
 }
 
-impl Kernel {
-    /// `None` when the workspace pins no digest. A pin that t1 can't read
-    /// fails its tests, so the gate needn't say so.
-    fn find(root: &Path) -> Result<Option<Kernel>, Problem> {
-        let text = fs::read_to_string(root.join("guest/kernel/pin.toml")).unwrap_or_default();
-        let pin = toml::document(&text).unwrap_or_default();
-        let Some(toml::Value::Str(digest)) = pin.get("sha256") else {
-            return Ok(None);
-        };
-        Ok(Some(Kernel {
-            digest: digest.clone(),
-            tree: root.join("target/guest/vmlinux"),
-            store: lock::directory(root)?.join("kernel/vmlinux"),
-        }))
+impl Kept {
+    /// What the workspace pins. A pin that t1 can't read fails its tests, so
+    /// the gate needn't say so.
+    fn find(root: &Path) -> Result<Vec<Kept>, Problem> {
+        let store = lock::directory(root)?;
+        let mut kept = Vec::new();
+        if let Some(digest) = pinned(root, "guest/kernel/pin.toml") {
+            kept.push(Kept {
+                name: "kernel",
+                digest,
+                tree: root.join("target/guest/vmlinux"),
+                store: store.join("kernel/vmlinux"),
+                files: Vec::new(),
+            });
+        }
+        // t1's tests keep the OS layer in a store that holds only it, as
+        // `ap build` keeps a layer: compressed, then uncompressed.
+        if let Some(digest) = pinned(root, "guest/os/pin.toml") {
+            kept.push(Kept {
+                name: "os",
+                tree: root.join("target/guest").join(format!("os-{digest}")),
+                store: store.join("os"),
+                files: ["zstd-layers", "plain-layers"]
+                    .map(|directory| Path::new(directory).join(&digest))
+                    .into(),
+                digest,
+            });
+        }
+        Ok(kept)
     }
 
-    /// Copies a pinned kernel from `from` to `to`, unless `to` has one. The
-    /// copy moves into place only once its digest matches, so a reader never
-    /// sees part of one. It saves a download, so a failure only warns.
-    fn copy(&self, from: &Path, to: &Path) {
-        if self.pinned(to) || !from.exists() {
+    /// Copies it from the store to the tree, or from the tree to the store,
+    /// unless the side it goes to holds it. The copy replaces what was there
+    /// only once its digest matches, so a reader finds a whole copy or none.
+    /// It saves a download, so a failure only warns.
+    fn copy(&self, side: Side) {
+        let (from, to) = match side {
+            Side::Tree => (&self.store, &self.tree),
+            Side::Store => (&self.tree, &self.store),
+        };
+        if self.whole(to) || !self.paths(from).iter().all(|path| path.is_file()) {
             return;
         }
         let partial = to.with_extension(format!("{}.part", process::id()));
-        let copied = to
-            .parent()
-            .map_or(Ok(()), fs::create_dir_all)
-            .and_then(|()| fs::copy(from, &partial));
-        if let Err(e) = copied {
-            eprintln!("kernel: couldn't copy {}: {e}", from.display());
-        } else if !self.pinned(&partial) {
-            eprintln!("kernel: {} doesn't match pin.toml", from.display());
-        } else if let Err(e) = fs::rename(&partial, to) {
-            eprintln!("kernel: couldn't move it to {}: {e}", to.display());
+        let remove = |path: &Path| {
+            let _ = fs::remove_file(path).or_else(|_| fs::remove_dir_all(path));
+        };
+        remove(&partial);
+        let name = self.name;
+        if let Err(e) = self.copy_files(from, &partial) {
+            eprintln!("{name}: couldn't copy {}: {e}", from.display());
+        } else if !self.whole(&partial) {
+            eprintln!("{name}: {} doesn't match pin.toml", from.display());
+        } else {
+            if to.is_dir() {
+                remove(to);
+            }
+            // Another gate may have put a whole copy there first.
+            if let Err(e) = fs::rename(&partial, to)
+                && !self.whole(to)
+            {
+                eprintln!("{name}: couldn't move it to {}: {e}", to.display());
+            }
         }
-        let _ = fs::remove_file(&partial);
+        remove(&partial);
     }
 
-    fn pinned(&self, path: &Path) -> bool {
-        path.exists() && bench::sha256(path).is_ok_and(|digest| digest == self.digest)
+    fn copy_files(&self, from: &Path, to: &Path) -> io::Result<()> {
+        for (from, to) in self.paths(from).into_iter().zip(self.paths(to)) {
+            to.parent().map_or(Ok(()), fs::create_dir_all)?;
+            fs::copy(from, to)?;
+        }
+        Ok(())
     }
+
+    /// Its files, under `path`.
+    fn paths(&self, path: &Path) -> Vec<PathBuf> {
+        if self.files.is_empty() {
+            return vec![path.to_path_buf()];
+        }
+        self.files.iter().map(|file| path.join(file)).collect()
+    }
+
+    /// Whether `path` holds every file, and the last has the pinned digest.
+    fn whole(&self, path: &Path) -> bool {
+        let paths = self.paths(path);
+        paths.iter().all(|path| path.is_file())
+            && paths
+                .last()
+                .is_some_and(|last| bench::is_copy(last, &self.digest).unwrap_or(false))
+    }
+}
+
+/// Where a kept file is copied to.
+enum Side {
+    Tree,
+    Store,
+}
+
+/// The digest that the pin at `file` names, or `None` if it names none.
+fn pinned(root: &Path, file: &str) -> Option<String> {
+    let text = fs::read_to_string(root.join(file)).unwrap_or_default();
+    bench::pinned_digest(file, &text).ok()
 }
 
 pub fn record(name: &'static str, passed: bool, failed: &mut Failed) {

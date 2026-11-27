@@ -124,8 +124,8 @@ impl Guest {
 
 /// The guest files that the tree holds copies of, as paths in the tree and in
 /// a store. Every store of the bench starts with them, so no command it runs
-/// downloads one.
-struct Copies(Vec<(PathBuf, String)>);
+/// downloads one, and so does every journey step's but one.
+pub struct Copies(Vec<(PathBuf, String)>);
 
 impl Copies {
     /// The copies of the guest files that the tree's pins name. A copy whose
@@ -133,7 +133,7 @@ impl Copies {
     /// it is when the tree holds no copy or names no digest. The T1 tests
     /// move an OS layer's directory into place only once both of its files
     /// are checked.
-    fn find(root: &Path) -> Result<Copies, Problem> {
+    pub fn find(root: &Path) -> Result<Copies, Problem> {
         let mut copies = Vec::new();
         for guest in [Guest::Os, Guest::Kernel] {
             let pin = guest.pin();
@@ -157,7 +157,7 @@ impl Copies {
 
     /// Puts the copies in the store that `ap` keeps under `home`, where a
     /// download leaves them. A file the store holds already stays.
-    fn put(&self, home: &Path) -> Result<(), Problem> {
+    pub fn put(&self, home: &Path) -> Result<(), Problem> {
         let store = home.join(".local/share/ap");
         for (from, to) in &self.0 {
             let to = store.join(to);
@@ -317,7 +317,7 @@ pub fn pinned_sizes(root: &Path, commit: &str) -> Result<BTreeMap<String, f64>, 
 }
 
 /// The digest that the pin file `pin`, which holds `text`, names.
-fn pinned_digest(pin: &str, text: &str) -> Result<String, Problem> {
+pub fn pinned_digest(pin: &str, text: &str) -> Result<String, Problem> {
     match toml::document(text)
         .map_err(|e| Problem(format!("{pin}: {e}")))?
         .get("sha256")
@@ -328,7 +328,7 @@ fn pinned_digest(pin: &str, text: &str) -> Result<String, Problem> {
 }
 
 /// Whether `copy` is a file with this digest.
-fn is_copy(copy: &Path, digest: &str) -> Result<bool, Problem> {
+pub fn is_copy(copy: &Path, digest: &str) -> Result<bool, Problem> {
     Ok(copy.is_file() && sha256(copy)? == digest)
 }
 

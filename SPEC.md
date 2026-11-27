@@ -1350,9 +1350,9 @@ missing value makes the run fail, and the error names the secret.
   manager can prompt.
 - The value is its standard output without the trailing newlines, as
   `$(...)` gives it.
-- A command that exits with a failure, or prints nothing, fails the run with
-  125. The error names the secret and how the command ended, and never shows
-  what it printed.
+- A command that exits with a failure, or prints nothing, fails the run
+  with 125. The error names the secret and how the command ended, and never
+  shows what it printed.
 - An Agentfile can't name a command. Only `ap secret set` on the host can.
 - `AUTH key` and `AUTH token` read their variable in the same way.
 

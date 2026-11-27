@@ -103,6 +103,9 @@ pub struct Report {
     waiting: Vec<Waiting>,
     spec_changes: Vec<SpecChange>,
     rule_changes: Vec<RuleChange>,
+    /// What each harness's channel gave, against the pin, from the nightly
+    /// job's check.
+    channels: Vec<String>,
 }
 
 pub fn run(json: bool) -> Result<Verdict, Problem> {
@@ -159,6 +162,7 @@ pub fn build(root: &Path) -> Result<Report, Problem> {
         waiting: Vec::new(),
         spec_changes: Vec::new(),
         rule_changes: Vec::new(),
+        channels: Vec::new(),
     };
     let gh = Gh::new(root);
     let issues = gh.open_issues()?;
@@ -571,6 +575,11 @@ impl Report {
         Report { left_out, ..self }
     }
 
+    /// A line for each harness's channel, for a caller that built them.
+    pub fn with_channels(self, channels: Vec<String>) -> Report {
+        Report { channels, ..self }
+    }
+
     /// The nightly job passes its checks. A report on its own has none. What
     /// needs the owner stays open, and the rest folds.
     pub fn markdown(&self, checks: &[(&str, &str)]) -> String {
@@ -614,6 +623,7 @@ impl Report {
             .map(|w| self.link(&w.title, "issues", w.issue))
             .collect();
         section(&mut text, "Waiting on the owner", waiting);
+        section(&mut text, "Harness channels", self.channels.clone());
         let mut above = Vec::new();
         self.spec_section(&mut text, &mut above);
         self.rules_section(&mut text, &mut above);

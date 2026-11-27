@@ -40,6 +40,14 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
         if !trimmed.is_empty() && !line.starts_with("  ") {
             extractor.marked_item = false;
         }
+        // A line left of the open numbered item's text ends that item. A
+        // numbered line there starts its sibling, and sets the column again.
+        let indent = line.len() - trimmed.len();
+        let leaves_item =
+            !trimmed.is_empty() && extractor.numbered.is_some_and(|column| indent < column);
+        if leaves_item {
+            extractor.numbered = None;
+        }
         if let Some(open) = opens_fence(trimmed) {
             extractor.flush();
             fence = Some(open);
@@ -60,20 +68,20 @@ fn extract_with(spec: &str, keep_marked: bool) -> Result<Vec<Unit>, String> {
             }
         } else {
             let body = trimmed.strip_prefix("> ").unwrap_or(trimmed);
-            // As in CommonMark, a numbered item interrupts a paragraph or a
-            // bullet only from 1, so a wrapped "125. " continues it.
+            // As in CommonMark, a numbered line interrupts a paragraph only
+            // from 1, so a wrapped "125. " continues it.
             let item = list_item(body).filter(|(_, number)| {
                 number.is_none_or(|n| {
-                    n.trim_start_matches('0') == "1"
-                        || extractor.block.is_empty()
-                        || extractor.in_numbered_item
+                    n.trim_start_matches('0') == "1" || extractor.block.is_empty() || leaves_item
                 })
             });
             if let Some((item, number)) = item {
                 extractor.flush();
                 extractor.marked_item = false;
                 extractor.in_item = true;
-                extractor.in_numbered_item = number.is_some();
+                if let Some(number) = number {
+                    extractor.numbered = Some(indent + number.len() + 2);
+                }
                 extractor.block.push(item);
             } else {
                 extractor.block.push(body);
@@ -92,8 +100,8 @@ struct Extractor<'a> {
     units: Vec<Unit>,
     /// The current block began as a list item.
     in_item: bool,
-    /// The current block began as a numbered list item.
-    in_numbered_item: bool,
+    /// The column where the open numbered list item's text starts.
+    numbered: Option<usize>,
     /// A marker earlier in this list item covers what follows it.
     marked_item: bool,
     keep_marked: bool,
@@ -107,7 +115,6 @@ impl Extractor<'_> {
         let marked = MARKERS.iter().any(|m| text.contains(m)) || self.marked_item;
         self.marked_item = marked && (self.in_item || self.marked_item);
         self.in_item = false;
-        self.in_numbered_item = false;
         (!text.is_empty() && (self.keep_marked || !marked)).then_some(text)
     }
 
@@ -522,6 +529,18 @@ mod tests {
     fn a_first_numbered_item_interrupts_a_paragraph() {
         let spec = "# A\n\nThese apply\n1. One\n2. Two\n";
         assert_eq!(texts(spec), ["These apply", "One", "Two"]);
+    }
+
+    #[test]
+    fn a_wrapped_number_stays_in_its_numbered_item() {
+        let spec = "# A\n\n1. It exits with\n   125. The error names it.\n";
+        assert_eq!(texts(spec), ["It exits with 125.", "The error names it."]);
+    }
+
+    #[test]
+    fn a_numbered_item_follows_its_nested_bullet_and_paragraph() {
+        let spec = "# A\n\n1. One\n   - Sub\n2. Two\n\n   More\n3. Three\n";
+        assert_eq!(texts(spec), ["One", "Sub", "Two", "More", "Three"]);
     }
 
     #[test]

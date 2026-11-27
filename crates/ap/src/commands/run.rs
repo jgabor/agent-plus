@@ -26,8 +26,9 @@
 //! starts.
 //!
 //! Each `SECRET`'s value comes from the variable of its name in this
-//! process's environment, and a run without one fails with 125, before any
-//! VM starts. A `visible` value goes to the harness's environment. A hidden
+//! process's environment, or else from the command that `ap secret set`
+//! kept for it, as [`super::secret::value`] says. A run without one fails
+//! with 125, before any VM starts. A `visible` value goes to the harness's environment. A hidden
 //! one goes to the network process, which puts it in requests to its bound
 //! hosts, and the harness gets a placeholder made for this run instead.
 //! No process that `ap run` starts, such as the run process, the network
@@ -808,8 +809,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         return Err(fail(format!("`{}` is not built yet", instruction.name)));
     }
     // SPEC.md's SECRET: each value comes from the host environment variable
-    // of the secret's name, and a run without one fails before it asks
-    // anything else.
+    // of the secret's name, or else from its command, once for each name,
+    // and a run without one fails before it asks anything else.
     let secrets = Secrets::read(&instructions).map_err(unreadable)?;
     let mut given = Vec::new();
     let mut hidden = Vec::new();
@@ -825,13 +826,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             .iter()
             .filter(same)
             .any(|other| other.visible);
-        let value = std::env::var_os(&secret.name).ok_or_else(|| {
-            fail(format!(
-                "`SECRET {0}` has no value. Set the environment variable `{0}`",
-                secret.name
-            ))
-        })?;
-        let value = value.into_vec();
+        let shown = format!("`SECRET {}`", secret.name);
+        let value = super::secret::value(&secret.name, &shown).map_err(fail)?;
         if visible {
             given.push((secret.name.as_bytes().to_vec(), value));
             continue;
@@ -875,12 +871,8 @@ fn start(args: &Args) -> Result<Prepared, Error> {
             let sign_in = ap::adapter::sign_in(harness, auth)
                 .ok_or_else(|| fail(format!("agent {name} can't run: `AUTH {method}`")))?;
             let variable = sign_in.variable;
-            let value = std::env::var_os(variable).ok_or_else(|| {
-                fail(format!(
-                    "`AUTH {method}` has no value. Set the environment variable `{variable}`"
-                ))
-            })?;
-            let value = value.into_vec();
+            let value =
+                super::secret::value(variable, &format!("`AUTH {method}`")).map_err(fail)?;
             if sign_in.hosts.is_empty() {
                 given.push((variable.as_bytes().to_vec(), value));
             } else {

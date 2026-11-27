@@ -373,45 +373,163 @@ fn an_agent_with_an_instruction_that_isnt_built_yet_fails_before_its_vm_starts()
     );
 }
 
-// spec(SECRET): On Linux, v0.1.0 has no secret store, so `ap` reads the value only from the host environment variable.
+// spec(SECRET): **Where the value comes from.** At run time, `ap` reads the value from the host environment variable `<name>`.
+// spec(SECRET): If that is unset, it runs the command that `ap secret set <name> --command` kept (see [ap secret](#ap-secret)).
+// spec(SECRET): A missing value makes the run fail, and the error names the secret.
+// spec(SECRET): `ap run` runs the command with `sh -c` on the host, once per run, before any VM starts.
 #[test]
-fn a_secret_s_value_comes_only_from_its_host_variable() {
+fn a_secret_s_value_comes_from_its_variable_then_its_command() {
     let scratch = Scratch::new("secret-variable");
+    // A name on two lines is still one secret, and its command runs once.
     let lines = "NETWORK +api.example.com\nSECRET API_TOKEN @api.example.com\n\
-                 SECRET NOTE visible\n";
+                 SECRET API_TOKEN @api.example.com\nSECRET NOTE visible\n";
     scratch.build("secretive", &format!("{RUNNABLE}{lines}"));
     let both = [("API_TOKEN", "tok-1"), ("NOTE", "note-1")];
     past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &both));
-    // The store says it has none, so a value given to it is kept nowhere,
-    // and the runs below don't find it.
-    let mut set = scratch.command(&["secret", "set", "API_TOKEN"], &[]);
-    let mut set = (set.stdin(Stdio::piped()).stderr(Stdio::piped()))
-        .spawn()
-        .unwrap();
-    // `ap` may exit before it reads, which closes the pipe.
-    match set.stdin.take().unwrap().write_all(b"tok-1\n") {
-        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => panic!("{error}"),
-        _ => {}
-    }
-    let set = set.wait_with_output().unwrap();
-    assert_eq!(set.status.code(), Some(1), "{set:?}");
-    let said = String::from_utf8_lossy(&set.stderr);
-    assert!(said.contains("no secret store on Linux"), "{said}");
     for (name, other) in [("API_TOKEN", both[1]), ("NOTE", both[0])] {
-        // Without its own variable, nothing else gives a secret its value:
-        // another secret's variable, one in another case, or one that
-        // only names it.
+        // Without its own variable or a command, nothing else gives a
+        // secret its value: another secret's variable, one in another
+        // case, or one that only names it.
         for env in [
             vec![other],
             vec![other, (&name.to_ascii_lowercase(), "tok-1")],
             vec![other, (&format!("AP_{name}"), "tok-1")],
         ] {
-            refused(
-                &scratch.ap(&["run", "secretive", "-p", "hi"], &env),
-                &format!("`{name}`"),
+            let output = scratch.ap(&["run", "secretive", "-p", "hi"], &env);
+            refused(&output, &format!("`SECRET {name}`"));
+            let said = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                said.contains(&format!("ap secret set {name} --command")),
+                "{said}"
             );
         }
     }
+    // The command counts its runs, through the shell's own syntax.
+    let counts = "for word in once; do echo \"$word\" >>count; done; echo tok-2";
+    secret_set(&scratch, "API_TOKEN", counts);
+    // The variable comes first, so the command doesn't run.
+    past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &both));
+    assert!(!scratch.root.join("count").exists());
+    // Without the variable, the command runs once, and the run gets as far
+    // as the boot.
+    past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &[both[1]]));
+    assert_eq!(
+        fs::read_to_string(scratch.root.join("count")).unwrap(),
+        "once\n"
+    );
+    // A secret without a value still fails the run, after the command ran,
+    // and before any VM starts.
+    fs::remove_file(scratch.root.join("count")).unwrap();
+    refused(
+        &scratch.ap(&["run", "secretive", "-p", "hi"], &[]),
+        "`SECRET NOTE`",
+    );
+    // Another secret's command is no command for this one.
+    secret_set(&scratch, "NOTE_OTHER", "echo note");
+    refused(
+        &scratch.ap(&["run", "secretive", "-p", "hi"], &[]),
+        "`SECRET NOTE`",
+    );
+    secret_set(&scratch, "NOTE", "echo note");
+    past_checks(&scratch.ap(&["run", "secretive", "-p", "hi"], &[]));
+}
+
+/// Keeps `command` for the secret `name`, as `ap secret set` does.
+fn secret_set(scratch: &Scratch, name: &str, command: &str) {
+    let output = scratch.ap(&["secret", "set", name, "--command", command], &[]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+// spec(SECRET): Its standard input and standard error stay on the terminal, so a password manager can prompt.
+#[test]
+fn a_secret_s_command_reads_and_asks_on_your_terminal() {
+    let scratch = Scratch::new("secret-terminal");
+    scratch.build(
+        "asks",
+        &format!("{RUNNABLE}NETWORK +api.example.com\nSECRET API_TOKEN @api.example.com\n"),
+    );
+    secret_set(
+        &scratch,
+        "API_TOKEN",
+        "echo 'Passphrase:' >&2; read -r typed; echo \"$typed\" >typed; echo tok",
+    );
+    let mut run = scratch.command(&["run", "asks", "-p", "hi"], &[]);
+    let mut run = (run.stdin(Stdio::piped()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    run.stdin.take().unwrap().write_all(b"hunter2\n").unwrap();
+    let output = run.wait_with_output().unwrap();
+    past_checks(&output);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Passphrase:"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.root.join("typed")).unwrap(),
+        "hunter2\n"
+    );
+}
+
+// spec(SECRET): A command that exits with a failure, or prints nothing, fails the run with 125.
+// spec(SECRET): The error names the secret and how the command ended, and never shows what it printed.
+#[test]
+fn a_secret_s_command_that_fails_or_prints_nothing_fails_the_run() {
+    let scratch = Scratch::new("secret-failed");
+    scratch.build(
+        "failing",
+        &format!("{RUNNABLE}NETWORK +api.example.com\nSECRET API_TOKEN @api.example.com\n"),
+    );
+    for (command, ended) in [
+        ("printf printed-value-1; exit 3", "exited with status 3"),
+        (
+            "printf 'printed-value-1\\n'; kill -9 $$",
+            "was killed by signal 9",
+        ),
+        ("true", "printed nothing"),
+        ("printf '\\n\\n'", "printed nothing"),
+    ] {
+        secret_set(&scratch, "API_TOKEN", command);
+        let output = scratch.ap(&["run", "failing", "-p", "hi"], &[]);
+        refused(&output, "`SECRET API_TOKEN`");
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(said.contains(ended), "{command}: {said}");
+        assert!(!said.contains("printed-value-1"), "{said}");
+    }
+}
+
+// spec(SECRET): An Agentfile can't name a command.
+// spec(SECRET): Only `ap secret set` on the host can.
+#[test]
+fn an_agentfile_can_t_name_a_secret_s_command() {
+    let scratch = Scratch::new("secret-agentfile");
+    for line in [
+        "SECRET API_TOKEN @api.example.com --command \"echo ran >ran\"",
+        "SECRET API_TOKEN @api.example.com command=\"echo ran >ran\"",
+        "SECRET API_TOKEN @api.example.com \"echo ran >ran\"",
+    ] {
+        let dir = scratch.root.join("commanding");
+        fs::create_dir_all(&dir).unwrap();
+        let agentfile = format!("{RUNNABLE}NETWORK +api.example.com\n{line}\n");
+        fs::write(dir.join("Agentfile"), agentfile).unwrap();
+        let output = scratch.ap(
+            &["build", "--approve=/dev/null", dir.to_str().unwrap()],
+            &[],
+        );
+        // The line itself is the error, and not the grants that weren't
+        // approved.
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(output.status.code(), Some(0), "{line}: {said}");
+        assert!(said.contains("Agentfile:5:"), "{line}: {said}");
+        assert!(!scratch.root.join("ran").exists(), "{line}");
+        assert!(!dir.join("ran").exists(), "{line}");
+    }
+    // Without a command, the same line builds.
+    scratch.build(
+        "commanding",
+        &format!("{RUNNABLE}NETWORK +api.example.com\nSECRET API_TOKEN @api.example.com\n"),
+    );
 }
 
 // spec(AUTH): On your host, `ap` reads `ANTHROPIC_API_KEY` for Claude Code and `CODEX_API_KEY` for Codex, the way it reads any [secret](#secret).
@@ -448,6 +566,48 @@ fn auth_key_and_token_need_their_variable_before_the_vm_starts() {
             &format!("`{variable}`"),
         );
         past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[(variable, "sk-1")]));
+    }
+}
+
+// spec(SECRET): `AUTH key` and `AUTH token` read their variable in the same way.
+#[test]
+fn auth_key_and_token_run_their_variable_s_command() {
+    let scratch = Scratch::new("auth-command");
+    let codex = RUNNABLE.replace("claude:0.0.0", "codex:0.169.0");
+    for (name, agentfile, variable, method) in [
+        (
+            "keyed",
+            format!("{RUNNABLE}AUTH key\n"),
+            "ANTHROPIC_API_KEY",
+            "key",
+        ),
+        (
+            "tokened",
+            format!("{RUNNABLE}AUTH token\n"),
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "token",
+        ),
+        (
+            "codex-keyed",
+            format!("{codex}AUTH key\n"),
+            "CODEX_API_KEY",
+            "key",
+        ),
+    ] {
+        scratch.build(name, &agentfile);
+        let count = scratch.root.join(format!("{name}.count"));
+        let command = format!("echo once >>{}; echo sk-2", count.display());
+        secret_set(&scratch, variable, &command);
+        // The variable comes first.
+        past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[(variable, "sk-1")]));
+        assert!(!count.exists(), "{name}");
+        past_checks(&scratch.ap(&["run", name, "-p", "hi"], &[]));
+        assert_eq!(fs::read_to_string(&count).unwrap(), "once\n", "{name}");
+        secret_set(&scratch, variable, "exit 4");
+        let output = scratch.ap(&["run", name, "-p", "hi"], &[]);
+        refused(&output, &format!("`AUTH {method}`"));
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(said.contains("exited with status 4"), "{said}");
     }
 }
 

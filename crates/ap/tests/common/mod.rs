@@ -3,6 +3,8 @@
 
 #![allow(dead_code, reason = "each test binary uses only some of this module")]
 
+pub mod erofs;
+pub mod git_server;
 pub mod repo;
 
 use std::fs;

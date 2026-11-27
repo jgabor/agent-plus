@@ -1199,25 +1199,29 @@ Recognized formats:
 
 A plugin that ships several manifests is read from the one native to the
 target harness, then from Agent Plugins 1.0, then from the others in table
-order. A directory with neither a plugin manifest nor a marketplace
+order. A root `plugin.json` without the Agent Plugins 1.0 `$schema`, in a
+plugin with no other manifest, is an error that names the `$schema` it has.
+
+Without names, a source with no plugin manifest and no marketplace
 manifest is read as a Claude Code plugin with no manifest, from Claude
-Code's default locations, and is named after the directory.
+Code's default locations, and is named after its directory. A source with
+nothing in those locations either is an error.
 
 A root `plugin.json` is read as Codex reads it, whatever the target harness.
 
 - The plugin's name comes from `plugin.json`, its skills from `skills/`,
   and its MCP servers from `mcp.json`, as Agent Plugins 1.0 says.
 - Its hooks come from the `hooks` key of the manifest's
-  `extensions.com.openai` object. When that object is absent, they come
-  from the `hooks` key of `.codex-plugin/plugin.json`. Without that key,
-  they come from `hooks/hooks.json`.
+  `extensions.com.openai` object or, when that object is absent, of
+  `.codex-plugin/plugin.json`. When that key isn't there, they come from
+  `hooks/hooks.json`.
 
 The plugin is parsed into a neutral model with these components: skills,
 commands, subagents, hooks, and MCP servers. That model is then rendered for
 the harness version in the lockfile, as a plugin in the harness's own
-format: with `.claude-plugin/plugin.json` for Claude Code, and with a root
-`plugin.json` in the Agent Plugins 1.0 format for Codex. Each component goes
-where that format keeps it:
+format. Claude Code gets `.claude-plugin/plugin.json`, and Codex gets a root
+`plugin.json` in the Agent Plugins 1.0 format. Each component goes where
+that format keeps it:
 
 | Component | `claude` | `codex` |
 |---|---|---|

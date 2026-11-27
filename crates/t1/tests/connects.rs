@@ -223,6 +223,18 @@ udp() {
 }
 "#;
 
+/// Lines of the guest's script that run each of `lines` at the same time,
+/// each under the limits it has alone, and print what each printed, in the
+/// order of `lines`.
+fn side_by_side(lines: &[String]) -> String {
+    let mut script = String::from("{\n");
+    for (at, line) in lines.iter().enumerate() {
+        script +=
+            &format!("{{\n{line}}} | while IFS= read -r said; do echo \"{at} $said\"; done &\n");
+    }
+    script + "wait\n} | sort -s -n -k1,1 | cut -d' ' -f2-\n"
+}
+
 /// What a listener saw: a line for each connection's or datagram's first
 /// line, and `closed` when a connection ended.
 type Seen = Arc<Mutex<Vec<String>>>;
@@ -299,7 +311,10 @@ fn a_rule_for_your_host_reaches_its_loopback_over_tcp_and_udp() {
     let (run, name) = scratch.run("reaching");
     let lines = scratch.try_network(
         &name,
-        &format!("tcp tcp host.ap.internal {port}\nudp udp host.ap.internal {port}\n"),
+        &side_by_side(&[
+            format!("tcp tcp host.ap.internal {port}\n"),
+            format!("udp udp host.ap.internal {port}\n"),
+        ]),
     );
     assert_eq!(lines, ["tcp host:ping", "udp host:ping"]);
     // The guest's end closed when its shell did, and the close reached the
@@ -350,14 +365,14 @@ fn unreachable(test: &str, network: &str) {
     let (run, name) = scratch.run(test);
     let lines = scratch.try_network(
         &name,
-        &format!(
-            "tcp tcp host.ap.internal {port}\n\
-             udp udp host.ap.internal {port}\n\
-             tcp tcp-v4 127.0.0.1 {port}\n\
-             tcp tcp-mapped ::ffff:127.0.0.1 {port}\n\
-             tcp tcp-v6 ::1 {port}\n\
-             udp udp-v4 127.0.0.1 {port}\n"
-        ),
+        &side_by_side(&[
+            format!("tcp tcp host.ap.internal {port}\n"),
+            format!("udp udp host.ap.internal {port}\n"),
+            format!("tcp tcp-v4 127.0.0.1 {port}\n"),
+            format!("tcp tcp-mapped ::ffff:127.0.0.1 {port}\n"),
+            format!("tcp tcp-v6 ::1 {port}\n"),
+            format!("udp udp-v4 127.0.0.1 {port}\n"),
+        ]),
     );
     assert_eq!(
         lines,
@@ -545,7 +560,7 @@ fn a_host_rule_s_connection_reaches_its_destination_only_when_its_name_agrees() 
         send(host, port, &[&mine]),
         send(host, port, &[AGREES]),
     ];
-    scratch.try_network(&name, &script.concat());
+    scratch.try_network(&name, &side_by_side(&script));
     // The hello for another name, and the request for one, never reached
     // the listener. The second request on a connection didn't either.
     let known: [(&str, &[u8]); 2] = [("agrees", AGREES), ("hello", &mine)];
@@ -569,7 +584,7 @@ fn a_connection_no_name_rule_decides_skips_the_name_check() {
         send(&address.to_string(), port, &[&other]),
         send(&address.to_string(), port, &[DISAGREES]),
     ];
-    scratch.try_network(&name, &script.concat());
+    scratch.try_network(&name, &side_by_side(&script));
     let known: [(&str, &[u8]); 2] = [("disagrees", DISAGREES), ("hello", &other)];
     assert_eq!(received(&seen, 2, &known), ["disagrees", "hello"]);
     scratch.stop(&name, run);
@@ -618,8 +633,10 @@ fn a_network_that_reaches_nothing_still_answers_the_guest() {
     let (run, name) = scratch.run("nothing");
     let lines = scratch.try_network(
         &name,
-        "timeout 10 getent ahostsv4 api.anthropic.com; echo \"lookup $?\"\n\
-         tcp tcp 192.0.2.1 443\n",
+        &side_by_side(&[
+            "timeout 10 getent ahostsv4 api.anthropic.com; echo \"lookup $?\"\n".to_owned(),
+            "tcp tcp 192.0.2.1 443\n".to_owned(),
+        ]),
     );
     // getent's status for a name that doesn't exist, which the resolver
     // said at once, and not the timeout's.
@@ -1095,11 +1112,13 @@ fn inside(scratch: &Scratch) {
     let (run, name) = scratch.run("resolving");
     let lines = scratch.try_network(
         &name,
-        &format!(
-            "tcp svc svc.test {PORT}\nudp svc-udp svc.test {PORT}\n\
-             tcp loop loop.test {PORT}\ntcp deny deny.test {PORT}\n\
-             tcp resolver {FIRST_DNS} 53\n"
-        ),
+        &side_by_side(&[
+            format!("tcp svc svc.test {PORT}\n"),
+            format!("udp svc-udp svc.test {PORT}\n"),
+            format!("tcp loop loop.test {PORT}\n"),
+            format!("tcp deny deny.test {PORT}\n"),
+            format!("tcp resolver {FIRST_DNS} 53\n"),
+        ]),
     );
     assert_eq!(
         lines,

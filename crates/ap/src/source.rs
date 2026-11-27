@@ -55,8 +55,8 @@ pub fn resolve(url: &str, reference: &str, cache: &Path) -> io::Result<Resolved>
     }
     let work = Work::new(cache)?;
     let mut command = work.git();
-    // A peeled tag is listed as `<tag>^{}`, which only its own pattern
-    // matches.
+    // An annotated tag is listed again, peeled, as `<tag>^{}`, which only
+    // its own pattern matches.
     let peeled = format!("{reference}^{{}}");
     command.args(["ls-remote", "--symref", "--", url, reference, &peeled]);
     let output = run(command, "ls-remote")?;
@@ -89,7 +89,6 @@ pub fn resolve(url: &str, reference: &str, cache: &Path) -> io::Result<Resolved>
         let Some(id) = refs.get(&candidate) else {
             continue;
         };
-        // An annotated tag is listed again, peeled, as `<tag>^{}`.
         let commit = *refs.get(&format!("{candidate}^{{}}")).unwrap_or(id);
         let name = match candidate.as_str() {
             DEFAULT => symbolic.clone().filter(|name| check_ref(name)),
@@ -282,7 +281,7 @@ fn read_failed(error: git::Error) -> io::Error {
 
 /// Whether `name` is a ref name `git check-ref-format` accepts, so that it
 /// can go in a `.git` as it is.
-fn check_ref(name: &str) -> bool {
+pub(crate) fn check_ref(name: &str) -> bool {
     let bad = |c: char| c.is_ascii_control() || " ~^:?*[\\".contains(c);
     name.contains('/')
         && !name.contains("..")

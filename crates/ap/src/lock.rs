@@ -223,7 +223,11 @@ impl Lock {
                         [repository, reference, name, commit] => {
                             let name = match name.as_str() {
                                 "-" => Some(None),
-                                name if name.starts_with("refs/") => Some(Some(name.to_string())),
+                                name if name.starts_with("refs/")
+                                    && crate::source::check_ref(name) =>
+                                {
+                                    Some(Some(name.to_string()))
+                                }
                                 _ => None,
                             };
                             name.zip(git::Id::from_hex(commit).filter(|_| is_commit(commit)))

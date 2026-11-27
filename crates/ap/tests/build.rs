@@ -2920,6 +2920,7 @@ fn a_lock_reads_and_writes_a_source() {
         "SOURCE https://localhost/a.git HEAD refs/heads/main\n".to_string(),
         "SOURCE https://localhost/a.git HEAD refs/heads/main abc\n".to_string(),
         format!("SOURCE https://localhost/a.git HEAD main {commit}\n"),
+        format!("SOURCE https://localhost/a.git HEAD \"refs/heads/a b\" {commit}\n"),
         format!(
             "SOURCE https://localhost/a.git HEAD - {commit}\nSOURCE https://localhost/a.git HEAD - {commit}\n"
         ),

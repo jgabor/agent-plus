@@ -241,10 +241,10 @@ says. List the rest in the PR.
 When your change needs an action that only the owner may take, such as
 installing or enabling something on a machine, changing a repository setting,
 or setting a secret, file an issue for it before you run `merge` or `prepare`.
-It has the label `action-needed`, and no `auto:*` label. The label is for what
-stops working, stays broken, or stays unsafe until the owner acts. A merge is
-`land-needed`, and a question is `answer-needed`. Only the owner closes the
-issue or removes its label.
+It has the label `action-needed`, no parent, and no `auto:*` label. The label
+is for what stops working, stays broken, or stays unsafe until the owner acts.
+A merge is `land-needed`, and a question is `answer-needed`. Only the owner
+closes the issue or removes its label.
 
 The title is the action as an instruction, and says where, such as "Turn the
 refresh timer on, on the Linux machine". The body has these three parts, in

@@ -82,10 +82,8 @@ can't continue alone, park the issue as AGENTS.md says.
    to the PR body before you run `merge` or `prepare`.
 
    If the change needs an action that only the owner may take, file its
-   `action-needed` issue now, as Owner actions in AGENTS.md says, with no
-   parent. Then start the PR's body with the alert that names it, put the
-   issue in your status comment's `Next`, and start your last message in
-   this thread with the alert's sentence.
+   `action-needed` issue now, and follow Owner actions in AGENTS.md for the
+   PR's body, your status comment, and your last message.
 7. If the issue has `auto:merge`, run `cargo xtask merge <pr> --thread <id>`.
    If it prints `fail owner`, because the PR waits for the owner, or `fail
    hills`, `fail journey`, or `fail budgets` because a count fell, run `cargo

@@ -6,34 +6,23 @@ use std::process::{Command, Output};
 
 mod common;
 
+const AT_ONCE_ENV: &str = "XTASK_PACKAGES_AT_ONCE";
 const GOOD: &str = "pub fn answer() -> u32 {\n    42\n}\n";
 
 /// A workspace with one crate, whose `lib.rs` holds `source`.
 fn workspace(name: &str, source: &str) -> PathBuf {
+    packages(name, &[("demo", source)])
+}
+
+/// A workspace of crates, each a name and the `lib.rs` it holds.
+fn packages(name: &str, crates: &[(&str, &str)]) -> PathBuf {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     if root.exists() {
         fs::remove_dir_all(&root).unwrap();
     }
-    fs::create_dir_all(root.join("demo/src")).unwrap();
-    fs::write(
-        root.join("Cargo.toml"),
-        "[workspace]\nmembers = [\"demo\"]\nresolver = \"3\"\n",
-    )
-    .unwrap();
-    fs::write(
-        root.join("demo/Cargo.toml"),
-        "[package]\nname = \"demo\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-    )
-    .unwrap();
-    fs::write(root.join("demo/src/lib.rs"), source).unwrap();
+    fs::create_dir_all(&root).unwrap();
     fs::write(root.join("SPEC.md"), "# A\n").unwrap();
-    let output = Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&root)
-        .env("PATH", common::path(&[]))
-        .output()
-        .unwrap();
-    assert!(output.status.success());
+    common::crates(&root, crates);
     root
 }
 
@@ -43,6 +32,7 @@ fn xtask(dir: &Path, args: &[&str]) -> Output {
         .current_dir(dir)
         .env("PATH", common::path(&[]))
         .env_remove("CARGO_TARGET_DIR")
+        .env_remove(AT_ONCE_ENV)
         .output()
         .unwrap()
 }
@@ -110,6 +100,72 @@ fn a_failing_test_fails() {
     let output = xtask(&root, &["gate"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(stdout(&output).contains("fail tests"));
+}
+
+/// Starts a line on stderr, and ends it only after the other package wrote a
+/// whole line of its own.
+const STARTS: &str = r#"
+#[test]
+fn starts_a_line() {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    stderr.write_all(b"first half, ").unwrap();
+    meet("half", true);
+    meet("whole", false);
+    stderr.write_all(b"second half\n").unwrap();
+}
+"#;
+
+const BETWEEN: &str = r#"
+#[test]
+fn writes_a_line_between() {
+    use std::io::Write;
+    meet("half", false);
+    std::io::stderr().write_all(b"a whole line\n").unwrap();
+    meet("whole", true);
+}
+"#;
+
+#[test]
+fn packages_run_side_by_side_and_keep_their_lines_whole() {
+    let starts = format!("{}{STARTS}", common::MEET);
+    let between = format!("{}{BETWEEN}", common::MEET);
+    let root = packages("side-by-side", &[("a", &starts), ("b", &between)]);
+    for fifo in ["half", "whole"] {
+        common::fifo(&root.join(fifo));
+    }
+    let output = xtask(&root, &["gate"]);
+    let err = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    let lines: Vec<&str> = err.lines().collect();
+    assert!(lines.contains(&"first half, second half"), "{err}");
+    assert!(lines.contains(&"a whole line"), "{err}");
+}
+
+const FAILS: &str = "#[test]\nfn fails() {\n    panic!(\"planted\");\n}\n";
+
+const FINISHES: &str = r#"#[test]
+fn finishes() {
+    let marks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    std::fs::write(marks.join("finished"), "").unwrap();
+}
+"#;
+
+/// One package at a time, so that the second waits for the first to fail.
+#[test]
+fn a_failing_package_fails_the_run_and_the_others_finish() {
+    let root = packages("one-fails", &[("a", FAILS), ("b", FINISHES)]);
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("gate")
+        .current_dir(&root)
+        .env("PATH", common::path(&[]))
+        .env(AT_ONCE_ENV, "1")
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stdout(&output).contains("fail tests"));
+    assert!(root.join("finished").exists(), "{}", stderr(&output));
 }
 
 #[test]

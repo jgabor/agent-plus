@@ -181,23 +181,39 @@ impl Hold {
     /// this process's own lets anything go, so the merge slot's holder, and a
     /// run whose parent passed its place down, go on.
     pub fn between(&mut self) -> Result<(), Problem> {
-        if self.ahead || !matches!(self.place, Held::Own(_)) {
+        let Some(waiting) = self.waiting()? else {
             return Ok(());
-        }
+        };
         let shared = self.activity.any();
-        if kept(&self.directory, AHEAD)? {
-            self.activity = Held::No;
+        self.activity = Held::No;
+        if waiting == Wait::Place {
             self.place = Held::No;
             self.place = Held::Own(take_place(&self.directory, places()?, false)?);
-        } else if shared && bench_waits(&self.directory)? {
-            self.activity = Held::No;
-        } else {
-            return Ok(());
         }
         if shared {
             self.activity = Held::Own(take_shared(&self.directory)?);
         }
         Ok(())
+    }
+
+    /// Whether `between` would let something go now.
+    pub fn waits(&self) -> Result<bool, Problem> {
+        Ok(self.waiting()?.is_some())
+    }
+
+    /// What waiting work wants of this hold: the place, for the merge slot's
+    /// holder, or the activity lock, for a bench.
+    fn waiting(&self) -> Result<Option<Wait>, Problem> {
+        if self.ahead || !matches!(self.place, Held::Own(_)) {
+            return Ok(None);
+        }
+        if kept(&self.directory, AHEAD)? {
+            return Ok(Some(Wait::Place));
+        }
+        if self.activity.any() && bench_waits(&self.directory)? {
+            return Ok(Some(Wait::Activity));
+        }
+        Ok(None)
     }
 
     /// For a child that must keep this hold until it exits, even if this
@@ -261,14 +277,19 @@ pub fn place(root: &Path, slot: Option<&Hold>) -> Result<Hold, Problem> {
 }
 
 fn places() -> Result<usize, Problem> {
-    let Some(value) = env::var_os(PLACES_OVERRIDE) else {
-        return Ok(PLACES);
+    count(PLACES_OVERRIDE, PLACES)
+}
+
+/// A number above 0: `variable` if it is set, or else `default`.
+pub fn count(variable: &str, default: usize) -> Result<usize, Problem> {
+    let Some(value) = env::var_os(variable) else {
+        return Ok(default);
     };
     value
         .to_str()
         .and_then(|text| text.parse().ok())
         .filter(|&count| count > 0)
-        .ok_or_else(|| Problem(format!("{PLACES_OVERRIDE} must be a number above 0")))
+        .ok_or_else(|| Problem(format!("{variable} must be a number above 0")))
 }
 
 fn inherited(name: &str, directory: &Path) -> bool {

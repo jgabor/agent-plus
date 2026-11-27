@@ -394,9 +394,17 @@ the next one that frees, because every merge waits for it. Before each
 package, a run of the tests with a place of its own lets waiting work go
 first. It gives its place to a proof under the slot that waits for one, or
 lets go of the activity lock while a bench waits for it. Then it takes back
-what it let go: the place first, then the lock through the turnstile. The
-nightly job does the same between its checks. A proof under the slot keeps
-both, and so does a run whose parent passed its place down.
+what it let go: the place first, then the lock through the turnstile. While
+packages run and work waits, the run starts no more until they have ended,
+so it lets nothing go while a package runs. The nightly job does the same
+between its checks. A proof under the slot keeps both, and so does a run
+whose parent passed its place down.
+
+**Packages side by side.** A run of the tests runs the tests of up to four
+packages at once. Each package has its own `cargo test --package`, so no
+package is built with another's features, and each is a job with its own
+memory limit. A package that fails fails the run, and the others finish. Each
+line of a package's output reaches the run's stderr whole.
 
 **Fuzzing.** The nightly job fuzzes the Agentfile parser, network rule
 matching, and device input from the guest. A target for code with an oracle

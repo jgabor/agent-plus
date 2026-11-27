@@ -157,8 +157,10 @@ impl Guest {
     }
 
     /// A guest of the server `make` makes, on the thread that serves it.
-    /// It returns once the server is made.
+    /// It returns once the server is made. The process may then hold as
+    /// many descriptors as the share server's process may.
     pub fn made(make: impl FnOnce() -> Server + Send + 'static) -> Self {
+        share::raise_descriptor_limit();
         let (mine, theirs) = UnixStream::pair().unwrap();
         let (ready, started) = mpsc::channel();
         let server = thread::spawn(move || {

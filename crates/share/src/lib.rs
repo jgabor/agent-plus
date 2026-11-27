@@ -364,8 +364,10 @@ fn open_roots(args: &[OsString], kept: Option<RawFd>) -> io::Result<Vec<Root>> {
 }
 
 /// Each file the guest looks up holds a descriptor, so the server may hold
-/// as many as the host lets it.
-fn raise_descriptor_limit() {
+/// as many as the host lets it. The limit is the whole process's, so a test
+/// that serves on a thread raises it too.
+#[doc(hidden)]
+pub fn raise_descriptor_limit() {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

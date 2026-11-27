@@ -2,7 +2,7 @@
 //! order the planner should take it.
 
 use crate::json::quoted;
-use crate::{Problem, Verdict, bench, journey, ledger, lock, score, testrun, workspace};
+use crate::{Problem, Verdict, bench, journey, ledger, lock, roadmap, score, testrun, workspace};
 use std::collections::BTreeMap;
 
 /// A gap isn't a failure of this command. A broken spec quote is, as in
@@ -10,6 +10,13 @@ use std::collections::BTreeMap;
 /// promise that only a `t2` check proves.
 pub fn run(json: bool) -> Result<Verdict, Problem> {
     let root = workspace::root()?;
+    // `gaps` runs no step that spends, nor one that needs such a step, so the
+    // nightly job's last run says whether one passes. Only then does `gaps`
+    // need GitHub, and it asks first, so a run that can't reach it stops early.
+    let details = match journey::left_out(&root)? {
+        0 => String::new(),
+        _ => roadmap::last_details(&root)?,
+    };
     let mut hold = lock::testing(&root)?;
     let results = testrun::run(&root, &mut hold)?;
     let score = score::compute(&root, &results)?;
@@ -24,7 +31,9 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let values = ledger::at_head(&root)?.map_or_else(BTreeMap::new, |record| record.budgets);
     let budgets = bench::read_budgets(&root)?;
 
-    let steps: Vec<_> = outcomes.iter().filter(|o| o.state != "pass").collect();
+    let passed =
+        |o: &journey::Outcome| o.state == "pass" || (o.spends && roadmap::passed_in(&details, o));
+    let steps: Vec<_> = outcomes.iter().filter(|o| !passed(o)).collect();
     // The planner works on one milestone at a time: the first in roadmap
     // order that has a step still to pass.
     let milestone = journey::milestones(&root)?

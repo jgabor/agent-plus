@@ -409,9 +409,9 @@ impl Gh {
             .collect()
     }
 
-    /// Every issue, open or closed.
-    pub fn roadmap_issues(&self) -> Result<Vec<RoadmapIssue>, Problem> {
-        self.listed("all", "number,state,title,body,labels,parent,url")?
+    /// The issues in `state`, which is `open`, `closed`, or `all`.
+    pub fn roadmap_issues(&self, state: &str) -> Result<Vec<RoadmapIssue>, Problem> {
+        self.listed(state, "number,state,title,body,labels,parent,url")?
             .iter()
             .map(|item| read_roadmap_issue(item).ok_or_else(|| unexpected("gh issue list")))
             .collect()

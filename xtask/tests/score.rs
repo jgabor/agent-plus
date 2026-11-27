@@ -159,7 +159,7 @@ fn spec_reports_a_stale_quote_without_running_a_test() {
 #[test]
 fn spec_leaves_what_needs_a_test_result_to_the_tests() {
     let root = with_packages("spec-t2-only", &[("t2", CHECK_ONE)]);
-    let (code, _, stderr) = xtask_in(&root, "spec");
+    let (code, stdout, stderr) = xtask_in(&root, "spec");
     assert_eq!(code, Some(0), "{stderr}");
-    assert_eq!(stderr, "");
+    assert_eq!((stdout.as_str(), stderr.as_str()), ("", ""));
 }

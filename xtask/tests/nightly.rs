@@ -1217,6 +1217,31 @@ fn a_passing_t2_package_is_reported() {
     );
 }
 
+/// A spec finding stops the gate before the tests, so no `t2` ran, and no
+/// score earned can go on the roadmap.
+#[test]
+fn a_gate_stopped_before_the_tests_fails_t2_and_writes_no_roadmap() {
+    let manifest = "[package]\nname = \"t2\"\nversion = \"0.0.0\"\nedition = \"2024\"\n";
+    let repo = Repo::with(
+        "t2-stopped",
+        "fn main() {}\n",
+        &[
+            ("crates/t2/Cargo.toml", manifest),
+            (
+                "crates/t2/src/lib.rs",
+                "// spec(A): Gone.\n#[test]\nfn adapter() {}\n",
+            ),
+        ],
+    );
+    repo.set_roadmap_issues("OPEN", "typed by hand", Some("written last night"));
+    let output = repo.xtask(&["nightly"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let comment = repo.comment();
+    assert_eq!(check_state(&comment, "gate"), "fail", "{comment}");
+    assert_eq!(check_state(&comment, "t2"), "fail", "{comment}");
+    assert_eq!(repo.edits(), Vec::<String>::new());
+}
+
 /// The gate's run of `t2` is the nightly job's T2 check, so `t2` runs once.
 #[test]
 fn t2_runs_once() {

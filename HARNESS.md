@@ -321,7 +321,8 @@ sentence, a check of a waived sentence, a spec comment that isn't above a
 test, a check's name used twice in its package, and the commands that
 SPEC.md, the milestones, and the README must agree on. On such a finding it
 prints `fail spec` and stops, and starts no test, so `merge` and `prepare`
-stop there too. Otherwise the `spec` check runs after the tests, for a
+stop there too. The nightly job then fails `t2`, which didn't run, and
+writes no roadmap. Otherwise the `spec` check runs after the tests, for a
 promise that a `t2` check quotes and no passing check in another tier
 proves. `cargo xtask spec` reports the same findings in seconds.
 

@@ -55,10 +55,11 @@ pub fn run() -> Result<Verdict, Problem> {
     // the tests does between packages.
     let mut hold = lock::testing(&root)?;
     let (gated, t2, score) = match gate::check(&root, &mut hold, None) {
+        // A gate that stopped before the tests ran no `t2` and earned no score.
         Ok((failed, score)) => (
             state(Ok(gate::verdict(&failed))),
-            t2(&root, Some(&failed)),
-            Some(score),
+            t2(&root, score.as_ref().map(|_| &failed)),
+            score,
         ),
         Err(problem) => (state(Err(problem)), t2(&root, None), None),
     };

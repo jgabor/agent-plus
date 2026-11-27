@@ -806,11 +806,12 @@ mod tests {
 
     /// Whether `locks`, read from `/proc/locks`, lists a blocked request by
     /// process `pid` to share the file with inode `inode`.
-    fn waits_to_share(locks: &str, _pid: u32, inode: u64) -> bool {
-        let inode = format!(":{inode}");
+    fn waits_to_share(locks: &str, pid: u32, inode: u64) -> bool {
+        let (pid, inode) = (pid.to_string(), format!(":{inode}"));
         locks.lines().any(|line| {
             let words: Vec<&str> = line.split_whitespace().collect();
-            matches!(words[..], [_, "->", _, _, "READ", _, file, ..] if file.ends_with(&inode))
+            matches!(words[..], [_, "->", _, _, "READ", by, file, ..]
+                if by == pid && file.ends_with(&inode))
         })
     }
 

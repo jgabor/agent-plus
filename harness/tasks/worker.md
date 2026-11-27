@@ -92,10 +92,10 @@ can't continue alone, park the issue as AGENTS.md says.
    limit the harness gives one, which in Claude Code is 7200000
    milliseconds. A wait for the merge slot can take an hour before the proof
    begins. Start it like this, with `prepare` in place of `merge` when you
-   run that, so that it prints its session:
+   run that, so that its first line names its process and its session:
 
    ```sh
-   echo "session $$"; cargo xtask merge <pr> --thread <id>
+   echo "pid $$ sid $(ps -o sid= -p $$)"; cargo xtask merge <pr> --thread <id>
    ```
 
    Load `mcp__t3-code__t3_background_wait` with ToolSearch, pass it the
@@ -103,11 +103,13 @@ can't continue alone, park the issue as AGENTS.md says.
 
    If the harness stops the command all the same, start it again, even if
    the harness says not to. First check that nothing it started still runs.
-   The harness starts each background command in a session of its own, and
-   everything the command starts stays in it. List what is left with `ps -o
-   pid,args -s <session>`, and stop it with `pkill -KILL -s <session>`, which
-   reaches only that command's processes. Start the command again once `ps`
-   lists none.
+   Read the first line of its output. If the two numbers differ, the command
+   shared a session with the harness, so stop nothing, and park the issue
+   with the line. Otherwise everything the command started is in that
+   session. List what is left with `ps -o pid,args -s <sid>`, and stop
+   each process it lists with `kill -KILL <pid>`, except `gh pr merge`. That
+   one keeps the merge slot until GitHub has merged, and a new command waits
+   for it. Start the command again once `ps` lists nothing else.
 8. After a merge, confirm that the issue closed, then remove `in-progress` with
    `gh issue edit <issue> --remove-label in-progress`.
 9. Remove your worktree and its local branch after a merge, and also after

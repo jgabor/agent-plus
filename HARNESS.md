@@ -773,8 +773,8 @@ a parent is the owner's.
     `merge` and `prepare` run as a background command with the harness's
     longest limit, because a wait for the slot can take an hour, and the
     worker waits for it without polling. If the harness stops it all the
-    same, the worker stops what is left in the command's session, and starts
-    it again.
+    same, the worker stops what is left in the command's session, except a
+    `gh pr merge` that keeps the slot, and starts it again.
 11. Remove the worktree and its local branch with `cargo xtask remove`, after
     a merge, or after parking with `land-needed` because `prepare` passed.
 

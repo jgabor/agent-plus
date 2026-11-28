@@ -1,0 +1,34 @@
+issue = 980
+pr = 1143
+commit = "2c905e30f476f20dd9785d5043a0c1d048d319cd"
+base = "aa3fa5e6da8e273e000333197a51b3fc9327f23f"
+date = "2026-11-28"
+host = "linux-x86_64"
+spec = { proven = 691, promises = 1070 }
+journey = { passing = 11, steps = 19 }
+reason = ""
+
+[budgets]
+binary_bytes = 8512432
+boot_ms = 117.02
+idle_mib = 51.69
+kernel_bytes = 15363160
+noop_build_ms = 1.24
+os_bytes = 183574528
+run_ms = 136.2
+version_ms = 0.26
+
+[seconds]
+slot = 375.6
+place = 11.1
+activity_lock = 227.5
+lint = 19.5
+tests = 263.0
+journey = 103.5
+bench = 61.0
+steps = { 1 = 0.0, 2 = 0.0, 3 = 0.2, 4 = 0.6, 5 = 20.7, 6 = 0.5, 7 = 0.6, 8 = 47.2, 9 = 0.9, 10 = 5.4, 11 = 8.2, 14 = 0.0, 15 = 0.0, 16 = 0.0, 17 = 0.0 }
+programs = [{ package = "xtask", name = "tests/merge/main.rs", seconds = 131.5 }, { package = "ap", name = "tests/apply.rs", seconds = 39.7 }, { package = "ap", name = "tests/decrypt.rs", seconds = 30.0 }, { package = "t1", name = "tests/connects.rs", seconds = 26.8 }, { package = "ap", name = "tests/build.rs", seconds = 23.5 }, { package = "git", name = "tests/oracle.rs", seconds = 20.4 }, { package = "xtask", name = "tests/bisect.rs", seconds = 19.7 }, { package = "t1", name = "tests/floor_guest_host.rs", seconds = 18.6 }, { package = "xtask", name = "tests/base.rs", seconds = 18.3 }, { package = "t1", name = "tests/ap_boot_command.rs", seconds = 16.9 }]
+
+[downloads]
+layers = 1
+files = 4

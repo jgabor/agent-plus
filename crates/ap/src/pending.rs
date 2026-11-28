@@ -1321,8 +1321,12 @@ fn verdict(
         ));
     }
     // A branch import leaves your working tree as it is, so a file you
-    // changed too isn't skipped there.
-    if branch.is_none() && changed_on_your_side(records, host, path)? {
+    // changed too isn't skipped there. Your directory the agent wrote over
+    // changed with any file in it.
+    if branch.is_none()
+        && (changed_on_your_side(records, host, path)?
+            || written && changed_beneath(records, host, path)?)
+    {
         if landed_by_apply(landed, host, path)? {
             return Ok(Verdict::Landed);
         }
@@ -1532,6 +1536,19 @@ fn changed_on_your_side(records: &Records, host: &Host, path: &[u8]) -> io::Resu
         None => Ok(!records.entries.contains_key(path)
             && parents(path).any(|parent| records.bases.contains_key(parent))),
     }
+}
+
+/// Whether a file of yours at any depth in your directory at `path`
+/// changed on your side.
+fn changed_beneath(records: &Records, host: &Host, path: &[u8]) -> io::Result<bool> {
+    let mut yours = Vec::new();
+    host.beneath(path, &mut |file| yours.push(file))?;
+    for file in yours {
+        if changed_on_your_side(records, host, &file)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Why a symlink at `path` with this target would leave the share, if it

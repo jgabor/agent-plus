@@ -1529,7 +1529,7 @@ impl Flow {
 
     /// Sends `payload` from the destination.
     fn reply(&self, payload: &[u8]) {
-        let _ = self.server.send_to(payload, self.from.unwrap());
+        self.server.send_to(payload, self.from.unwrap()).unwrap();
     }
 
     /// Whether `payload` reaches the guest within `wait`.

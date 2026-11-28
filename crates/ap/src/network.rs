@@ -542,10 +542,10 @@ mod tests {
     }
 
     /// A backtrace makes calls that the network process's filter kills it
-    /// for, such as one that opens this program's file. This starts this program again, with
-    /// `RUST_BACKTRACE` set, and that process starts a network process as
-    /// `ap run` does, which confines itself and panics. Only Linux runs the
-    /// processes before the test harness.
+    /// for, such as one that opens this program's file. This starts this
+    /// program again, with `RUST_BACKTRACE` set, and that process starts a
+    /// network process as `ap run` does, which confines itself and panics.
+    /// Only Linux runs the processes before the test harness.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_network_process_panics_under_rust_backtrace() {

@@ -2,7 +2,7 @@
 
 use crate::Problem;
 use crate::json::{self, Json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -38,7 +38,7 @@ pub struct Package {
     /// A test here is linked against a `fake-*` crate, so it earns no score.
     pub fake: bool,
     /// The workspace's packages that a build of this one compiles, itself
-    /// included. Dev-dependencies aren't.
+    /// included, in name order. Dev-dependencies aren't.
     pub built_from: Vec<String>,
 }
 
@@ -122,8 +122,8 @@ fn linked<'a>(
     package: &'a str,
     dependencies: &'a HashMap<String, Vec<Dependency>>,
     own_dev: bool,
-) -> HashSet<&'a str> {
-    let mut seen = HashSet::new();
+) -> BTreeSet<&'a str> {
+    let mut seen = BTreeSet::new();
     let mut pending = vec![(package, own_dev)];
     while let Some((name, include_dev)) = pending.pop() {
         if !seen.insert(name) {

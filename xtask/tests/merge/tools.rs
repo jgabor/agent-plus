@@ -126,8 +126,8 @@ fi
 
 /// With `STAND_IN_PROOF` set, the proof's format check, lint, and tests pass
 /// at once, and each release build leaves a program that exits 0. A test that
-/// isn't about what cargo does sets it, so that its proof's work takes about a
-/// second, where the real commands take up to 40 on a loaded machine.
+/// isn't about what cargo does sets it, so that its proof's work takes about
+/// 2 seconds, where the real commands take up to 40 on a loaded machine.
 const STAND_IN_PROOF: &str = r#"if [ -n "$STAND_IN_PROOF" ]; then
   case "$1 $2" in
     "fmt --all" | "clippy --workspace" | "test --package") maybe_kill after; exit 0 ;;

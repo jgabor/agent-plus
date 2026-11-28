@@ -14,8 +14,9 @@ fn external(program: &str) -> String {
 }
 
 /// The timeout of a merge whose proof stands in for cargo's work. That work
-/// takes about 2 seconds a proof. Beside a run of these tests, it took at most
-/// 4.2 in 20 runs, and 12.2 once, when the machine was swapping.
+/// takes about 2 seconds a proof. With the other merge tests running beside
+/// it, it took at most 4.2 in 20 runs, and 12.2 once, when the machine was
+/// swapping.
 const TIMEOUT: u64 = 45;
 
 /// A wait that outlasts the timeout.

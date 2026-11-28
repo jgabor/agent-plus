@@ -463,6 +463,7 @@ fn a_copy_on_write_share_keeps_the_agent_s_changes_until_they_are_discarded() {
 // spec(Run): Of these, only `-p`, `--share`, and `--network` change what the Agentfile says, and only for that run.
 // spec(Run): the share from `ap run --share`
 // spec(WORKDIR): `ap run --share` wins over `WORKDIR`.
+// spec(MODE): The harness's workspace is the working directory plus every `SHARE` and `REPO`.
 #[test]
 fn a_run_with_share_starts_in_it_and_keeps_its_changes_pending() {
     let scratch = Scratch::new("run-share");
@@ -491,6 +492,13 @@ fn a_run_with_share_starts_in_it_and_keeps_its_changes_pending() {
         .unwrap();
     assert!(
         report.contains("\"directory\":\"/home/agent/project\""),
+        "{report}"
+    );
+    // The working directory and the Agentfile's share are the workspace.
+    assert!(
+        report.contains(
+            "\"--add-dir\",\"/home/agent/work\",\"--add-dir\",\"/home/agent/project\",\"--\""
+        ),
         "{report}"
     );
     let ps = String::from_utf8(scratch.ap(&["ps"]).stdout).unwrap();

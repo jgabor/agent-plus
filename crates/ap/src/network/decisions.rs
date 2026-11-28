@@ -6,9 +6,9 @@
 //! lookups on: `!`, `allow` or `deny`, the rule that decided, then what it
 //! decided, as [`super::blocked`] writes a host it blocked. The rule is the
 //! number of a `NETWORK` rule, from 0 in the order of the run's rules, or
-//! `default`, `harness`, `loopback`, `path`, or `http`. `ap run` reads each
-//! report as data, and keeps it in the run's log, with the time it came and
-//! the rule as the Agentfile wrote it.
+//! `default`, `harness`, `loopback`, `path`, `http`, or `decryption`.
+//! `ap run` reads each report as data, and keeps it in the run's log, with
+//! the time it came and the rule as the Agentfile wrote it.
 //!
 //! `ap inspect --network` names the rule that decides a destination the
 //! same way, as SPEC.md's `ap inspect` section says, from the same
@@ -39,6 +39,9 @@ pub(super) enum Rule {
     Path,
     /// The host's URL rules, under which only HTTP passes.
     NotHttp,
+    /// The proxy's decryption of a host with no URL rules, which only TCP
+    /// passes.
+    Decryption,
 }
 
 impl Rule {
@@ -114,6 +117,7 @@ impl Rule {
             }
             Rule::Path => "the request path".to_owned(),
             Rule::NotHttp => "the host's URL rules, which only HTTP meets".to_owned(),
+            Rule::Decryption => "the host's decryption, which only TCP passes".to_owned(),
         })
     }
 }
@@ -299,6 +303,7 @@ pub(super) fn write(allow: bool, rule: &Rule, about: &Blocked) -> Vec<u8> {
         Rule::Loopback => "loopback".to_owned(),
         Rule::Path => "path".to_owned(),
         Rule::NotHttp => "http".to_owned(),
+        Rule::Decryption => "decryption".to_owned(),
     };
     let text = format!("{verdict} {rule} {}", blocked::text(about));
     [&[TAG][..], text.as_bytes()].concat()
@@ -319,6 +324,7 @@ pub(super) fn read(message: &[u8]) -> Option<(bool, Rule, Blocked)> {
         "loopback" => Rule::Loopback,
         "path" => Rule::Path,
         "http" => Rule::NotHttp,
+        "decryption" => Rule::Decryption,
         number if number.bytes().all(|byte| byte.is_ascii_digit()) => {
             Rule::Numbered(number.parse().ok()?)
         }

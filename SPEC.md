@@ -647,6 +647,8 @@ and sends no input.
   harness's hosts, or your host's loopback.
 - On a host with URL rules, the rule can also be the request path, or, for
   traffic that isn't HTTP, the host's URL rules.
+- On a host the proxy decrypts that has no URL rules, the rule for UDP that
+  decryption denies, such as QUIC, is the host's decryption.
 
 ### ap exec
 

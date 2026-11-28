@@ -20,6 +20,7 @@ use vmm::net::MAX_FRAME;
 use super::Injection;
 use super::RECEIVE_WAIT;
 use super::blocked::Reporter;
+use super::decisions::Rule;
 use super::decrypt::{Decrypted, Decryption, Reads};
 use super::lookup::Asker;
 
@@ -129,9 +130,12 @@ enum Check {
     /// A `+` rule that allows the name has a narrower `-` rule beneath it,
     /// so TLS to it is decrypted, and each request in it must name it.
     Hosts,
-    /// The name has URL rules, and the flow is UDP, which isn't HTTP, or
-    /// the proxy decrypts TLS to it, and the flow is QUIC's.
+    /// The name has URL rules, and the flow is UDP, which isn't HTTP.
     NotHttp,
+    /// The proxy decrypts TLS to the name, which has no URL rules, and the
+    /// flow is UDP that it would have to read: QUIC's, or any UDP to a
+    /// host whose every request must carry a placeholder.
+    NotTcp,
     /// The name is a hidden secret's bound host and has no URL rules, so
     /// TLS to it is decrypted, and a name decided it if this says so.
     Injects(bool),
@@ -144,6 +148,16 @@ impl Check {
             Check::Requests => Some(Reads::Requests),
             Check::Hosts => Some(Reads::Hosts),
             Check::Injects(by_name) => Some(Reads::Injects { by_name }),
+            _ => None,
+        }
+    }
+
+    /// The rule that refused a flow it reads, if it refuses whatever the
+    /// host's rules say.
+    fn refused(self) -> Option<Rule> {
+        match self {
+            Check::NotHttp => Some(Rule::NotHttp),
+            Check::NotTcp => Some(Rule::Decryption),
             _ => None,
         }
     }
@@ -289,7 +303,7 @@ impl Proxy {
                 if let (Some(reporter), Some((name, address, port))) =
                     (reporter, decrypted.not_http())
                 {
-                    reporter.not_http(Some(name), address, port);
+                    reporter.refused(&Rule::NotHttp, Some(name), address, port);
                 }
                 goes_on
             });
@@ -440,9 +454,9 @@ impl Proxy {
                 );
                 if allowed.is_empty() {
                     let port = destination.port();
-                    match (reporter, check) {
-                        (Some(reporter), Check::NotHttp) => {
-                            reporter.not_http(name.as_deref(), addresses[0], port)
+                    match (reporter, check.refused()) {
+                        (Some(reporter), Some(rule)) => {
+                            reporter.refused(&rule, name.as_deref(), addresses[0], port)
                         }
                         _ => report(reporter, name.as_deref(), addresses[0], port),
                     }
@@ -524,7 +538,7 @@ impl Proxy {
                         port,
                         &addresses,
                         &allowed,
-                        false,
+                        check,
                     );
                 }
                 opening.decrypts = check.decrypts();
@@ -563,7 +577,7 @@ impl Proxy {
                     port,
                     &addresses,
                     &allowed,
-                    check == Check::NotHttp,
+                    check,
                 );
                 let waiting = match std::mem::replace(&mut flow.state, UdpState::Failed) {
                     UdpState::Asking(_, waiting) => waiting,
@@ -821,22 +835,27 @@ impl Proxy {
 
 /// Reports to `reporter`, if there is one, how the rules decided a
 /// connection to `name` on `port` once its lookup found `addresses`, of
-/// which it may connect to `allowed`. A name with no addresses is no
-/// decision.
+/// which it may connect to `allowed`, and `check` reads. A name with no
+/// addresses is no decision.
 fn answered(
     reporter: Option<&Reporter>,
     name: Option<&str>,
     port: u16,
     addresses: &[IpAddr],
     allowed: &[IpAddr],
-    not_http: bool,
+    check: Check,
 ) {
-    match (reporter, allowed.first(), addresses.first()) {
-        (Some(reporter), Some(&address), _) => reporter.decided(true, name, address, port),
-        (Some(reporter), None, Some(&address)) if not_http => {
-            reporter.not_http(name, address, port)
+    match (
+        reporter,
+        allowed.first(),
+        addresses.first(),
+        check.refused(),
+    ) {
+        (Some(reporter), Some(&address), ..) => reporter.decided(true, name, address, port),
+        (Some(reporter), None, Some(&address), Some(rule)) => {
+            reporter.refused(&rule, name, address, port)
         }
-        (_, None, Some(&address)) => report(reporter, name, address, port),
+        (_, None, Some(&address), _) => report(reporter, name, address, port),
         _ => {}
     }
 }
@@ -905,8 +924,11 @@ fn allowed(
     // for another name, or the placeholder. A host whose every request must
     // carry a placeholder gets no UDP at all.
     let required = name.is_some_and(|name| injection.requires(name));
-    if (url || (bound || narrowed) && port == 443 || required) && !tcp {
+    if url && !tcp {
         return (Vec::new(), Check::NotHttp);
+    }
+    if ((bound || narrowed) && port == 443 || required) && !tcp {
+        return (Vec::new(), Check::NotTcp);
     }
     let requests = url;
     let mut by_name = false;
@@ -1179,6 +1201,80 @@ mod tests {
         // name check alone.
         let closed = "NETWORK -\nNETWORK +github.com\n";
         assert!(read(closed, "github.com") == (Check::Name, true));
+    }
+
+    /// The line `ap logs` shows for UDP to `example.com` on `port`, under
+    /// the `NETWORK` rules of `rules`, with the secrets of `injection`.
+    fn udp_line(rules: &[&str], injection: Injection, port: u16) -> String {
+        let args: Vec<std::ffi::OsString> = (std::iter::once("--").chain(rules.iter().copied()))
+            .map(Into::into)
+            .collect();
+        let (network, harness) = super::super::rules(&args).unwrap();
+        let (mine, theirs) = super::super::link().unwrap();
+        let reporter = Reporter::new(theirs.as_raw_fd(), network.clone(), harness);
+        let name = Some("example.com");
+        let addresses: [IpAddr; 1] = [Ipv4Addr::new(192, 0, 2, 1).into()];
+        let (passed, check) = allowed(&network, &[], (name, &injection), port, &addresses, false);
+        answered(Some(&reporter), name, port, &addresses, &passed, check);
+        let mine = UnixDatagram::from(mine);
+        mine.set_nonblocking(true).unwrap();
+        let mut message = [0; 512];
+        let len = mine.recv(&mut message).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "ap-proxy-udp-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut log = File::options()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let mut keeper = super::super::Keeper::new(&args, log.try_clone().unwrap());
+        assert!(keeper.take(&message[..len]));
+        std::io::Seek::rewind(&mut log).unwrap();
+        match crate::runs::read_log(&mut log).unwrap() {
+            Some(crate::runs::Logged::Decision(_, line)) => line,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // spec(ap logs): On a host the proxy decrypts that has no URL rules, the rule for UDP that decryption denies, such as QUIC, is the host's decryption.
+    #[test]
+    fn udp_that_decryption_denies_is_logged_as_the_host_s_decryption() {
+        let host = ["-", "+example.com"];
+        let narrowed = ["-", "+example.com", "-gist.example.com"];
+        let secret = |required| {
+            let secret = super::super::Hidden {
+                name: "API_TOKEN".to_owned(),
+                value: b"value".to_vec(),
+                placeholder: b"placeholder".to_vec(),
+                hosts: vec!["example.com".to_owned()],
+                required,
+            };
+            Injection {
+                headers: Vec::new(),
+                secrets: vec![secret],
+            }
+        };
+        let decryption = "deny   example.com:443  the host's decryption, which only TCP passes";
+        // QUIC to a narrowed host, and to a hidden secret's bound host.
+        assert_eq!(udp_line(&narrowed, Injection::default(), 443), decryption);
+        assert_eq!(udp_line(&host, secret(false), 443), decryption);
+        // A key's host gets no UDP on any port.
+        assert_eq!(
+            udp_line(&host, secret(true), 53),
+            decryption.replace(":443", ":53")
+        );
+        // A host with URL rules gets none either, by its URL rules.
+        let url = ["-", "+example.com", "-https://example.com/secret"];
+        assert_eq!(
+            udp_line(&url, secret(false), 443),
+            "deny   example.com:443  the host's URL rules, which only HTTP meets"
+        );
     }
 
     /// `ap run` holds the other end of the socket the proxy asks for

@@ -189,10 +189,12 @@ impl Reporter {
     }
 
     /// Reports a flow to `name` at `address` on `port` that the proxy
-    /// refused, because the name has URL rules, and what came wasn't HTTP
-    /// they could decide: UDP, or TCP that the request check refused.
-    pub(super) fn not_http(&self, name: Option<&str>, address: IpAddr, port: u16) {
-        self.send_decision(false, &Rule::NotHttp, name, address, port);
+    /// refused by `rule`, which no rule for the host could change: what
+    /// came wasn't HTTP that the name's URL rules could decide, UDP or TCP
+    /// that the request check refused, or it was UDP to a host the proxy
+    /// decrypts, which it can't.
+    pub(super) fn refused(&self, rule: &Rule, name: Option<&str>, address: IpAddr, port: u16) {
+        self.send_decision(false, rule, name, address, port);
     }
 
     fn send_decision(
@@ -505,7 +507,7 @@ mod tests {
         for target in ["/other", "/allowed/secret", "/allowed/../x"] {
             reporter.request(false, "host.ap.internal", address, 443, request(target));
         }
-        reporter.not_http(Some("host.ap.internal"), address, 443);
+        reporter.refused(&Rule::NotHttp, Some("host.ap.internal"), address, 443);
         let mine = std::os::unix::net::UnixDatagram::from(mine);
         mine.set_nonblocking(true).unwrap();
         let mut buffer = [0; 512];
@@ -539,8 +541,8 @@ mod tests {
         );
         let address = "192.0.2.7".parse().unwrap();
         // UDP, and TCP that isn't HTTP.
-        reporter.not_http(Some("example.com"), address, 443);
-        reporter.not_http(Some("example.com"), address, 22);
+        reporter.refused(&Rule::NotHttp, Some("example.com"), address, 443);
+        reporter.refused(&Rule::NotHttp, Some("example.com"), address, 22);
         drop(theirs);
         let mine = std::os::unix::net::UnixDatagram::from(mine);
         let mut reports = Reports::default();

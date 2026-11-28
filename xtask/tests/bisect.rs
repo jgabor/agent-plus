@@ -49,6 +49,7 @@ case "$1 $2" in
       *) cat "$d/pr.json" ;;
     esac ;;
   "api -X") ;;
+  "api repos/"*/comments) ;;
   "api repos/"*)
     sha="$(echo "$2" | cut -d/ -f5)"
     if grep -q "^$sha\$" "$d/passing"; then

@@ -503,12 +503,7 @@ fn a_process_that_outlives_its_check_names_what_holds_its_socket() {
     );
     let (holder_pid, reader_pid) = (holder.0.id(), reader.0.id());
     // The reader sleeps once it waits to read.
-    let asleep = || {
-        fs::read_to_string(format!("/proc/{reader_pid}/stat")).is_ok_and(|stat| {
-            stat.rsplit_once(") ")
-                .is_some_and(|(_, rest)| rest.starts_with('S'))
-        })
-    };
+    let asleep = || stat(reader_pid, 0).as_deref() == Some("S");
     let deadline = Instant::now() + Duration::from_secs(3);
     while !asleep() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
@@ -1433,13 +1428,7 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
 fn ap_runs(shell: &Started) -> Vec<u32> {
     let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
     program.extend_from_slice(b"\0run\0");
-    descendants(shell.0.id())
-        .into_iter()
-        .filter(|pid| {
-            fs::read(format!("/proc/{pid}/cmdline"))
-                .is_ok_and(|cmdline| cmdline.starts_with(&program))
-        })
-        .collect()
+    all_started_as(shell.0.id(), &program)
 }
 
 // spec(ap stop): An interactive run that `ap stop` reaches leaves your terminal's modes as they are if it ends while its `ap run` is in the background of your terminal.
@@ -1449,10 +1438,18 @@ fn ap_stop_leaves_the_shells_modes_when_it_stops_a_run_from_the_background() {
     scratch.build("open", &fake(""));
     let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
     let before = stty(&terminal, &["-g"]);
-    let shell = as_job(&scratch, &terminal, "", "fg");
+    // Once the job stops, the shell has the terminal back, and sets modes
+    // of its own.
+    let changed = scratch.home.join("changed");
+    let shell = as_job(
+        &scratch,
+        &terminal,
+        "",
+        "fg; stty sane -echo; : > \"$HOME/changed\"",
+    );
     let deadline = Instant::now() + SHOWN_WITHIN;
     let (run, rows) = loop {
-        // In the foreground, `ap run` sets raw mode before the run is listed.
+        // In the foreground, `ap run` sets raw mode after the run is listed.
         if let [run] = ap_runs(&shell)[..]
             && stty(&terminal, &["-g"]) != before
             && let rows = scratch.ps()
@@ -1465,23 +1462,21 @@ fn ap_stop_leaves_the_shells_modes_when_it_stops_a_run_from_the_background() {
     };
     let vm = run_process(run);
     let name = rows[0].split_whitespace().next().unwrap().to_owned();
-    // As Ctrl-Z would, if raw mode let it. The shell takes the terminal
-    // back once the job stops, and the job's modes are its own to change.
-    let job = stat(run, 2);
+    // As Ctrl-Z would, if raw mode let it.
+    let job = stat(run, 2).unwrap();
     let status = Command::new("kill")
         .args(["-STOP", "--", &format!("-{job}")])
         .status()
         .unwrap();
     assert!(status.success(), "kill -STOP -{job}");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while stat(run, 5) == job {
+    while !changed.exists() {
         assert!(
             Instant::now() < deadline,
-            "the shell didn't take the terminal"
+            "the shell didn't change the modes"
         );
         thread::sleep(Duration::from_millis(10));
     }
-    stty(&terminal, &["sane", "-echo"]);
     let modes = stty(&terminal, &["-g"]);
     assert_ne!(modes, before);
 
@@ -1493,12 +1488,11 @@ fn ap_stop_leaves_the_shells_modes_when_it_stops_a_run_from_the_background() {
 }
 
 /// Field `index` of `/proc/<pid>/stat`, after its command, where 0 is its
-/// state, 2 its process group, and 5 the foreground process group of its
-/// terminal.
-fn stat(pid: u32, index: usize) -> String {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let after = stat.rsplit_once(") ").unwrap().1;
-    after.split(' ').nth(index).unwrap().to_owned()
+/// state and 2 its process group, while the process `pid` exists.
+fn stat(pid: u32, index: usize) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.rsplit_once(") ")?.1;
+    Some(after.split(' ').nth(index)?.to_owned())
 }
 
 /// Starts `ap run open` as a job in the background of `terminal`, as `ap run
@@ -1586,10 +1580,7 @@ fn stty(terminal: &File, args: &[&str]) -> String {
 
 /// Whether the process `pid` is stopped, as by `SIGSTOP`.
 fn stopped(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| stat.rsplit_once(") ")?.1.chars().next())
-        == Some('T')
+    stat(pid, 0).as_deref() == Some("T")
 }
 
 const SYS_PIDFD_OPEN: c_long = 434;

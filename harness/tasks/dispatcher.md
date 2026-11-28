@@ -11,10 +11,14 @@ Worker `to11y` harness: `claude-code`, scope `all`
 1. Run `df -Pk .`, which works on Linux and on a Mac. If its `Available`
    column shows less than 52428800, which is 50 GiB in KiB, say so and stop.
 2. On Linux, run `to11y rate_limit_status --harness <harness>`, with the
-   worker's harness from above. If it exits 0, and the entry in `scopes`
-   whose `scope` is the worker's has `"blocked": true`, say that the
-   worker's harness is blocked, and stop. If `to11y` isn't on
-   `PATH`, or exits with any other status, go on. On a Mac, skip this step.
+   worker's harness from above. If it exits 0, its result has no `stale`
+   entry, and the entry in `scopes` whose `scope` is the worker's has
+   `"blocked": true`, say that the worker's harness is blocked, and stop. If
+   `to11y` isn't on `PATH`, exits with any other status, or gives a result
+   with a `stale` entry, go on. A stale result is an old reading that
+   `to11y` couldn't renew, so its `blocked` may have ended, and a worker
+   started against a limit stops at its first turn. On a Mac, skip this
+   step.
 3. Run `cargo xtask next`, which prints a JSON array. It names only the
    issues that start on this machine. If it exits with an error, report the
    error and stop. If the array is empty, say so and stop.

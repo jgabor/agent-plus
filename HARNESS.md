@@ -796,10 +796,10 @@ issue with no parent and no `auto:*`, `answer-needed`, `land-needed`, or
 sub-issue, with the parent's label, if it has no sub-issues of its own, and its
 definition of done names checks and not a decision of the owner's. An adopted
 issue counts as a filed one. The planner files none if the issues in progress
-and the issues `cargo xtask next` lists already fill the worker slots. It also
-keeps a parent to at most 3 open sub-issues without `land-needed`, whether they
-are blocked or not, because a sub-issue filed far ahead is written before the
-work it builds on exists. A prepared PR waiting for the owner doesn't count.
+and the issues `cargo xtask next` lists already fill the worker slots on Linux.
+It also keeps a parent to at most 3 open sub-issues without `land-needed`,
+whether they are blocked or not, because a sub-issue filed far ahead is written
+before the work it builds on exists. A prepared PR waiting for the owner doesn't count.
 
 Every run starts by adopting the issues that hold up labeled work: each open
 issue with no parent and no label, filed by the owner's account, that an open

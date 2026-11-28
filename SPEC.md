@@ -1613,7 +1613,7 @@ SHARE ~/notes ro
 
 | Mode | Agent writes | Your files |
 |---|---|---|
-| copy-on-write (default) | Allowed; kept in the agent's overlay | Unchanged until `ap apply` |
+| copy-on-write (default) | Allowed; kept on your host as the run's pending changes | Unchanged until `ap apply` |
 | `rw` | Allowed | Changed immediately |
 | `ro` | Fail with a read-only error | Unchanged |
 

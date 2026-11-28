@@ -37,7 +37,7 @@ fn walk(dir: &Path) -> Vec<(String, fs::Metadata)> {
     found
 }
 
-// spec(SHARE): | copy-on-write (default) | Allowed; kept in the agent's overlay | Unchanged until `ap apply` |
+// spec(SHARE): | copy-on-write (default) | Allowed; kept on your host as the run's pending changes | Unchanged until `ap apply` |
 #[test]
 fn the_agent_s_writes_land_in_pending_and_your_files_stay() {
     let tree = Tree::new("cow-writes");

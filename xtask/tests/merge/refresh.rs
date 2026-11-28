@@ -1480,6 +1480,71 @@ fn a_refresh_reads_auto_merge_again_before_it_turns_it_off_again() {
     assert!(!calls.contains("/labels/"), "{calls}");
 }
 
+impl Repo {
+    /// The owner arms auto-merge on the PR again, after every comment so far.
+    fn arm_again(&self, number: u64) {
+        let _ = fs::remove_file(self.bin.join(format!("disarmed-{number}")));
+    }
+}
+
+/// A proof can post its comment and then fail to turn auto-merge off. The
+/// owner armed the PR before that comment, so they didn't approve it, and
+/// the next proof doesn't take it as approved.
+#[test]
+fn a_refresh_merges_nothing_listed_after_the_owner_armed_it_until_they_arm_it_again() {
+    let repo = falling("refresh-listed-after-arming");
+    repo.approved(&["it changes `.github/workflows/x.yml`"]);
+
+    let output = repo.refresh_failing("--disable-auto");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert_eq!(
+        calls.matches("gh pr merge 9 --disable-auto").count(),
+        2,
+        "{calls}"
+    );
+    assert!(!calls.contains(&merged(9, &repo.head())), "{calls}");
+    let listed = format!("Merging this PR at `{}` accepts:", repo.head());
+    assert!(repo.pr_comments().contains(&listed));
+
+    repo.forget_calls();
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let head = repo.head();
+    let calls = repo.calls();
+    assert!(!calls.contains(&merged(9, &head)), "{calls}");
+    assert!(repo.bin.join("disarmed-9").exists(), "{calls}");
+    let why = "PR 9 stays open, because its proof accepts what the owner didn't approve: journey fell from 2 to 1. Arming its auto-merge again approves it";
+    let out = stdout(&output);
+    assert!(out.contains(&format!("refresh: {why}\n")), "{out}");
+
+    repo.arm_again(9);
+    repo.forget_calls();
+    let output = repo.refresh();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&output),
+        stderr(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains(&merged(9, &head)), "{calls}");
+    assert!(calls.contains(&closed(7)), "{calls}");
+}
+
 /// A comment call can fail after GitHub took the comment.
 #[test]
 fn a_comment_that_was_posted_is_not_posted_again() {

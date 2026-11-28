@@ -20,9 +20,9 @@ pub enum Access {
     /// No one. Every request gets a 401, as a host answers for a private
     /// repository when a client sends no credentials.
     Private,
-    /// A client that signs in with this user and password, as
-    /// [`authorization`] gives them. Any other request gets a 401.
-    Password(&'static str, &'static str),
+    /// A client that sends this `Authorization` header. Any other request
+    /// gets a 401.
+    Password(&'static str),
     /// No one. Every request gets a 403, as a host answers a client that it
     /// refuses for a reason other than its credentials.
     Forbidden,
@@ -73,25 +73,6 @@ impl GitServer {
     pub fn authorizations(&self) -> Vec<Option<String>> {
         self.requests.lock().unwrap().clone()
     }
-}
-
-/// The `Authorization` header that signs in with `user` and `password`.
-pub fn authorization(user: &str, password: &str) -> String {
-    const DIGITS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes = format!("{user}:{password}").into_bytes();
-    let mut encoded = String::new();
-    for chunk in bytes.chunks(3) {
-        let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| {
-            word | u32::from(*byte) << (16 - 8 * at)
-        });
-        for at in 0..4 {
-            match at <= chunk.len() {
-                true => encoded.push(DIGITS[(word >> (18 - 6 * at) & 63) as usize] as char),
-                false => encoded.push('='),
-            }
-        }
-    }
-    format!("Basic {encoded}")
 }
 
 /// Writes the certificate the server presents into `dir`, and returns the
@@ -162,7 +143,7 @@ fn serve(
               Content-Length: 0\r\n\r\n";
         let reply = match access {
             Access::Private => unauthorized.to_vec(),
-            Access::Password(user, password) if sent != Some(authorization(user, password)) => {
+            Access::Password(signed_in) if sent.as_deref() != Some(signed_in) => {
                 unauthorized.to_vec()
             }
             Access::Forbidden => b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_vec(),

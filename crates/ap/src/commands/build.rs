@@ -519,7 +519,7 @@ fn store_layers(
     let mut made = Vec::new();
     let mut errors = Vec::new();
     for layer in planned {
-        let (line, label, key, level) = (layer.line, layer.label, layer.key, layer.level);
+        let (line, label, mut key, level) = (layer.line, layer.label, layer.key, layer.level);
         let content = match layer.content {
             Content::Fetch(pin) => {
                 made.push((key, label, Made::Fetch(pin, level)));
@@ -535,13 +535,19 @@ fn store_layers(
             Content::Add(add) => add.image(),
             Content::Image(image) => Ok(image),
             Content::Harness(locked, path) => harness(&locked, &path),
-            Content::Repo(repo, cache) => {
+            Content::Repo(mut repo, cache) => {
                 let commit = &repo.resolved.commit;
-                (approving.anonymous_first(&repo.url, |credentials| {
+                let fetched = approving.anonymous_first(&repo.url, |credentials| {
                     source::fetch(&repo.url, commit, repo.history, &cache, credentials)
-                })?)
-                .and_then(|fetched| repo.image(&fetched, &cache))
-                .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", repo.url)))
+                })?;
+                // What your credentials fetched has a layer of its own.
+                if approving.needs(&repo.url) && !repo.credentials {
+                    repo.credentials = true;
+                    key = repo.key();
+                }
+                fetched
+                    .and_then(|fetched| repo.image(&fetched, &cache))
+                    .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", repo.url)))
             }
             Content::Fetch(_) => unreachable!("a fetch was made above"),
         };
@@ -816,7 +822,7 @@ fn plan(
             continue;
         }
         let reference = remote.reference.as_deref().unwrap_or(source::DEFAULT);
-        let (Some(guest), Some(resolved), Some(cache)) = (
+        let (Some(guest), Some(locked), Some(cache)) = (
             guest.iter().find(|path| path.line == line),
             cached.lock.source(&remote.repository, reference),
             cached.cache,
@@ -828,9 +834,10 @@ fn plan(
         };
         let repo = source::Repo {
             url: remote.repository.clone(),
-            resolved: resolved.clone(),
+            resolved: locked.resolved.clone(),
             guest: guest.path.clone(),
             history: repo.history,
+            credentials: locked.credentials,
         };
         let label = instructions
             .iter()
@@ -903,7 +910,7 @@ fn settle_sources(
             continue;
         }
         let resolved = match lock.source(repository, reference) {
-            Some(resolved) => resolved.clone(),
+            Some(locked) => locked.resolved.clone(),
             // A new resolution is fetched before the lock records it, so
             // the lock records only a commit the remote has.
             None => (approving

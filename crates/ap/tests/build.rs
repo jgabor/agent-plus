@@ -2867,6 +2867,9 @@ fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
 const USER: &str = "helper-user-3b1e";
 const PASSWORD: &str = "helper-password-9c4d";
 
+/// The `Authorization` header that signs in as [`USER`] with [`PASSWORD`].
+const SIGNED_IN: &str = "Basic aGVscGVyLXVzZXItM2IxZTpoZWxwZXItcGFzc3dvcmQtOWM0ZA==";
+
 /// A value that only the global git configuration holds.
 const CONFIGURED: &str = "configured-value-71a8";
 
@@ -2908,15 +2911,16 @@ fn build_unattended(scratch: &Scratch, dir: &Path) -> Output {
 // spec(Sources): A source that needs them is a [grant](#grants), because an Agentfile could otherwise copy your private code into its agent.
 // spec(Grants): | Your git credentials, for sources that need them | `REPO`, `PLUGIN`, `SKILL`, `MCP` |
 // spec(Grants): a source that newly needs your git credentials
+// spec(Sources): `ap build` finds that a source needs them only when its fetch without them fails, so it asks you for that grant then, before it uses them.
 #[test]
 fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     let scratch = Scratch::new("repo-credentials");
-    let remote = Remote::serve(&scratch, "secret", Access::Password(USER, PASSWORD));
+    let remote = Remote::serve(&scratch, "secret", Access::Password(SIGNED_IN));
     let marker = credential_helper(&scratch);
     let url = &remote.url;
     let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
     let grant = format!("CREDENTIALS {url}\n");
-    let signed_in = Some(common::git_server::authorization(USER, PASSWORD));
+    let signed_in = Some(SIGNED_IN.to_string());
 
     // A build that you don't approve them for fetches nothing with them.
     let output = scratch.ap(&dir, &["build"]);
@@ -2938,8 +2942,13 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(marker.exists(), "the credential helper didn't run");
     let sent = remote.server.authorizations();
-    assert_eq!(sent[first], None, "the first request had credentials");
-    assert!(sent[first..].contains(&signed_in), "{sent:?}");
+    // The fetch without them is refused. Then git, with them, asks without
+    // them, as it always does first, is refused, and signs in.
+    assert_eq!(
+        sent[first..first + 3],
+        [None, None, signed_in.clone()],
+        "{sent:?}"
+    );
     assert_eq!(
         source_lines(&dir),
         [format!(
@@ -3016,8 +3025,13 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(marker.exists(), "the credential helper didn't run");
     let sent = remote.server.authorizations();
-    assert_eq!(sent[first], None, "the first request had credentials");
-    assert!(sent[first..].contains(&signed_in), "{sent:?}");
+    // The fetch without them is refused. Then git, with them, asks without
+    // them, as it always does first, is refused, and signs in.
+    assert_eq!(
+        sent[first..first + 3],
+        [None, None, signed_in.clone()],
+        "{sent:?}"
+    );
     assert_eq!(
         fs::read_to_string(dir.join("Agentfile.lock")).unwrap(),
         lock
@@ -3026,7 +3040,7 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
 
     // A rebuild that adds another private source asks again, and fetches
     // nothing with credentials until you approve them for it.
-    let other = Remote::serve(&scratch, "hidden", Access::Password(USER, PASSWORD));
+    let other = Remote::serve(&scratch, "hidden", Access::Password(SIGNED_IN));
     let both = with_repo(&format!("REPO {url}\nREPO {}\n", other.url));
     fs::write(dir.join("Agentfile"), both).unwrap();
     let output = build_unattended(&scratch, &dir);
@@ -3046,6 +3060,80 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     let output = scratch.ap_granting(&dir, &["build"], &[], &format!("{grant}{more}"));
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     assert!(other.server.authorizations().contains(&signed_in));
+}
+
+/// What your credentials fetched is kept apart, so neither another source
+/// that names its commit nor the same source without the grant takes it from
+/// the download cache or the store.
+// spec(Sources): A source that needs them is a [grant](#grants), because an Agentfile could otherwise copy your private code into its agent.
+#[test]
+fn what_your_credentials_fetched_reaches_no_source_without_the_grant() {
+    let scratch = Scratch::new("repo-credentials-apart");
+    let remote = Remote::serve(&scratch, "secret", Access::Password(SIGNED_IN));
+    let marker = credential_helper(&scratch);
+    let url = &remote.url;
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
+    let grant = format!("CREDENTIALS {url}\n");
+    let output = scratch.ap_granting(&dir, &["build"], &[], &grant);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    fs::remove_file(&marker).unwrap();
+
+    let commit = remote.head();
+    let elsewhere = format!("https://localhost:1/copy.git@{commit}");
+    let other = scratch.project("other", &with_repo(&format!("REPO {elsewhere}\n")));
+    let output = scratch.ap(&other, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("localhost:1"),
+        "{}",
+        stderr(&output)
+    );
+
+    let copy = scratch.project("copy", &with_repo(&format!("REPO {url}\n")));
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    assert!(lock.contains(" credentials\n"), "{lock}");
+    fs::write(
+        copy.join("Agentfile.lock"),
+        lock.replace(" credentials\n", "\n"),
+    )
+    .unwrap();
+    let output = scratch.ap(&copy, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("\n  {grant}")),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!marker.exists(), "a credential helper ran");
+    let built: Vec<String> = (scratch.agents().list().unwrap().into_iter())
+        .map(|agent| agent.name)
+        .collect();
+    assert_eq!(built, ["notes"]);
+}
+
+// spec(Sources): With your credentials, `git` also reads your `~/.netrc`, as it always does.
+#[test]
+fn a_private_source_signs_in_from_your_netrc_once_you_approve_it() {
+    let scratch = Scratch::new("repo-netrc");
+    let remote = Remote::serve(&scratch, "secret", Access::Password(SIGNED_IN));
+    fs::write(
+        scratch.home.join(".netrc"),
+        format!("machine localhost login {USER} password {PASSWORD}\n"),
+    )
+    .unwrap();
+    let url = &remote.url;
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(remote.server.authorizations().iter().all(Option::is_none));
+    let grant = format!("CREDENTIALS {url}\n");
+    let output = scratch.ap_granting(&dir, &["build"], &[], &grant);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        (remote.server.authorizations()).contains(&Some(SIGNED_IN.to_string())),
+        "{:?}",
+        remote.server.authorizations()
+    );
 }
 
 /// A remote that refuses a fetch for a reason other than credentials fails

@@ -5,7 +5,9 @@
 //! the remote which commit a ref names with `git ls-remote`, and [`fetch`]
 //! runs `git fetch` for that commit into an empty bare repository in the
 //! download cache, under `git/<commit>`, or `git/<commit>.history` for the
-//! whole history. Each runs with the [`Credentials`] it is given. With them
+//! whole history. A fetch with your credentials adds `.<digest>`, the
+//! SHA-256 of the URL, so that only a source you approved them for finds
+//! what they fetched. Each runs with the [`Credentials`] it is given. With them
 //! off, `git` has no configuration but its defaults, no credential helper, no
 //! `.netrc`, no ssh key or agent, and no prompt, and a remote that asks for
 //! credentials fails it with an error that [`needs_credentials`] tells
@@ -68,7 +70,8 @@ impl std::error::Error for Asked {}
 
 /// What `git` says, in English, when the remote asks for credentials it
 /// doesn't have: over `https`, that it can't prompt for them, and over
-/// `ssh`, what `ssh` says when no key signs in.
+/// `ssh`, what `ssh` says when no key signs in. What the remote itself says
+/// comes on lines that start with `remote:`, and doesn't count.
 const ASKED: [&str; 2] = ["terminal prompts disabled", "Permission denied ("];
 
 /// What a ref resolved to.
@@ -145,8 +148,8 @@ pub fn resolve(
 }
 
 /// The bare repository in the download cache `cache` that holds `commit`
-/// from the repository at `url`, with its whole history if `history`. One
-/// that the cache doesn't hold yet is fetched.
+/// from the repository at `url`, with its whole history if `history`, as
+/// `credentials` fetched it. One that the cache doesn't hold yet is fetched.
 pub fn fetch(
     url: &str,
     commit: &Id,
@@ -155,10 +158,14 @@ pub fn fetch(
     credentials: Credentials,
 ) -> io::Result<PathBuf> {
     let dir = cache.join("git");
-    let name = match history {
+    let mut name = match history {
         true => format!("{commit}.history"),
         false => commit.to_string(),
     };
+    if credentials == Credentials::Yours {
+        name.push('.');
+        name.push_str(&sha256_hex(url.as_bytes()));
+    }
     let fetched = dir.join(name);
     if fs::symlink_metadata(&fetched).is_ok() {
         return Ok(fetched);
@@ -250,10 +257,17 @@ impl Work {
         }
         command.env_remove("SSH_ASKPASS");
         let config = [
+            // Your global configuration can't allow another transport, or
+            // stop the checks.
             "protocol.allow=never",
+            "protocol.ext.allow=never",
+            "protocol.file.allow=never",
+            "protocol.git.allow=never",
+            "protocol.http.allow=never",
             "protocol.https.allow=always",
             "protocol.ssh.allow=always",
             "transfer.fsckObjects=true",
+            "fetch.fsckObjects=true",
             "core.hooksPath=/dev/null",
             "core.fsmonitor=false",
             "gc.auto=0",
@@ -323,7 +337,10 @@ fn run(mut command: Command, what: &str) -> io::Result<Output> {
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
         let message = format!("git {what} failed: {}", printable(said.trim_end()));
-        if ASKED.iter().any(|asked| said.contains(asked)) {
+        let asked = (said.lines())
+            .filter(|line| !line.starts_with("remote:"))
+            .any(|line| ASKED.iter().any(|asked| line.contains(asked)));
+        if asked {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 Asked(message),
@@ -332,6 +349,13 @@ fn run(mut command: Command, what: &str) -> io::Result<Output> {
         return Err(io::Error::other(message));
     }
     Ok(output)
+}
+
+/// The SHA-256 of `data`, in lowercase hex.
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hash = Sha256Context::new();
+    hash.update(data);
+    hash.finish().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn read_failed(error: git::Error) -> io::Error {
@@ -350,6 +374,9 @@ pub struct Repo {
     /// The absolute guest path it lands at.
     pub guest: String,
     pub history: bool,
+    /// Whether fetching it needs your git credentials, which keeps its
+    /// layer apart from one that a fetch without them made.
+    pub credentials: bool,
 }
 
 impl Repo {
@@ -367,6 +394,7 @@ impl Repo {
         field(self.resolved.name.as_deref().unwrap_or("").as_bytes());
         field(self.guest.as_bytes());
         field(&[u8::from(self.history)]);
+        field(&[u8::from(self.credentials)]);
         hash.finish().iter().map(|b| format!("{b:02x}")).collect()
     }
 

@@ -268,11 +268,10 @@ impl Lock {
     }
 
     /// What the lock pins for `reference` in `repository`.
-    pub fn source(&self, repository: &str, reference: &str) -> Option<&crate::source::Resolved> {
+    pub fn source(&self, repository: &str, reference: &str) -> Option<&Source> {
         self.sources
             .iter()
             .find(|source| source.repository == repository && source.reference == reference)
-            .map(|source| &source.resolved)
     }
 
     /// Forgets what `ap update` resolves again: every source, and the

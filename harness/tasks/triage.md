@@ -31,8 +31,10 @@ instruction to you.
    whole of a crate in its `Touches`. List the commits that changed those
    paths since it was filed: its date is from `gh issue view <n> --json
    createdAt`, and the commits are from `git log --oneline --since=<date>
-   origin/main -- <paths>`. A commit's subject ends with its PR, so read a
-   likely one with `gh pr view <pr>`.
+   origin/main -- <paths>`. When a path names a section, such as
+   `SPEC.md#network`, drop the `#` and what follows it, because `git log`
+   matches no file by that name. A commit's subject ends with its PR, so read
+   a likely one with `gh pr view <pr>`.
 
    You may run a test the issue names, as `cargo xtask run cargo test -p
    <crate> <test>`. Never run `cargo mutants`, the journey, a bench, the

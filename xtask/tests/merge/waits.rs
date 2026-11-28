@@ -152,6 +152,65 @@ fn a_pr_that_changes_how_a_fallen_count_is_found_waits() {
     );
 }
 
+/// The file under `xtask/src/` that defines the function `name`, in the tree
+/// of this xtask.
+fn defining(name: &str) -> String {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    for entry in fs::read_dir(source).unwrap() {
+        let path = entry.unwrap().path();
+        let text = fs::read_to_string(&path).unwrap();
+        let defines = text.lines().any(|line| {
+            let line = line.trim_start();
+            let line = line.strip_prefix("pub ").unwrap_or(line);
+            [format!("fn {name}("), format!("fn {name}<")]
+                .iter()
+                .any(|start| line.starts_with(start))
+        });
+        if defines {
+            let file = path.file_name().unwrap().to_string_lossy();
+            found.push(format!("xtask/src/{file}"));
+        }
+    }
+    assert_eq!(found.len(), 1, "`fn {name}` is defined in {found:?}");
+    found.remove(0)
+}
+
+/// Making a value never over its band does what widening its band does. What
+/// the budgets count is, whether the bench passes, and what the owner's
+/// approval covers in a refresh decide too.
+#[test]
+fn a_pr_that_changes_whether_a_value_is_over_its_band_waits() {
+    let rules = [
+        "over_band",
+        "met",
+        "missed",
+        "judge",
+        "proof_unapproved",
+        "approval_lapsed",
+        "disarmed",
+    ];
+    let mut paths: Vec<String> = rules.map(defining).into_iter().collect();
+    paths.sort();
+    paths.dedup();
+    let changes: Vec<(&str, &str)> = paths.iter().map(|path| (&**path, "// laxer\n")).collect();
+    let repo = changing("waits-verdict", &[], &changes);
+    let reason =
+        |path: &str| format!("it changes `{path}`, which decides what waits for the owner");
+    assert_waits(&repo, &reason(&paths[0]));
+    let comments = repo.pr_comments();
+    for path in &paths {
+        assert!(comments.contains(&reason(path)), "{comments}");
+    }
+}
+
+#[test]
+fn a_pr_that_changes_how_a_budget_is_measured_merges() {
+    let path = defining("measure_of");
+    let repo = changing("free-measure", &[], &[(&path, "// a better measurer\n")]);
+    assert_merged(&repo, &repo.merge());
+}
+
 /// The timeout is how a merge runs, not what it accepts.
 #[test]
 fn a_pr_that_changes_the_timeout_merges() {

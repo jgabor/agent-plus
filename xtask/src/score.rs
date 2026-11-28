@@ -5,7 +5,7 @@ use crate::journey::{self, JOURNEY_FILE};
 use crate::readme::{self, README_FILE};
 use crate::spec::Arrives;
 use crate::testrun::{self, Results};
-use crate::{Problem, Verdict, bench, ledger, lock, spec, workspace};
+use crate::{Problem, Verdict, accepts, bench, ledger, lock, spec, workspace};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
@@ -47,7 +47,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
     let journey = record.as_ref().map(|record| (record.passing, record.steps));
     let budgets = match &record {
         Some(record) if root.join(bench::BUDGETS_FILE).exists() => {
-            Some(bench::met(&bench::read_budgets(&root)?, &record.budgets))
+            Some(accepts::met(&bench::read_budgets(&root)?, &record.budgets))
         }
         _ => None,
     };

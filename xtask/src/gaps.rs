@@ -2,7 +2,9 @@
 //! order the planner should take it.
 
 use crate::json::quoted;
-use crate::{Problem, Verdict, bench, journey, ledger, lock, roadmap, score, testrun, workspace};
+use crate::{
+    Problem, Verdict, accepts, bench, journey, ledger, lock, roadmap, score, testrun, workspace,
+};
 use std::collections::BTreeMap;
 
 /// A gap isn't a failure of this command. A broken spec quote is, as in
@@ -40,7 +42,7 @@ pub fn run(json: bool) -> Result<Verdict, Problem> {
         .into_iter()
         .map(|milestone| milestone.name)
         .find(|name| steps.iter().any(|step| step.milestone == *name));
-    let missed = bench::missed(&budgets, &values);
+    let missed = accepts::missed(&budgets, &values);
     if json {
         let steps: Vec<String> = steps
             .iter()

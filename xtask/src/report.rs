@@ -6,7 +6,7 @@ use crate::forge::{Forge, Gh, OpenIssue};
 use crate::json::quoted;
 use crate::ledger::{self, Record};
 use crate::work::PARKED;
-use crate::{Problem, Verdict, base, journey, spec, waits, workspace};
+use crate::{Problem, Verdict, accepts, base, journey, spec, waits, workspace};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -139,7 +139,7 @@ fn start_after(
 pub fn build(root: &Path) -> Result<Report, Problem> {
     let budgets = bench::read_budgets(root)?;
     let scores = ledger::at_head(root)?.map(|record| {
-        let (met, targets) = bench::met(&budgets, &record.budgets);
+        let (met, targets) = accepts::met(&budgets, &record.budgets);
         Scores {
             proven: record.proven,
             promises: record.promises,
@@ -458,7 +458,7 @@ fn regressions(root: &Path, commit: &str, record: &Record) -> Result<Vec<String>
         // Both sides use this commit's targets, so that a target changed later
         // isn't blamed on this commit.
         let budgets = bench::budgets_at(root, commit)?;
-        let met = |record: &Record| bench::met(&budgets, &record.budgets).0;
+        let met = |record: &Record| accepts::met(&budgets, &record.budgets).0;
         for (name, was, now) in [
             ("spec", previous.proven, record.proven),
             ("journey", previous.passing, record.passing),

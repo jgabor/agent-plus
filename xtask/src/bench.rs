@@ -1,8 +1,10 @@
 //! `cargo xtask bench`: interleaved runs of the base and candidate builds.
+//! Whether a value is over its band, and whether the bench passes, is for
+//! `accepts.rs` to say.
 
 use crate::ledger::{self, Measured};
 use crate::toml::{self, Table, Value};
-use crate::{Problem, Verdict, base, journey, lock, workspace};
+use crate::{Problem, Verdict, accepts, base, journey, lock, workspace};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs;
@@ -59,16 +61,16 @@ const IDLE_AGENTFILE: &str =
 const RUN_TIMEOUT: [&str; 3] = ["-k", "10", "120"];
 
 pub struct Budget {
-    key: String,
-    name: String,
-    target: Option<f64>,
-    band: Option<Band>,
+    pub key: String,
+    pub name: String,
+    pub target: Option<f64>,
+    pub band: Option<Band>,
 }
 
 #[derive(Clone, Copy)]
-struct Band {
-    pct: f64,
-    abs: f64,
+pub struct Band {
+    pub pct: f64,
+    pub abs: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -417,38 +419,6 @@ pub fn is_copy(copy: &Path, digest: &str) -> Result<bool, Problem> {
     Ok(copy.is_file() && sha256(copy)? == digest)
 }
 
-/// How many budgets with a target meet it, and how many have one. A budget
-/// with no value yet isn't met.
-pub fn met(budgets: &[Budget], values: &BTreeMap<String, f64>) -> (usize, usize) {
-    let targets = budgets.iter().filter(|b| b.target.is_some()).count();
-    (targets - missed(budgets, values).len(), targets)
-}
-
-/// A budget with a target that isn't met.
-pub struct Missed<'a> {
-    pub key: &'a str,
-    pub name: &'a str,
-    pub target: f64,
-    pub value: Option<f64>,
-}
-
-/// The budgets that miss their targets, in the order of the budget file.
-pub fn missed<'a>(budgets: &'a [Budget], values: &BTreeMap<String, f64>) -> Vec<Missed<'a>> {
-    budgets
-        .iter()
-        .filter_map(|budget| {
-            let target = budget.target?;
-            let value = values.get(&budget.key).copied();
-            (!value.is_some_and(|value| value < target)).then_some(Missed {
-                key: &budget.key,
-                name: &budget.name,
-                target,
-                value,
-            })
-        })
-        .collect()
-}
-
 pub fn run() -> Result<Verdict, Problem> {
     compare(&workspace::root()?, None, &|_| Ok(()))
 }
@@ -507,39 +477,30 @@ pub fn compare(
     *fetched = (fetched.0 + layers, fetched.1 + files);
     drop(fetched);
 
-    let any_over = rows.iter().any(|row| row.over);
-    let reason = match (any_over, pr_body) {
-        (false, _) => None,
-        (true, Some(body)) => base::reason_in(body),
-        (true, None) => base::budget_reason(root)?,
-    };
-    let mut verdict = Verdict::Pass;
+    let judged = accepts::judge(root, pr_body, &rows)?;
     let mut values = BTreeMap::new();
     let mut base_values = BTreeMap::new();
-    for row in &rows {
-        let word = match (row.has_band, row.over, &reason) {
-            (false, _, _) => "recorded",
-            (true, false, _) => "pass",
-            (true, true, Some(_)) => "over",
-            (true, true, None) => {
-                verdict = Verdict::Fail;
-                eprintln!(
-                    "bench: {} worsened past its band. Undo the slowdown, or add a `Budget reason: <text>` line to the PR body",
-                    row.name
-                );
-                "fail"
-            }
-        };
-        match row.base {
-            Some(base) => println!("{word} {} base {base} candidate {}", row.key, row.candidate),
-            None => println!("no-comparison {} candidate {}", row.key, row.candidate),
+    for (row, standing) in rows.iter().zip(&judged.standings) {
+        let (key, candidate) = (&row.budget.key, row.candidate);
+        if *standing == accepts::Standing::Fail {
+            eprintln!(
+                "bench: {} worsened past its band. Undo the slowdown, or add a `Budget reason: <text>` line to the PR body",
+                row.budget.name
+            );
         }
-        values.insert(row.key.clone(), row.candidate);
+        match row.base {
+            Some(base) => println!(
+                "{} {key} base {base} candidate {candidate}",
+                standing.word()
+            ),
+            None => println!("no-comparison {key} candidate {candidate}"),
+        }
+        values.insert(key.clone(), candidate);
         if let Some(base) = row.base {
-            base_values.insert(row.key.clone(), base);
+            base_values.insert(key.clone(), base);
         }
     }
-    if verdict == Verdict::Pass {
+    if judged.verdict == Verdict::Pass {
         if let Some(head) = head
             && clean_head(root)?.as_ref() == Some(&head)
         {
@@ -548,7 +509,7 @@ pub fn compare(
                 &Measured {
                     commit: head,
                     base: commit,
-                    reason: reason.unwrap_or_default(),
+                    reason: judged.reason.unwrap_or_default(),
                     budgets: values,
                     base_budgets: base_values,
                 },
@@ -558,7 +519,7 @@ pub fn compare(
     } else {
         println!("bench: fail");
     }
-    Ok(verdict)
+    Ok(judged.verdict)
 }
 
 /// HEAD, if the tree is what HEAD holds. Otherwise what was built says nothing
@@ -703,24 +664,22 @@ fn export(root: &Path, commit: &str, tree: &Path) -> Result<(), Problem> {
     Ok(())
 }
 
-struct Row {
-    key: String,
-    name: String,
+/// What the bench measured of a budget.
+pub struct Row<'a> {
+    pub budget: &'a Budget,
     /// `None` when the base can't be measured this way at all.
-    base: Option<f64>,
-    candidate: f64,
-    has_band: bool,
-    over: bool,
+    pub base: Option<f64>,
+    pub candidate: f64,
 }
 
-fn measure(
-    budgets: &[Budget],
+fn measure<'a>(
+    budgets: &'a [Budget],
     base: &Path,
     candidate: &Path,
     harness: Option<&Path>,
     directory: &Path,
     copies: &Copies,
-) -> Result<Vec<Row>, Problem> {
+) -> Result<Vec<Row<'a>>, Problem> {
     let mut rows = Vec::new();
     for budget in budgets {
         let (before, after) = match measure_of(&budget.key) {
@@ -760,15 +719,9 @@ fn measure(
             Some(Measure::Pinned(_)) | None => continue,
         };
         rows.push(Row {
-            key: budget.key.clone(),
-            name: budget.name.clone(),
+            budget,
             base: before,
             candidate: after,
-            has_band: budget.band.is_some(),
-            over: budget
-                .band
-                .zip(before)
-                .is_some_and(|(band, before)| over_band(before, after, band)),
         });
     }
     Ok(rows)
@@ -1375,15 +1328,10 @@ fn median(mut values: Vec<f64>) -> f64 {
     (values[values.len() / 2] * 100.0).round() / 100.0
 }
 
-fn over_band(base: f64, candidate: f64, band: Band) -> bool {
-    candidate - base > band.abs.max(base * band.pct / 100.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Band, Copies, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, choose_temp, median,
-        over_band,
+        Copies, NOOP_FILES, NOOP_HARNESS, NOOP_HARNESS_SHA256, asked, choose_temp, median,
     };
     use std::fs;
     use std::io::Write;
@@ -1500,26 +1448,6 @@ mod tests {
     fn the_median_is_the_middle_value() {
         assert_eq!(median(vec![3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median(vec![1.234, 9.0, 0.5]), 1.23);
-    }
-
-    #[test]
-    fn the_band_is_whichever_is_larger() {
-        let band = Band {
-            pct: 20.0,
-            abs: 2.0,
-        };
-        assert!(!over_band(100.0, 120.0, band));
-        assert!(over_band(100.0, 120.5, band));
-        assert!(!over_band(1.0, 3.0, band));
-        assert!(over_band(1.0, 3.5, band));
-    }
-
-    #[test]
-    fn getting_faster_is_never_over() {
-        let band = Band { pct: 0.0, abs: 0.0 };
-        assert!(!over_band(10.0, 1.0, band));
-        assert!(!over_band(10.0, 10.0, band));
-        assert!(over_band(10.0, 10.5, band));
     }
 
     const DISK_TMP: &str = "\

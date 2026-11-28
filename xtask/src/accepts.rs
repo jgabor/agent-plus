@@ -1,9 +1,12 @@
 //! What a merge accepts: whether a PR may merge, which checks its proof runs,
-//! which counts fell, and what the owner's approval covers. `merge.rs` runs
-//! the sequence around it: the timeout, the slot, the trees, and the statuses.
-//! A change to this file waits for the owner, as `waits.rs` says.
+//! what the budgets count is and whether the bench passes, which counts fell,
+//! and what the owner's approval covers, in a merge and in a refresh.
+//! `merge.rs` runs the sequence around it: the timeout, the slot, the trees,
+//! and the statuses. `bench.rs` measures the budgets, and `refresh.rs` runs
+//! the refresh. A change to this file waits for the owner, as `waits.rs` says.
 
-use crate::forge::{Forge, Gh, PullRequest};
+use crate::bench::{Band, Budget, Row};
+use crate::forge::{Armed, Forge, Gh, OpenPr, PullRequest};
 use crate::gate::{self, Failed, Merging};
 use crate::ledger::{self, Record, Scores};
 use crate::lock::Hold;
@@ -201,6 +204,186 @@ pub fn hold_back(
     Ok(())
 }
 
+/// Why the owner's approval doesn't cover what a refresh's proof of `head`
+/// accepted, if it doesn't. A head that the refresh found green, and so
+/// didn't prove, had its comment when the owner armed it, because a proof
+/// that found something new turned auto-merge off.
+pub fn proof_unapproved(
+    gh: &Gh,
+    number: u64,
+    head: &str,
+    proved: bool,
+) -> Result<Option<String>, Problem> {
+    if !proved {
+        return Ok(None);
+    }
+    let lists = acceptances(&gh.acceptances(number)?);
+    // A proof that accepted nothing left no comment for this head.
+    let new = match lists.split_last() {
+        Some(((at, accepted), earlier)) if at == head => {
+            unapproved(earlier.last().map(|(_, reasons)| &reasons[..]), accepted)
+        }
+        _ => Vec::new(),
+    };
+    Ok((!new.is_empty()).then(|| {
+        format!(
+            "its proof accepts what the owner didn't approve: {}. Arming its auto-merge again approves it",
+            new.join("; ")
+        )
+    }))
+}
+
+/// Why the owner's approval no longer stands for squashing `pr` at `head`,
+/// which a refresh proved, if it doesn't. `now` is what GitHub says of the PR.
+pub fn approval_lapsed(
+    gh: &Gh,
+    pr: &OpenPr,
+    head: &str,
+    now: &Armed,
+) -> Result<Option<String>, Problem> {
+    if let Some(why) = disarmed(now) {
+        return Ok(Some(why));
+    }
+    if now.head != head {
+        return Ok(Some(format!("its head moved from {head} to {}", now.head)));
+    }
+    let read = gh.pull_request(pr.number)?;
+    // A green from an earlier proof can predate the review.
+    if read.changes_requested {
+        return Ok(Some("a review of it requested changes".to_string()));
+    }
+    // The label goes from the issues the refresh listed, and they are the
+    // ones to close.
+    if read.closing_issues != pr.closing_issues {
+        return Ok(Some("the issue it closes changed".to_string()));
+    }
+    Ok(None)
+}
+
+/// Why the owner's approval no longer stands for a PR, by what GitHub says of
+/// it `now`, if it doesn't.
+pub fn disarmed(now: &Armed) -> Option<String> {
+    if now.state != "OPEN" {
+        return Some(format!("it is {}", now.state));
+    }
+    if !now.auto_merge {
+        return Some("its auto-merge was turned off".to_string());
+    }
+    None
+}
+
+/// How many budgets with a target meet it, and how many have one. A budget
+/// with no value yet isn't met.
+pub fn met(budgets: &[Budget], values: &BTreeMap<String, f64>) -> (usize, usize) {
+    let targets = budgets.iter().filter(|b| b.target.is_some()).count();
+    (targets - missed(budgets, values).len(), targets)
+}
+
+/// A budget with a target that isn't met.
+pub struct Missed<'a> {
+    pub key: &'a str,
+    pub name: &'a str,
+    pub target: f64,
+    pub value: Option<f64>,
+}
+
+/// The budgets that miss their targets, in the order of the budget file.
+pub fn missed<'a>(budgets: &'a [Budget], values: &BTreeMap<String, f64>) -> Vec<Missed<'a>> {
+    budgets
+        .iter()
+        .filter_map(|budget| {
+            let target = budget.target?;
+            let value = values.get(&budget.key).copied();
+            (!value.is_some_and(|value| value < target)).then_some(Missed {
+                key: &budget.key,
+                name: &budget.name,
+                target,
+                value,
+            })
+        })
+        .collect()
+}
+
+/// What the bench says of a budget it measured.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Standing {
+    /// The budget has no band, so nothing fails it.
+    Recorded,
+    Pass,
+    /// Over its band, with a `Budget reason:` that says why it is worth it.
+    Over,
+    Fail,
+}
+
+impl Standing {
+    pub fn word(self) -> &'static str {
+        match self {
+            Standing::Recorded => "recorded",
+            Standing::Pass => "pass",
+            Standing::Over => "over",
+            Standing::Fail => "fail",
+        }
+    }
+}
+
+/// What the bench's measurements earn.
+pub struct Judged {
+    /// One for each row, in order.
+    pub standings: Vec<Standing>,
+    /// The `Budget reason:` that was read, because a value was over its band.
+    pub reason: Option<String>,
+    pub verdict: Verdict,
+}
+
+/// Whether the bench passes, from what it measured. A value over its band
+/// fails it, unless the PR's body has a `Budget reason:` line. A merge passes
+/// the body it read. Otherwise the body comes from this branch's open PR, and
+/// it is read only when a value is over.
+pub fn judge(root: &Path, pr_body: Option<&str>, rows: &[Row]) -> Result<Judged, Problem> {
+    let over: Vec<bool> = rows
+        .iter()
+        .map(|row| {
+            row.budget
+                .band
+                .zip(row.base)
+                .is_some_and(|(band, base)| over_band(base, row.candidate, band))
+        })
+        .collect();
+    let reason = match (over.contains(&true), pr_body) {
+        (false, _) => None,
+        (true, Some(body)) => base::reason_in(body),
+        (true, None) => base::budget_reason(root)?,
+    };
+    let standings: Vec<Standing> = rows
+        .iter()
+        .zip(over)
+        .map(
+            |(row, over)| match (row.budget.band.is_some(), over, &reason) {
+                (false, _, _) => Standing::Recorded,
+                (true, false, _) => Standing::Pass,
+                (true, true, Some(_)) => Standing::Over,
+                (true, true, None) => Standing::Fail,
+            },
+        )
+        .collect();
+    let verdict = if standings.contains(&Standing::Fail) {
+        Verdict::Fail
+    } else {
+        Verdict::Pass
+    };
+    Ok(Judged {
+        standings,
+        reason,
+        verdict,
+    })
+}
+
+/// Whether the candidate is worse than the base by more than the band, which
+/// is the larger of its percentage of the base and its absolute amount.
+fn over_band(base: f64, candidate: f64, band: Band) -> bool {
+    candidate - base > band.abs.max(base * band.pct / 100.0)
+}
+
 pub struct Scoring<'a> {
     pub number: u64,
     pub issue: u64,
@@ -385,9 +568,9 @@ fn compare_counts(
     } else {
         None
     };
-    let budgets_met = base_values(measured.as_ref(), before.as_ref())
-        .map_or(0, |values| bench::met(&budgets, values).0);
-    let met_now = bench::met(&budgets, &record.budgets).0;
+    let budgets_met =
+        base_values(measured.as_ref(), before.as_ref()).map_or(0, |values| met(&budgets, values).0);
+    let met_now = met(&budgets, &record.budgets).0;
 
     let mut failed = Failed::new();
     let mut accepted = Vec::new();
@@ -553,7 +736,30 @@ pub fn proves_with_its_own(tree: &Path, main: &str, mode: Mode) -> Result<bool, 
 
 #[cfg(test)]
 mod tests {
-    use super::{BENCHED, NOT_BENCHED, acceptance, acceptances, affects_a_budget, unapproved};
+    use super::{
+        BENCHED, NOT_BENCHED, acceptance, acceptances, affects_a_budget, over_band, unapproved,
+    };
+    use crate::bench::Band;
+
+    #[test]
+    fn the_band_is_whichever_is_larger() {
+        let band = Band {
+            pct: 20.0,
+            abs: 2.0,
+        };
+        assert!(!over_band(100.0, 120.0, band));
+        assert!(over_band(100.0, 120.5, band));
+        assert!(!over_band(1.0, 3.0, band));
+        assert!(over_band(1.0, 3.5, band));
+    }
+
+    #[test]
+    fn getting_faster_is_never_over() {
+        let band = Band { pct: 0.0, abs: 0.0 };
+        assert!(!over_band(10.0, 1.0, band));
+        assert!(!over_band(10.0, 10.0, band));
+        assert!(over_band(10.0, 10.5, band));
+    }
 
     #[test]
     fn only_what_ap_and_the_fake_harness_are_built_from_can_change_a_budget() {

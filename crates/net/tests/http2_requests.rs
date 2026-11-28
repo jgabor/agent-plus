@@ -310,29 +310,30 @@ fn a_malformed_http2_request_never_passes() {
     assert_eq!(passed.fed, Ok(()));
 }
 
+// spec(NETWORK): There, the proxy refuses an HTTP/2 request that RFC 9113 calls malformed, or whose `:scheme` isn't `https`, and asks the server never to push.
 #[test]
 fn an_http2_path_that_a_server_would_reset_never_passes() {
-    // The `http` crate, which the `h2` crate's server reads `:path` with,
-    // refuses these, so that server resets the stream.
-    let reset = [
-        "/allowed/<",
-        "/allowed/>",
-        "/allowed/`",
-        "/allowed?\"",
-        "/allowed?<",
-        "/allowed?>",
-    ];
-    for path in reset {
-        let passed = fed(&client(&[headers(1, request(path), true)]), 64);
-        assert_eq!(passed.fed, Err(Refused), "{path}");
-        assert!(heads(&passed.frames).is_empty(), "{path}");
-        assert!(passed.asked.is_empty(), "{path}");
+    // The `http` crate, which the `h2` crate's server reads `:path` with, is
+    // the oracle: a server built on it resets a stream whose path it
+    // refuses. `#` and `?` start the parts that follow the path.
+    let visible = (b'!'..=b'~').filter(|byte| !b"#?".contains(byte));
+    for byte in visible.map(char::from) {
+        for path in [format!("/allowed/{byte}"), format!("/allowed?{byte}")] {
+            let read = http::uri::PathAndQuery::try_from(&path[..]).is_ok();
+            let passed = fed(&client(&[headers(1, request(&path), true)]), 64);
+            match read {
+                true => assert_eq!(heads(&passed.frames), [request(&path)], "{path}"),
+                false => {
+                    assert_eq!(passed.fed, Err(Refused), "{path}");
+                    assert!(heads(&passed.frames).is_empty(), "{path}");
+                    assert!(passed.asked.is_empty(), "{path}");
+                }
+            }
+        }
     }
-    for path in ["/allowed/a", "/allowed/\"{}", "/allowed?`{}"] {
-        let passed = fed(&client(&[headers(1, request(path), true)]), 64);
-        assert_eq!(passed.fed, Ok(()), "{path}");
-        assert_eq!(heads(&passed.frames), [request(path)]);
-    }
+    let checked = |path| fed(&client(&[headers(1, request(path), true)]), 64).fed;
+    assert_eq!(checked("/allowed/<"), Err(Refused));
+    assert_eq!(checked("/allowed/a"), Ok(()));
 }
 
 #[test]

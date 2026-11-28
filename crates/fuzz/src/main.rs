@@ -3230,8 +3230,6 @@ mod tests {
             "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/<",
         );
         assert!(!http2_check_input(input));
-        let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
-        assert!(paths(&served_http2(&http2_passed(&input)).0).is_empty());
     }
 
     #[test]

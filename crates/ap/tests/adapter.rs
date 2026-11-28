@@ -31,9 +31,9 @@ const VERSIONS: [&str; 11] = [
 
 /// The current version, and the versions on either side of each change in
 /// what Codex accepts.
-const CODEX_VERSIONS: [&str; 11] = [
-    "0.137.0", "0.138.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0", "0.157.0", "0.159.3",
-    "0.160.0", "0.168.0", "0.169.0",
+const CODEX_VERSIONS: [&str; 13] = [
+    "0.137.0", "0.138.0", "0.144.6", "0.145.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0",
+    "0.157.0", "0.159.3", "0.160.0", "0.168.0", "0.169.0",
 ];
 
 /// Fails unless `actual` is what the Claude Code golden file `name` holds.
@@ -205,6 +205,43 @@ fn each_effort_maps_to_a_level_the_version_accepts() {
     golden("effort.txt", lines.as_bytes());
 }
 
+// spec(EFFORT): With Codex 0.145.0 and later, the adapter also sets the effort a subagent starts with (`agents.default_subagent_reasoning_effort`), so a project can't use that key to pick another.
+#[test]
+fn a_codex_project_cant_change_a_subagents_effort() {
+    for version in CODEX_VERSIONS {
+        // Before 0.145.0, Codex reads the key as an agent role, and refuses
+        // to start.
+        let number: Vec<u64> = version
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        let has_key = number.as_slice() >= [0, 145, 0].as_slice();
+        for interactive in [false, true] {
+            for mode in MODES {
+                for effort in [None].into_iter().chain(EFFORTS.map(Some)) {
+                    let arguments = codex::arguments(version, None, effort, mode, interactive);
+                    let subagent: Vec<&str> = (arguments.windows(2))
+                        .filter(|pair| pair[0] == "-c")
+                        .map(|pair| pair[1].as_str())
+                        .filter(|value| value.starts_with("agents."))
+                        .collect();
+                    let run = format!("{version} {mode:?} {interactive} {effort:?}");
+                    let expected = match effort {
+                        Some(effort) if has_key => {
+                            let (level, _) = codex::effort(version, effort);
+                            vec![format!(
+                                "agents.default_subagent_reasoning_effort=\"{level}\""
+                            )]
+                        }
+                        _ => Vec::new(),
+                    };
+                    assert_eq!(subagent, expected, "{run}");
+                }
+            }
+        }
+    }
+}
+
 // spec(MODE): | `read` | reads and explores, and doesn't edit. In an interactive Claude Code run, approving its plan lets it start editing | `plan` | `read-only` sandbox, approval `never` |
 // spec(MODE): | `ask` | reads, and asks before anything else | `default` | `read-only` sandbox, approval `on-request` |
 // spec(MODE): | `edit` | also edits files in its workspace. Claude Code asks before commands other than common file operations. Codex runs commands inside its sandbox and asks before leaving it | `acceptEdits` | `workspace-write` sandbox, approval `on-request` |
@@ -336,7 +373,12 @@ fn codex_plan_mode_gets_the_effort() {
                 for effort in [None].into_iter().chain(EFFORTS.map(Some)) {
                     let arguments = codex::arguments(version, None, effort, mode, interactive);
                     let efforts: Vec<&str> = (arguments.windows(2))
-                        .filter(|pair| pair[0] == "-c" && pair[1].contains("reasoning_effort="))
+                        .filter(|pair| pair[0] == "-c")
+                        .filter(|pair| {
+                            ["model_reasoning_effort=", "plan_mode_reasoning_effort="]
+                                .iter()
+                                .any(|key| pair[1].starts_with(key))
+                        })
                         .map(|pair| pair[1].as_str())
                         .collect();
                     let run = format!("{version} {mode:?} {interactive} {effort:?}");

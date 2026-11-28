@@ -2605,6 +2605,15 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
             "GITHUB_TOKEN",
             true,
         ),
+        // The host is compared as the proxy compares it, in any case and
+        // with or without a trailing dot.
+        (
+            "cased",
+            "SECRET GITHUB_TOKEN @GitHub.com\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        ("dotted", "SECRET GH_TOKEN @github.com.\n", "GH_TOKEN", true),
         (
             "visible",
             "SECRET GITHUB_TOKEN visible\n",

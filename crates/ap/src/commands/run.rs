@@ -64,7 +64,7 @@ use agentfile::{
 };
 use ap::boot::Error;
 use ap::filter::Filter;
-use ap::network::{Hidden, Injection};
+use ap::network::{Hidden, Injection, same_host};
 use ap::paths::HostPath;
 use ap::runs::{self, End, FromRun, LayerName};
 use guest::agent::HOME;
@@ -1062,10 +1062,14 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     };
     let mut written = ap::adapter::run_files(harness, &directory, placeholder_given.as_deref());
     // SPEC.md's SECRET: git signs in to `github.com` with a token bound to
-    // it.
+    // it, as the proxy reads the host.
     let bound = |token: &&str| {
         (secrets.secrets.iter()).any(|secret| {
-            secret.name == *token && secret.hosts.iter().any(|host| host == "github.com")
+            secret.name == *token
+                && secret
+                    .hosts
+                    .iter()
+                    .any(|host| same_host(host, "github.com"))
         })
     };
     if let Some(token) = ap::adapter::GIT_TOKENS.into_iter().find(bound) {

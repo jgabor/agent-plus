@@ -1331,24 +1331,47 @@ fn verdict(
             conflict: true,
         });
     }
-    // Your directory keeps its git-ignored files, as one the agent deleted
-    // does, so nothing the agent wrote can take its place.
-    if branch.is_none() && written && holds_ignored(host, ignore, path)? {
-        return skipped("it would replace a directory that holds a git-ignored file");
+    // Your directory keeps its git-ignored files and repositories, as one
+    // the agent deleted does, so nothing the agent wrote can take its place.
+    if let Some(bare) = bare
+        && written
+        && let Some(why) = kept_beneath(host, ignore, bare, path)?
+    {
+        return skipped(why);
     }
     Ok(Verdict::Change)
 }
 
-/// Whether your directory at `path` holds a git-ignored file, at any depth.
-fn holds_ignored(host: &Host, ignore: &Gitignore, path: &[u8]) -> io::Result<bool> {
+/// Why your directory at `path` stays where the agent deleted it, if it
+/// does: it holds, at any depth, a git-ignored file, a `.git` entry, or a
+/// bare repository, which `ap apply` leaves. The first found says. At
+/// `path` itself, `verdict` has already said why for a git-ignored file
+/// and a bare repository.
+fn kept_beneath(
+    host: &Host,
+    ignore: &Gitignore,
+    bare: &Bare,
+    path: &[u8],
+) -> io::Result<Option<&'static str>> {
     if !host.stat(path)?.is_some_and(|m| m.is_dir()) {
-        return Ok(false);
+        if ignore.is_ignored(bytes_path(path), false) {
+            return Ok(Some("it would replace a directory that holds a git-ignored file"));
+        }
+        return Ok(None);
     }
-    let mut found = false;
-    host.beneath(path, &mut |yours| {
-        found = found || ignore.is_ignored(bytes_path(&yours), false);
-    })?;
-    Ok(found)
+    let repository = Some("it would replace a directory that holds a repository");
+    if bare.is(host, path)? {
+        return Ok(repository);
+    }
+    for name in host.names(path)? {
+        if name.eq_ignore_ascii_case(b".git") {
+            return Ok(repository);
+        }
+        if let Some(why) = kept_beneath(host, ignore, bare, &[path, b"/", &name].concat())? {
+            return Ok(Some(why));
+        }
+    }
+    Ok(None)
 }
 
 /// Whether your file at `path` is one an earlier `ap apply` landed, with

@@ -1838,6 +1838,11 @@ attributes, because those can run commands.
     unless it changed on your side.
     The directory stays, with its git-ignored files, as if the agent had
     deleted it.
+  - Where your directory holds a `.git` entry or a bare repository, at any
+    depth, and the agent wrote a file or symlink in its place, `ap apply`
+    skips that file and says why, unless it changed on your side.
+    The directory stays, with its repository, as if the agent had deleted
+    it.
   - `ap apply` makes a directory only to hold what it applies, and gives
     each file it writes and each directory it makes the permission bits
     the agent gave it.

@@ -202,7 +202,6 @@ dependencies = [
  "agentfile",
  "ap",
  "git",
- "guest",
  "h2",
  "httparse",
  "hyper",

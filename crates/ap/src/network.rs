@@ -331,15 +331,21 @@ fn decrypts(network: &Network, injection: &Injection) -> bool {
     !injection.secrets.is_empty() || url || has(Sign::Allow) && has(Sign::Deny)
 }
 
-/// The guest's gateway, at the addresses the guest's init gives it.
+/// The guest's gateway, seeded from the system's random source, before the
+/// filter.
 pub fn stack() -> Stack {
-    Stack::new(Config {
+    Stack::new(config(RandomState::new().hash_one(0)))
+}
+
+/// The guest's gateway, at the addresses the guest's init gives it, with
+/// `seed`.
+pub fn config(seed: u64) -> Config {
+    Config {
         mac: net::GATEWAY_MAC,
         ipv4: (net::IPV4_GATEWAY, net::IPV4_PREFIX),
         ipv6: (net::IPV6_GATEWAY, net::IPV6_PREFIX),
-        // Drawn from the system's random source, before the filter.
-        seed: RandomState::new().hash_one(0),
-    })
+        seed,
+    }
 }
 
 /// The rules and the harness's hosts in the `args` that [`arguments`]

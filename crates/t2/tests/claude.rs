@@ -100,6 +100,30 @@ fn an_interactive_claude_code_run_in_a_shared_repository_reaches_its_prompt() {
     reaches_its_prompt(Interactive::start(run));
 }
 
+// Claude Code 2.1.323 looks up its trust records by the path the kernel
+// resolves, and the link is in a share, so only the guest can follow it.
+// spec(Run): The adapter also sets `CLAUDE_CODE_SANDBOXED`, so an interactive run whose working directory goes through a symlink doesn't ask whether to trust it.
+#[test]
+fn an_interactive_claude_code_run_whose_working_directory_is_a_symlink_reaches_its_prompt() {
+    let scratch = Scratch::new("symlink-dialog");
+    let pin = pin("claude");
+    let work = scratch.root.join("linked/work");
+    for directory in [".git/objects", ".git/refs/heads"] {
+        fs::create_dir_all(work.join("repos/app").join(directory)).unwrap();
+    }
+    fs::write(work.join("repos/app/.git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::os::unix::fs::symlink("repos/app", work.join("current")).unwrap();
+    scratch.build(
+        "linked",
+        &format!(
+            "AGENT claude:{}\nOS minimal\nNETWORK -\nMODE auto\nSHARE ./work\nWORKDIR ~/work/current\n",
+            pin.version
+        ),
+        &pin.lock,
+    );
+    reaches_its_prompt(Interactive::start(scratch.run("linked")));
+}
+
 // Claude Code asks whether to use a key from its environment that its state
 // doesn't approve. The key isn't a real one, and nothing sends it anywhere
 // it could be used.

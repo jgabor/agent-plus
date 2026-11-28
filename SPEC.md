@@ -459,7 +459,9 @@ directory) and writes an image into the local store.
   interactive run whose working directory isn't in a git repository doesn't
   ask whether to trust it. Each run also marks its working directory and
   every directory above it as trusted, so an interactive run whose working
-  directory is in a git repository doesn't ask whether to trust it.
+  directory is in a git repository doesn't ask whether to trust it. The
+  adapter also sets `CLAUDE_CODE_SANDBOXED`, so an interactive run whose
+  working directory goes through a symlink doesn't ask whether to trust it.
 - **Ephemeral.** Every run starts from the image with an empty writable
   overlay, and the overlay is discarded when the run ends. Three things
   outlast it: the state that `AUTH login` and `PERSIST` keep (see

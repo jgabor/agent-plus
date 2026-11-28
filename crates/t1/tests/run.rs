@@ -637,6 +637,7 @@ fn a_headless_run_starts_the_harness_as_agent_and_exits_with_its_status() {
 // spec(MODE): The adapter sets the mode on the harness's command line, with flags or Codex's `-c` overrides, every time it starts the harness, including on `--resume`, so a project's settings or an earlier session can't pick a different one.
 // spec(MODEL): `<model>` is passed to the harness unchanged, so it accepts whatever names or aliases the harness accepts.
 // spec(AGENT): which first-run state it prepares, so a new VM doesn't repeat the harness's setup
+// spec(Run): The adapter also sets `CLAUDE_CODE_SANDBOXED`, so an interactive run whose working directory goes through a symlink doesn't ask whether to trust it.
 #[test]
 fn claude_code_starts_with_its_adapters_configuration() {
     let scratch = Scratch::new("adapter");
@@ -660,6 +661,10 @@ fn claude_code_starts_with_its_adapters_configuration() {
             "\"--\"",
             &format!("\"{PROMPT}\""),
         ],
+        "{report}"
+    );
+    assert!(
+        report.contains("\"CLAUDE_CODE_SANDBOXED\":\"1\""),
         "{report}"
     );
     let files = array(&report, "files");

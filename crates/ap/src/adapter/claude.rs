@@ -5,7 +5,8 @@
 //! onboarding is done and which directories it trusts. Its command line sets
 //! the model, the effort, and the permission mode every time it starts the
 //! harness, so neither a project's settings nor an earlier session can pick
-//! others. A version older than
+//! others. Its environment tells Claude Code it runs in a sandbox, so it
+//! trusts every directory. A version older than
 //! `--effort` gets the effort from `CLAUDE_CODE_EFFORT_LEVEL`, which it reads
 //! before its settings.
 //!
@@ -37,10 +38,23 @@ pub const STATE: &str = "/home/agent/.claude.json";
 /// The variable that sets the effort of a version without `--effort`.
 pub const EFFORT_VARIABLE: &str = "CLAUDE_CODE_EFFORT_LEVEL";
 
+/// The variable that tells Claude Code it runs in a sandbox, so it trusts
+/// every directory. Claude Code 2.1.323 reads it only in its checks for a
+/// directory's trust, before any record in [`STATE`]. A record can't cover
+/// a working directory that a symlink leads to, because Claude Code looks
+/// the record up by the path the kernel resolves, which only the guest can
+/// follow once the shares are mounted.
+pub const SANDBOXED: &str = "CLAUDE_CODE_SANDBOXED";
+
 /// The variables the adapter sets, besides the certificate variables:
-/// [`EFFORT_VARIABLE`], the one its settings set, and the one SPEC.md's AUTH
-/// section gives `AUTH login`.
-pub const SET: &[&str] = &[EFFORT_VARIABLE, "DISABLE_AUTOUPDATER", "CLAUDE_CONFIG_DIR"];
+/// [`EFFORT_VARIABLE`], [`SANDBOXED`], the one its settings set, and the one
+/// SPEC.md's AUTH section gives `AUTH login`.
+pub const SET: &[&str] = &[
+    EFFORT_VARIABLE,
+    SANDBOXED,
+    "DISABLE_AUTOUPDATER",
+    "CLAUDE_CONFIG_DIR",
+];
 
 /// The variables Claude Code reads for sign-in. Claude Code 2.1.325 picks its
 /// credential from these, in the code that names each source, and reads the
@@ -220,17 +234,17 @@ pub fn effort(version_text: &str, effort: Effort) -> (Option<&'static str>, Opti
     (Some(given), warning)
 }
 
-/// The variables that set the effort of a version older than `--effort`:
-/// [`EFFORT_VARIABLE`], with the level [`effort`] gives. Other versions get
-/// none.
+/// The variables a run of this version of Claude Code gets: [`SANDBOXED`],
+/// and for a version older than `--effort`, [`EFFORT_VARIABLE`] with the
+/// level [`effort`] gives.
 pub fn environment(version_text: &str, effort: Option<Effort>) -> Vec<(String, String)> {
-    if version(version_text).as_slice() >= EFFORT_FROM.as_slice() {
-        return Vec::new();
+    let mut environment = vec![(SANDBOXED.to_owned(), "1".to_owned())];
+    if version(version_text).as_slice() < EFFORT_FROM.as_slice()
+        && let Some((Some(level), _)) = effort.map(|effort| self::effort(version_text, effort))
+    {
+        environment.push((EFFORT_VARIABLE.to_owned(), level.to_owned()));
     }
-    match effort.map(|effort| self::effort(version_text, effort)) {
-        Some((Some(level), _)) => vec![(EFFORT_VARIABLE.to_owned(), level.to_owned())],
-        _ => Vec::new(),
-    }
+    environment
 }
 
 /// The arguments that set the model, the effort, and the permission mode, in

@@ -721,7 +721,7 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
     );
 }
 
-// spec(Run): From a trusted share that doesn't hold its working directory, Codex loads none of them.
+// spec(Run): When Codex's working directory isn't in a linked git worktree, Codex loads none of them from a trusted share that doesn't hold that directory.
 #[test]
 fn the_codex_adapter_points_at_no_shares_codex_directory() {
     // Real Codex loads nothing from such a share in T2. This checks the

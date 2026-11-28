@@ -141,13 +141,18 @@ fn exec_codex(scratch: &Scratch, name: &str, port: u16, arguments: Vec<String>) 
     shown
 }
 
+/// The requests to the fake upstream in `upstream`.
+fn requests(upstream: &Path) -> Vec<String> {
+    let requests = fs::read_dir(upstream.join("requests")).unwrap();
+    (requests.flatten())
+        .filter_map(|request| fs::read_to_string(request.path()).ok())
+        .collect()
+}
+
 /// The tool's outputs that requests to the fake upstream in `upstream`
 /// gave the model, which say why a tool failed.
 fn tool_outputs(upstream: &Path) -> Vec<String> {
-    let requests = fs::read_dir(upstream.join("requests")).unwrap();
-    requests
-        .flatten()
-        .filter_map(|request| fs::read_to_string(request.path()).ok())
+    (requests(upstream).into_iter())
         .filter(|text| text.contains("\"custom_tool_call_output\""))
         .collect()
 }
@@ -292,11 +297,11 @@ fn a_trusted_codex_projects_model_catalog_reaches_the_reviewer_in_auto() {
     }
 }
 
-/// A `SessionStart` hook that writes `hook-ran` in the share that holds it.
+/// A `SessionStart` hook that writes `ran` to the file `$0`.
 const HOOK: &str =
     r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo ran > \"$0\""}]}]}}"#;
 
-// spec(Run): From a trusted share that doesn't hold its working directory, Codex loads none of them.
+// spec(Run): When Codex's working directory isn't in a linked git worktree, Codex loads none of them from a trusted share that doesn't hold that directory.
 #[test]
 fn codex_loads_nothing_from_a_share_that_isnt_its_working_directory() {
     let scratch = Scratch::new("codex-other-share");
@@ -350,9 +355,8 @@ fn codex_loads_nothing_from_a_share_that_isnt_its_working_directory() {
         let hooked = scratch.ap(&["exec", &name, "test", "-e", &format!("{there}/hook-ran")]);
         assert_eq!(hooked.status.code(), code, "{case}: {shown}");
         // The configuration: the model got its instructions.
-        let requests = fs::read_dir(upstream.join("requests")).unwrap();
-        let instructed = (requests.flatten())
-            .filter_map(|request| fs::read_to_string(request.path()).ok())
+        let instructed = requests(&upstream)
+            .iter()
             .any(|text| text.contains(instructions));
         assert_eq!(instructed, loads, "{case}: {shown}");
     }

@@ -767,3 +767,18 @@ fn a_copy_that_fails_to_move_what_the_guest_holds_leaves_nothing_half_moved() {
     assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, 0).0, EAGAIN);
     assert_eq!(guest.lock(SETLK, writer, 8, F_WRLCK, LK_FLOCK).0, EAGAIN);
 }
+
+#[test]
+fn a_reader_of_a_file_you_replaced_with_a_symlink_reads_the_file_it_opened() {
+    let tree = Tree::new("cow-reader-symlink");
+    let path = tree.root.join("hello.txt");
+    let mut guest = Guest::cow(&tree.root, &pending(&tree));
+    let hello = guest.walk("hello.txt").unwrap();
+    let reader = guest.open(hello, 0).unwrap();
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink("dir/nested.txt", &path).unwrap();
+    // Renaming it makes the agent's copy, a symlink.
+    assert_eq!(guest.rename(1, b"hello.txt", 1, b"moved", 0), 0);
+    let read = guest.read(READ, reader, 0, 64);
+    assert_eq!(read, (0, INSIDE.to_vec()));
+}

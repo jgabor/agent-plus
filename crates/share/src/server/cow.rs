@@ -1291,7 +1291,14 @@ impl Cow {
                         },
                     };
                     self.times.set(path, &times_of(&stat))?;
-                    Ok((entry, self.ready_moves(path)?))
+                    // The copy of a symlink or a special file is a
+                    // placeholder, so what the guest has open of your file
+                    // stays there.
+                    let moves = match kind {
+                        libc::S_IFREG => self.ready_moves(path)?,
+                        _ => Moves::default(),
+                    };
+                    Ok((entry, moves))
                 })();
                 // Removing the copy may need the descriptor it holds, as
                 // when the move failed with `EMFILE`.

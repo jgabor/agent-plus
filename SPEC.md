@@ -1926,13 +1926,29 @@ Runs are ephemeral. `PERSIST` names the state that survives between runs.
 PERSIST sessions
 ```
 
-| Name | Keeps | Example (Claude Code) |
-|---|---|---|
-| `sessions` | Conversation history, so runs can resume | `~/.claude/projects` |
-| `home` | The agent's whole home directory, including `sessions` but not shares | `/home/agent` |
+| Name | Keeps | Claude Code | Codex |
+|---|---|---|---|
+| `sessions` | Conversation history, so runs can resume | `~/.claude/projects` | `~/.codex/sessions` |
+| `home` | The agent's whole home directory, including `sessions` but not shares | `/home/agent` | `/home/agent` |
+
+Each harness keeps its sign-in, its first-launch state, and its conversation
+history in its own files. It replaces some by rename, writing a new copy and
+moving it over the old one, and writes others in place.
+
+| State | Kept by | Claude Code | Codex |
+|---|---|---|---|
+| Sign-in | `AUTH login` | `~/.claude/.credentials.json`, replaced by rename | `~/.codex/auth.json`, replaced by rename |
+| First-launch state | `AUTH login` and `PERSIST home` | `~/.claude.json`, replaced by rename | `~/.codex/config.toml`, which the adapter writes on every run, so nothing is kept |
+| Conversation history | `PERSIST sessions` and `PERSIST home` | A file per session in `~/.claude/projects/<directory>/`, appended in place | A file per session in `~/.codex/sessions/<year>/<month>/<day>/`, appended in place |
 
 - The adapter maps each name to that harness's own files, so a `PERSIST`
   line still works after you change `AGENT`.
+- With `AUTH login`, Claude Code keeps these files in the directory that
+  the adapter names in `CLAUDE_CONFIG_DIR` (see [AUTH](#auth)), in place of
+  `~/.claude` and `~`.
+- Only `PERSIST home` keeps the rest of what a harness writes, such as the
+  prompts you typed (`~/.claude/history.jsonl` and `~/.codex/history.jsonl`)
+  and Claude Code's file snapshots for rewinding.
 - Persisted state lives in the store, under the agent's name, together with
   the sign-in from `AUTH login`. An image with no local Agentfile keeps it
   under its digest instead (see [Grants](#grants)). It survives rebuilds.

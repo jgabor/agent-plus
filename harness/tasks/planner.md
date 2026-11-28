@@ -62,8 +62,15 @@ Draft model: `claude-fable-5-2`, at effort `high`
 
    Go on when it returns, or when it times out.
 5. Run `cargo xtask next` and count its entries. Then count the issues in
-   progress with `gh issue list --state open --label in-progress --json number
-   --jq length`. If the two counts add up to 5 or more, say so and stop.
+   progress on Linux, which leaves out those with `host:macos`, because the
+   Mac holds them:
+
+   ```sh
+   gh issue list --state open --label in-progress --limit 1000 --json labels \
+     --jq 'map(select(all(.labels[]; .name != "host:macos"))) | length'
+   ```
+
+   If the two counts add up to 5 or more, say so and stop.
 6. Find the parent: the open issue that has an `auto:*` label, no
    `answer-needed` label, and a line in its body that reads `Milestone:
    <name>.`, with your milestone's name. Search with `gh issue list --state

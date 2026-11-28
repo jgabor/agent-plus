@@ -431,8 +431,9 @@ fn memory_rules() -> [Rule; 2] {
 
 /// Every filter allows `restart_syscall`, which the kernel makes to go on
 /// with a wait for a time, such as `poll` with a timeout, once a stop or a
-/// freeze has interrupted it. It goes on only with the call it interrupted,
-/// which the filter let through.
+/// freeze has interrupted it. It can only go on with a wait that this
+/// thread began, and a wait reads or changes nothing. It comes last, so the
+/// calls a filter makes most stay first.
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
     let kill = op(RETURN, 0, 0, RET_KILL_PROCESS);
     let mut program = vec![
@@ -443,7 +444,7 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
         op(JUMP_AT_LEAST, 0, 1, X32_SYSCALLS),
         kill,
     ];
-    for rule in std::iter::once(&Rule::Allow(RESTART_SYSCALL)).chain(rules) {
+    for rule in rules.iter().chain([&Rule::Allow(RESTART_SYSCALL)]) {
         let (number, body) = compiled(rule);
         program.push(op(JUMP_EQUAL, 0, body.len() as u8, number));
         program.extend(body);
@@ -1266,9 +1267,9 @@ mod tests {
             network_rules(socket),
             network_connecting_rules(socket),
         ];
-        for rules in &filters {
+        for (index, rules) in filters.iter().enumerate() {
             let restarted = run_rules(rules, AUDIT_ARCH_X86_64, RESTART_SYSCALL, [0; 6]);
-            assert_eq!(restarted, RET_ALLOW);
+            assert_eq!(restarted, RET_ALLOW, "filter {index}");
         }
     }
 
@@ -1276,6 +1277,8 @@ mod tests {
     /// [`a_confined_network_process_waits_on_after_a_stop`] starts, which
     /// confines itself.
     const WAITING_VARIABLE: &str = "VMM_CONFINED_WAIT";
+
+    const POLLIN: i16 = 1;
 
     /// `struct pollfd`.
     #[repr(C)]
@@ -1288,7 +1291,7 @@ mod tests {
     /// The process that [`a_confined_network_process_waits_on_after_a_stop`]
     /// starts. It waits on its link, standard input, as the network process
     /// does, once it has said on standard output that it is confined. It
-    /// exits 0 if the link woke it, and 2 if the wait ran out.
+    /// exits 0 if the link woke it, and 2 otherwise.
     #[used]
     #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
     static WAITING_PROCESS: extern "C" fn() = waiting_process;
@@ -1300,7 +1303,7 @@ mod tests {
         confine_network(0).unwrap();
         let mut link = PollFd {
             fd: 0,
-            events: 1,
+            events: POLLIN,
             revents: 0,
         };
         // SAFETY: the byte and `link` outlive the calls, which take plain
@@ -1355,6 +1358,7 @@ mod tests {
         let mut confined = [0];
         let mut said = process.stdout.take().unwrap();
         said.read_exact(&mut confined).unwrap();
+        assert_eq!(&confined, b"w");
         // Once it is confined, the process sleeps nowhere but in its wait.
         wait_for_state(&mut process, 'S');
         // SAFETY: `kill` takes plain integers, and the process is this

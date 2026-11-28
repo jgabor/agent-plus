@@ -148,6 +148,11 @@ case "$1 $2" in
   "issue edit") ;;
   "issue comment")
     if [ -f '{bin}/comment-refused' ]; then echo 'gh: comment refused' >&2; exit 1; fi
+    if [ -f '{bin}/view-before' ]; then
+      {{ cat '{bin}/view-before'
+        awk 'BEGIN {{ ORS = "" }} {{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); print $0 "\\n" }}'
+        cat '{bin}/view-after'; }} > '{bin}/view.json'
+    fi
     echo 'https://github.com/o/r/issues/1#issuecomment-500' ;;
   "api -X") ;;
   api*)
@@ -724,6 +729,40 @@ fn claim_of_a_claimed_issue_fails_without_writing() {
     assert!(!calls.contains("issue comment"), "{calls}");
 }
 
+/// The fake `gh` gives back the comment that the claim posts.
+#[test]
+fn claim_writes_through_gh_and_labels_when_it_wins() {
+    let repo = Repo::new("claim-wins", &[open(7, &["auto:merge"], T)]);
+    repo.git(&["checkout", "-q", "-b", "7-x"]);
+    let shell = issue(
+        7,
+        "OPEN",
+        &["auto:merge"],
+        &body(T, ""),
+        &["COMMENT".to_string()],
+    );
+    let (before, after) = shell.split_once("COMMENT").unwrap();
+    let before = format!(
+        "{before}{{\"id\":\"IC_x\",\"author\":{{\"login\":{}}},\"url\":\"https://github.com/o/r/issues/1#issuecomment-500\",\"body\":\"",
+        quoted(OWNER)
+    );
+    fs::write(repo.bin.join("view-before"), before).unwrap();
+    fs::write(repo.bin.join("view-after"), format!("\"}}{after}")).unwrap();
+    let output = repo.xtask(&["claim", "7"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("\"comment\":500"),
+        "{}",
+        stdout(&output)
+    );
+    let calls = repo.calls();
+    assert!(calls.contains("issue comment 7 --body-file -"), "{calls}");
+    assert!(
+        calls.contains("issue edit 7 --add-label in-progress"),
+        "{calls}"
+    );
+}
+
 #[test]
 fn claim_writes_through_gh_and_loses_when_its_comment_is_gone() {
     let repo = Repo::new("claim-race", &[open(7, &["auto:merge"], T)]);
@@ -742,11 +781,8 @@ fn claim_writes_through_gh_and_loses_when_its_comment_is_gone() {
     let output = repo.xtask(&["claim", "7"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let calls = repo.calls();
-    assert!(
-        calls.contains("issue edit 7 --add-label in-progress"),
-        "{calls}"
-    );
     assert!(calls.contains("issue comment 7 --body-file -"), "{calls}");
+    assert!(!calls.contains("--add-label"), "{calls}");
 }
 
 /// A repository where a claim loses to a live status comment.

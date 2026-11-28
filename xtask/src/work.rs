@@ -653,10 +653,12 @@ fn render_status(thread: &str, branch: &str, lease: i64, nonce: &str) -> String 
     )
 }
 
-/// Claims an issue as AGENTS.md describes: write a status comment, label it,
-/// and read it again. The comment comes first so that a claim that dies here
-/// still has a lease that runs out. The nonce tells this claim from another
-/// one that edited the same comment.
+/// Claims an issue as AGENTS.md describes: write a status comment, read it
+/// and the overlapping issues again, and label it only if it won. The comment
+/// comes first so that a claim that dies here still has a lease that runs
+/// out. A loser adds no label, because `in-progress` with no live status
+/// keeps an issue claimed. The nonce tells this claim from another one that
+/// edited the same comment.
 fn claim(
     forge: &dyn Forge,
     number: u64,
@@ -695,11 +697,7 @@ fn claim(
     // other host can race this one on an overlapping issue.
     let rivals: Vec<u64> = states
         .iter()
-        .filter(|(other, state)| {
-            !host.starts(other)
-                && !matches!(state, State::Closed | State::Parked)
-                && any_overlap(&touches(&other.body), &paths)
-        })
+        .filter(|(other, _)| !host.starts(other) && any_overlap(&touches(&other.body), &paths))
         .map(|(other, _)| other.number)
         .collect();
 
@@ -719,8 +717,6 @@ fn claim(
         }
         None => forge.post_comment(number, &body)?,
     };
-    forge.add_label(number, IN_PROGRESS)?;
-
     let after = forge.issue(number)?;
     let intact = after
         .comments
@@ -741,6 +737,7 @@ fn claim(
         }
     }
     let Some(reason) = lost else {
+        forge.add_label(number, IN_PROGRESS)?;
         return Ok(Claim::Won {
             comment: mine,
             replaced,
@@ -757,8 +754,9 @@ fn claim(
 /// overlaps it. Each claim writes its comment before it reads the other, so
 /// of two claims at least one reads the other, and a posted comment's id says
 /// which was written first. An edited comment keeps its old id, which says
-/// nothing, so that claim backs out from any live claim it reads. Two such
-/// claims can both back out, and the next dispatch tries again.
+/// nothing, so that claim backs out from any live claim it reads, and a
+/// posted one loses to its lower id. Then both can back out, and the next
+/// dispatch tries again.
 fn comes_first(rival: Issue, owner: &str, now: i64, fresh: bool, mine: u64) -> bool {
     if !rival.open || is_parked(&rival) {
         return true;
@@ -1359,12 +1357,21 @@ mod tests {
                 "{}",
                 case.name
             );
-            let retired = forge
+            // A loser leaves no `in-progress`, which would keep its issue
+            // claimed with no live status.
+            let labeled = forge.writes().contains(&"label 7 in-progress".to_string());
+            assert_eq!(labeled, case.won, "{}", case.name);
+            let edits = forge
                 .writes()
                 .iter()
-                .skip_while(|write| !write.starts_with("label"))
-                .any(|write| *write == format!("edit {mine}"));
-            assert_eq!(retired, case.retired, "{}", case.name);
+                .filter(|write| **write == format!("edit {mine}"))
+                .count();
+            assert_eq!(
+                edits > usize::from(case.reuses),
+                case.retired,
+                "{}",
+                case.name
+            );
             if case.retired {
                 assert!(
                     forge.body_of(mine).contains("**State:** parked"),
@@ -1373,6 +1380,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The owner answers the other host's issue, and its claim lands, between
+    /// this claim's two reads.
+    #[test]
+    fn an_overlapping_issue_parked_at_the_first_read_still_counts() {
+        let mut overlapping = issue(vec![]);
+        overlapping.number = 8;
+        overlapping.labels.push("host:macos".to_string());
+        overlapping.labels.push("answer-needed".to_string());
+        let forge = Fake::new(vec![issue(vec![]), overlapping]);
+        *forge.interfere.borrow_mut() = Some(Box::new(|issues| {
+            issues[1].labels.retain(|label| label != "answer-needed");
+            rival_at(1, 50, OWNER)(issues);
+        }));
+        assert!(matches!(try_claim(&forge), Claim::Lost(_)));
     }
 
     #[test]

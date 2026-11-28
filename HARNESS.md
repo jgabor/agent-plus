@@ -716,11 +716,12 @@ null.
 
 `claim` prints `{"issue", "comment", "branch", "replaced"}`. `replaced` is the
 thread of the last claim, or null if there was none or it was this thread.
-After it writes, `claim` reads the issue again, and each open, unparked issue
-for the other host whose `Touches` overlap it, because a claim on this host
-waits for the claim slot. It wins only if its comment is the lowest live one on its
-issue, and lower than every live one on those. A claim that edited an earlier
-comment loses to any live one on those, because its id is old.
+After it writes its status comment, `claim` reads the issue again, and each
+open issue for the other host whose `Touches` overlap it, because a claim on
+this host waits for the claim slot. It wins only if its comment is the lowest
+live one on its issue, and lower than every live one on those that isn't
+parked. A claim that edited an earlier comment loses to any live one on
+those, because its id is old. Only a claim that wins adds `in-progress`.
 
 While an issue has a live claim, `merge` and `prepare` refuse its PR with exit
 1, and name the holder, unless `--thread` names it. They check again after the

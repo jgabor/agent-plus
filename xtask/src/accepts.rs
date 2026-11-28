@@ -115,12 +115,33 @@ pub fn acceptance(head: &str, accepted: &[String]) -> String {
     format!("{ACCEPTS}{head}` accepts:\n\n{}\n", lines.join("\n"))
 }
 
-/// The head and the reasons of each comment that `acceptance` wrote, oldest
-/// first, from comment bodies one after another.
-pub fn acceptances(comments: &str) -> Vec<(String, Vec<String>)> {
+/// A list that `acceptance` wrote.
+#[derive(Debug, PartialEq)]
+pub struct Listed {
+    /// When GitHub took the comment, in seconds.
+    pub posted: i64,
+    pub head: String,
+    pub reasons: Vec<String>,
+}
+
+/// Each list that `acceptance` wrote, oldest first, from comments with the
+/// time each was posted, in seconds.
+pub fn acceptances(comments: &[(i64, String)]) -> Vec<Listed> {
+    let mut listed = Vec::new();
+    for (posted, body) in comments {
+        listed.extend(lists(body).into_iter().map(|(head, reasons)| Listed {
+            posted: *posted,
+            head,
+            reasons,
+        }));
+    }
+    listed
+}
+
+fn lists(body: &str) -> Vec<(String, Vec<String>)> {
     let mut lists: Vec<(String, Vec<String>)> = Vec::new();
     let mut open = false;
-    for line in comments.lines() {
+    for line in body.lines() {
         let head = line
             .strip_prefix(ACCEPTS)
             .and_then(|rest| rest.strip_suffix("` accepts:"));
@@ -173,22 +194,34 @@ fn fall(reason: &str) -> Option<(&str, u64)> {
     Some((name, from.checked_sub(to)?))
 }
 
-/// An owner who arms auto-merge approves what the PR's newest comment said
-/// merging accepts, and GitHub merges an armed PR once it is green. So a proof
-/// that accepts more turns auto-merge off before its green, and arming it
-/// again approves the new comment. `earlier` is what was there before it.
-pub fn hold_back(
-    gh: &Gh,
-    number: u64,
-    command: &str,
-    earlier: &str,
-    accepted: &[String],
-) -> Result<(), Problem> {
-    let lists = acceptances(earlier);
-    let new = unapproved(lists.last().map(|(_, reasons)| &reasons[..]), accepted);
-    // Read after the comment, so no approval given before it stands. One
-    // given just after it is taken back too, which keeps the PR open.
-    if new.is_empty() || !gh.armed(number)?.auto_merge {
+/// What the owner approved by arming auto-merge at `armed`, in seconds: the
+/// reasons of the newest list posted before then, since that is the one they
+/// could read. `None` when no list came before it.
+fn approved(lists: &[Listed], armed: i64) -> Option<&[String]> {
+    let mut before = lists.iter().filter(|list| list.posted < armed);
+    before.next_back().map(|list| &list.reasons[..])
+}
+
+/// What the proof of `head` accepted that arming the PR at `armed` didn't
+/// approve. A proof that accepted nothing left no list for its head.
+pub fn newly_accepted(lists: &[Listed], head: &str, armed: i64) -> Vec<String> {
+    match lists.last() {
+        Some(list) if list.head == head => unapproved(approved(lists, armed), &list.reasons),
+        _ => Vec::new(),
+    }
+}
+
+/// GitHub merges an armed PR once it is green, so a proof that accepts more
+/// than the owner approved turns auto-merge off before its green, and arming
+/// it again approves the new comment.
+pub fn hold_back(gh: &Gh, number: u64, command: &str, accepted: &[String]) -> Result<(), Problem> {
+    // Read after the comment, so that an approval given just after it stands.
+    let Some(armed) = gh.armed(number)?.auto_merge else {
+        return Ok(());
+    };
+    let lists = acceptances(&gh.acceptances(number)?);
+    let new = unapproved(approved(&lists, armed), accepted);
+    if new.is_empty() {
         return Ok(());
     }
     gh.disable_auto_merge(number)?;
@@ -554,7 +587,10 @@ pub fn proves_with_its_own(tree: &Path, main: &str, mode: Mode) -> Result<bool, 
 
 #[cfg(test)]
 mod tests {
-    use super::{BENCHED, NOT_BENCHED, acceptance, acceptances, affects_a_budget, unapproved};
+    use super::{
+        BENCHED, Listed, NOT_BENCHED, acceptance, acceptances, affects_a_budget, approved,
+        unapproved,
+    };
 
     #[test]
     fn only_what_ap_and_the_fake_harness_are_built_from_can_change_a_budget() {
@@ -650,18 +686,43 @@ mod tests {
         let second = acceptance("bbb", &reasons(&["spec fell from 3 to 2"]));
         let other = "The refresh couldn't prove this PR: Failed: lint\n\n- a list\n";
         let quoted = "> Merging this PR at `ccc` accepts:\n";
-        let comments = format!("{first}\n{other}\n{second}\n{quoted}\n");
+        let comments = [first, other.to_string(), second, quoted.to_string()];
+        let comments: Vec<(i64, String)> = (1..).zip(comments).collect();
+        let listed = |posted, head: &str, items: &[&str]| Listed {
+            posted,
+            head: head.to_string(),
+            reasons: reasons(items),
+        };
         assert_eq!(
             acceptances(&comments),
             [
-                (
-                    "aaa".to_string(),
-                    reasons(&["it changes `x`", "journey fell from 2 to 1"])
-                ),
-                ("bbb".to_string(), reasons(&["spec fell from 3 to 2"])),
+                listed(1, "aaa", &["it changes `x`", "journey fell from 2 to 1"]),
+                listed(3, "bbb", &["spec fell from 3 to 2"]),
             ]
         );
-        assert!(acceptances("").is_empty());
+        assert!(acceptances(&[]).is_empty());
+    }
+
+    /// The owner could read only a list posted before they armed the PR.
+    #[test]
+    fn arming_approves_the_newest_list_posted_before_it() {
+        let lists = acceptances(&[
+            (10, acceptance("aaa", &reasons(&["it changes `x`"]))),
+            (20, acceptance("bbb", &reasons(&["it changes `y`"]))),
+        ]);
+        assert_eq!(approved(&lists, 10), None);
+        assert_eq!(
+            approved(&lists, 11),
+            Some(&reasons(&["it changes `x`"])[..])
+        );
+        assert_eq!(
+            approved(&lists, 20),
+            Some(&reasons(&["it changes `x`"])[..])
+        );
+        assert_eq!(
+            approved(&lists, 21),
+            Some(&reasons(&["it changes `y`"])[..])
+        );
     }
 
     #[test]

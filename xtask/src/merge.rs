@@ -278,19 +278,18 @@ fn sequence(
     }
     // The comment comes first, so that a green PR always has it.
     if !accepted.is_empty() {
-        let earlier = again(|| gh.acceptances(number))?;
         let body = acceptance(&recorded, &accepted);
         again(|| {
             // A call that failed can have posted it all the same.
             let posted = accepts::acceptances(&gh.acceptances(number)?);
-            if posted.iter().any(|(at, _)| *at == recorded) {
+            if posted.iter().any(|list| list.head == recorded) {
                 return Ok(());
             }
             gh.comment_on_pr(number, &body)
         })?;
         // It only reads, and turns auto-merge off if it is on, so it can run
         // twice.
-        again(|| hold_back(&gh, number, command, &earlier, &accepted))?;
+        again(|| hold_back(&gh, number, command, &accepted))?;
     }
     status.passed(&format!(
         "spec {} of {}, journey {} of {}",

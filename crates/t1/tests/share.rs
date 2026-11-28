@@ -6,7 +6,6 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output, Stdio};
-use std::sync::OnceLock;
 
 use ap::fetch;
 use ap::store::Store;
@@ -19,18 +18,6 @@ const TIMEOUT: &str = "120";
 const PROMPT: &str = "Look at the shares.";
 /// The fake harness exits with this, so that a run's status is the harness's.
 const STATUS: i32 = 3;
-
-/// Built and fetched once, because the tests in this file run at once.
-fn shared() -> &'static (PathBuf, PathBuf, PathBuf) {
-    static PATHS: OnceLock<(PathBuf, PathBuf, PathBuf)> = OnceLock::new();
-    PATHS.get_or_init(|| {
-        (
-            guest_binary::ap(),
-            guest_binary::fake_harness(),
-            kernel::vmlinux(),
-        )
-    })
-}
 
 /// A home of its own, with the kernel and the OS layer in its store and the
 /// fake harness in its download cache, so that `ap` reads none of the owner's
@@ -53,13 +40,17 @@ impl Scratch {
         let home = root.join("home");
         let store = Store::new(home.join(".local/share/ap"));
         store
-            .put(fetch::kernel().sha256, File::open(&shared().2).unwrap())
+            .put(
+                fetch::kernel().sha256,
+                File::open(kernel::vmlinux()).unwrap(),
+            )
             .unwrap();
         os::put(&home.join(".local/share/ap"));
-        let harness = sha256(&shared().1);
+        let fake = guest_binary::fake_harness();
+        let harness = sha256(&fake);
         let cache = home.join(".cache/ap");
         fs::create_dir_all(&cache).unwrap();
-        fs::copy(&shared().1, cache.join(&harness)).unwrap();
+        fs::copy(&fake, cache.join(&harness)).unwrap();
         let runtime = root.join("runtime");
         fs::create_dir_all(&runtime).unwrap();
         Scratch {
@@ -111,7 +102,7 @@ impl Scratch {
         let mut command = Command::new("timeout");
         command
             .args(["-k", "10", TIMEOUT])
-            .arg(&shared().0)
+            .arg(guest_binary::ap())
             .args(args)
             .env_clear()
             .env("HOME", &self.home)

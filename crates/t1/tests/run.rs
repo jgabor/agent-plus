@@ -12,7 +12,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,19 +32,6 @@ const PROMPT: &str = "Say what you can see.";
 const BUILT_PROMPT: &str = "What is here?";
 /// The fake harness exits with this, so that a run's status is the harness's.
 const STATUS: i32 = 3;
-
-/// Built and fetched once, because the tests in this file run at once, and
-/// each build or download would replace a file another test is using.
-fn shared() -> &'static (PathBuf, PathBuf, PathBuf) {
-    static PATHS: OnceLock<(PathBuf, PathBuf, PathBuf)> = OnceLock::new();
-    PATHS.get_or_init(|| {
-        (
-            guest_binary::ap(),
-            guest_binary::fake_harness(),
-            kernel::vmlinux(),
-        )
-    })
-}
 
 /// A home of its own, with the kernel and the OS layer in its store and the
 /// fake harness in its download cache, so that `ap` reads none of the owner's
@@ -66,14 +53,17 @@ impl Scratch {
         let home = root.join("home");
         let store = Store::new(home.join(".local/share/ap"));
         store
-            .put(fetch::kernel().sha256, File::open(&shared().2).unwrap())
+            .put(
+                fetch::kernel().sha256,
+                File::open(kernel::vmlinux()).unwrap(),
+            )
             .unwrap();
         os::put(&home.join(".local/share/ap"));
-        let fake = &shared().1;
-        let harness = sha256(fake);
+        let fake = guest_binary::fake_harness();
+        let harness = sha256(&fake);
         let cache = home.join(".cache/ap");
         fs::create_dir_all(&cache).unwrap();
-        fs::copy(fake, cache.join(&harness)).unwrap();
+        fs::copy(&fake, cache.join(&harness)).unwrap();
         let runtime = root.join("runtime");
         fs::create_dir_all(&runtime).unwrap();
         Scratch {
@@ -123,7 +113,7 @@ impl Scratch {
     fn ap(&self, args: &[&str]) -> Output {
         Command::new("timeout")
             .args(["-k", "10", TIMEOUT])
-            .arg(&shared().0)
+            .arg(guest_binary::ap())
             .args(args)
             .env_clear()
             .env("HOME", &self.home)
@@ -154,7 +144,7 @@ impl Scratch {
         let mut command = Command::new("timeout");
         command
             .args(["-k", "10", TIMEOUT])
-            .arg(&shared().0)
+            .arg(guest_binary::ap())
             .args(["exec", name])
             .args(args)
             .env_clear()
@@ -845,7 +835,7 @@ struct Interactive {
 impl Interactive {
     fn start(scratch: &Scratch, args: &[&str], size: Size) -> Interactive {
         let (controller, terminal) = open_terminal(size).unwrap();
-        let mut command = Command::new(&shared().0);
+        let mut command = Command::new(guest_binary::ap());
         command
             .arg("run")
             .args(args)
@@ -1056,7 +1046,7 @@ fn killing_ap_run_ends_its_run_and_leaves_no_process_or_socket() {
     assert_eq!(scratch.ps(), Vec::<String>::new());
 
     let mut run = Started(
-        Command::new(&shared().0)
+        Command::new(guest_binary::ap())
             .args(["run", "sleepy", "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1118,7 +1108,7 @@ fn a_failed_test_stops_the_ap_run_it_started_under_timeout() {
         let mut run = Started(
             Command::new("timeout")
                 .args(["-k", "10", TIMEOUT])
-                .arg(&shared().0)
+                .arg(guest_binary::ap())
                 .args(["run", "sleepy", "-p", PROMPT])
                 .env_clear()
                 .env("HOME", &scratch.home)
@@ -1172,7 +1162,7 @@ fn start_reporting(
     env: &[(&str, &str)],
 ) -> (Started, String, String) {
     let mut run = Started(
-        Command::new(&shared().0)
+        Command::new(guest_binary::ap())
             .args(["run", agent, "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1241,7 +1231,7 @@ fn ap_stop_sends_the_harness_sigterm_and_returns_once_the_vm_has_stopped() {
     // An `ap stop` that can't reach the run doesn't say it stopped.
     let elsewhere = scratch.root.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let unreached = Command::new(&shared().0)
+    let unreached = Command::new(guest_binary::ap())
         .args(["stop", &name])
         .env_clear()
         .env("HOME", &scratch.home)
@@ -1325,7 +1315,7 @@ fn ap_stop_resumes_a_suspended_ap_run_and_stops_the_run() {
     }
     assert!(stopped(run.0.id()), "ap run didn't stop");
     let mut stop = Started(
-        Command::new(&shared().0)
+        Command::new(guest_binary::ap())
             .args(["stop", &name])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1389,7 +1379,7 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let modes = stty(&terminal, &["-g"]);
 
     let mut stop = Started(
-        Command::new(&shared().0)
+        Command::new(guest_binary::ap())
             .args(["stop", &name])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1426,7 +1416,7 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
 
 /// The `ap run` processes that `shell` started.
 fn ap_runs(shell: &Started) -> Vec<u32> {
-    let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
+    let mut program = guest_binary::ap().as_os_str().as_encoded_bytes().to_vec();
     program.extend_from_slice(b"\0run\0");
     all_started_as(shell.0.id(), &program)
 }
@@ -1515,7 +1505,7 @@ fn as_job(scratch: &Scratch, terminal: &File, wrapper: &str, then: &str) -> Star
             sleeper=$!
             wait $sleeper"
         ))
-        .arg(&shared().0)
+        .arg(guest_binary::ap())
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap())
         .env("HOME", &scratch.home)
@@ -1670,7 +1660,7 @@ fn a_run_whose_run_process_ended_is_not_listed_while_ap_run_is_stopped() {
     let scratch = Scratch::new("stopped");
     scratch.build("brief", &fake("ENV FAKE_HARNESS_SLEEP 1\n"));
     let mut run = Started(
-        Command::new(&shared().0)
+        Command::new(guest_binary::ap())
             .args(["run", "brief", "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1753,7 +1743,7 @@ fn a_run_has_512_mib_of_memory() {
     let mut run = Started(
         Command::new("timeout")
             .args(["-k", "10", TIMEOUT])
-            .arg(&shared().0)
+            .arg(guest_binary::ap())
             .args(["run", "roomy", "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)
@@ -1801,7 +1791,7 @@ fn ap_exec_runs_a_command_beside_the_harness_as_the_harness_does() {
     let mut run = Started(
         Command::new("timeout")
             .args(["-k", "10", TIMEOUT])
-            .arg(&shared().0)
+            .arg(guest_binary::ap())
             .args(["run", "busy", "-p", PROMPT])
             .env_clear()
             .env("HOME", &scratch.home)

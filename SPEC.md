@@ -2232,12 +2232,14 @@ allow one.
   The proxy verifies an upstream server's certificate against the root
   certificates compiled into `ap`, plus those in the file that
   `SSL_CERT_FILE` names in your host's environment. A file that can't be
-  read, or isn't a regular file, adds none. Until the proxy has
-  its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
-  On a host with URL rules, where it puts in no secret's value, it offers
-  `h2` too, and the guest gets HTTP/2 only when the server chose it. There,
-  the proxy refuses an HTTP/2 request that RFC 9113 calls malformed, or
-  whose `:scheme` isn't `https`, and asks the server never to push. It
+  read, or isn't a regular file, adds none. The proxy offers only
+  `http/1.1` on a connection it decrypts for a narrower `-` rule under a
+  `+` rule, to a host with no URL rules, and on any connection it decrypts
+  to put in a secret's value. On a host with URL rules, where it puts in no
+  secret's value, it offers `h2` too, and the guest gets HTTP/2 only when
+  the server chose it. There, the proxy refuses an HTTP/2 request that RFC
+  9113 calls malformed, or whose `:scheme` isn't `https`, and asks the
+  server never to push. It
   passes the guest's frames on without priority signals, frames of a type
   it doesn't know, or the debug data of `GOAWAY`.
 - **Harness hosts are never decrypted for a rule.** A rule set that would

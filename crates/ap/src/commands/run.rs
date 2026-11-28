@@ -1064,13 +1064,9 @@ fn start(args: &Args) -> Result<Prepared, Error> {
     // SPEC.md's SECRET: git signs in to `github.com` with a token bound to
     // it, as the proxy reads the host.
     let bound = |token: &&str| {
-        (secrets.secrets.iter()).any(|secret| {
-            secret.name == *token
-                && secret
-                    .hosts
-                    .iter()
-                    .any(|host| same_host(host, "github.com"))
-        })
+        (secrets.secrets.iter())
+            .filter(|secret| secret.name == *token)
+            .any(|secret| (secret.hosts.iter()).any(|host| same_host(host, "github.com")))
     };
     if let Some(token) = ap::adapter::GIT_TOKENS.into_iter().find(bound) {
         let placeholder = (hidden.iter())

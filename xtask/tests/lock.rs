@@ -83,14 +83,17 @@ struct Holder {
     _stdout: BufReader<ChildStdout>,
 }
 
-fn start_holder(root: &Path) -> Holder {
-    start_holder_in(root, 2)
+fn start_holder(root: &Path, target: &str) -> Holder {
+    start_holder_in(root, 2, target)
 }
 
-/// A holder in a host with this many places.
-fn start_holder_in(root: &Path, places: usize) -> Holder {
+/// A holder in a host with this many places, whose target directory is
+/// `target` in `root`. A run with a target directory of its own stands for a
+/// run in another checkout, which shares the places and the lock.
+fn start_holder_in(root: &Path, places: usize, target: &str) -> Holder {
     let mut child = xtask(root, &["run", "sh", "-c", "echo held; read line"])
         .env(PLACES_ENV, places.to_string())
+        .env("CARGO_TARGET_DIR", root.join(target))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -343,10 +346,12 @@ fn run_passes_stdin_through() {
     assert_eq!(output.status.code(), Some(0));
 }
 
-/// `xtask run true` in a host with this many places.
-fn waiter(root: &Path, places: usize) -> Child {
+/// `xtask run true` in a host with this many places, whose target directory
+/// is `target` in `root`.
+fn waiter(root: &Path, places: usize, target: &str) -> Child {
     xtask(root, &["run", "true"])
         .env(PLACES_ENV, places.to_string())
+        .env("CARGO_TARGET_DIR", root.join(target))
         .spawn()
         .unwrap()
 }
@@ -354,17 +359,17 @@ fn waiter(root: &Path, places: usize) -> Child {
 #[test]
 fn a_run_past_the_places_waits_for_one_to_free() {
     let root = workspace("places-full");
-    let first = start_holder_in(&root, 2);
-    let second = start_holder_in(&root, 2);
-    assert_blocked_until_released(waiter(&root, 2), || second.finish());
+    let first = start_holder_in(&root, 2, "a");
+    let second = start_holder_in(&root, 2, "b");
+    assert_blocked_until_released(waiter(&root, 2, "c"), || second.finish());
     first.finish();
 }
 
 #[test]
 fn a_killed_holder_frees_its_place() {
     let root = workspace("place-killed");
-    let mut holder = start_holder_in(&root, 1);
-    assert_blocked_until_released(waiter(&root, 1), || {
+    let mut holder = start_holder_in(&root, 1, "target");
+    assert_blocked_until_released(waiter(&root, 1, "other"), || {
         holder.child.kill().unwrap();
         holder.child.wait().unwrap();
     });
@@ -398,8 +403,8 @@ fn takes_within(file: &File, limit: Duration) -> bool {
 #[test]
 fn a_bench_does_not_wait_for_a_run_waiting_for_a_place() {
     let root = workspace("place-bench");
-    let holder = start_holder_in(&root, 1);
-    let mut later = waiter(&root, 1);
+    let holder = start_holder_in(&root, 1, "target");
+    let mut later = waiter(&root, 1, "other");
     thread::sleep(WAIT);
     let pending = turnstile(&root);
     assert!(takes_within(&pending, Duration::from_secs(30)));
@@ -421,8 +426,8 @@ fn a_bench_does_not_wait_for_a_run_waiting_for_a_place() {
 #[test]
 fn a_holder_shares_the_lock() {
     let root = workspace("shared");
-    let holder = start_holder(&root);
-    let other = start_holder(&root);
+    let holder = start_holder(&root, "target");
+    let other = start_holder(&root, "other");
     let probe = activity(&root);
     assert!(is_locked(&probe));
     other.finish();
@@ -434,7 +439,7 @@ fn a_holder_shares_the_lock() {
 #[test]
 fn a_killed_holder_releases_the_lock() {
     let root = workspace("killed");
-    let mut holder = start_holder(&root);
+    let mut holder = start_holder(&root, "target");
     let probe = activity(&root);
     assert!(is_locked(&probe));
     holder.child.kill().unwrap();
@@ -757,11 +762,13 @@ fn stderr_lines(child: &mut Child) -> Receiver<String> {
 }
 
 /// The status and stderr of `xtask run` with `command`, in a host with one
-/// place. A run that waits for the place fails the test instead of hanging it,
-/// and the limit only ends a test that already failed.
+/// place, from a target directory of its own. A run that waits for the place
+/// fails the test instead of hanging it, and the limit only ends a test that
+/// already failed.
 fn exits_without_waiting(root: &Path, command: &[&str]) -> (Option<i32>, String) {
     let mut run = xtask(root, &[&["run"][..], command].concat())
         .env(PLACES_ENV, "1")
+        .env("CARGO_TARGET_DIR", root.join("other"))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -783,7 +790,7 @@ fn exits_without_waiting(root: &Path, command: &[&str]) -> (Option<i32>, String)
 #[test]
 fn a_bad_command_ends_at_once_while_every_place_is_held() {
     let root = workspace("bad-command-held");
-    let holder = start_holder_in(&root, 1);
+    let holder = start_holder_in(&root, 1, "target");
     for (command, says) in [
         (&[][..], "needs a command"),
         (&["--help"][..], "--help"),
@@ -797,10 +804,12 @@ fn a_bad_command_ends_at_once_while_every_place_is_held() {
     holder.finish();
 }
 
-/// `xtask run true`, and a channel that gets each line of its stderr.
-fn waiter_heard(root: &Path, places: usize) -> (Child, Receiver<String>) {
+/// `xtask run true` with the target directory `target` in `root`, and a
+/// channel that gets each line of its stderr.
+fn waiter_heard(root: &Path, places: usize, target: &str) -> (Child, Receiver<String>) {
     let mut child = xtask(root, &["run", "true"])
         .env(PLACES_ENV, places.to_string())
+        .env("CARGO_TARGET_DIR", root.join(target))
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -838,10 +847,25 @@ fn count(heard: &[String], text: &str) -> usize {
 #[test]
 fn a_run_that_waits_for_a_place_says_so_once_and_how_long_it_waited() {
     let root = workspace("says-place");
-    let holder = start_holder_in(&root, 1);
-    let (child, stderr) = waiter_heard(&root, 1);
+    let holder = start_holder_in(&root, 1, "target");
+    let (child, stderr) = waiter_heard(&root, 1, "other");
     let heard = heard_waiting(child, stderr, || holder.finish());
     assert_eq!(count(&heard, "waiting for a place"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
+    assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
+}
+
+#[test]
+fn a_run_that_waits_for_its_target_directory_says_so_once_and_how_long_it_waited() {
+    let root = workspace("says-target");
+    let holder = start_holder_in(&root, 2, "target");
+    let (child, stderr) = waiter_heard(&root, 2, "target");
+    let heard = heard_waiting(child, stderr, || holder.finish());
+    assert_eq!(
+        count(&heard, "waiting for the target directory"),
+        1,
+        "{heard:?}"
+    );
     assert_eq!(count(&heard, "waiting"), 1, "{heard:?}");
     assert_eq!(count(&heard, "waited "), 1, "{heard:?}");
 }
@@ -851,7 +875,7 @@ fn a_run_that_waits_for_the_activity_lock_says_so_once_and_how_long_it_waited() 
     let root = workspace("says-activity");
     let bench = activity(&root);
     bench.lock().unwrap();
-    let (child, stderr) = waiter_heard(&root, 1);
+    let (child, stderr) = waiter_heard(&root, 1, "target");
     let heard = heard_waiting(child, stderr, || bench.unlock().unwrap());
     assert_eq!(
         count(&heard, "waiting for the activity lock"),

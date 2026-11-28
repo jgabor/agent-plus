@@ -260,7 +260,7 @@ fn the_proofs_wait_for_the_activity_lock_does_not_count_against_the_timeout() {
 #[test]
 fn the_build_of_its_own_xtask_waits_for_the_activity_lock_off_the_timeout() {
     let name = "own-build-wait";
-    let bin = held_tmp().join("merge").join(name).join("bin");
+    let bin = tmp().join("merge").join(name).join("bin");
     let (ready, go, once) = (bin.join("ready"), bin.join("go"), bin.join("once"));
     let step = format!(
         "#!/bin/sh\nif [ ! -e '{once}' ]; then : > '{once}'; echo > '{ready}'; read _ < '{go}'; fi\nexit 0\n",

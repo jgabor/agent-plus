@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 agentfile = { path = "../agentfile" }
 ap = { path = "../ap" }
+extensions = { path = "../extensions" }
 git = { path = "../git" }
 h2 = { version = "0.4.20", default-features = false }
 httparse = { version = "1", default-features = false }
@@ -20,6 +21,7 @@ share = { path = "../share" }
 smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 tokio = { version = "1", default-features = false }
 vmm = { path = "../vmm" }
+yaml-rust2 = { version = "0.13.0", default-features = false }
 
 [lints]
 workspace = true

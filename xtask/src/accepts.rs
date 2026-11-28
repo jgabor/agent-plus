@@ -494,7 +494,7 @@ const BENCHED: [&str; 11] = [
     "vmm",
 ];
 /// The packages under `crates/` that neither is built from.
-const NOT_BENCHED: [&str; 5] = ["fake-upstream", "fake-vm", "fuzz", "t1", "t2"];
+const NOT_BENCHED: [&str; 6] = ["extensions", "fake-upstream", "fake-vm", "fuzz", "t1", "t2"];
 
 /// A path under `crates/` affects a budget unless it is in a package's
 /// `tests/`, or in a package that `NOT_BENCHED` names. A package on neither

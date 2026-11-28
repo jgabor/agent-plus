@@ -1172,6 +1172,7 @@ fn a_host_without_url_rules_is_passed_through_without_decryption() {
 
 // spec(NETWORK): under a broader rule of the opposite sign: with `+github.com` and `-gist.github.com`, on every TLS connection that `+github.com` allows, because a client can reuse one connection for several names.
 // spec(NETWORK): TLS that the proxy decrypts and that doesn't carry HTTP is denied, because the proxy can't check the names in it.
+// spec(NETWORK): The proxy offers only `http/1.1` on a connection to a host with no URL rules that it decrypts for a narrower `-` rule under a `+` rule, and on any connection it decrypts to put in a secret's value.
 #[test]
 fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
     let (root, config) = server();
@@ -1240,6 +1241,25 @@ fn a_plus_rule_with_a_narrower_minus_rule_beneath_it_is_decrypted() {
         settled(&seen),
         ["GET /a HTTP/1.1 (http/1.1)", "GET /c HTTP/1.1 (http/1.1)"]
     );
+}
+
+// spec(NETWORK): The proxy offers only `http/1.1` on a connection to a host with no URL rules that it decrypts for a narrower `-` rule under a `+` rule, and on any connection it decrypts to put in a secret's value.
+// spec(NETWORK): On a host with URL rules, where it puts in no secret's value, it offers `h2` too, and the guest gets HTTP/2 only when the server chose it.
+#[test]
+fn a_narrower_url_rule_under_a_plus_rule_leaves_http2_offered() {
+    let (root, config) = server();
+    let (port, seen) = h2_destination(config);
+    let rules = format!("NETWORK -\nNETWORK +{NAME}\nNETWORK -https://{NAME}:{port}/denied\n");
+    let mut guest = Guest::new(&rules, vec![root], port);
+    // The host has a URL rule, so the guest and the destination agree
+    // HTTP/2 through the proxy, as on any host with URL rules.
+    let handle = guest.connect();
+    let tls = Guest::tls(&guest.authority.clone());
+    let allowed = vec![vec![format!("https://{NAME}:{port}/allowed")]];
+    let asked = guest.ask_h2(handle, tls, allowed);
+    assert_eq!(asked.protocol.as_deref(), Some(&b"h2"[..]));
+    assert_eq!(asked.answers, [Ok("/allowed".to_owned())]);
+    assert_eq!(settled(&seen), ["POST /allowed whole"]);
 }
 
 #[test]
@@ -1838,7 +1858,7 @@ fn holding_placeholder(host: &str) -> Vec<u8> {
 // spec(SECRET): in request headers on the adapter's allowlist (for example, `Authorization` and `x-api-key`), never in query strings or bodies
 // spec(SECRET): In an `Authorization: Basic` header, which git sends over HTTPS, the proxy decodes the credentials, replaces the placeholder in them, and encodes them again.
 // spec(SECRET): Injection requires decrypting TLS to the bound hosts (see [Enforcement](#network)).
-// spec(NETWORK): Until the proxy has its own HTTP/2, it offers only `http/1.1` on a connection it decrypts.
+// spec(NETWORK): The proxy offers only `http/1.1` on a connection to a host with no URL rules that it decrypts for a narrower `-` rule under a `+` rule, and on any connection it decrypts to put in a secret's value.
 #[test]
 fn a_bound_host_gets_the_value_in_the_allowed_headers_alone() {
     let (root, config) = server();
@@ -1939,6 +1959,7 @@ fn a_secret_bound_to_a_parent_host_never_reaches_its_subdomain() {
     }
 }
 
+// spec(NETWORK): The proxy offers only `http/1.1` on a connection to a host with no URL rules that it decrypts for a narrower `-` rule under a `+` rule, and on any connection it decrypts to put in a secret's value.
 #[test]
 fn a_bound_host_with_url_rules_gets_the_value_in_the_requests_they_allow() {
     let (root, config) = server();
@@ -2027,6 +2048,7 @@ fn a_client_hello_that_never_ends_is_reset() {
 
 // spec(AUTH): The proxy swaps in the real value on the hosts the adapter lists for that key, with the same checks as for a hidden secret.
 // spec(NETWORK): With `AUTH key`, the proxy allows only requests that carry the key's placeholder on the key's hosts.
+// spec(NETWORK): The proxy offers only `http/1.1` on a connection to a host with no URL rules that it decrypts for a narrower `-` rule under a `+` rule, and on any connection it decrypts to put in a secret's value.
 #[test]
 fn a_key_s_host_takes_only_the_requests_that_carry_its_placeholder() {
     let (root, config) = server();
@@ -2041,6 +2063,7 @@ fn a_key_s_host_takes_only_the_requests_that_carry_its_placeholder() {
     let mut tls = Guest::tls(&authority);
     let answer = guest.exchange(handle, Some(&mut tls), &holding_placeholder(NAME));
     assert!(answer.is_ok(), "{answer:?}");
+    assert_eq!(tls.alpn_protocol(), Some(&b"http/1.1"[..]));
     let answer = guest.exchange(handle, Some(&mut tls), &without_placeholder(NAME));
     assert!(answer.is_err(), "{answer:?}");
 

@@ -1236,10 +1236,11 @@ fn hpack_input(input: &str) -> usize {
 /// the byte of its code point: a client's, if it starts with the preface,
 /// and a server's if it doesn't. It writes each frame the reader accepts,
 /// and panics if reading what it wrote gives other frames, or if reading
-/// `input` a byte at a time does. Each SETTINGS ACK acknowledges the oldest
-/// SETTINGS frame that none has yet, as section 6.5.3 of RFC 9113 orders
-/// them, and the readers and the writer apply its settings once they pass
-/// the ACK. Returns how many frames it accepted.
+/// `input` a byte at a time does. Its SETTINGS stand in for those the other
+/// side sent, so each SETTINGS ACK acknowledges the oldest one that none
+/// has yet, as section 6.5.3 of RFC 9113 orders them, and the readers and
+/// the writer apply its settings once they pass the ACK. Returns how many
+/// frames it accepted.
 fn h2_frames_input(input: &str) -> usize {
     use net::h2::{Error, Frame, PREFACE, Reader, Writer};
     use std::collections::VecDeque;

@@ -49,7 +49,8 @@ pub enum Wait {
     Activity,
 }
 
-/// Hears each wait of this process for a place or the activity lock: what it
+/// Hears each wait of this process for its target directory, a place, or the
+/// activity lock: what it
 /// waits for as the wait starts, and `None` once the take has what it waited
 /// for.
 pub type Watcher = Box<dyn Fn(Option<Wait>) + Send + Sync>;

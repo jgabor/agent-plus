@@ -610,8 +610,8 @@ impl Status {
                 return;
             };
             match wait {
-                Some(lock::Wait::Target) => status.waits("the target directory"),
-                Some(lock::Wait::Place) => status.waits("a place"),
+                // The target directory comes with the place.
+                Some(lock::Wait::Target | lock::Wait::Place) => status.waits("a place"),
                 Some(lock::Wait::Activity) => status.waits("the activity lock"),
                 None => status.goes_on(),
             }

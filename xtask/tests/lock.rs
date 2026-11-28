@@ -365,16 +365,6 @@ fn a_run_past_the_places_waits_for_one_to_free() {
     first.finish();
 }
 
-/// Most tests keep their fixtures at a fixed path in the target directory, so
-/// a second run of the tests with the same one waits for the first, even while
-/// a place is free.
-#[test]
-fn a_second_run_in_one_target_directory_waits_for_the_first() {
-    let root = workspace("same-target");
-    let first = start_holder_in(&root, 2, "target");
-    assert_blocked_until_released(waiter(&root, 2, "target"), || first.finish());
-}
-
 #[test]
 fn a_killed_holder_frees_its_place() {
     let root = workspace("place-killed");

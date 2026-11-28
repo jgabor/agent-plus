@@ -416,9 +416,11 @@ exits. The places live beside the activity lock.
 
 A run of the tests also holds its target directory alone, so a second run in
 the same checkout waits for the first. Most tests keep their fixtures at a
-fixed path in `CARGO_TARGET_TMPDIR`, and delete it as they start. A run takes
-the directory before its place, and a nested `xtask` that inherits the place
-inherits the directory with it.
+fixed path in `CARGO_TARGET_TMPDIR`, and delete it as they start. The run
+locks `tests.lock` in the target directory, which is `CARGO_TARGET_DIR`, taken
+from the workspace root, when it is set. A run takes the directory before its
+place, and waits for it as part of the place, and a nested `xtask` that
+inherits the place inherits the directory with it.
 
 A proof under the merge slot waits for a place apart from the queue, and gets
 the next one that frees, because every merge waits for it. Before each
@@ -1000,7 +1002,7 @@ status:
 | When | State | Description |
 |---|---|---|
 | The merge waits for the merge slot | `pending` | `Waiting: the merge slot` |
-| The merge waits for its target directory, a place, or the activity lock | `pending` | `Waiting: the target directory`, `Waiting: a place`, `Waiting: the activity lock` |
+| The merge waits for a place, or for the activity lock | `pending` | `Waiting: a place`, `Waiting: the activity lock` |
 | A wait during the proof ends | `pending` | What the proof is doing, as `Proving: lint` |
 | The proof starts | `pending` | `Proving: lint` |
 | The tests, T2, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: t2`, `Proving: journey`, `Proving: bench` |

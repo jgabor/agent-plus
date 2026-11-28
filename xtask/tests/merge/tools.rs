@@ -11,6 +11,8 @@ impl Repo {
     /// shares the merge's pipe to its supervisor write `w` to it, which would
     /// pause the timeout. The fake `gh` keeps the newest state posted on each
     /// commit, and gives it back when asked for that commit's status.
+    /// `STAND_IN_PROOF` stands in for the proof's cargo work, as its own
+    /// comment says.
     pub(super) fn write_tools(&self) {
         let bin = self.bin.display();
         let prelude = format!(
@@ -43,7 +45,8 @@ maybe_kill before
         for tool in ["git", "cargo"] {
             let (path, built) = if tool == "cargo" {
                 let cargo = common::toolchain().join("cargo");
-                (cargo.display().to_string(), stand_in_build())
+                let stand_ins = format!("{}{STAND_IN_PROOF}", stand_in_build());
+                (cargo.display().to_string(), stand_ins)
             } else {
                 (real(tool), String::new())
             };
@@ -120,6 +123,27 @@ fi
         lying = variant_binary("lying").display(),
     )
 }
+
+/// With `STAND_IN_PROOF` set, the proof's format check, lint, and tests pass
+/// at once, and each release build leaves a program that exits 0. A test that
+/// isn't about what cargo does sets it, so that its proof's work takes about a
+/// second, where the real commands take up to 40 on a loaded machine.
+const STAND_IN_PROOF: &str = r#"if [ -n "$STAND_IN_PROOF" ]; then
+  case "$1 $2" in
+    "fmt --all" | "clippy --workspace" | "test --package") maybe_kill after; exit 0 ;;
+    "build --release")
+      while [ $# -gt 0 ]; do
+        case "$1" in --package) package=$2 ;; --target) target=$2 ;; --target-dir) dir=$2 ;; esac
+        shift
+      done
+      built="$dir/$target/release/$package"
+      mkdir -p "${built%/*}" && printf '#!/bin/sh\nexit 0\n' > "$built" && chmod +x "$built"
+      code=$?
+      maybe_kill after
+      exit $code ;;
+  esac
+fi
+"#;
 
 #[test]
 fn a_tool_just_written_can_run_while_other_threads_start_processes() {

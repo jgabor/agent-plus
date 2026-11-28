@@ -4,10 +4,10 @@
 //!
 //! What is left can't start a process or a program, or reach a host file:
 //! every call that takes a path is missing, and memory can be mapped only
-//! anonymously, so a file left open can't be read either. None of that
-//! memory may run, so the code can't load more of itself. The exceptions are
+//! anonymously, so a file left open can't be read either. The exceptions are
 //! the descriptors the caller names, which may be read, at an offset or not,
-//! and nothing else.
+//! and nothing else. None of the memory it maps may run, so that code can't
+//! write more code and run it.
 //! Calls that could reach past this process are narrowed by their arguments,
 //! as the kernel reads them.
 //!
@@ -417,8 +417,8 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
     rules
 }
 
-/// How every process this module confines maps memory, and changes what it
-/// allows. They map only anonymous memory, and none of it may run.
+/// How a confined process that maps memory maps it, and changes what it
+/// allows. It maps only anonymous memory, and none of it may run.
 /// musl's allocator maps pages that allow nothing when the program break
 /// can't grow, and lets them be read and written with `mprotect`.
 fn memory_rules() -> [Rule; 2] {
@@ -1163,10 +1163,10 @@ mod tests {
     }
 
     /// musl's allocator maps pages that allow nothing when the program
-    /// break can't grow, and opens them with `mprotect`. No filter lets
-    /// memory run.
+    /// break can't grow, and opens them with `mprotect`. No filter that
+    /// maps memory lets it run.
     #[test]
-    fn every_filter_opens_memory_that_never_runs() {
+    fn every_process_that_maps_memory_opens_memory_that_never_runs() {
         const PROT_READ_WRITE: u32 = 3;
         let socket = SOCKET as RawFd;
         let filters = [

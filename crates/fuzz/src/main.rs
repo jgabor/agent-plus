@@ -988,15 +988,9 @@ fn dns_input(input: &str) -> bool {
 /// doesn't take a flow the stack asks about as that flow, or if smoltcp's
 /// wire parsing can't read a frame the stack sends. Returns how many flows it asked about, and frames it sent.
 fn frames_input(input: &str) -> (usize, usize) {
-    use netstack::{Config, Flow, Stack, Verdict};
+    use netstack::{Flow, Stack, Verdict};
     use std::collections::VecDeque;
-    let mut stack = Stack::new(Config {
-        mac: guest::net::GATEWAY_MAC,
-        ipv4: (guest::net::IPV4_GATEWAY, guest::net::IPV4_PREFIX),
-        ipv6: (guest::net::IPV6_GATEWAY, guest::net::IPV6_PREFIX),
-        // So that a run is reproduced by its seed.
-        seed: 0,
-    });
+    let mut stack = Stack::new(gateway());
     let mut now = Instant::now();
     let mut held = VecDeque::new();
     let (mut asked, mut sent) = (0, 0);
@@ -1040,6 +1034,12 @@ fn frames_input(input: &str) -> (usize, usize) {
     }
 }
 
+/// The network process's stack configuration, with a fixed seed, so that
+/// the fuzzer's seed alone reproduces a run.
+fn gateway() -> netstack::Config {
+    ap::network::config(0)
+}
+
 /// Panics unless `frame` goes to the stack's MAC address, and a bare smoltcp
 /// `Interface` on the stack's addresses takes it as `flow`: a socket that
 /// listens at the destination takes the SYN from the source, or a port bound
@@ -1049,7 +1049,7 @@ fn frames_input(input: &str) -> (usize, usize) {
 fn same_flow(frame: &[u8], flow: &netstack::Flow) {
     assert_eq!(
         frame.get(..6),
-        Some(&guest::net::GATEWAY_MAC[..]),
+        Some(&gateway().mac[..]),
         "a flow to another MAC address in {frame:x?}"
     );
     assert!(
@@ -1099,11 +1099,12 @@ fn interface_takes(frame: &[u8], flow: &netstack::Flow) -> bool {
     }
 
     let mut link = Link(Some(frame.to_vec()));
-    let mac = HardwareAddress::Ethernet(EthernetAddress(guest::net::GATEWAY_MAC));
+    let gateway = gateway();
+    let mac = HardwareAddress::Ethernet(EthernetAddress(gateway.mac));
     let mut iface = Interface::new(Config::new(mac), &mut link, Instant::ZERO);
     iface.update_ip_addrs(|addrs| {
-        let v4 = IpCidr::new(guest::net::IPV4_GATEWAY.into(), guest::net::IPV4_PREFIX);
-        let v6 = IpCidr::new(guest::net::IPV6_GATEWAY.into(), guest::net::IPV6_PREFIX);
+        let v4 = IpCidr::new(gateway.ipv4.0.into(), gateway.ipv4.1);
+        let v6 = IpCidr::new(gateway.ipv6.0.into(), gateway.ipv6.1);
         addrs.push(v4).expect("room for IPv4");
         addrs.push(v6).expect("room for IPv6");
     });
@@ -1214,7 +1215,7 @@ fn sent_parsed(frame: &[u8]) -> Option<()> {
     let checked = ChecksumCapabilities::default();
     let ethernet = EthernetFrame::new_checked(frame).ok()?;
     let repr = EthernetRepr::parse(&ethernet).ok()?;
-    if repr.src_addr != EthernetAddress(guest::net::GATEWAY_MAC) {
+    if repr.src_addr != EthernetAddress(gateway().mac) {
         return None;
     }
     if repr.ethertype == EthernetProtocol::Arp {
@@ -3398,7 +3399,7 @@ mod tests {
     /// The frames corpus's IPv4 SYN, as if the stack had sent it.
     fn sent_syn() -> Vec<u8> {
         let mut frame = syn().0;
-        frame[6..12].copy_from_slice(&guest::net::GATEWAY_MAC);
+        frame[6..12].copy_from_slice(&gateway().mac);
         frame
     }
 

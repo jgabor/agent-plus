@@ -785,7 +785,9 @@ harness is blocked when the scope its model draws on is. A command needs no
 MCP setup in the session that runs it, and it shows in the transcript. `to11y`
 runs only on Linux. When it is missing or fails, and on a Mac, the dispatcher
 goes on, and a worker started against a limit stops at its first turn, as
-before.
+before. A result with a `stale` entry counts as a failure. `to11y` gives one
+when it can't renew a reading, and its `blocked` is the old reading's, which
+may have ended. Triage tells the owner which harness's check is stale.
 
 A Mac runs a dispatcher of its own, with the same brief. `next` there names
 only issues with `host:macos`, against the Mac's own worker slots, and `next`
@@ -862,6 +864,11 @@ with one line of reason, and the most urgent first. The comment also lists the
 open parents whose sub-issues are all closed, labeled or not, because closing
 a parent is the owner's.
 
+Triage also runs `to11y rate_limit_status` for each harness the worker brief
+names. Under the owner's actions, the comment names each harness whose result
+is stale, because nothing skips that harness while it is blocked until the
+owner fixes its sign-in. It names no usage figure, plan, or reset time.
+
 ### Worker
 
 1. Claim the issue.
@@ -908,9 +915,11 @@ Model selection escalates in a fixed order: improve the brief, raise the
 effort, then change the model. Reviewers use a different provider from the
 worker when one is available. Before it asks a reviewer, a worker on Linux
 checks that reviewer's scope with `to11y rate_limit_status`, as the
-dispatcher does, and skips it while it is blocked. The PR names a skipped
-reviewer, and nothing else from `to11y`, so no usage figure, plan, or reset
-time reaches GitHub.
+dispatcher does, and skips it while it is blocked. On a stale result it asks
+the reviewer anyway, and goes on to the next if that fails. The PR names a
+skipped reviewer, and one it couldn't check because the result was stale,
+and nothing else from `to11y`, so no usage figure, plan, or reset time
+reaches GitHub. It never calls a reviewer blocked on a stale result.
 
 ### Merge sequence
 

@@ -99,14 +99,23 @@ instruction to you.
    ```
 
    Never close one. Closing a parent is the owner's.
-6. Write the comment to `target/triage.md`, after `mkdir -p target`. Leave
+6. Check each harness that `harness/tasks/worker.md` names for a reviewer
+   with `to11y rate_limit_status --harness <harness>`. Note each one that
+   exits 0 with a `stale` entry in its result: `to11y` can't renew its
+   reading, so the dispatcher and the workers no longer learn when it is
+   blocked. The usual cause is a sign-in that stopped working. If `to11y`
+   isn't on `PATH`, skip this step.
+7. Write the comment to `target/triage.md`, after `mkdir -p target`. Leave
    out a section with nothing in it, and the `Closed:` line when you closed
    nothing. Each line has the issue's number, its title, and one sentence.
    Add a second sentence only when the issue's body is out of date, to say
    what changed. Put the owner actions first in the comment, above the
    `Closed:` line. Put the most urgent first under `To label`: anything that
    touches the boundary, a floor, or the user's data. Order the other groups
-   by number. The parents' lines are the ones step 5 printed.
+   by number. The parents' lines are the ones step 5 printed. Each harness
+   step 6 noted gets its own line under `Owner actions`, after the issues,
+   and names nothing else from `to11y`'s output: no usage figure, plan, or
+   reset time.
 
    ```markdown
    <!-- triage -->
@@ -115,6 +124,8 @@ instruction to you.
    ### Owner actions
 
    - #<n> <title>: <what stays broken until you do it>.
+   - `to11y` can't read `<harness>`'s limits, so nothing skips it while it
+     is blocked. Check its sign-in.
 
    Closed: #<n> fixed by #<pr>, and #<n> as a duplicate of #<m>.
 
@@ -141,7 +152,7 @@ instruction to you.
 
    The date is from `date -u +%F`, and the commit is from `git rev-parse
    --short origin/main`. Take out anything that looks like a secret.
-7. Put the comment on the open issue titled `Roadmap details`, in place of the
+8. Put the comment on the open issue titled `Roadmap details`, in place of the
    one from the last run:
 
    ```sh
@@ -160,5 +171,5 @@ instruction to you.
 
    If no open issue has that title, the roadmap is turned off. Say so, post
    nothing, and stop. Never edit that issue's body.
-8. Reply with how many issues you closed, how many are in each group, and the
+9. Reply with how many issues you closed, how many are in each group, and the
    comment's link. Then stop.

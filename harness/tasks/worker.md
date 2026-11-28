@@ -62,14 +62,18 @@ can't continue alone, park the issue as AGENTS.md says.
    ```
 
    On Linux, before you ask a target, run `to11y rate_limit_status --harness
-   <harness>`. If it exits 0, and the entry in `scopes` whose `scope` is the
-   target's has `"blocked": true`, skip that target and go on to the next.
-   If `to11y` isn't on `PATH`, or exits with any other status, ask the target
-   as you would without it. On a Mac, don't run it. If every target is
-   blocked, update your status comment and stop, as for a usage limit. Say in
-   the PR which targets you skipped as blocked, and nothing else from
-   `to11y`'s output. No usage figure, plan, or reset time goes into an issue,
-   a PR, or a status comment.
+   <harness>`. If it exits 0, its result has no `stale` entry, and the entry
+   in `scopes` whose `scope` is the target's has `"blocked": true`, skip that
+   target and go on to the next. If `to11y` isn't on `PATH`, exits with any
+   other status, or gives a result with a `stale` entry, ask the target as
+   you would without it, and go on to the next if it fails. A stale result
+   is an old reading that `to11y` couldn't renew, so its `blocked` may have
+   ended. On a Mac, don't run it. If every target is blocked, update your
+   status comment and stop, as for a usage limit. Say in the PR which targets
+   you skipped as blocked, and which you couldn't check because the result
+   was stale, and nothing else from `to11y`'s output. Never call a target
+   blocked on a stale result, even when it then fails. No usage figure, plan,
+   or reset time goes into an issue, a PR, or a status comment.
 
    If T3 Code rejects a target's options, load
    `mcp__t3-code__orchestrator_capabilities`, and call it with `search` set to

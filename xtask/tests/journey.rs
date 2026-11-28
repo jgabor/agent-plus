@@ -13,6 +13,10 @@ const FAIL: &str = "#!/bin/sh\nexit 1\n";
 /// output open, so the caller reads to the end only once that process is gone.
 const HANGS: &str =
     "#!/bin/sh\necho the step started >&2\n(sleep 120; echo the step survived >&2) &\nsleep 121\n";
+/// As `HANGS`, but it also leaves running a group of its own, as GNU
+/// `timeout` makes one, which writes to the output if it outlives the step,
+/// and a process in its group whose parent has ended.
+const HANGS_IN_TWO_GROUPS: &str = "#!/bin/sh\necho the step started >&2\n(sleep 120; echo the step survived >&2) &\n(sleep 123 &)\ntimeout 130 sh -c 'sleep 122; echo its timeout survived >&2' &\nsleep 121\n";
 /// Replaces the limit on how long a step may run.
 const STEP_SECONDS: &str = "XTASK_JOURNEY_STEP_SECONDS";
 /// The milestone that every step from `step` is in.
@@ -234,12 +238,14 @@ fn a_step_that_runs_past_its_limit_fails_and_the_journey_goes_on() {
         "hangs",
         &toml,
         &[
-            ("harness/journey/hangs.sh", HANGS),
+            ("harness/journey/hangs.sh", HANGS_IN_TWO_GROUPS),
             ("harness/journey/two.sh", PASS),
         ],
     );
+    // The limit can't wait for the step to reach its last line, so it is far
+    // past the moment that line takes to reach.
     let output = journey_command(&root, &[])
-        .env(STEP_SECONDS, "3")
+        .env(STEP_SECONDS, "10")
         .output()
         .unwrap();
     let stderr = stderr(&output);
@@ -252,11 +258,15 @@ fn a_step_that_runs_past_its_limit_fails_and_the_journey_goes_on() {
     // What it wrote before the limit is kept, and what it was running is named.
     assert!(stderr.contains("the step started\n"), "{stderr}");
     let (_, stopped) = stderr
-        .split_once("step 1: stopped at its 3 second limit, while these ran:\n")
+        .split_once("step 1: stopped at its 10 second limit, while these ran:\n")
         .unwrap_or_else(|| panic!("the stop isn't reported: {stderr}"));
     assert!(stopped.contains("sleep 121\n"), "{stderr}");
     assert!(stopped.contains("sleep 120\n"), "{stderr}");
-    assert!(!stderr.contains("the step survived"), "{stderr}");
+    assert!(stopped.contains("timeout 130 sh -c"), "{stderr}");
+    assert!(stopped.contains("sleep 123\n"), "{stderr}");
+    assert!(stopped.contains("harness/journey/hangs.sh\n"), "{stderr}");
+    // Everything it left running holds the output open, so it is all gone.
+    assert!(!stderr.contains("survived\n"), "{stderr}");
 }
 
 #[test]

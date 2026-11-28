@@ -20,9 +20,7 @@ pub struct Watcher {
 }
 
 impl Watcher {
-    /// Ends the watcher without its stopping anything. Called before the
-    /// leader is reaped, while the group is still the command's, the watcher
-    /// never signals a group that is gone.
+    /// Ends the watcher, so that it stops nothing, even a group that is gone.
     pub fn end(mut self) {
         let _ = self.process.kill();
         let _ = self.process.wait();
@@ -64,12 +62,16 @@ pub fn start(command: &mut Command) -> io::Result<(Child, Watcher)> {
 /// it. `xtask` has no dependencies, so `kill` sends the signals, and it fails
 /// on a group that is gone.
 pub fn stop(group: u32) {
-    let target = format!("-{group}");
-    for signal in ["-STOP", "-KILL"] {
-        let _ = Command::new("kill")
-            .args([signal, "--", &target])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    for name in ["-STOP", "-KILL"] {
+        signal(group, name);
     }
+}
+
+/// Sends the signal `name`, such as `-TERM`, to each process in the group.
+pub fn signal(group: u32, name: &str) {
+    let _ = Command::new("kill")
+        .args([name, "--", &format!("-{group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }

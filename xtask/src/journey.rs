@@ -591,10 +591,10 @@ fn stop_late(leader: u32) -> String {
 }
 
 /// The step's processes in `ps`'s `text`, each as its id, its group's, and
-/// what follows them: first the step's leader and each process below it, then
-/// each other process in its group, whose parent ended.
+/// what follows them: the leader, the rest of its group, whose parents may
+/// have ended, and each process below them.
 fn step_processes<'a>(text: &'a str, leader: &str) -> Vec<(&'a str, &'a str, &'a str)> {
-    let mut processes: Vec<(&str, &str, &str, &str)> = text
+    let processes: Vec<(&str, &str, &str, &str)> = text
         .lines()
         .filter_map(|line| {
             let mut rest = line.trim_start();
@@ -603,31 +603,30 @@ fn step_processes<'a>(text: &'a str, leader: &str) -> Vec<(&'a str, &'a str, &'a
                 rest = after.trim_start();
                 Some(word)
             };
-            let (pid, ppid, group) = (field()?, field()?, field()?);
+            let (pid, ppid, group, rest) = (field()?, field()?, field()?, rest);
             Some((pid, ppid, group, rest))
         })
         .collect();
+    let mut left: Vec<&str> = (processes.iter())
+        .filter(|(pid, _, group, _)| *group == leader && *pid != leader)
+        .map(|(pid, _, _, _)| *pid)
+        .collect();
+    left.push(leader);
+    let mut seen = HashSet::new();
     let mut step = Vec::new();
-    let mut parents = vec![leader.to_string()];
-    while let Some(parent) = parents.pop() {
-        for (pid, _, group, rest) in processes.iter() {
-            if *pid == parent {
-                step.push((*pid, *group, *rest));
-            }
+    while let Some(id) = left.pop() {
+        if !seen.insert(id) {
+            continue;
         }
-        for (pid, ppid, _, _) in processes.iter() {
-            if *ppid == parent {
-                parents.push(pid.to_string());
+        for &(pid, ppid, group, rest) in &processes {
+            if pid == id {
+                step.push((pid, group, rest));
+            }
+            if ppid == id {
+                left.push(pid);
             }
         }
     }
-    processes
-        .retain(|(pid, _, group, _)| *group == leader && !step.iter().any(|(id, _, _)| id == pid));
-    step.extend(
-        processes
-            .iter()
-            .map(|(pid, _, group, rest)| (*pid, *group, *rest)),
-    );
     step
 }
 
@@ -649,4 +648,31 @@ fn floor_check_exists(root: &Path, floor: &str) -> Result<bool, Problem> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_processes;
+
+    #[test]
+    fn a_late_step_lists_its_group_and_each_process_below_it() {
+        // As `ps -A -o pid=,ppid=,pgid=,etime=,args=` prints them. The step
+        // leads group 10, 12 is a `timeout` it started, 14 is in its group
+        // but its parent ended, and 1 and 20 aren't the step's.
+        let text = "    1     0     1    05:00 init
+   10     1    10    00:10 /bin/sh step.sh
+   11    10    10    00:10 sleep 121
+   12    10    12    00:10 timeout 130 sh -c x
+   13    12    12    00:10 sh -c x
+   14     1    10    00:09 sleep 123
+   15    14    15    00:09 timeout 900 y
+   20     1    20    05:00 other
+";
+        let listed = step_processes(text, "10");
+        assert_eq!(listed[0], ("10", "10", "00:10 /bin/sh step.sh"));
+        let mut ids: Vec<&str> = listed.iter().map(|(pid, _, _)| *pid).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["10", "11", "12", "13", "14", "15"]);
+        assert!(listed.contains(&("15", "15", "00:09 timeout 900 y")));
+    }
 }

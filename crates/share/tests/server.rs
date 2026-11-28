@@ -664,7 +664,7 @@ fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
     assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
 }
 
-// spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the file has no name left, unless the agent removed its last name.
+// spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the file has no name left, unless the agent removed its last name in that share.
 #[test]
 fn a_file_with_no_name_left_shows_its_attributes_if_the_agent_removed_its_last_name() {
     let tree = Tree::new("unlinked-open");

@@ -1251,10 +1251,15 @@ impl Share {
         if stat.st_nlink != 0 {
             return;
         }
-        let node = self.known.get(&(stat.st_dev, stat.st_ino));
-        if let Some(node) = node.and_then(|node| self.nodes.get_mut(node)) {
+        if let Some(node) = self.known_mut(&stat) {
             node.unlinked = true;
         }
+    }
+
+    /// The node of the file `stat` is, if the guest knows it.
+    fn known_mut(&mut self, stat: &libc::stat) -> Option<&mut Node> {
+        let node = self.known.get(&(stat.st_dev, stat.st_ino))?;
+        self.nodes.get_mut(node)
     }
 
     /// Gives the node of the file now at `name` in `directory` that name.
@@ -1266,11 +1271,7 @@ impl Share {
         let Ok(stat) = sys::fstat(fd.as_fd()) else {
             return;
         };
-        let Some(node) = self
-            .known
-            .get(&(stat.st_dev, stat.st_ino))
-            .and_then(|node| self.nodes.get_mut(node))
-        else {
+        let Some(node) = self.known_mut(&stat) else {
             return;
         };
         if !is(node.mode, libc::S_IFDIR) {

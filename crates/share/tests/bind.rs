@@ -1,6 +1,8 @@
 //! A share whose root holds a bind mount. Past the top of a bind mount, the
 //! kernel reads a file's path as `/`, so the path of a file the host moved
-//! there starts with the path of a root that is `/`.
+//! there starts with the path of a root that is `/`. So the server below
+//! serves `/`, and a file there is past the top of the mount the agent
+//! found it through, where no name it knows leads to it.
 
 #![cfg(target_os = "linux")]
 

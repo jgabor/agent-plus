@@ -322,8 +322,8 @@ T0 lints the whole workspace twice: once for Linux, and once for
 compile and lint one, so the code that only macOS builds stays checked. A
 change can affect a budget that the bench measures when its diff touches
 `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
-`harness/budgets.toml`, `xtask/src/bench.rs`, or what `ap` and
-`fake-harness` are built from under `crates/`. Under `crates/`, neither is
+`harness/budgets.toml`, `xtask/src/accepts.rs`, `xtask/src/bench.rs`, or what
+`ap` and `fake-harness` are built from under `crates/`. Under `crates/`, neither is
 built from a package's `tests/` directory, or from the packages `t1`, `t2`,
 `fuzz`, `fake-upstream`, and `fake-vm`. Every other path there counts, and a
 test fails when a package is on neither side of that rule.
@@ -519,17 +519,18 @@ security boundary. A PR waits when it:
   `accepts.rs`, `base.rs`, `floors.rs`, `gate.rs`, `journey.rs`, `ledger.rs`,
   `readme.rs`, `score.rs`, `spec.rs`, `testrun.rs`, or `waits.rs`. A file
   decides when it says what waits for the owner, what a count or a floor is
-  and whether one fell, which checks a proof runs, or what makes a check pass.
+  and whether one fell, which checks a proof runs, what makes a check pass,
+  or what the owner's approval covers.
 
 Each of the others lowers the bar for later PRs, or can't be undone by a revert.
 Everything else merges under `auto:merge`: a new SPEC.md sentence with its
 check, AGENTS.md, HARNESS.md, the task briefs, the rest of `harness/`, and the
-rest of `xtask/`, such as the timeout and the slot in `merge.rs`, and how
-`bench.rs` measures a budget. Nightly mutation testing is what notices a
-weakened test that kept its count. The xtask built from `main` decides, so a PR
-can't let itself through. `merge` fails a PR that waits with `fail owner`, and
-names each reason. `prepare` passes it, and its comment lists each reason under
-"Merging this PR at `<head>` accepts:".
+rest of `xtask/`, such as the timeout and the slot in `merge.rs`, how
+`bench.rs` measures a budget, and how `refresh.rs` runs. Nightly mutation
+testing is what notices a weakened test that kept its count. The xtask built
+from `main` decides, so a PR can't let itself through. `merge` fails a PR that
+waits with `fail owner`, and names each reason. `prepare` passes it, and its
+comment lists each reason under "Merging this PR at `<head>` accepts:".
 
 ## Data formats
 

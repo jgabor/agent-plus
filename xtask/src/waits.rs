@@ -22,8 +22,9 @@ const GATE_TESTS: &str = "xtask/";
 const WORKFLOWS: &str = ".github/";
 /// The code that decides what a merge accepts. A file decides when it says
 /// what waits for the owner, what a count or a floor is and whether one fell,
-/// which checks a proof runs, or what makes a check pass. This file reads the
-/// budgets itself, so that a change to how they are measured doesn't wait.
+/// which checks a proof runs, what makes a check pass, or what the owner's
+/// approval covers. This file reads the budgets itself, so that a change to
+/// how they are measured doesn't wait.
 const DECIDES: [&str; 11] = [
     "xtask/src/accepts.rs",
     "xtask/src/base.rs",

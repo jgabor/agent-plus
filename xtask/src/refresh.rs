@@ -1,7 +1,8 @@
 //! `cargo xtask refresh`: proves each `land-needed` PR that the owner approved
-//! by arming auto-merge on the newest `main`, and merges it.
+//! by arming auto-merge on the newest `main`, and merges it. What the owner's
+//! approval covers is for `accepts.rs` to say.
 
-use crate::forge::{Armed, Gh, OpenPr};
+use crate::forge::{Gh, OpenPr};
 use crate::lock::Hold;
 use crate::work::LAND_NEEDED;
 use crate::{Problem, Verdict, accepts, base, group, lock, merge, workspace};
@@ -140,20 +141,9 @@ pub fn run() -> Result<Verdict, Problem> {
                 if !proven {
                     verdict = Verdict::Fail;
                 }
-                // A head that was green already had its comment when the
-                // owner armed it, because a proof that found something new
-                // turned auto-merge off.
-                let new = if stale {
-                    newly_accepted(&gh, pr.number, &head)
-                } else {
-                    Ok(Vec::new())
-                };
-                let merged = match new {
-                    Ok(new) if new.is_empty() => merge_if_armed(&gh, pr, &head, &slot),
-                    Ok(new) => Ok(Landed::Open(format!(
-                        "its proof accepts what the owner didn't approve: {}. Arming its auto-merge again approves it",
-                        new.join("; ")
-                    ))),
+                let merged = match accepts::proof_unapproved(&gh, pr.number, &head, stale) {
+                    Ok(None) => merge_if_armed(&gh, pr, &head, &slot),
+                    Ok(Some(why)) => Ok(Landed::Open(why)),
                     Err(problem) => Err(problem),
                 };
                 match merged {
@@ -272,24 +262,8 @@ fn merge_if_armed(gh: &Gh, pr: &OpenPr, head: &str, slot: &Hold) -> Result<Lande
     // the PR's issues itself.
     let mut close = false;
     if now.state != "MERGED" {
-        if let Some(why) = unapproved(&now) {
+        if let Some(why) = accepts::approval_lapsed(gh, pr, head, &now)? {
             return Ok(Landed::Open(why));
-        }
-        if now.head != head {
-            return Ok(Landed::Open(format!(
-                "its head moved from {head} to {}",
-                now.head
-            )));
-        }
-        let read = gh.pull_request(number)?;
-        // A green from an earlier proof can predate the review.
-        if read.changes_requested {
-            return Ok(Landed::Open("a review of it requested changes".to_string()));
-        }
-        // The label goes from the issues this run listed, and they are the
-        // ones to close.
-        if read.closing_issues != pr.closing_issues {
-            return Ok(Landed::Open("the issue it closes changed".to_string()));
         }
         if let Err(problem) = gh.merge_pr(number, head, slot)
             && gh.armed(number)?.state != "MERGED"
@@ -338,40 +312,17 @@ fn closes_one(pr: &OpenPr, issues: &BTreeSet<u64>) -> bool {
     pr.closing_issues.iter().any(|n| issues.contains(n))
 }
 
-/// Why the owner's approval no longer stands for the PR, if it doesn't.
-fn unapproved(now: &Armed) -> Option<String> {
-    if now.state != "OPEN" {
-        return Some(format!("it is {}", now.state));
-    }
-    if !now.auto_merge {
-        return Some("its auto-merge was turned off".to_string());
-    }
-    None
-}
-
 /// Why the run should leave a PR it listed, now that it holds the slot: the
 /// PR merged or closed, its auto-merge was turned off, or its issue lost
 /// `land-needed`. `None` when the PR is still one to prove or merge.
 fn changed(gh: &Gh, pr: &OpenPr) -> Result<Option<String>, Problem> {
-    if let Some(why) = unapproved(&gh.armed(pr.number)?) {
+    if let Some(why) = accepts::disarmed(&gh.armed(pr.number)?) {
         return Ok(Some(why));
     }
     if !closes_one(pr, &land_needed(gh)?) {
         return Ok(Some(format!("its issue no longer has `{LAND_NEEDED}`")));
     }
     Ok(None)
-}
-
-/// What this head's proof accepted that the comment before its own didn't
-/// list. A proof that accepted nothing left no comment for this head.
-fn newly_accepted(gh: &Gh, number: u64, head: &str) -> Result<Vec<String>, Problem> {
-    let lists = accepts::acceptances(&gh.acceptances(number)?);
-    Ok(match lists.split_last() {
-        Some(((at, accepted), earlier)) if at == head => {
-            accepts::unapproved(earlier.last().map(|(_, reasons)| &reasons[..]), accepted)
-        }
-        _ => Vec::new(),
-    })
 }
 
 /// Lets the dispatcher restart the PR's issue, and tells the PR why, once for

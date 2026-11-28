@@ -2267,6 +2267,54 @@ fn a_secret_cannot_use_a_name_ap_or_the_adapter_sets() {
     assert!(scratch.agents().list().unwrap().is_empty());
 }
 
+// spec(SEAL): A `SEAL` can't use a name `ap` or the adapter sets, or one the harness reads for sign-in, and can't bind one of the harness's own hosts, as a `SECRET` can't.
+#[test]
+fn a_seal_cannot_use_a_reserved_name_or_bind_a_harness_host() {
+    let scratch = Scratch::new("seal-reserved");
+    for (agent, line, named, says) in [
+        ("claude", "SEAL HOME @example.com", "HOME", "`SEAL`"),
+        ("codex", "SEAL LOGNAME visible", "LOGNAME", "`SEAL`"),
+        (
+            "claude",
+            "SEAL SSL_CERT_FILE visible",
+            "SSL_CERT_FILE",
+            "`SEAL`",
+        ),
+        (
+            "claude",
+            "SEAL ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "`AUTH`",
+        ),
+        (
+            "codex",
+            "SEAL CODEX_ACCESS_TOKEN visible",
+            "CODEX_ACCESS_TOKEN",
+            "`AUTH`",
+        ),
+        (
+            "claude",
+            "SEAL MINE @api.anthropic.com",
+            "api.anthropic.com",
+            "`AUTH`",
+        ),
+        ("codex", "SEAL MINE @chatgpt.com", "chatgpt.com", "`AUTH`"),
+    ] {
+        let dir = scratch.project(
+            &format!("{agent}-{named}"),
+            &format!("AGENT {agent}\nOS minimal\nSEAL OK @example.com\n{line}\n"),
+        );
+        let output = scratch.ap(&dir, &["build", "-t", "notes"]);
+        assert_eq!(output.status.code(), Some(1), "{agent} {line}");
+        let message = stderr(&output);
+        assert_eq!(message.lines().count(), 1, "{message}");
+        assert!(message.starts_with("Agentfile:4: "), "{message}");
+        assert!(message.contains(&format!("`{named}`")), "{message}");
+        assert!(message.contains(says), "{message}");
+    }
+    assert!(scratch.agents().list().unwrap().is_empty());
+}
+
 // spec(Overview): `ap build` reports every error it can find in the Agentfile itself.
 #[test]
 fn a_reserved_name_is_reported_with_other_errors() {

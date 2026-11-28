@@ -859,7 +859,7 @@ fn names_and_hosts_no_list_holds_pass() {
         "ENV set_by_adapter 1\n\
          ENV OTHER_KEY x\n\
          SECRET MINE @harness.example @sub.api.harness.example\n\
-         SEAL HARNESS_KEY @api.harness.example\n",
+         SEAL SEALED @harness.example\n",
     );
     assert!(errors.is_empty(), "{errors:?}");
 }

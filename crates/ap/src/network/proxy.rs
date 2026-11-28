@@ -792,16 +792,9 @@ impl Proxy {
                 _ => {}
             }
         }
-        let mut buffer = [0; 65536];
-        for flow in &mut self.flows {
-            let UdpState::Open(socket) = &flow.state else {
-                continue;
-            };
-            while let Ok(len) = socket.recv(&mut buffer) {
-                flow.used = now;
-                stack.send_datagram(flow.destination, flow.guest, &buffer[..len]);
-            }
-        }
+        // A flow closes before its replies are read, so that one which comes
+        // in the turn after the limit stays dropped. One that came before it
+        // woke an earlier turn.
         let (live, idle): (Vec<_>, Vec<_>) =
             (self.flows.drain(..)).partition(|flow| now.duration_since(flow.used) < UDP_IDLE);
         self.flows = live;
@@ -811,6 +804,16 @@ impl Proxy {
             let used = (self.flows.iter()).any(|other| other.destination.port() == port);
             if !used && port != resolver.port() {
                 stack.unbind(port);
+            }
+        }
+        let mut buffer = [0; 65536];
+        for flow in &mut self.flows {
+            let UdpState::Open(socket) = &flow.state else {
+                continue;
+            };
+            while let Ok(len) = socket.recv(&mut buffer) {
+                flow.used = now;
+                stack.send_datagram(flow.destination, flow.guest, &buffer[..len]);
             }
         }
     }

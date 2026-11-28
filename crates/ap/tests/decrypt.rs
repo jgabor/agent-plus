@@ -16,7 +16,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
 use std::pin::Pin;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::task::Poll;
 use std::thread;
@@ -1409,6 +1409,9 @@ struct Clock {
     start: Instant,
     ahead: Arc<AtomicU64>,
     reads: Arc<AtomicUsize>,
+    /// Whether a read waits until the clock moves, and whether one does.
+    held: Arc<AtomicBool>,
+    waiting: Arc<AtomicBool>,
 }
 
 impl Clock {
@@ -1417,11 +1420,17 @@ impl Clock {
             start: Instant::now(),
             ahead: Arc::default(),
             reads: Arc::default(),
+            held: Arc::default(),
+            waiting: Arc::default(),
         }
     }
 
     /// The time by this clock.
     fn now(&self) -> Instant {
+        while self.held.load(Ordering::SeqCst) {
+            self.waiting.store(true, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(1));
+        }
         let ahead = Duration::from_millis(self.ahead.load(Ordering::SeqCst));
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.start + ahead
@@ -1431,6 +1440,7 @@ impl Clock {
     /// a whole turn by the new time.
     fn advance(&self, by: Duration) {
         (self.ahead).fetch_add(by.as_millis() as u64, Ordering::SeqCst);
+        self.held.store(false, Ordering::SeqCst);
         let read = self.reads.load(Ordering::SeqCst);
         // A turn reads the clock three times, and one read that began
         // before the move may count after it, so six reads hold a whole
@@ -1438,6 +1448,18 @@ impl Clock {
         let deadline = Instant::now() + WAIT;
         while self.reads.load(Ordering::SeqCst) < read + 6 {
             assert!(Instant::now() < deadline, "the proxy took no turn");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Stops the proxy at its next read of this clock, and returns once it
+    /// waits there. It goes on when the clock moves, by the new time.
+    fn hold(&self) {
+        self.waiting.store(false, Ordering::SeqCst);
+        self.held.store(true, Ordering::SeqCst);
+        let deadline = Instant::now() + WAIT;
+        while !self.waiting.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the proxy never read the clock");
             thread::sleep(Duration::from_millis(1));
         }
     }
@@ -1501,7 +1523,17 @@ impl Flow {
     /// Whether `payload`, sent by the destination, reaches the guest within
     /// `wait`.
     fn replies(&mut self, guest: &mut Guest, payload: &[u8], wait: Duration) -> bool {
-        let _ = self.server.send_to(payload, self.from.unwrap());
+        self.reply(payload);
+        self.received(guest, payload, wait)
+    }
+
+    /// Sends `payload` from the destination.
+    fn reply(&self, payload: &[u8]) {
+        self.server.send_to(payload, self.from.unwrap()).unwrap();
+    }
+
+    /// Whether `payload` reaches the guest within `wait`.
+    fn received(&mut self, guest: &mut Guest, payload: &[u8], wait: Duration) -> bool {
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             guest.poll();
@@ -1547,9 +1579,12 @@ fn a_udp_flow_closes_after_60_seconds_with_no_datagram() {
     clock.advance(Duration::from_secs(59));
     assert!(flow.replies(&mut guest, b"three", WAIT));
 
-    // After 60 seconds with no datagram either way, a reply is dropped.
+    // After 60 seconds with no datagram either way, a reply is dropped,
+    // even one that is there when the proxy first turns past the limit.
+    clock.hold();
+    flow.reply(b"late");
     clock.advance(Duration::from_secs(60));
-    assert!(!flow.replies(&mut guest, b"late", second));
+    assert!(!flow.received(&mut guest, b"late", second));
 }
 
 /// A plain destination that greets each connection first, as an SMTP

@@ -101,7 +101,8 @@ fn an_interactive_claude_code_run_in_a_shared_repository_reaches_its_prompt() {
 }
 
 // Claude Code 2.1.323 looks up its trust records by the path the kernel
-// resolves, and the link is in a share, so only the guest can follow it.
+// resolves, and the guest writes them before it mounts the share that holds
+// the link.
 // spec(Run): The adapter also sets `CLAUDE_CODE_SANDBOXED`, so an interactive run whose working directory goes through a symlink doesn't ask whether to trust it.
 #[test]
 fn an_interactive_claude_code_run_whose_working_directory_is_a_symlink_reaches_its_prompt() {

@@ -40,10 +40,12 @@ pub const EFFORT_VARIABLE: &str = "CLAUDE_CODE_EFFORT_LEVEL";
 
 /// The variable that tells Claude Code it runs in a sandbox, so it trusts
 /// every directory. Claude Code 2.1.323 reads it only in its checks for a
-/// directory's trust, before any record in [`STATE`]. A record can't cover
-/// a working directory that a symlink leads to, because Claude Code looks
-/// the record up by the path the kernel resolves, which only the guest can
-/// follow once the shares are mounted.
+/// directory's trust, before any record in [`STATE`]. Those checks also
+/// decide whether a repository's permission rules apply, and background
+/// sessions it starts get the variable too. A record can't cover a working
+/// directory that a symlink leads to, because Claude Code looks the record
+/// up by the path the kernel resolves, and the guest writes [`STATE`]
+/// before it mounts the shares the link may lead through.
 pub const SANDBOXED: &str = "CLAUDE_CODE_SANDBOXED";
 
 /// The variables the adapter sets, besides the certificate variables:

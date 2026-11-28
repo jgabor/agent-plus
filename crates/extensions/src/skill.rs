@@ -13,6 +13,7 @@ use std::fmt;
 use std::io;
 
 use yaml_rust2::parser::{Event, Parser};
+use yaml_rust2::scanner::TScalarStyle;
 
 /// The most bytes of a `SKILL.md` that its front matter may take, with both
 /// of its `---` lines. A reader needs no more of the file than this.
@@ -76,6 +77,10 @@ pub enum Problem {
     NotText(&'static str),
     /// `metadata` isn't a mapping from scalars to scalars.
     Metadata,
+    /// A top-level key that YAML readers resolve in different ways: an
+    /// alias, or the merge key `<<`. Either could give a key that the
+    /// specification defines a value this reader never sees.
+    Key(&'static str),
     /// `name` breaks the specification's rules for one.
     Name(String),
     /// `name` isn't the name of the skill's directory.
@@ -120,10 +125,14 @@ impl fmt::Display for Problem {
             Problem::Repeated(key) => write!(f, "`{key}` appears twice"),
             Problem::NotText(key) => write!(f, "`{key}` isn't text"),
             Problem::Metadata => write!(f, "`metadata` isn't a mapping from text to text"),
+            Problem::Key(what) => write!(
+                f,
+                "its front matter has {what} as a key, which YAML readers read in different ways"
+            ),
             Problem::Name(name) => write!(
                 f,
-                "`name` is `{name}`, but a name is 1 to {MAX_NAME} lowercase letters, digits, \
-                 and single hyphens, with no hyphen at either end"
+                "`name` is `{name}`, but a name is 1 to {MAX_NAME} of the letters a to z, \
+                 digits, and single hyphens, with no hyphen at either end"
             ),
             Problem::Directory { name, directory } => write!(
                 f,
@@ -142,8 +151,9 @@ impl fmt::Display for Problem {
 ///
 /// With `names`, only the skills with those names are read, and a name that
 /// no skill has is an error. Each skill's name is its directory's, so a
-/// skill that isn't asked for is never read. `read` returns a file's bytes,
-/// and needs to return no more than [`MAX_FRONT_MATTER`] of them.
+/// skill that isn't asked for is never read. `read` returns a file's bytes.
+/// It may stop after `MAX_FRONT_MATTER + 1` of them, but no sooner, so a cut
+/// line is never taken for the closing `---`.
 pub fn find<'a>(
     root: &str,
     paths: impl IntoIterator<Item = &'a str>,
@@ -322,12 +332,16 @@ impl Keys {
         }
         let mut keys = Keys::default();
         // YAML allows a key once in a mapping. A key that is a collection
-        // or an alias is skipped with its value, and so are the mappings
-        // inside a value that is skipped.
+        // is skipped with its value, and so are the mappings inside a value
+        // that is skipped.
         let mut seen = BTreeSet::new();
         loop {
             let key = match events.next()? {
                 Event::MappingEnd => break,
+                Event::Alias(_) => return Err(Problem::Key("an alias")),
+                Event::Scalar(key, TScalarStyle::Plain, ..) if key == "<<" => {
+                    return Err(Problem::Key("`<<`"));
+                }
                 Event::Scalar(key, ..) if seen.contains(&key) => {
                     return Err(Problem::Repeated(key));
                 }
@@ -336,7 +350,8 @@ impl Keys {
                     key
                 }
                 other => {
-                    // A key that is a collection, or an alias.
+                    // A key that is a collection, which no reader takes
+                    // for one the specification defines.
                     events.skip(other)?;
                     events.value()?;
                     continue;

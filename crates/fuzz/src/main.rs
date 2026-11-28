@@ -3,8 +3,8 @@
 //! httparse, hyper, h2, iri-string, smoltcp, yaml-rust2's loader, `git`, or
 //! `sha1sum` does the same job, a target compares the two. miniz_oxide
 //! compresses the loose objects that `crates/git` and `git` both read. Those
-//! crates are pure Rust, so the fuzzer adds no C to the tree. A run is reproduced by passing its
-//! seed again.
+//! crates are pure Rust, so the fuzzer adds no C to the tree. A run is
+//! reproduced by passing its seed again.
 
 #![forbid(unsafe_code)]
 
@@ -941,38 +941,46 @@ const TARGETS: [Target; 15] = [
 const HELLO: &str = "\x16\x03\x01\x00\x57\x01\x00\x00\x53\x03\x03\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x00\x00\x02\x13\x01\x01\x00\x00\x28\x00\x00\x00\x15\x00\x13\x00\x00\x10\x68\x6f\x73\x74\x2e\x61\x70\x2e\x69\x6e\x74\x65\x72\x6e\x61\x6c\x00\x0d\x00\x04\x00\x02\x04\x03\x00\x2b\x00\x03\x02\x03\x04";
 
 /// Reads `input` as a whole `SKILL.md`, and again as the YAML of its front
-/// matter. Whatever the reader accepts, yaml-rust2's own loader must read
-/// as one mapping, with the same text for each key the reader took.
-fn skill_input(input: &str) {
+/// matter. Returns whether the reader took that YAML, and so whether it was
+/// compared with yaml-rust2's loader.
+fn skill_input(input: &str) -> bool {
     let read = |text: &str| {
         extensions::skill::find("fuzz", ["SKILL.md"], &[], |_| Ok(text.as_bytes().to_vec()))
     };
     let _ = read(input);
     if input.lines().any(|line| line.trim_end().starts_with("---")) {
-        return;
+        return false;
     }
     let yaml = format!("{input}\n");
     let Ok(skills) = read(&format!("---\n{yaml}---\n")) else {
-        return;
+        return false;
     };
     let [skill] = skills.as_slice() else {
         panic!("one SKILL.md read as {} skills", skills.len());
     };
     assert_eq!(skill.name, "fuzz");
     assert!((1..=1024).contains(&skill.description.chars().count()));
+    same_skill(skill, &yaml);
+    true
+}
+
+/// Whatever the reader took, yaml-rust2's loader must read as one mapping,
+/// with the same text for each key the reader took, and in `metadata`.
+fn same_skill(skill: &extensions::skill::Skill, yaml: &str) {
+    use yaml_rust2::Yaml;
     // The reader refuses a top-level key that it saw before as text. The
     // loader also compares keys inside a value that the reader skips, and
     // compares each by what it resolves to, so `1` and `01` are one key.
-    let documents = match yaml_rust2::YamlLoader::load_from_str(&yaml) {
+    let documents = match yaml_rust2::YamlLoader::load_from_str(yaml) {
         Err(e) if e.info().ends_with(": duplicated key in mapping") => return,
         documents => documents
             .unwrap_or_else(|e| panic!("the reader took YAML that yaml-rust2 refuses: {e}")),
     };
-    let [yaml_rust2::Yaml::Hash(mapping)] = documents.as_slice() else {
+    let [Yaml::Hash(mapping)] = documents.as_slice() else {
         panic!("the reader took YAML that isn't one mapping: {documents:?}");
     };
-    let text = |key: &str| match mapping.get(&yaml_rust2::Yaml::String(key.to_string())) {
-        Some(yaml_rust2::Yaml::String(text)) => Some(text.clone()),
+    let text = |key: &str| match mapping.get(&Yaml::String(key.to_string())) {
+        Some(Yaml::String(text)) => Some(text.clone()),
         _ => None,
     };
     for (key, ours) in [
@@ -984,6 +992,13 @@ fn skill_input(input: &str) {
     ] {
         if let Some(theirs) = text(key) {
             assert_eq!(ours, Some(&theirs), "`{key}`");
+        }
+    }
+    if let Some(Yaml::Hash(metadata)) = mapping.get(&Yaml::String("metadata".to_string())) {
+        for (key, value) in metadata {
+            if let (Yaml::String(key), Yaml::String(value)) = (key, value) {
+                assert_eq!(skill.metadata.get(key), Some(value), "`metadata.{key}`");
+            }
         }
     }
 }
@@ -3023,6 +3038,29 @@ mod tests {
         // Only as an object.
         assert_eq!(git_input(corpus[4]), 1);
         assert_eq!(git_input(corpus[5]), 1);
+    }
+
+    #[test]
+    fn the_skill_corpus_reads_as_yaml_rust2_reads_it() {
+        let corpus = TARGETS[14].corpus;
+        assert_eq!(TARGETS[14].name, "skill");
+        assert!(!skill_input(corpus[0]));
+        for input in &corpus[1..] {
+            assert!(skill_input(input), "{input:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "`metadata.version`")]
+    fn a_skill_yaml_rust2_reads_differently_is_found() {
+        let skill = extensions::skill::find("fuzz", ["SKILL.md"], &[], |_| {
+            Ok(b"---\nname: fuzz\ndescription: d\nmetadata: {version: '1'}\n---\n".to_vec())
+        })
+        .unwrap();
+        same_skill(
+            &skill[0],
+            "name: fuzz\ndescription: d\nmetadata: {version: '2'}\n",
+        );
     }
 
     #[test]

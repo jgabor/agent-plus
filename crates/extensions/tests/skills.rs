@@ -557,7 +557,7 @@ fn problems_say_what_is_wrong() {
     assert_eq!(
         shown("---\nname: Pdf\ndescription: d\n---\n"),
         concat!(
-            "skills/pdf/SKILL.md: `name` is `Pdf`, but a name is 1 to 64 lowercase letters, ",
+            "skills/pdf/SKILL.md: `name` is `Pdf`, but a name is 1 to 64 of the letters a to z, ",
             "digits, and single hyphens, with no hyphen at either end"
         )
     );
@@ -581,4 +581,70 @@ fn problems_say_what_is_wrong() {
         shown("---\nname: [pdf\n---\n")
             .starts_with("skills/pdf/SKILL.md: its front matter isn't valid YAML: ")
     );
+}
+
+#[test]
+fn a_key_that_readers_resolve_differently_is_refused() {
+    // An alias as a key is `allowed-tools` to a YAML reader.
+    assert_eq!(
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nx: &a allowed-tools\n*a : Bash\n---\n"
+        ),
+        Problem::Key("an alias")
+    );
+    // A merge key is `license` to a reader that merges.
+    assert_eq!(
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\n<<: {license: MIT}\n---\n"
+        ),
+        Problem::Key("`<<`")
+    );
+    assert_eq!(
+        find(
+            &tree(&[(
+                "skills/pdf/SKILL.md",
+                "---\nname: pdf\ndescription: d\nx: &m {license: MIT}\n<<: *m\n---\n"
+            )]),
+            "skills",
+            &[]
+        )
+        .unwrap_err()
+        .to_string(),
+        "skills/pdf/SKILL.md: its front matter has `<<` as a key, which YAML readers read in different ways"
+    );
+    // Quoted, it is only text.
+    let skill = read(
+        "pdf",
+        "---\nname: pdf\ndescription: d\n'<<': {license: MIT}\n---\n",
+    );
+    assert_eq!(skill.license, None);
+}
+
+#[test]
+fn a_read_that_stops_past_the_bound_is_enough() {
+    // The first `MAX_FRONT_MATTER` bytes end in `---`, but the line goes on.
+    let head = "---\nname: pdf\ndescription: d\n";
+    let filler = "#".repeat(MAX_FRONT_MATTER - head.len() - "\n---".len());
+    let text = format!("{head}{filler}\n---xyz\nlicense: evil\n---\n");
+    assert_eq!(
+        &text.as_bytes()[MAX_FRONT_MATTER - 4..MAX_FRONT_MATTER],
+        b"\n---"
+    );
+    for limit in [MAX_FRONT_MATTER + 1, text.len()] {
+        let read = skill::find("pdf", ["SKILL.md"], &[], |_| {
+            Ok(text.as_bytes()[..limit].to_vec())
+        });
+        assert!(
+            matches!(
+                read,
+                Err(Error::Invalid {
+                    problem: Problem::TooLong,
+                    ..
+                })
+            ),
+            "{limit}: {read:?}"
+        );
+    }
 }

@@ -2082,6 +2082,8 @@ Matching follows boundaries:
   `%2e`, because a normalized request path never has one.
 - A URL rule's path can't have an empty segment, as in `/a//b`, because a
   request path with one is denied, but it may end with one `/`.
+- A URL rule's path can't have a backslash or a `;`, even escaped, because
+  a request path with one is denied.
 - A port suffix limits a host or IP rule to that port. IPv6 addresses go in
   brackets.
 - Names match in any case, with or without a final dot. An IPv4-mapped IPv6

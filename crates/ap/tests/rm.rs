@@ -603,9 +603,9 @@ fn only_the_server_that_keeps_pending_changes_holds_the_record() {
     for server in servers.started {
         let pid = server.process.id();
         let process = Killed(server.process);
-        // `start` can return before the process is the server, with the
-        // arguments it starts with. The server answers an empty frame with
-        // one once it runs, and it has its own arguments by then.
+        // `start` can return before `/proc` shows the server's arguments.
+        // The server answers an empty frame only once it runs, and by then
+        // `/proc` shows them.
         let mut socket = File::from(server.socket);
         socket.write_all(&[0; 8]).unwrap();
         let mut answer = [1; 4];

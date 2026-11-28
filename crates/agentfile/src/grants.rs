@@ -186,7 +186,10 @@ impl Grants {
     /// Adds the grant of your git credentials for the source whose
     /// repository is `repository`, and says whether it is new.
     pub fn credential(&mut self, repository: &str) -> bool {
-        match self.credentials.binary_search_by(|it| it.as_str().cmp(repository)) {
+        match self
+            .credentials
+            .binary_search_by(|it| it.as_str().cmp(repository))
+        {
             Ok(_) => false,
             Err(at) => {
                 self.credentials.insert(at, repository.to_string());

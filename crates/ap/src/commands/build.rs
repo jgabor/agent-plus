@@ -11,7 +11,11 @@
 //! holds it, and a changed lock is written, as `ap::lock::settle` says. Each
 //! `REPO` the lock doesn't pin resolves then too, as `ap::source` says, and
 //! its layer fetches the commit, unless the store has the layer or the
-//! download cache has the commit. The other tiers, a `REPO` with a local
+//! download cache has the commit. Each of those fetches without credentials
+//! first. When the remote asks for them, the build asks you to approve your
+//! git credentials for the source, as for any grant that widens, and fetches
+//! again with them. The lock marks the source, so a later build lists the
+//! grant before it fetches anything. The other tiers, a `REPO` with a local
 //! source, and the instructions that need any other fetch, fail.
 //!
 //! `ap update` builds the same way, once `ap::lock::Lock::forget` has
@@ -28,14 +32,14 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use agentfile::{
-    Error, Files, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings, Source,
-    Sources, Text,
+    Error, Files, Grants, GuestPath, Harness, Instruction, Network, Os, Policy, Secrets, Settings,
+    Source, Sources, Text,
 };
 use ap::add;
 use ap::fetch::{self, Client, Pin};
 use ap::lock::{self, Companion, Lock, Locked};
 use ap::paths::HostPath;
-use ap::source;
+use ap::source::{self, Credentials};
 use graviola::hashing::sha2::Sha256Context;
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 
@@ -256,19 +260,35 @@ fn build(args: &Args) -> Result<(), String> {
     // The grants come from the resolutions the layers are made from, so a
     // path that changes on the host can't put what you didn't approve in a
     // layer.
-    let grants = ap::approval::grants(&instructions, |text| resolved.get(text)).map_err(report)?;
+    let mut grants =
+        ap::approval::grants(&instructions, |text| resolved.get(text)).map_err(report)?;
+    // A source that the lock says needed your git credentials needs them
+    // again, so you approve them before anything is fetched.
+    let named: Vec<String> = (Sources::read(&instructions).unwrap_or_default().repo)
+        .into_iter()
+        .filter_map(|repo| match repo.source {
+            Source::Remote(remote) => Some(remote.repository),
+            Source::Local(_) => None,
+        })
+        .collect();
+    for locked in &lock.sources {
+        if locked.credentials && named.contains(&locked.repository) {
+            grants.credential(&locked.repository);
+        }
+    }
     let approver = match &args.approve {
         Some(file) => ap::approval::Approver::File(file),
         None => ap::approval::Approver::Terminal,
     };
     let approvals = ::store::Approvals::new(&root);
-    ap::approval::approve(
-        &approvals,
-        agentfile.path(),
-        &shown.to_string(),
-        &grants,
+    let mut approving = Approving {
+        approvals: &approvals,
+        agentfile: agentfile.path(),
+        shown: shown.to_string(),
         approver,
-    )?;
+        grants,
+    };
+    approving.approve()?;
 
     let Some(agentfile_path) = agentfile.path().to_str().map(str::to_string) else {
         return Err(format!("ap: {} isn't UTF-8", agentfile.path().display()));
@@ -294,8 +314,13 @@ fn build(args: &Args) -> Result<(), String> {
     let agent = Settings::read(&instructions).map_err(report)?.agent;
     let cache = cache.ok_or("ap: HOME isn't an absolute path, so there's no download cache")?;
     let lock_path = context.join("Agentfile.lock");
-    let sources = settle_sources(&instructions, &lock, &cache)
-        .map_err(|(line, error)| format!("{shown}:{line}: {error}"))?;
+    let sources =
+        settle_sources(&instructions, &lock, &cache, &mut approving).map_err(|(line, error)| {
+            match line {
+                Some(line) => format!("{shown}:{line}: {error}"),
+                None => error,
+            }
+        })?;
     let sources_changed = sources != on_disk;
     lock.sources = sources;
     let changed = lock::settle(
@@ -360,7 +385,14 @@ fn build(args: &Args) -> Result<(), String> {
             })
             .collect();
 
-        let (built, lines) = store_layers(&agents, &layers, current, use_cache, &report)?;
+        let (built, lines) = store_layers(
+            &agents,
+            &layers,
+            current,
+            use_cache,
+            &mut approving,
+            &report,
+        )?;
         let agent = ::store::Agent {
             name: name.clone(),
             directory: directory.to_string(),
@@ -387,6 +419,18 @@ fn build(args: &Args) -> Result<(), String> {
             Err(error) => return Err(format!("ap: {error}")),
         }
     };
+    // A locked source whose layer only now needed your git credentials.
+    let mut marked = false;
+    for locked in &mut lock.sources {
+        if !locked.credentials && approving.needs(&locked.repository) {
+            locked.credentials = true;
+            marked = true;
+        }
+    }
+    if marked {
+        lock.write(&lock_path)
+            .map_err(|error| format!("ap: {error}"))?;
+    }
     for line in lines {
         println!("{line}");
     }
@@ -395,6 +439,56 @@ fn build(args: &Args) -> Result<(), String> {
 }
 
 const NAME_RULE: &str = "A name is 1 to 63 lowercase letters, digits, and `-`, starting and ending with a letter or digit";
+
+/// Asks you to approve your git credentials for a source whose remote asks
+/// for them, and keeps the grants you approved.
+struct Approving<'a> {
+    approvals: &'a ::store::Approvals,
+    /// The Agentfile's canonical path.
+    agentfile: &'a Path,
+    /// The Agentfile's path, as errors show it.
+    shown: String,
+    approver: ap::approval::Approver<'a>,
+    /// The grants to approve, with each source that needs your credentials.
+    grants: Grants,
+}
+
+impl Approving<'_> {
+    /// Makes sure you approved the grants, as `ap::approval::approve` does.
+    fn approve(&self) -> Result<(), String> {
+        ap::approval::approve(
+            self.approvals,
+            self.agentfile,
+            &self.shown,
+            &self.grants,
+            self.approver,
+        )
+    }
+
+    /// Runs `attempt` without credentials, and when the remote asks for
+    /// them, once more with yours, once you approve them for `repository`.
+    /// It returns what the last attempt returned, or a message when you
+    /// don't approve them.
+    fn anonymous_first<T>(
+        &mut self,
+        repository: &str,
+        attempt: impl Fn(Credentials) -> io::Result<T>,
+    ) -> Result<io::Result<T>, String> {
+        match attempt(Credentials::Off) {
+            Err(error) if source::needs_credentials(&error) => {}
+            done => return Ok(done),
+        }
+        if self.grants.credential(repository) {
+            self.approve()?;
+        }
+        Ok(attempt(Credentials::Yours))
+    }
+
+    /// Whether the source with `repository` needs your git credentials.
+    fn needs(&self, repository: &str) -> bool {
+        self.grants.credentials.iter().any(|it| it == repository)
+    }
+}
 
 /// What putting one layer in the store takes.
 enum Made {
@@ -410,12 +504,14 @@ enum Made {
 /// and the store keeps it at the layer's level, and returns the agent's layers
 /// with a line for each. Every image is made before any download, and every
 /// download before any image is put, so a layer that can't be made leaves the
-/// store as it was, and its error names its line.
+/// store as it was, and its error names its line. A `REPO` fetched to make
+/// its image asks `approving` for your git credentials if it needs them.
 fn store_layers(
     agents: &::store::Agents,
     layers: &::store::Layers,
     planned: Vec<Planned>,
     use_cache: bool,
+    approving: &mut Approving,
     report: &dyn Fn(Vec<Error>) -> String,
 ) -> Result<(Vec<::store::Layer>, Vec<String>), String> {
     let io = |error: io::Error| format!("ap: {error}");
@@ -440,9 +536,12 @@ fn store_layers(
             Content::Image(image) => Ok(image),
             Content::Harness(locked, path) => harness(&locked, &path),
             Content::Repo(repo, cache) => {
-                source::fetch(&repo.url, &repo.resolved.commit, repo.history, &cache)
-                    .and_then(|fetched| repo.image(&fetched, &cache))
-                    .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", repo.url)))
+                let commit = &repo.resolved.commit;
+                (approving.anonymous_first(&repo.url, |credentials| {
+                    source::fetch(&repo.url, commit, repo.history, &cache, credentials)
+                })?)
+                .and_then(|fetched| repo.image(&fetched, &cache))
+                .map_err(|error| io::Error::new(error.kind(), format!("{}: {error}", repo.url)))
             }
             Content::Fetch(_) => unreachable!("a fetch was made above"),
         };
@@ -780,13 +879,15 @@ fn plan(
 
 /// What the lock pins for each `REPO` with a remote source, in line order,
 /// one for each repository and ref. A source the lock doesn't pin resolves,
-/// and its commit is fetched into the download cache `cache`. An error
-/// comes with its line.
+/// and its commit is fetched into the download cache `cache`, with your git
+/// credentials if `approving` approves them. An error comes with its line,
+/// and a refusal of your credentials with none.
 fn settle_sources(
     instructions: &[Instruction],
     lock: &Lock,
     cache: &Path,
-) -> Result<Vec<lock::Source>, (usize, String)> {
+    approving: &mut Approving,
+) -> Result<Vec<lock::Source>, (Option<usize>, String)> {
     let mut settled: Vec<lock::Source> = Vec::new();
     let sources = Sources::read(instructions).unwrap_or_default();
     for repo in &sources.repo {
@@ -805,17 +906,26 @@ fn settle_sources(
             Some(resolved) => resolved.clone(),
             // A new resolution is fetched before the lock records it, so
             // the lock records only a commit the remote has.
-            None => source::resolve(repository, reference, cache)
-                .and_then(|resolved| {
-                    source::fetch(repository, &resolved.commit, repo.history, cache)?;
+            None => (approving
+                .anonymous_first(repository, |credentials| {
+                    let resolved = source::resolve(repository, reference, cache, credentials)?;
+                    source::fetch(
+                        repository,
+                        &resolved.commit,
+                        repo.history,
+                        cache,
+                        credentials,
+                    )?;
                     Ok(resolved)
                 })
-                .map_err(|error| (repo.line, format!("{repository}: {error}")))?,
+                .map_err(|refused| (None, refused))?)
+            .map_err(|error| (Some(repo.line), format!("{repository}: {error}")))?,
         };
         settled.push(lock::Source {
             repository: repository.clone(),
             reference: reference.to_string(),
             resolved,
+            credentials: approving.needs(repository),
         });
     }
     Ok(settled)

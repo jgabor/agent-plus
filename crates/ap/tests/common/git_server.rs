@@ -81,10 +81,9 @@ pub fn authorization(user: &str, password: &str) -> String {
     let bytes = format!("{user}:{password}").into_bytes();
     let mut encoded = String::new();
     for chunk in bytes.chunks(3) {
-        let word = chunk
-            .iter()
-            .enumerate()
-            .fold(0u32, |word, (at, byte)| word | u32::from(*byte) << (16 - 8 * at));
+        let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| {
+            word | u32::from(*byte) << (16 - 8 * at)
+        });
         for at in 0..4 {
             match at <= chunk.len() {
                 true => encoded.push(DIGITS[(word >> (18 - 6 * at) & 63) as usize] as char),
@@ -158,7 +157,8 @@ fn serve(
         let sent = header("authorization");
         requests.lock().unwrap().push(sent.clone());
 
-        let unauthorized = b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
+        let unauthorized =
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
               Content-Length: 0\r\n\r\n";
         let reply = match access {
             Access::Private => unauthorized.to_vec(),

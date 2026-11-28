@@ -5,10 +5,14 @@
 //! the remote which commit a ref names with `git ls-remote`, and [`fetch`]
 //! runs `git fetch` for that commit into an empty bare repository in the
 //! download cache, under `git/<commit>`, or `git/<commit>.history` for the
-//! whole history. Each runs with credentials off: no configuration but
-//! git's defaults, no credential helper, no `.netrc`, no ssh key or agent,
-//! and no prompt. `git` may use only the `https` and `ssh` transports, checks
-//! every object it receives, checks nothing out, and runs no hook.
+//! whole history. Each runs with the [`Credentials`] it is given. With them
+//! off, `git` has no configuration but its defaults, no credential helper, no
+//! `.netrc`, no ssh key or agent, and no prompt, and a remote that asks for
+//! credentials fails it with an error that [`needs_credentials`] tells
+//! apart. With yours, it also has your home and your global configuration,
+//! so its credential helpers find what they keep, and your ssh-agent. Either
+//! way `git` may use only the `https` and `ssh` transports, checks every
+//! object it receives, checks nothing out, and runs no hook.
 //!
 //! [`Repo::image`] reads the fetched objects with `crates/git`, and writes
 //! the clone: the commit's tree, and a `.git` that holds the fetched packs,
@@ -16,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs;
 use std::io::{self, Cursor};
 use std::os::unix::ffi::OsStrExt;
@@ -34,6 +39,38 @@ pub const DEFAULT: &str = "HEAD";
 /// How deep a tree may nest, as git's default `core.maxTreeDepth`.
 const MAX_DEPTH: usize = 2048;
 
+/// Which credentials `git` may use, by SPEC.md's Sources section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Credentials {
+    Off,
+    /// Your ssh-agent, and the credential helpers in your global git
+    /// configuration.
+    Yours,
+}
+
+/// Whether `error` says that the remote asked for credentials that `git`
+/// didn't have.
+pub fn needs_credentials(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<Asked>())
+}
+
+/// What `git` said when the remote asked for credentials it didn't have.
+#[derive(Debug)]
+struct Asked(String);
+
+impl fmt::Display for Asked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Asked {}
+
+/// What `git` says, in English, when the remote asks for credentials it
+/// doesn't have: over `https`, that it can't prompt for them, and over
+/// `ssh`, what `ssh` says when no key signs in.
+const ASKED: [&str; 2] = ["terminal prompts disabled", "Permission denied ("];
+
 /// What a ref resolved to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
@@ -49,12 +86,17 @@ pub struct Resolved {
 /// `refs/heads/<ref>` that the remote has, or `<ref>` alone when it starts
 /// with `refs/`, as `git fetch` picks. A tag resolves to the commit it
 /// names. `cache` is the download cache, which holds what `git` works in.
-pub fn resolve(url: &str, reference: &str, cache: &Path) -> io::Result<Resolved> {
+pub fn resolve(
+    url: &str,
+    reference: &str,
+    cache: &Path,
+    credentials: Credentials,
+) -> io::Result<Resolved> {
     if let Some(commit) = Id::from_hex(reference) {
         return Ok(Resolved { name: None, commit });
     }
     let work = Work::new(cache)?;
-    let mut command = work.git();
+    let mut command = work.git(credentials);
     // An annotated tag is listed again, peeled, as `<tag>^{}`, which only
     // its own pattern matches.
     let peeled = format!("{reference}^{{}}");
@@ -105,7 +147,13 @@ pub fn resolve(url: &str, reference: &str, cache: &Path) -> io::Result<Resolved>
 /// The bare repository in the download cache `cache` that holds `commit`
 /// from the repository at `url`, with its whole history if `history`. One
 /// that the cache doesn't hold yet is fetched.
-pub fn fetch(url: &str, commit: &Id, history: bool, cache: &Path) -> io::Result<PathBuf> {
+pub fn fetch(
+    url: &str,
+    commit: &Id,
+    history: bool,
+    cache: &Path,
+    credentials: Credentials,
+) -> io::Result<PathBuf> {
     let dir = cache.join("git");
     let name = match history {
         true => format!("{commit}.history"),
@@ -117,11 +165,11 @@ pub fn fetch(url: &str, commit: &Id, history: bool, cache: &Path) -> io::Result<
     }
     let work = Work::new(cache)?;
     let repository = work.dir.join("repository");
-    let mut init = work.git();
+    let mut init = work.git(Credentials::Off);
     init.args(["init", "--quiet", "--bare", "--template="])
         .arg(&repository);
     run(init, "init")?;
-    let mut command = work.git();
+    let mut command = work.git(credentials);
     command
         .arg("--git-dir")
         .arg(&repository)
@@ -189,10 +237,10 @@ impl Work {
         }
     }
 
-    /// `git`, with credentials off, as this module says. Of the environment
+    /// `git`, with `credentials`, as this module says. Of the environment
     /// that names git, only `GIT_SSL_CAINFO`, the certificates you trust,
-    /// stays.
-    fn git(&self) -> Command {
+    /// stays. It speaks English, so that [`ASKED`] reads what it says.
+    fn git(&self, credentials: Credentials) -> Command {
         let mut command = Command::new("git");
         for (name, _) in std::env::vars_os() {
             let bytes = name.as_bytes();
@@ -200,9 +248,7 @@ impl Work {
                 command.env_remove(&name);
             }
         }
-        for name in ["SSH_ASKPASS", "SSH_AUTH_SOCK"] {
-            command.env_remove(name);
-        }
+        command.env_remove("SSH_ASKPASS");
         let config = [
             "protocol.allow=never",
             "protocol.https.allow=always",
@@ -210,7 +256,6 @@ impl Work {
             "transfer.fsckObjects=true",
             "core.hooksPath=/dev/null",
             "core.fsmonitor=false",
-            "credential.helper=",
             "gc.auto=0",
             "maintenance.auto=false",
             "fetch.writeCommitGraph=false",
@@ -219,20 +264,33 @@ impl Work {
         for setting in config {
             command.args(["-c", setting]);
         }
+        // Neither kind lets `ssh` read a password, a key file, or your
+        // configuration. Yours lets it use your agent.
+        let ssh = "ssh -F /dev/null -o BatchMode=yes -o PasswordAuthentication=no \
+                   -o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no \
+                   -o HostbasedAuthentication=no";
+        match credentials {
+            Credentials::Off => {
+                command
+                    .args(["-c", "credential.helper="])
+                    .env_remove("SSH_AUTH_SOCK")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .env(
+                        "GIT_SSH_COMMAND",
+                        format!("{ssh} -o IdentityAgent=none -o PubkeyAuthentication=no"),
+                    )
+                    // An empty home, so no `.netrc` gives git a password.
+                    .env("HOME", self.dir.join("home"));
+            }
+            Credentials::Yours => {
+                command.env("GIT_SSH_COMMAND", format!("{ssh} -o IdentityFile=none"));
+            }
+        }
         command
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_SSH_VARIANT", "ssh")
-            .env(
-                "GIT_SSH_COMMAND",
-                "ssh -F /dev/null -o BatchMode=yes -o IdentityAgent=none \
-                 -o PubkeyAuthentication=no -o PasswordAuthentication=no \
-                 -o KbdInteractiveAuthentication=no -o GSSAPIAuthentication=no \
-                 -o HostbasedAuthentication=no",
-            )
-            // An empty home, so no `.netrc` gives git a password.
-            .env("HOME", self.dir.join("home"))
+            .env("LC_ALL", "C")
             // No repository around the directory it works in, such as your
             // project's, gives git its configuration.
             .env(
@@ -264,10 +322,14 @@ fn run(mut command: Command, what: &str) -> io::Result<Output> {
     };
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(format!(
-            "git {what} failed: {}",
-            printable(said.trim_end())
-        )));
+        let message = format!("git {what} failed: {}", printable(said.trim_end()));
+        if ASKED.iter().any(|asked| said.contains(asked)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                Asked(message),
+            ));
+        }
+        return Err(io::Error::other(message));
     }
     Ok(output)
 }
@@ -423,7 +485,7 @@ impl Repo {
 fn index(fetched: &Path, commit: &Id, cache: &Path) -> io::Result<Vec<u8>> {
     let work = Work::new(cache)?;
     let output = work.dir.join("index");
-    let mut command = work.git();
+    let mut command = work.git(Credentials::Off);
     command
         .arg("--git-dir")
         .arg(fetched)

@@ -2854,8 +2854,9 @@ fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
     let output = scratch.ap(&dir, &["build"]);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.starts_with("Agentfile:3: "), "{message}");
-    assert!(message.contains(&remote.url), "{message}");
+    // It asks for your git credentials, which the build didn't approve.
+    let asked = format!("\n  CREDENTIALS {}\n", remote.url);
+    assert!(message.contains(&asked), "{message}");
     assert!(!marker.exists(), "a credential helper ran");
     assert!(remote.server.requests() > 0);
     assert!(source_lines(&dir).is_empty());
@@ -2968,7 +2969,11 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     }
     // `ap inspect` lists the grant.
     let inspect = scratch.ap(&dir, &["inspect", "notes"]);
-    assert!(stdout(&inspect).contains(&format!("\n  {grant}")), "{}", stdout(&inspect));
+    assert!(
+        stdout(&inspect).contains(&format!("\n  {grant}")),
+        "{}",
+        stdout(&inspect)
+    );
     let listed = scratch.ap(&dir, &["inspect", "--grants", "notes"]);
     assert!(stdout(&listed).contains(&grant), "{}", stdout(&listed));
 
@@ -2984,10 +2989,40 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
         "{}",
         stdout(&output)
     );
-    assert_eq!(remote.server.requests(), requests, "a rebuild made a request");
+    assert_eq!(
+        remote.server.requests(),
+        requests,
+        "a rebuild made a request"
+    );
     assert!(!marker.exists(), "a rebuild ran the credential helper");
     let again = scratch.ap(&dir, &["inspect", "--grants", "notes"]);
     assert_eq!(stdout(&again), stdout(&listed));
+
+    // A locked commit that neither the store nor the download cache holds
+    // is fetched without credentials first, then with yours. A lock that
+    // doesn't mark the source, such as one written while it was public,
+    // gains the mark.
+    let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    fs::write(
+        dir.join("Agentfile.lock"),
+        lock.replace(" credentials\n", "\n"),
+    )
+    .unwrap();
+    let rm = scratch.ap(&dir, &["rm", "notes"]);
+    assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
+    fs::remove_dir_all(scratch.home.join(".cache/ap/git")).unwrap();
+    let first = remote.server.requests();
+    let output = scratch.ap_granting(&dir, &["build"], &[], &grant);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(marker.exists(), "the credential helper didn't run");
+    let sent = remote.server.authorizations();
+    assert_eq!(sent[first], None, "the first request had credentials");
+    assert!(sent[first..].contains(&signed_in), "{sent:?}");
+    assert_eq!(
+        fs::read_to_string(dir.join("Agentfile.lock")).unwrap(),
+        lock
+    );
+    fs::remove_file(&marker).unwrap();
 
     // A rebuild that adds another private source asks again, and fetches
     // nothing with credentials until you approve them for it.
@@ -2997,7 +3032,10 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     let output = build_unattended(&scratch, &dir);
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    let wider = format!("asks for more than you approved:\n  CREDENTIALS {}\n", other.url);
+    let wider = format!(
+        "asks for more than you approved:\n  CREDENTIALS {}\n",
+        other.url
+    );
     assert!(message.contains(&wider), "{message}");
     assert!(!marker.exists(), "a credential helper ran");
     assert!(other.server.authorizations().iter().all(Option::is_none));
@@ -3023,7 +3061,10 @@ fn a_remote_that_refuses_for_another_reason_is_not_asked_with_credentials() {
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
     assert!(message.starts_with("Agentfile:3: "), "{message}");
-    assert!(message.contains(url.as_str()) && message.contains("403"), "{message}");
+    assert!(
+        message.contains(url.as_str()) && message.contains("403"),
+        "{message}"
+    );
     assert!(!marker.exists(), "a credential helper ran");
     assert_eq!(remote.server.authorizations(), [None]);
     assert!(source_lines(&dir).is_empty());
@@ -3057,14 +3098,20 @@ fn a_private_ssh_source_uses_your_ssh_agent_once_you_approve_it() {
     let path = std::env::join_paths([programs.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
         .unwrap();
     let socket = scratch.root.join("agent.sock");
-    let env = [("PATH", Path::new(&path)), ("SSH_AUTH_SOCK", socket.as_path())];
+    let env = [
+        ("PATH", Path::new(&path)),
+        ("SSH_AUTH_SOCK", socket.as_path()),
+    ];
     let url = format!("ssh://localhost{}", remote.bare.display());
     let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
 
     let output = scratch.ap_granting(&dir, &["build"], &env, "");
     assert_eq!(output.status.code(), Some(1));
     let message = stderr(&output);
-    assert!(message.contains(&format!("\n  CREDENTIALS {url}\n")), "{message}");
+    assert!(
+        message.contains(&format!("\n  CREDENTIALS {url}\n")),
+        "{message}"
+    );
     let tries = fs::read_to_string(&log).unwrap();
     assert!(
         tries.lines().all(|line| line.starts_with("agent= ")),
@@ -3283,17 +3330,24 @@ fn a_repo_source_with_a_subdirectory_fails() {
 }
 
 /// A `SOURCE` line holds a repository, a ref, the full name of the ref it
-/// resolved through or `-`, and a commit.
+/// resolved through or `-`, a commit, and `credentials` if it needed them.
 #[test]
 fn a_lock_reads_and_writes_a_source() {
     let commit = "0123456789abcdef0123456789abcdef01234567";
-    let text = format!("SOURCE https://localhost/a.git HEAD refs/heads/main {commit}\n");
+    let text = format!(
+        "SOURCE https://localhost/a.git HEAD refs/heads/main {commit}\n\
+         SOURCE https://localhost/b.git HEAD refs/heads/main {commit} credentials\n"
+    );
     let lock = ap::lock::Lock::read(&text).unwrap();
     assert_eq!(lock.text(), text);
+    let marked: Vec<bool> = lock.sources.iter().map(|it| it.credentials).collect();
+    assert_eq!(marked, [false, true]);
     for bad in [
         "SOURCE https://localhost/a.git HEAD refs/heads/main\n".to_string(),
         "SOURCE https://localhost/a.git HEAD refs/heads/main abc\n".to_string(),
         format!("SOURCE https://localhost/a.git HEAD main {commit}\n"),
+        format!("SOURCE https://localhost/a.git HEAD refs/heads/main {commit} history\n"),
+        "SOURCE https://localhost/a.git HEAD refs/heads/main credentials\n".to_string(),
         format!("SOURCE https://localhost/a.git HEAD \"refs/heads/a b\" {commit}\n"),
         format!(
             "SOURCE https://localhost/a.git HEAD - {commit}\nSOURCE https://localhost/a.git HEAD - {commit}\n"

@@ -37,6 +37,7 @@ pub fn grants(
 }
 
 /// Where an approval comes from.
+#[derive(Clone, Copy)]
 pub enum Approver<'a> {
     /// `--approve=<file>`, which approves exactly the grants it lists.
     File(&'a Path),

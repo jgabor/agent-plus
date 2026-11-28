@@ -6,8 +6,8 @@
 //! reach a destination, and which rule decides, as [`ap::network::answer`]
 //! decides it.
 //!
-//! Git credentials and the harness's own hosts aren't shown yet, because
-//! nothing fetches a source or resolves a harness.
+//! The harness's own hosts aren't shown yet, because nothing resolves a
+//! harness.
 
 use std::ffi::OsString;
 use std::path::Path;

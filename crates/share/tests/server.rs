@@ -631,6 +631,16 @@ fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
     mode(0o0);
     assert_eq!(size_of(&mut guest, linked), Err(EACCES));
     mode(0o755);
+    // Linked outside, unlinked beneath the root, and then removed outside,
+    // its path is still beneath the root, and it shows nothing.
+    fs::write(tree.root.join("dir/linked.txt"), INSIDE).unwrap();
+    let nested = guest.walk("dir/linked.txt").unwrap();
+    let away = tree.base.join("outside/linked-out.txt");
+    fs::hard_link(tree.root.join("dir/linked.txt"), &away).unwrap();
+    fs::remove_file(tree.root.join("dir/linked.txt")).unwrap();
+    fs::write(&away, CANARY).unwrap();
+    fs::remove_file(&away).unwrap();
+    assert_eq!(size_of(&mut guest, nested), Err(ENOENT));
     // Moved outside and then removed there, it has no name left, and still
     // shows nothing.
     let hello = guest.walk("hello.txt").unwrap();
@@ -654,8 +664,9 @@ fn a_known_file_the_host_moves_alone_outside_the_root_shows_no_attributes() {
     assert_eq!(size_of(&mut guest, hello), Err(ENOENT));
 }
 
+// spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the file has no name left, unless the agent removed its last name.
 #[test]
-fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() {
+fn a_file_with_no_name_left_shows_its_attributes_if_the_agent_removed_its_last_name() {
     let tree = Tree::new("unlinked-open");
     let mut guest = Guest::with(&tree.root, Mode::ReadWrite);
     let dir = guest.walk("dir").unwrap();
@@ -663,6 +674,19 @@ fn a_file_the_agent_unlinks_while_it_holds_it_open_still_shows_its_attributes() 
     guest.open(nested, 0).unwrap();
     assert_eq!(guest.remove(UNLINK, dir, b"nested.txt"), 0);
     assert_eq!(size_of(&mut guest, nested), Ok(6));
+    // Still, once the agent removes its directory too.
+    assert_eq!(guest.remove(RMDIR, 1, b"dir"), 0);
+    assert_eq!(size_of(&mut guest, nested), Ok(6));
+    // And a file the agent renames another over.
+    fs::write(tree.root.join("other.txt"), CANARY).unwrap();
+    let hello = guest.walk("hello.txt").unwrap();
+    assert_eq!(guest.rename(1, b"other.txt", 1, b"hello.txt", 0), 0);
+    assert_eq!(size_of(&mut guest, hello), Ok(INSIDE.len() as u64));
+    // A file the host removes has no name the agent removed.
+    fs::write(tree.root.join("removed.txt"), INSIDE).unwrap();
+    let removed = guest.walk("removed.txt").unwrap();
+    fs::remove_file(tree.root.join("removed.txt")).unwrap();
+    assert_eq!(size_of(&mut guest, removed), Err(ENOENT));
 }
 
 // spec(SHARE): In an `ro` or `rw` share, `fstat` on a file the agent holds open fails once the name the agent last reached the file by is removed, if the file has another hard link.

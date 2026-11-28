@@ -348,12 +348,12 @@ fn a_url_path_is_written_as_rfc_3986_allows() {
         error_of(line);
     }
     assert_eq!(
-        destination_of("NETWORK +https://example.com/a%20b/~c:d@e!$&'()*+,;=\n"),
+        destination_of("NETWORK +https://example.com/a%20b/~c:d@e!$&'()*+,=\n"),
         url(
             Scheme::Https,
             "example.com",
             None,
-            "/a%20b/~c:d@e!$&'()*+,;="
+            "/a%20b/~c:d@e!$&'()*+,="
         )
     );
 }
@@ -384,6 +384,30 @@ fn a_url_rule_path_has_no_empty_segment() {
         error_of(&format!("NETWORK +https://a.com{path}\n"));
     }
     for path in ["/", "/a/", "/a/b/"] {
+        assert_eq!(
+            destination_of(&format!("NETWORK +https://a.com{path}\n")),
+            url(Scheme::Https, "a.com", None, path)
+        );
+    }
+}
+
+// spec(NETWORK): A URL rule's path can't have a backslash or a `;`, even escaped, because a request path with one is denied.
+#[test]
+fn a_url_rule_path_has_no_backslash_or_semicolon() {
+    for path in [
+        "/a\\b",
+        "/a;b",
+        "/a;",
+        "/;",
+        "/a%5Cb",
+        "/a%5cb",
+        "/a%3Bb",
+        "/a%3bb",
+        "/a/b;v=1/c",
+    ] {
+        error_of(&format!("NETWORK +https://a.com{path}\n"));
+    }
+    for path in ["/a%5Bb", "/a%3Ab", "/a%255Cb", "/a=b"] {
         assert_eq!(
             destination_of(&format!("NETWORK +https://a.com{path}\n")),
             url(Scheme::Https, "a.com", None, path)

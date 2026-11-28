@@ -9,7 +9,7 @@
 mod common;
 
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -603,10 +603,18 @@ fn only_the_server_that_keeps_pending_changes_holds_the_record() {
     for server in servers.started {
         let pid = server.process.id();
         let process = Killed(server.process);
+        // `start` can return before the process is the server, with the
+        // arguments it starts with. The server answers an empty frame with
+        // one once it runs, and it has its own arguments by then.
+        let mut socket = File::from(server.socket);
+        socket.write_all(&[0; 8]).unwrap();
+        let mut answer = [1; 4];
+        socket.read_exact(&mut answer).unwrap();
+        assert_eq!(answer, [0; 4]);
         let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap();
         let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
         held.push((args[1].to_vec(), args.contains(&&b"keep"[..])));
-        drop(server.socket);
+        drop(socket);
         drop(process);
     }
 

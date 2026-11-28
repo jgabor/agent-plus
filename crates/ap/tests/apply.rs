@@ -2910,3 +2910,35 @@ fn a_directory_in_place_of_an_ignored_file_is_skipped() {
     let kept = format!("{}:docs/old.log", repository.branch());
     assert_eq!(repo::run(share, &["cat-file", "-p", &kept]), "kept");
 }
+
+/// From #837: a directory the agent made isn't a git-ignored file, though
+/// a pattern for files names it, so a branch import counts only the files
+/// in it that are. One in place of a git-ignored file its `HEAD` holds
+/// leaves that file out, and so counts it.
+// spec(SHARE): `ap diff` and `ap apply` report how many files they skipped, and why.
+#[test]
+fn a_directory_the_agent_made_isnt_a_git_ignored_file() {
+    let repository = Repository::new("directory-not-ignored", true, &[]);
+    let share = repository.share();
+    fs::write(share.join(".gitignore"), "*\n!*/\n!*.txt\n").unwrap();
+    let pending = &repository.pending;
+    repository.commit("x.log", "x\n");
+    repository.land();
+    record(pending, "DELETE \"x.log\"");
+    fs::remove_file(pending.join("tree/x.log")).unwrap();
+    dir(pending, "x.log", 0o755);
+    dir(pending, "docs", 0o755);
+    dir(pending, "docs/a", 0o755);
+    write(pending, "docs/a/b.txt", 0o644, b"b\n");
+    write(pending, "docs/a/c.log", 0o644, b"c\n");
+    let guest = &repository.guest;
+    fs::create_dir_all(guest.join("docs/a")).unwrap();
+    fs::write(guest.join("docs/a/b.txt"), "b\n").unwrap();
+    let tree = repository.tree_after(&[&["add", "docs/a/b.txt"]]);
+
+    let (output, during) = repository.apply_timed();
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "skipped 2 git-ignored files\n");
+    repository.assert_last_commit(&tree, during);
+}

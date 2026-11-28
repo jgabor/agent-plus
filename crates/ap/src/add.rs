@@ -10,7 +10,7 @@ use std::ffi::{CStr, OsStr};
 use std::fs::File;
 use std::io::{self, Cursor, Read};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -474,19 +474,14 @@ fn read_link(dir: &File, name: &CStr, stat: &libc::stat) -> io::Result<Vec<u8>> 
 
 /// The names in `dir`, without `.` and `..`.
 fn list(dir: &File) -> io::Result<Vec<std::ffi::CString>> {
-    // SAFETY: the descriptor is open. `fdopendir` takes the copy.
-    let fd = unsafe { libc::dup(dir.as_raw_fd()) };
-    if fd < 0 {
+    let copy = copy(dir)?;
+    // SAFETY: `copy` is a directory's descriptor that nothing else owns.
+    let stream = unsafe { libc::fdopendir(copy.as_raw_fd()) };
+    if stream.is_null() {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `fd` is a new descriptor of a directory that nothing else owns.
-    let stream = unsafe { libc::fdopendir(fd) };
-    if stream.is_null() {
-        let error = io::Error::last_os_error();
-        // SAFETY: `fdopendir` failed, so `fd` is still ours to close.
-        unsafe { libc::close(fd) };
-        return Err(error);
-    }
+    // The stream owns it now, and `closedir` below closes it.
+    let _ = copy.into_raw_fd();
     let mut names = Vec::new();
     let result = loop {
         // SAFETY: `errno` is this thread's, and `readdir` sets it only on
@@ -520,6 +515,19 @@ fn list(dir: &File) -> io::Result<Vec<std::ffi::CString>> {
     })
 }
 
+/// A copy of `dir`'s descriptor for `fdopendir` to take. It closes on
+/// exec, so a program that another thread starts doesn't inherit it.
+fn copy(dir: &File) -> io::Result<OwnedFd> {
+    // SAFETY: `F_DUPFD_CLOEXEC` takes an open descriptor and returns a new
+    // one.
+    let fd = unsafe { libc::fcntl(dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor is new, and nothing else owns it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 #[cfg(target_os = "linux")]
 unsafe fn errno() -> *mut libc::c_int {
     // SAFETY: always safe to call.
@@ -530,4 +538,33 @@ unsafe fn errno() -> *mut libc::c_int {
 unsafe fn errno() -> *mut libc::c_int {
     // SAFETY: always safe to call.
     unsafe { libc::__error() }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::fs::File;
+    use std::os::fd::AsRawFd;
+    use std::process::Command;
+
+    /// A program that another thread starts while `list` holds its copy of
+    /// the directory doesn't inherit it.
+    #[test]
+    fn a_program_started_while_a_directory_is_listed_does_not_inherit_it() {
+        let dir = std::env::temp_dir();
+        let copy = super::copy(&File::open(&dir).unwrap()).unwrap();
+        // Each shell checks once it runs, so its exec has closed what closes
+        // on exec. `$PPID` is this process, which holds the copy.
+        let check = |whose: &str| {
+            let script = format!("test /proc/{whose}/fd/{} -ef \"$0\"", copy.as_raw_fd());
+            let mut command = Command::new("sh");
+            command.env("LC_ALL", "C").arg("-c").arg(script).arg(&dir);
+            command.status().unwrap().success()
+        };
+
+        let ours = check("$PPID");
+        let its = check("self");
+        drop(copy);
+
+        assert_eq!((ours, its), (true, false));
+    }
 }

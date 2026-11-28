@@ -2,7 +2,7 @@
 
 use crate::Problem;
 use crate::json::{self, Json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +37,9 @@ pub struct Package {
     pub directory: PathBuf,
     /// A test here is linked against a `fake-*` crate, so it earns no score.
     pub fake: bool,
+    /// The workspace's packages that a build of this one compiles, itself
+    /// included, in name order. Dev-dependencies aren't.
+    pub built_from: Vec<String>,
 }
 
 struct Dependency {
@@ -96,23 +99,33 @@ pub fn packages(root: &Path) -> Result<Vec<Package>, Problem> {
             name: name.to_string(),
             directory: directory.to_path_buf(),
             fake: false,
+            built_from: Vec::new(),
         });
     }
     for package in &mut packages {
-        package.fake = links_a_fake(&package.name, &dependencies);
+        package.fake = linked(&package.name, &dependencies, true)
+            .iter()
+            .any(|name| name.starts_with("fake-"));
+        package.built_from = linked(&package.name, &dependencies, false)
+            .into_iter()
+            .filter(|name| dependencies.contains_key(*name))
+            .map(str::to_string)
+            .collect();
     }
     Ok(packages)
 }
 
-/// Walks a package's dependencies. Its own dev-dependencies are linked into
-/// its tests, but those of the packages it depends on are not.
-fn links_a_fake(package: &str, dependencies: &HashMap<String, Vec<Dependency>>) -> bool {
-    let mut seen = HashSet::new();
-    let mut pending = vec![(package, true)];
+/// The packages linked into a package, itself included. With `own_dev`,
+/// its dev-dependencies are too, as in its tests, but never those of the
+/// packages it depends on.
+fn linked<'a>(
+    package: &'a str,
+    dependencies: &'a HashMap<String, Vec<Dependency>>,
+    own_dev: bool,
+) -> BTreeSet<&'a str> {
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![(package, own_dev)];
     while let Some((name, include_dev)) = pending.pop() {
-        if name.starts_with("fake-") {
-            return true;
-        }
         if !seen.insert(name) {
             continue;
         }
@@ -122,5 +135,5 @@ fn links_a_fake(package: &str, dependencies: &HashMap<String, Vec<Dependency>>) 
             }
         }
     }
-    false
+    seen
 }

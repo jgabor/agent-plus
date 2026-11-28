@@ -477,7 +477,8 @@ fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
 }
 
 /// The packages under `crates/` that `ap` and `fake-harness` are built from,
-/// which the bench builds. A test fails while a package is on neither list.
+/// which the bench builds. A test fails while a package is on neither list,
+/// or while this one isn't what they are built from.
 #[cfg(test)]
 const BENCHED: [&str; 11] = [
     "agentfile",
@@ -608,6 +609,32 @@ mod tests {
             named += 1;
         }
         assert_eq!(named, BENCHED.len() + NOT_BENCHED.len());
+    }
+
+    /// A new dependency of either moves a package onto the benched side.
+    #[test]
+    fn the_benched_packages_are_what_ap_and_the_fake_harness_are_built_from() {
+        let root = crate::workspace::root().unwrap();
+        let crates = root.join("crates");
+        let packages = crate::workspace::packages(&root).unwrap();
+        let mut built: Vec<String> = packages
+            .iter()
+            .filter(|package| ["ap", "fake-harness"].contains(&&*package.name))
+            .flat_map(|package| package.built_from.iter())
+            .map(|name| {
+                let package = packages.iter().find(|p| p.name == *name).unwrap();
+                let directory = package.directory.strip_prefix(&crates).unwrap_or_else(|_| {
+                    panic!("`{name}` is built into the bench from outside `crates/`")
+                });
+                directory.to_string_lossy().into_owned()
+            })
+            .collect();
+        built.sort();
+        built.dedup();
+        assert_eq!(
+            built, BENCHED,
+            "`BENCHED` must be what `ap` and `fake-harness` are built from"
+        );
     }
 
     fn reasons(items: &[&str]) -> Vec<String> {

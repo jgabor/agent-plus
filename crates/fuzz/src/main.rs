@@ -993,6 +993,10 @@ fn same_skill(skill: &extensions::skill::Skill, yaml: &str) {
         if let Some(theirs) = text(key) {
             assert_eq!(ours, Some(&theirs), "`{key}`");
         }
+        if ours.is_some() {
+            let key = Yaml::String(key.to_string());
+            assert!(mapping.contains_key(&key), "the loader has no `{key:?}`");
+        }
     }
     if let Some(Yaml::Hash(metadata)) = mapping.get(&Yaml::String("metadata".to_string())) {
         for (key, value) in metadata {

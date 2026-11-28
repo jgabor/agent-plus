@@ -591,7 +591,7 @@ fn a_key_that_readers_resolve_differently_is_refused() {
             "pdf",
             "---\nname: pdf\ndescription: d\nx: &a allowed-tools\n*a : Bash\n---\n"
         ),
-        Problem::Key("an alias")
+        Problem::Key("an alias as a key")
     );
     // A merge key is `license` to a reader that merges.
     assert_eq!(
@@ -599,8 +599,23 @@ fn a_key_that_readers_resolve_differently_is_refused() {
             "pdf",
             "---\nname: pdf\ndescription: d\n<<: {license: MIT}\n---\n"
         ),
-        Problem::Key("`<<`")
+        Problem::Key("`<<` as a key")
     );
+    // A tag can make any key a merge key.
+    for key in [
+        "!!merge x",
+        "!!merge '<<'",
+        "!<tag:yaml.org,2002:merge> x",
+        "!!str name",
+        "!x license",
+    ] {
+        let text = format!("---\nname: pdf\ndescription: d\n{key}: {{license: MIT}}\n---\n");
+        assert_eq!(
+            problem("pdf", &text),
+            Problem::Key("a key with a tag"),
+            "{key}"
+        );
+    }
     assert_eq!(
         find(
             &tree(&[(
@@ -614,7 +629,7 @@ fn a_key_that_readers_resolve_differently_is_refused() {
         .to_string(),
         "skills/pdf/SKILL.md: its front matter has `<<` as a key, which YAML readers read in different ways"
     );
-    // Quoted, it is only text.
+    // Quoted, with no tag, it is only text.
     let skill = read(
         "pdf",
         "---\nname: pdf\ndescription: d\n'<<': {license: MIT}\n---\n",

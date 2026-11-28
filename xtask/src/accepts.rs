@@ -480,10 +480,11 @@ fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
 /// which the bench builds. A test fails while a package is on neither list,
 /// or while this one isn't what they are built from.
 #[cfg(test)]
-const BENCHED: [&str; 11] = [
+const BENCHED: [&str; 12] = [
     "agentfile",
     "ap",
     "erofs",
+    "extensions",
     "fake-harness",
     "git",
     "guest",

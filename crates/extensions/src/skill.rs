@@ -78,8 +78,9 @@ pub enum Problem {
     /// `metadata` isn't a mapping from scalars to scalars.
     Metadata,
     /// A top-level key that YAML readers resolve in different ways: an
-    /// alias, or the merge key `<<`. Either could give a key that the
-    /// specification defines a value this reader never sees.
+    /// alias, the merge key `<<`, or a key with a tag, which can make any
+    /// key a merge key. Each could give a key that the specification
+    /// defines a value this reader never sees.
     Key(&'static str),
     /// `name` breaks the specification's rules for one.
     Name(String),
@@ -127,7 +128,7 @@ impl fmt::Display for Problem {
             Problem::Metadata => write!(f, "`metadata` isn't a mapping from text to text"),
             Problem::Key(what) => write!(
                 f,
-                "its front matter has {what} as a key, which YAML readers read in different ways"
+                "its front matter has {what}, which YAML readers read in different ways"
             ),
             Problem::Name(name) => write!(
                 f,
@@ -338,9 +339,10 @@ impl Keys {
         loop {
             let key = match events.next()? {
                 Event::MappingEnd => break,
-                Event::Alias(_) => return Err(Problem::Key("an alias")),
+                Event::Alias(_) => return Err(Problem::Key("an alias as a key")),
+                Event::Scalar(_, _, _, Some(_)) => return Err(Problem::Key("a key with a tag")),
                 Event::Scalar(key, TScalarStyle::Plain, ..) if key == "<<" => {
-                    return Err(Problem::Key("`<<`"));
+                    return Err(Problem::Key("`<<` as a key"));
                 }
                 Event::Scalar(key, ..) if seen.contains(&key) => {
                     return Err(Problem::Repeated(key));

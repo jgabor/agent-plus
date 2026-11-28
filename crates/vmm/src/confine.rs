@@ -121,6 +121,7 @@ const AF_INET: u32 = 2;
 const AF_INET6: u32 = 10;
 const CLONE3: u32 = 435;
 const GETRANDOM: u32 = 318;
+const RESTART_SYSCALL: u32 = 219;
 
 /// One BPF instruction, as `struct sock_filter`.
 #[repr(C)]
@@ -428,6 +429,10 @@ fn memory_rules() -> [Rule; 2] {
     ]
 }
 
+/// Every filter allows `restart_syscall`, which the kernel makes to go on
+/// with a wait for a time, such as `poll` with a timeout, once a stop or a
+/// freeze has interrupted it. It goes on only with the call it interrupted,
+/// which the filter let through.
 fn compile(rules: &[Rule]) -> Vec<Instruction> {
     let kill = op(RETURN, 0, 0, RET_KILL_PROCESS);
     let mut program = vec![
@@ -438,7 +443,7 @@ fn compile(rules: &[Rule]) -> Vec<Instruction> {
         op(JUMP_AT_LEAST, 0, 1, X32_SYSCALLS),
         kill,
     ];
-    for rule in rules {
+    for rule in std::iter::once(&Rule::Allow(RESTART_SYSCALL)).chain(rules) {
         let (number, body) = compiled(rule);
         program.push(op(JUMP_EQUAL, 0, body.len() as u8, number));
         program.extend(body);
@@ -1242,6 +1247,126 @@ mod tests {
             "{:?}\n{stderr}",
             output.status
         );
+    }
+
+    /// A call that waits for a time, such as `poll` with a timeout, goes on
+    /// through `restart_syscall` when a stop or a freeze interrupted it. The
+    /// network process waits so, and so does a VMM thread that parks for a
+    /// time, and the network process is in the process group of `ap run`,
+    /// which a terminal stops.
+    #[test]
+    fn every_filter_lets_a_wait_go_on_after_a_stop() {
+        let socket = SOCKET as RawFd;
+        let filters = [
+            rules(PID, TID, &[]),
+            share_server_rules(socket, Changes::Nothing, &[], None),
+            share_server_rules(socket, Changes::Files, &[TIMES as RawFd], None),
+            share_server_rules(socket, Changes::FilesModesAndTimes, &[], None),
+            share_times_rules(socket),
+            network_rules(socket),
+            network_connecting_rules(socket),
+        ];
+        for rules in &filters {
+            let restarted = run_rules(rules, AUDIT_ARCH_X86_64, RESTART_SYSCALL, [0; 6]);
+            assert_eq!(restarted, RET_ALLOW);
+        }
+    }
+
+    /// Set in the process that
+    /// [`a_confined_network_process_waits_on_after_a_stop`] starts, which
+    /// confines itself.
+    const WAITING_VARIABLE: &str = "VMM_CONFINED_WAIT";
+
+    /// `struct pollfd`.
+    #[repr(C)]
+    struct PollFd {
+        fd: c_int,
+        events: i16,
+        revents: i16,
+    }
+
+    /// The process that [`a_confined_network_process_waits_on_after_a_stop`]
+    /// starts. It waits on its link, standard input, as the network process
+    /// does, once it has said on standard output that it is confined. It
+    /// exits 0 if the link woke it, and 2 if the wait ran out.
+    #[used]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    static WAITING_PROCESS: extern "C" fn() = waiting_process;
+
+    extern "C" fn waiting_process() {
+        if std::env::var_os(WAITING_VARIABLE).is_none() {
+            return;
+        }
+        confine_network(0).unwrap();
+        let mut link = PollFd {
+            fd: 0,
+            events: 1,
+            revents: 0,
+        };
+        // SAFETY: the byte and `link` outlive the calls, which take plain
+        // integers besides, and `_exit` ends the process at once.
+        unsafe {
+            assert_eq!(syscall(WRITE as c_long, STDOUT, c"w".as_ptr(), 1), 1);
+            let polled = syscall(POLL as c_long, &raw mut link, 1, 60_000);
+            _exit(if polled == 1 { 0 } else { 2 });
+        }
+    }
+
+    /// The state that `/proc/<pid>/stat` gives a process, or none once it
+    /// has gone.
+    #[cfg(target_os = "linux")]
+    fn state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        stat.rsplit_once(") ")?.1.chars().next()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_state(process: &mut std::process::Child, wanted: char) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while state(process.id()) != Some(wanted) {
+            if let Some(status) = process.try_wait().unwrap() {
+                panic!("the process exited before it was {wanted}: {status:?}");
+            }
+            assert!(std::time::Instant::now() < deadline, "never {wanted}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A terminal that stops `ap run` stops its network process too, while
+    /// it waits on its link, and continues it after. The process goes on
+    /// waiting. Only Linux runs the process before the test harness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_confined_network_process_waits_on_after_a_stop() {
+        use std::io::{Read, Write};
+        use std::process::Stdio;
+        const SIGCONT: c_int = 18;
+        const SIGSTOP: c_int = 19;
+        unsafe extern "C" {
+            fn kill(pid: c_int, signal: c_int) -> c_int;
+        }
+        let mut process = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(WAITING_VARIABLE, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = process.id() as c_int;
+        let mut confined = [0];
+        let mut said = process.stdout.take().unwrap();
+        said.read_exact(&mut confined).unwrap();
+        // Once it is confined, the process sleeps nowhere but in its wait.
+        wait_for_state(&mut process, 'S');
+        // SAFETY: `kill` takes plain integers, and the process is this
+        // test's child, which hasn't been waited for.
+        assert_eq!(unsafe { kill(pid, SIGSTOP) }, 0);
+        wait_for_state(&mut process, 'T');
+        // SAFETY: as above.
+        assert_eq!(unsafe { kill(pid, SIGCONT) }, 0);
+        // A process the filter killed has closed its end already.
+        let _ = process.stdin.take().unwrap().write_all(b"x");
+        let status = process.wait().unwrap();
+        assert_eq!(status.code(), Some(0), "{status:?}");
     }
 
     #[test]

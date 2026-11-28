@@ -1078,58 +1078,23 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         ));
     }
     shares.extend(typed);
-    // SPEC.md's MODE section: every share joins the harness's workspace. The
-    // share from `--share` is a directory.
+    // The harness layer is named for the version the build locked.
+    let version = (record.layers.iter())
+        .find_map(|layer| ap::lock::labeled_version(&layer.instruction, harness))
+        .ok_or_else(|| {
+            let shown = ap::adapter::reserved(harness).harness;
+            fail(format!("agent {name} has no {shown} layer"))
+        })?;
+    if harness == Harness::Claude {
+        // The adapter's variables come after `ENV`'s, so they win.
+        for (key, value) in ap::adapter::claude::environment(version, settings.effort) {
+            env.insert(key.into_bytes(), value.into_bytes());
+        }
+    }
+    // The share from `--share` is a directory.
     let kinds = (checked.iter().map(|(_, directory)| *directory)).chain(std::iter::repeat(true));
-    let workspace = ap::adapter::workspace(shares.iter().map(String::as_str).zip(kinds));
-    let harness = super::build::harness_path(settings.agent.harness);
-    // `--` keeps a prompt that starts with `-` from reading as a flag.
-    let argv = match settings.agent.harness {
-        Harness::Claude => {
-            // The harness layer is named for the version the build locked.
-            let version = record
-                .layers
-                .iter()
-                .find_map(|layer| ap::lock::labeled_version(&layer.instruction, Harness::Claude))
-                .ok_or_else(|| fail(format!("agent {name} has no Claude Code layer")))?;
-            // The adapter's variables come after `ENV`'s, so they win.
-            for (key, value) in ap::adapter::claude::environment(version, settings.effort) {
-                env.insert(key.into_bytes(), value.into_bytes());
-            }
-            let mut argv = vec![harness];
-            if !interactive {
-                argv.push("-p".to_owned());
-            }
-            argv.extend(ap::adapter::claude::arguments(
-                version,
-                settings.model.as_deref(),
-                settings.effort,
-                settings.mode,
-            ));
-            argv.extend(ap::adapter::claude::workspace(&workspace));
-            argv.push("--".to_owned());
-            argv
-        }
-        Harness::Codex => {
-            // The harness layer is named for the version the build locked.
-            let version = record
-                .layers
-                .iter()
-                .find_map(|layer| ap::lock::labeled_version(&layer.instruction, Harness::Codex))
-                .ok_or_else(|| fail(format!("agent {name} has no Codex layer")))?;
-            let mut argv = vec![harness];
-            argv.extend(ap::adapter::codex::arguments(
-                version,
-                settings.model.as_deref(),
-                settings.effort,
-                settings.mode,
-                interactive,
-            ));
-            argv.extend(ap::adapter::codex::workspace(&workspace));
-            argv.push("--".to_owned());
-            argv
-        }
-    };
+    let shared = shares.iter().map(String::as_str).zip(kinds);
+    let argv = harness_argv(&settings, version, interactive, shared);
 
     let layers = record
         .layers
@@ -1169,6 +1134,48 @@ fn start(args: &Args) -> Result<Prepared, Error> {
         secrets: hidden,
     };
     Ok((root, layers, roots, start, network, injection))
+}
+
+/// The harness's command line up to the prompt, for the `version` the build
+/// locked and the guest paths of the run's shares, each with whether it is a
+/// directory. SPEC.md's MODE section: every share joins the harness's
+/// workspace.
+fn harness_argv<'a>(
+    settings: &Settings,
+    version: &str,
+    interactive: bool,
+    shares: impl IntoIterator<Item = (&'a str, bool)>,
+) -> Vec<String> {
+    let workspace = ap::adapter::workspace(shares);
+    let mut argv = vec![super::build::harness_path(settings.agent.harness)];
+    let model = settings.model.as_deref();
+    match settings.agent.harness {
+        Harness::Claude => {
+            if !interactive {
+                argv.push("-p".to_owned());
+            }
+            argv.extend(ap::adapter::claude::arguments(
+                version,
+                model,
+                settings.effort,
+                settings.mode,
+            ));
+            argv.extend(ap::adapter::claude::workspace(&workspace));
+        }
+        Harness::Codex => {
+            argv.extend(ap::adapter::codex::arguments(
+                version,
+                model,
+                settings.effort,
+                settings.mode,
+                interactive,
+            ));
+            argv.extend(ap::adapter::codex::workspace(&workspace));
+        }
+    }
+    // `--` keeps a prompt that starts with `-` from reading as a flag.
+    argv.push("--".to_owned());
+    argv
 }
 
 /// Checks each `SHARE` again, as SPEC.md's SHARE and Grants sections say a
@@ -1354,6 +1361,35 @@ mod tests {
 
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    // spec(MODE): The harness's workspace is the working directory plus every `SHARE` and `REPO`.
+    #[test]
+    fn a_run_gives_the_harness_its_workspace() {
+        let shares = [
+            ("/home/agent/project", true),
+            ("/srv/notes/read.txt", false),
+        ];
+        let codex = r#"projects={"/home/agent/project"={trust_level="trusted"},"/srv/notes"={trust_level="trusted"}}"#;
+        let add_dirs = [
+            "--add-dir",
+            "/home/agent/project",
+            "--add-dir",
+            "/srv/notes",
+        ];
+        for (agent, workspace) in [
+            ("claude", add_dirs.to_vec()),
+            ("codex", [&add_dirs[..], &["-c", codex]].concat()),
+        ] {
+            let instructions = agentfile::parse(&format!("AGENT {agent}:0.0.0\n")).unwrap();
+            let settings = Settings::read(&instructions).unwrap();
+            for interactive in [false, true] {
+                let argv = harness_argv(&settings, "0.0.0", interactive, shares);
+                let argv: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let tail = [&workspace[..], &["--"]].concat();
+                assert!(argv.ends_with(&tail), "{agent} {interactive}: {argv:?}");
+            }
         }
     }
 

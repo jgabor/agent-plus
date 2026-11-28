@@ -1428,7 +1428,10 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     assert_eq!(status.code(), Some(0), "{printed}");
     assert_eq!(printed, "", "{status:?}");
     ended(&[vm], Instant::now(), "the VM outlived ap stop");
-    ended(&[run], Instant::now(), "ap run outlived ap stop");
+    // `ap stop` returns when `ap run` hangs up, as it exits, and the last of
+    // its threads can still be ending then.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    ended(&[run], deadline, "ap run outlived ap stop");
     assert_eq!(scratch.ps(), Vec::<String>::new());
     assert_eq!(scratch.status_of(&name).as_deref(), Some("exited 137"));
     assert_eq!(stty(&terminal, &["-g"]), modes);

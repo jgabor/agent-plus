@@ -124,8 +124,9 @@ pub fn arguments(harness: &[&str], instructions: &[Instruction]) -> Vec<OsString
 /// `args` that [`arguments`] made. The link it returns is a socket that
 /// keeps message boundaries, for [`crate::boot::boot_linked`]. It returns
 /// once the process has sent its authority, and been sent `injection`. The
-/// process starts without a hidden secret's variable. It ends once every
-/// copy of the link is closed.
+/// process starts without a hidden secret's variable, or one that asks Rust
+/// for a backtrace, which the process's filter kills it for. It ends once
+/// every copy of the link is closed.
 pub fn start(program: &Path, args: &[OsString], injection: &Injection) -> io::Result<Started> {
     let (mine, theirs) = link()?;
     let (answers, asks) = link()?;
@@ -133,6 +134,7 @@ pub fn start(program: &Path, args: &[OsString], injection: &Injection) -> io::Re
     for secret in &injection.secrets {
         command.env_remove(&secret.name);
     }
+    command.env_remove("RUST_BACKTRACE");
     let process = command
         .arg0(PROGRAM)
         .args(args)
@@ -475,5 +477,89 @@ mod tests {
         ));
         assert!(!decrypts_under("NETWORK -\nNETWORK +github.com\n"));
         assert!(!decrypts_under("NETWORK +\nNETWORK -gist.github.com\n"));
+    }
+
+    /// Set in the process that
+    /// [`a_network_process_panics_under_rust_backtrace`] starts, which
+    /// starts a network process as `ap run` does.
+    const PANICKING_VARIABLE: &str = "AP_NETWORK_PANIC";
+    /// What the network process's panic says.
+    const PANIC: &str = "a confined network process panicked";
+    /// The status a Rust program exits with once its panic unwinds.
+    const PANICKED: i32 = 101;
+
+    /// The processes that [`a_network_process_panics_under_rust_backtrace`]
+    /// starts. They run before the test harness, so that each is its
+    /// process's only thread, as `ap run` and its network process are when
+    /// one starts the other.
+    #[used]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    static PANICKING_PROCESS: extern "C" fn() = panicking_process;
+
+    extern "C" fn panicking_process() {
+        if std::env::var_os(PANICKING_VARIABLE).is_none() {
+            return;
+        }
+        // As the Rust runtime does before `main`, which hasn't run.
+        // SAFETY: ignoring a signal changes no memory.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let cmdline = std::fs::read("/proc/self/cmdline").unwrap();
+        let status = match cmdline.starts_with(format!("{PROGRAM}\0").as_bytes()) {
+            true => panicking_network(),
+            false => starting_network(),
+        };
+        // The process ends here, before the test harness starts.
+        // SAFETY: `_exit` ends the process at once.
+        unsafe { libc::_exit(status) };
+    }
+
+    /// Starts this program as `ap run` starts its network process, and
+    /// returns the status that process exits with, or 128 and the signal
+    /// that killed it, as a shell says.
+    fn starting_network() -> c_int {
+        use std::os::unix::process::ExitStatusExt;
+        let program = std::env::current_exe().unwrap();
+        let mut started = start(&program, &[], &Injection::default()).unwrap();
+        let status = started.process.wait().unwrap();
+        (status.code()).unwrap_or_else(|| 128 + status.signal().unwrap())
+    }
+
+    /// Does what the network process does before it confines itself,
+    /// confines itself, and panics.
+    fn panicking_network() -> c_int {
+        // SAFETY: standard output is the socket that `start` passed, and
+        // nothing else in this process owns it.
+        let lookups = unsafe { UnixDatagram::from(OwnedFd::from_raw_fd(STDOUT)) };
+        let pem = b"-----BEGIN CERTIFICATE-----\n";
+        lookups.send(pem).unwrap();
+        Injection::receive(lookups.as_fd()).unwrap();
+        // SAFETY: standard input is the link that `start` passed.
+        confine(unsafe { BorrowedFd::borrow_raw(STDIN) }).unwrap();
+        match std::panic::catch_unwind(|| panic!("{PANIC}")) {
+            Ok(()) => 0,
+            Err(_) => PANICKED,
+        }
+    }
+
+    /// A backtrace makes calls that the network process's filter kills it
+    /// for, such as one that opens this program's file. This starts this program again, with
+    /// `RUST_BACKTRACE` set, and that process starts a network process as
+    /// `ap run` does, which confines itself and panics. Only Linux runs the
+    /// processes before the test harness.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_network_process_panics_under_rust_backtrace() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env(PANICKING_VARIABLE, "1")
+            .env("RUST_BACKTRACE", "1")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.code() == Some(PANICKED) && stderr.contains(PANIC),
+            "{:?}\n{stderr}",
+            output.status
+        );
     }
 }

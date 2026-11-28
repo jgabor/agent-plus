@@ -407,7 +407,7 @@ fn a_url_rule_path_has_no_backslash_or_semicolon() {
     ] {
         error_of(&format!("NETWORK +https://a.com{path}\n"));
     }
-    for path in ["/a%5Bb", "/a%3Ab", "/a=b"] {
+    for path in ["/a%5Bb", "/a%3Ab", "/a%255Cb", "/a=b"] {
         assert_eq!(
             destination_of(&format!("NETWORK +https://a.com{path}\n")),
             url(Scheme::Https, "a.com", None, path)

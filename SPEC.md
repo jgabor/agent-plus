@@ -1666,6 +1666,8 @@ How it works:
 - In an `ro` or `rw` share, `fstat` on a file the agent holds open fails
   once the name the agent last reached the file by is removed, if the file
   has another hard link.
+- In an `ro` or `rw` share, `fstat` on a file the agent holds open fails
+  once the file has no name left, unless the agent removed its last name.
 - In an `rw` share, the agent can give back a mode it took away from a
   file or a directory, while the agent's kernel still holds the file in its
   cache.

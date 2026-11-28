@@ -850,8 +850,8 @@ fn url(scheme: &str, rest: &str) -> Result<Destination, String> {
     if path.contains(';') || lower.contains("%5c") || lower.contains("%3b") {
         return Err("its path has a backslash or a `;`".to_string());
     }
-    if path.split('/').any(|segment| {
-        let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+    if lower.split('/').any(|segment| {
+        let segment = segment.replace("%2e", ".");
         segment == "." || segment == ".."
     }) {
         return Err("its path has a `.` or `..` segment".to_string());

@@ -130,7 +130,9 @@ pub struct Hold {
     /// The activity lock, shared for a build or a run of the tests, and held
     /// alone by a bench.
     activity: Held,
-    /// A bench's turnstile, or a slot.
+    /// A bench's turnstile.
+    turnstile: Option<Turnstile>,
+    /// A slot.
     files: Vec<File>,
     /// The merge slot's holder took the place, and never gives it up.
     ahead: bool,
@@ -143,6 +145,7 @@ impl Hold {
             target: None,
             place: Held::No,
             activity: Held::No,
+            turnstile: None,
             files: Vec::new(),
             ahead: false,
         }
@@ -352,8 +355,8 @@ pub fn bench_waits(directory: &Path) -> Result<bool, Problem> {
             Err(TryLockError::Error(e)) => Err(failed(e)),
         }
     };
-    let turnstile = open(directory, "turnstile.lock")?;
-    if free(&turnstile, false)? {
+    let turnstile = Turnstile::open(directory)?;
+    if free(&turnstile.0, false)? {
         return Ok(false);
     }
     let activity = open(directory, "activity.lock")?;
@@ -637,8 +640,8 @@ fn is_executable(path: &Path) -> bool {
 /// a bench isn't starved by a stream of new holders.
 fn take_shared(directory: &Path) -> Result<File, Problem> {
     let mut waiting = None;
-    let turnstile = open(directory, "turnstile.lock")?;
-    take(&turnstile, false, Wait::Activity, &mut waiting).map_err(failed)?;
+    let turnstile = Turnstile::open(directory)?;
+    take(&turnstile.0, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
     take(&activity, true, Wait::Activity, &mut waiting).map_err(failed)?;
     Ok(activity)
@@ -646,14 +649,31 @@ fn take_shared(directory: &Path) -> Result<File, Problem> {
 
 fn take_exclusive(directory: &Path) -> Result<Hold, Problem> {
     let mut waiting = None;
-    let turnstile = open(directory, "turnstile.lock")?;
-    take(&turnstile, false, Wait::Activity, &mut waiting).map_err(failed)?;
+    let turnstile = Turnstile::open(directory)?;
+    take(&turnstile.0, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let activity = open(directory, "activity.lock")?;
     take(&activity, false, Wait::Activity, &mut waiting).map_err(failed)?;
     let mut hold = Hold::new(directory);
     hold.activity = Held::Own(activity);
-    hold.files.push(turnstile);
+    hold.turnstile = Some(turnstile);
     Ok(hold)
+}
+
+/// The turnstile's file. A child that another thread starts shares each open
+/// file until it runs its program, and a lock lasts until every copy closes,
+/// so this unlocks as it drops, and doesn't wait for the close.
+struct Turnstile(File);
+
+impl Turnstile {
+    fn open(directory: &Path) -> Result<Turnstile, Problem> {
+        Ok(Turnstile(open(directory, "turnstile.lock")?))
+    }
+}
+
+impl Drop for Turnstile {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
 }
 
 /// Waiters queue for a place one at a time, behind the merge slot's holder,
@@ -769,10 +789,11 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ticket, bench_waits, open, take_exclusive, take_place, take_shared};
+    use super::{Ticket, Turnstile, bench_waits, open, take_exclusive, take_place, take_shared};
     use std::fs::{self, TryLockError};
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::mpsc::{Receiver, channel};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -862,6 +883,31 @@ mod tests {
         let bench = take_exclusive(&path).map_err(|e| e.0).unwrap();
         assert!(!waits(), "the bench holds the lock");
         drop(bench);
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    /// A child that another thread starts keeps a copy of each open file
+    /// until it runs its program, as this one does until its input closes.
+    /// The turnstile frees as it drops all the same, so no bench seems to
+    /// wait.
+    #[test]
+    fn the_turnstile_frees_while_a_child_keeps_it_open() {
+        let path = directory("forked");
+        let waits = || bench_waits(&path).map_err(|e| e.0).unwrap();
+        let shared = take_shared(&path).map_err(|e| e.0).unwrap();
+        let turnstile = Turnstile::open(&path).map_err(|e| e.0).unwrap();
+        turnstile.0.lock().unwrap();
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(turnstile.0.try_clone().unwrap())
+            .spawn()
+            .unwrap();
+        assert!(waits(), "a bench waits for a holder that shares the lock");
+        drop(turnstile);
+        assert!(!waits(), "no bench keeps the turnstile");
+        drop(child.stdin.take());
+        assert!(child.wait().unwrap().success());
+        drop(shared);
         fs::remove_dir_all(&path).unwrap();
     }
 

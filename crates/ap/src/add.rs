@@ -546,8 +546,8 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::process::Command;
 
-    /// A program that another thread starts while `list` holds its copy of
-    /// the directory doesn't inherit it.
+    /// A program that starts while `list` holds its copy of the directory,
+    /// as one that another thread starts would, doesn't inherit it.
     #[test]
     fn a_program_started_while_a_directory_is_listed_does_not_inherit_it() {
         let dir = std::env::temp_dir();

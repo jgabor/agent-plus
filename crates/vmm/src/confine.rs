@@ -4,7 +4,8 @@
 //!
 //! What is left can't start a process or a program, or reach a host file:
 //! every call that takes a path is missing, and memory can be mapped only
-//! anonymously, so a file left open can't be read either. The exceptions are
+//! anonymously, so a file left open can't be read either. None of that
+//! memory may run, so the code can't load more of itself. The exceptions are
 //! the descriptors the caller names, which may be read, at an offset or not,
 //! and nothing else.
 //! Calls that could reach past this process are narrowed by their arguments,
@@ -190,10 +191,8 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
         AllowIf(IOCTL, 1, vec![KVM_RUN as u32, KVM_IRQ_LINE as u32]),
         Allow(FUTEX),
         Allow(WRITE),
-        AllowIfSet(MMAP, 3, MAP_ANONYMOUS),
         Allow(MUNMAP),
         Allow(MREMAP),
-        Allow(MPROTECT),
         Allow(MADVISE),
         Allow(BRK),
         Allow(RT_SIGPROCMASK),
@@ -219,6 +218,7 @@ fn rules(pid: u32, tid: u32, readable: &[RawFd]) -> Vec<Rule> {
         Allow(EXIT),
         Allow(EXIT_GROUP),
     ];
+    rules.extend(memory_rules());
     if !readable.is_empty() {
         let readable: Vec<u32> = readable.iter().map(|fd| *fd as u32).collect();
         rules.push(AllowIf(READ, 0, readable.clone()));
@@ -417,8 +417,8 @@ fn network_common_rules(link: RawFd) -> Vec<Rule> {
     rules
 }
 
-/// How the share server and the network process map memory, and change
-/// what it allows. They map only anonymous memory, and none of it may run.
+/// How every process this module confines maps memory, and changes what it
+/// allows. They map only anonymous memory, and none of it may run.
 /// musl's allocator maps pages that allow nothing when the program break
 /// can't grow, and lets them be read and written with `mprotect`.
 fn memory_rules() -> [Rule; 2] {
@@ -1163,13 +1163,14 @@ mod tests {
     }
 
     /// musl's allocator maps pages that allow nothing when the program
-    /// break can't grow, and opens them with `mprotect`. No filter but the
-    /// VMM's lets memory run.
+    /// break can't grow, and opens them with `mprotect`. No filter lets
+    /// memory run.
     #[test]
-    fn the_share_server_and_the_network_process_open_memory_that_never_runs() {
+    fn every_filter_opens_memory_that_never_runs() {
         const PROT_READ_WRITE: u32 = 3;
         let socket = SOCKET as RawFd;
         let filters = [
+            rules(PID, TID, &[]),
             share_server_rules(socket, Changes::Nothing, &[], None),
             share_server_rules(socket, Changes::Files, &[TIMES as RawFd], None),
             share_server_rules(socket, Changes::FilesModesAndTimes, &[], None),

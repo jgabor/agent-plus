@@ -1516,6 +1516,9 @@ Every `SEAL` is a [grant](#grants).
   reach a registry. A pulled agent has no sealed layer, so it reads the secret
   from your environment or secret store, like any other secret.
 - A name can't appear in both `SECRET` and `SEAL`.
+- A `SEAL` can't use a name `ap` or the adapter sets, or one the harness
+  reads for sign-in, and can't bind one of the harness's own hosts, as a
+  `SECRET` can't.
 
 ### AUTH
 

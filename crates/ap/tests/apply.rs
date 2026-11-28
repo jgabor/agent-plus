@@ -955,6 +955,66 @@ fn an_ignored_file_you_add_where_the_agent_wrote_a_file_is_a_change_on_your_side
     assert!(scratch.runs().has_pending(&run).unwrap());
 }
 
+/// A file and a symlink the agent wrote in place of your directories that
+/// hold a `.git` entry or a bare repository, at any depth, are skipped, and
+/// each directory stays with its repository, as if the agent had deleted
+/// it. An empty `.git` directory counts too, and so does a `.GIT` file.
+// spec(SHARE): Where your directory holds a `.git` entry or a bare repository, at any depth, and the agent wrote a file or symlink in its place, `ap apply` skips that file and says why, unless it changed on your side.
+// spec(SHARE): The directory stays, with its repository, as if the agent had deleted it.
+#[test]
+fn a_file_in_place_of_your_directory_with_a_repository_is_skipped() {
+    let scratch = Scratch::new("repository-replaced");
+    let share = &scratch.share;
+    for (path, data) in [
+        ("notes.txt", "notes\n"),
+        ("vendor/.git/HEAD", "ref: refs/heads/main\n"),
+        ("vendor/lib.rs", "lib\n"),
+        ("mirror/sub/HEAD", "ref: refs/heads/main\n"),
+        ("upper/.GIT", "gitdir: elsewhere\n"),
+    ] {
+        fs::create_dir_all(share.join(path).parent().unwrap()).unwrap();
+        fs::write(share.join(path), data).unwrap();
+    }
+    for dir in ["mirror/sub/objects", "mirror/sub/refs", "empty/.git"] {
+        fs::create_dir_all(share.join(dir)).unwrap();
+    }
+    let (run, pending) = scratch.run("notes", 1);
+    // The agent empties each directory before it replaces it.
+    for path in [
+        "vendor/.git/HEAD",
+        "vendor/lib.rs",
+        "mirror/sub/HEAD",
+        "upper/.GIT",
+    ] {
+        delete(share, &pending, path);
+    }
+    change(share, &pending, "vendor", 0o644, b"a file\n");
+    record(&pending, &base(share, "mirror"));
+    link(&pending, "mirror", "notes.txt");
+    change(share, &pending, "empty", 0o644, b"empty\n");
+    change(share, &pending, "upper", 0o644, b"upper\n");
+
+    let diff = scratch.ap(&["diff", &run]);
+    let output = scratch.ap(&["apply", &run]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let why = "it would replace a directory that holds a repository";
+    let skipped = format!(
+        "skipped empty: {why}\nskipped mirror: {why}\n\
+         skipped mirror/sub/HEAD: it is in a bare repository\n\
+         skipped upper: {why}\nskipped upper/.GIT: it is under .git\n\
+         skipped vendor: {why}\nskipped vendor/.git/HEAD: it is under .git\n"
+    );
+    assert!(stdout(&diff).starts_with(&skipped), "{}", stdout(&diff));
+    assert_eq!(stdout(&output), skipped);
+    assert_eq!(scratch.names("vendor"), [".git"]);
+    assert_eq!(scratch.read("vendor/.git/HEAD"), "ref: refs/heads/main\n");
+    assert_eq!(scratch.names("mirror/sub"), ["HEAD", "objects", "refs"]);
+    assert_eq!(scratch.names("empty"), [".git"]);
+    assert_eq!(scratch.names("upper"), [".GIT"]);
+    assert!(!scratch.store().join("pending").join(&run).exists());
+}
+
 // spec(SHARE): `ap apply` and `ap discard` fail while the run is active.
 #[test]
 fn apply_fails_while_the_run_is_active() {

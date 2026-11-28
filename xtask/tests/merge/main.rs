@@ -190,6 +190,7 @@ fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
     fs::write(&source, text.replace(from, to)).unwrap();
     let output = Command::new("cargo")
         .env("PATH", common::path(&[]))
+        .env("CARGO_HOME", directory.join("cargo-home"))
         .args(["build", "--quiet", "--manifest-path"])
         .arg(&manifest)
         .arg("--target-dir")
@@ -367,6 +368,11 @@ impl Repo {
             .current_dir(&self.root)
             .env("PATH", common::path(&[&self.bin]))
             .env("TMPDIR", &self.temp)
+            // Every cargo on the machine shares the package-cache lock in the
+            // owner's `~/.cargo`, and a proof that waits for it can reach its
+            // timeout. The fixtures have no dependencies, so an empty home
+            // serves.
+            .env("CARGO_HOME", self.temp.join("cargo-home"))
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
             .env("GIT_AUTHOR_NAME", "t")

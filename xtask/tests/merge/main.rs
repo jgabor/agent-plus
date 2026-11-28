@@ -47,8 +47,8 @@ const NO_REBASE: &str = "the branch doesn't rebase onto `main`. Rebase it by han
 
 /// Far longer than any command in these tests runs, timeouts and all, and far
 /// shorter than the timeout of a merge whose proof runs these tests. So a
-/// merge that hangs past its own timeouts fails its test, and doesn't stop
-/// the merge that runs it.
+/// merge that `Repo::output` runs, and that hangs past its own timeouts,
+/// fails its test, and doesn't stop the merge that runs it.
 const HUNG: Duration = Duration::from_secs(5 * 60);
 
 /// Runs `command` as `Command::output` does, until it has ended and closed its
@@ -470,7 +470,7 @@ impl Repo {
         match output_unless(command, || started.elapsed() > HUNG) {
             Ok(output) => output,
             Err(output) => panic!(
-                "killed after {HUNG:?}, because it hung\nstdout: {}\nstderr: {}\ncalls:\n{}",
+                "killed after {HUNG:?}, because it, or what holds its output, hung\nstdout: {}\nstderr: {}\ncalls:\n{}",
                 stdout(&output),
                 stderr(&output),
                 self.calls()

@@ -1,5 +1,3 @@
-use std::os::unix::process::ExitStatusExt;
-
 use super::prepare::{last_post, posts};
 use super::waits::changing;
 use super::*;
@@ -674,24 +672,6 @@ fn a_merge_past_its_timeout_stops_what_it_started() {
     assert_stray_stopped(&repo);
 }
 
-/// A merge in a test that hangs, however far off its own timeouts are, is
-/// killed, so that its test fails, and the merge whose proof runs the tests
-/// goes on. This one hangs just before its format check, and is given up on
-/// once the hang has started.
-#[test]
-fn a_merge_that_hangs_in_a_test_is_killed_with_what_it_started() {
-    let repo = Repo::new("hung");
-    let mut merge = repo.command(env!("CARGO_BIN_EXE_xtask"));
-    merge
-        .args(["merge", "9"])
-        .env("RUN_ON", "cargo fmt")
-        .env("RUN_COMMAND", format!("{}; sleep 600", stray(&repo)));
-    let output = output_unless(&mut merge, || stray_pid(&repo).is_some())
-        .expect_err("the merge ended on its own");
-    assert_eq!(output.status.signal(), Some(9), "{}", stderr(&output));
-    assert_stray_stopped(&repo);
-}
-
 #[test]
 fn a_merge_that_ends_stops_what_it_started() {
     let repo = Repo::new("ended-stray");
@@ -700,29 +680,22 @@ fn a_merge_that_ends_stops_what_it_started() {
     assert_stray_stopped(&repo);
 }
 
-/// As on Ctrl-C, which reaches the caller's process group but not the merge's.
+/// As on Ctrl-C, which reaches the caller's process group but not the merge's,
+/// and as when a test gives up on a merge that hangs, so that the test fails,
+/// and the merge whose proof runs the tests goes on.
 #[test]
 fn a_merge_whose_caller_is_killed_stops_what_it_started() {
     let repo = Repo::new("caller-killed");
-    let mut merge = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
+    let mut merge = repo.command(env!("CARGO_BIN_EXE_xtask"));
+    merge
         .args(["merge", "9"])
         .env("RUN_ON", "cargo fmt")
-        .env("RUN_COMMAND", format!("{}; sleep 30", stray(&repo)))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while stray_pid(&repo).is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "the merge never reached `cargo fmt`"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-    merge.kill().unwrap();
-    merge.wait().unwrap();
+        .env("RUN_COMMAND", format!("{}; sleep 30", stray(&repo)));
+    let started = Instant::now();
+    let killed = output_unless(&mut merge, || {
+        stray_pid(&repo).is_some() || started.elapsed() > HUNG
+    });
+    assert!(killed.is_err(), "the merge ended on its own: {killed:?}");
     assert_stray_stopped(&repo);
     assert_merged(&repo, &repo.merge());
 }

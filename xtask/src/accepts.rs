@@ -652,7 +652,8 @@ fn can_raise_a_count(root: &Path, commit: &str, head: &str) -> Result<bool, Prob
 }
 
 /// Whether the change can move a budget: the product's code, what it is built
-/// from, how it is built, what it boots, or how a budget is measured.
+/// from, how it is built, what it boots, how a budget is measured, or how
+/// what was measured is judged.
 fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
     let args = ["diff", "--name-only", "--no-renames", "-z", commit, "HEAD"];
     let changed = base::git_text(tree, &args)?;
@@ -693,6 +694,7 @@ fn affects_a_budget(path: &str) -> bool {
             "Cargo.lock",
             "rust-toolchain.toml",
             "harness/budgets.toml",
+            "xtask/src/accepts.rs",
             "xtask/src/bench.rs",
         ]
         .contains(&path)
@@ -772,6 +774,7 @@ mod tests {
             "crates/vmm/src/tests.rs",
             "crates/new/src/lib.rs",
             "Cargo.lock",
+            "xtask/src/accepts.rs",
             "xtask/src/bench.rs",
         ] {
             assert!(affects_a_budget(path), "{path}");

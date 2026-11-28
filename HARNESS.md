@@ -322,8 +322,8 @@ T0 lints the whole workspace twice: once for Linux, and once for
 compile and lint one, so the code that only macOS builds stays checked. A
 change can affect a budget that the bench measures when its diff touches
 `.cargo/`, `guest/kernel/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`,
-`harness/budgets.toml`, `xtask/src/bench.rs`, or what `ap` and
-`fake-harness` are built from under `crates/`. Under `crates/`, neither is
+`harness/budgets.toml`, `xtask/src/accepts.rs`, `xtask/src/bench.rs`, or what
+`ap` and `fake-harness` are built from under `crates/`. Under `crates/`, neither is
 built from a package's `tests/` directory, or from the packages `t1`, `t2`,
 `fuzz`, `fake-upstream`, and `fake-vm`. Every other path there counts, and a
 test fails when a package is on neither side of that rule.

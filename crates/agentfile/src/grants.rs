@@ -13,6 +13,7 @@
 //! SECRET GITHUB_TOKEN @api.github.com @github.com
 //! SEAL NPM_TOKEN @registry.npmjs.org visible
 //! AUTH key
+//! CREDENTIALS https://github.com/me/private
 //! NETWORK -
 //! NETWORK +github.com
 //! POLICY -
@@ -28,7 +29,9 @@
 //! It is the Agentfile's own line, without the version. The adapter knows
 //! the hosts, so they aren't listed.
 //!
-//! Git credentials aren't listed yet, because nothing is fetched.
+//! `CREDENTIALS` names the repository of a source that needs your git
+//! credentials. Only a fetch finds that, so [`Grants::read`] lists none, and
+//! the caller adds each with [`Grants::credential`].
 
 use std::fmt;
 use std::str::FromStr;
@@ -75,6 +78,8 @@ pub struct Grants {
     pub seals: Vec<Secret>,
     /// `AUTH key` or `AUTH token`. `AUTH login` isn't a grant.
     pub auth: Option<Auth>,
+    /// The repositories of the sources that need your git credentials.
+    pub credentials: Vec<String>,
     pub network: Network,
     pub policy: Policy,
 }
@@ -171,10 +176,23 @@ impl Grants {
             secrets: secrets.secrets,
             seals: secrets.seals,
             auth,
+            credentials: Vec::new(),
             network,
             policy,
         }
         .sorted())
+    }
+
+    /// Adds the grant of your git credentials for the source whose
+    /// repository is `repository`, and says whether it is new.
+    pub fn credential(&mut self, repository: &str) -> bool {
+        match self.credentials.binary_search_by(|it| it.as_str().cmp(repository)) {
+            Ok(_) => false,
+            Err(at) => {
+                self.credentials.insert(at, repository.to_string());
+                true
+            }
+        }
     }
 
     /// Sorts each list, and merges what names one grant twice, keeping the
@@ -188,6 +206,8 @@ impl Grants {
         });
         self.variables.sort();
         self.variables.dedup();
+        self.credentials.sort();
+        self.credentials.dedup();
         for list in [&mut self.secrets, &mut self.seals] {
             list.sort_by(|a, b| a.name.cmp(&b.name));
             list.dedup_by(|later, kept| {
@@ -239,6 +259,8 @@ pub enum Widening {
     Sealed(String),
     /// `AUTH key` or `AUTH token`, added or changed from the other one.
     Auth(Auth),
+    /// The repository of a source that newly needs your git credentials.
+    Credentials(String),
     /// A new `NETWORK +` rule.
     Allow(NetworkRule),
     /// An approved `NETWORK -` rule that is gone.
@@ -256,7 +278,7 @@ impl Grants {
     /// Lists how these grants are wider than `approved`, in the order the
     /// text form prints them. It is empty when they only narrow, or are the
     /// same. `adapter` says what the adapter keeps for a harness, which
-    /// gives its hosts. Git credentials aren't compared yet.
+    /// gives its hosts.
     pub fn widening<'a>(
         &self,
         approved: &Grants,
@@ -339,6 +361,11 @@ impl Grants {
         {
             wider.push(Widening::Auth(auth));
         }
+        wider.extend(
+            (self.credentials.iter())
+                .filter(|repository| !approved.credentials.contains(repository))
+                .map(|repository| Widening::Credentials(repository.clone())),
+        );
         if self.network.default == Sign::Allow && approved.network.default == Sign::Deny {
             wider.push(Widening::Open);
         }
@@ -429,6 +456,7 @@ impl fmt::Display for Widening {
                     Auth::Login => "login",
                 }
             ),
+            Widening::Credentials(repository) => write!(f, "CREDENTIALS {}", printed(repository)),
             Widening::Allow(rule) => write!(f, "NETWORK {}", printed(&rule_text(rule))),
             Widening::Unblock(rule) => {
                 write!(f, "NETWORK {} is gone", printed(&rule_text(rule)))
@@ -478,6 +506,9 @@ impl fmt::Display for Grants {
             Some(Auth::Token) => line("AUTH", &["token"])?,
             Some(Auth::Login) | None => {}
         }
+        for repository in &self.credentials {
+            line("CREDENTIALS", &[repository])?;
+        }
         line("NETWORK", &[sign(self.network.default)])?;
         for rule in &self.network.rules {
             line("NETWORK", &[&rule_text(rule)])?;
@@ -504,6 +535,7 @@ impl FromStr for Grants {
             secrets: Vec::new(),
             seals: Vec::new(),
             auth: None,
+            credentials: Vec::new(),
             network: Network {
                 default: Sign::Allow,
                 rules: Vec::new(),
@@ -608,6 +640,12 @@ impl Grants {
                     auth => self.auth = Some(auth),
                 }
             }
+            "CREDENTIALS" => match arguments {
+                [repository] if !repository.is_empty() => {
+                    self.credentials.push(repository.clone());
+                }
+                _ => return Err("`CREDENTIALS` takes one repository".to_string()),
+            },
             "NETWORK" => match network::line(instruction, network::rule)? {
                 Line::Bare(sign) => set_default("NETWORK", network_default, sign)?,
                 Line::Rule(rule) => self.network.rules.push(rule),

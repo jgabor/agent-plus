@@ -3,7 +3,7 @@
 
 use agentfile::{
     Auth, Destination, Error, Grants, Harness, Location, Network, NetworkRule, PathGrant, Policy,
-    Secret, Sign, parse,
+    Reserved, Secret, Sign, Widening, parse,
 };
 
 /// Resolves a host path the way a build in `/ctx` with home `/home/u` would,
@@ -259,10 +259,61 @@ fn the_agents_it_may_call_are_a_grant_with_the_default() {
     assert!(text.contains("POLICY +reviewer\n"), "{text}");
 }
 
+/// Only a fetch finds that a source needs your git credentials, so the
+/// instructions alone ask for none.
 #[test]
 fn git_credentials_are_left_out() {
     let grants = grants_of("REPO jgabor/private\nPLUGIN https://github.com/jgabor/plugins.git");
     assert_eq!(grants, grants_of(""));
+}
+
+// spec(Grants): | Your git credentials, for sources that need them | `REPO`, `PLUGIN`, `SKILL`, `MCP` |
+#[test]
+fn a_source_that_needs_your_git_credentials_is_a_grant() {
+    let mut grants = grants_of("REPO https://git.test/me/private\nREPO https://git.test/me/other");
+    assert!(grants.credential("https://git.test/me/private"));
+    assert!(grants.credential("https://git.test/me/other"));
+    assert!(!grants.credential("https://git.test/me/private"));
+    assert_eq!(
+        grants.credentials,
+        ["https://git.test/me/other", "https://git.test/me/private"]
+    );
+    let text = round_trip(&grants);
+    assert!(
+        text.ends_with(
+            "CREDENTIALS https://git.test/me/other\n\
+             CREDENTIALS https://git.test/me/private\n\
+             NETWORK +\nPOLICY +\n"
+        ),
+        "{text}"
+    );
+    let errors = errors_of("CREDENTIALS\nCREDENTIALS a b\nCREDENTIALS \"\"\nNETWORK +\nPOLICY +");
+    let lines: Vec<usize> = errors.iter().map(|error| error.line).collect();
+    assert_eq!(lines, vec![1, 2, 3], "{errors:?}");
+}
+
+// spec(Grants): a source that newly needs your git credentials
+#[test]
+fn a_source_that_newly_needs_your_git_credentials_widens() {
+    let adapter = |_| Reserved::default();
+    let approved = grants_of("REPO https://git.test/a\nREPO https://git.test/b");
+    let mut now = approved.clone();
+    now.credential("https://git.test/a");
+    let wider = now.widening(&approved, adapter);
+    assert_eq!(
+        wider,
+        [Widening::Credentials("https://git.test/a".to_string())]
+    );
+    assert_eq!(wider[0].to_string(), "CREDENTIALS https://git.test/a");
+    // A source that no longer needs them narrows.
+    assert!(approved.widening(&now, adapter).is_empty());
+    let mut approved = now.clone();
+    now.credential("https://git.test/b");
+    approved.credential("https://git.test/c");
+    assert_eq!(
+        now.widening(&approved, adapter),
+        [Widening::Credentials("https://git.test/b".to_string())]
+    );
 }
 
 #[test]

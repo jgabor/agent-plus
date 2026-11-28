@@ -4,12 +4,10 @@
 //! itself, as a run's does.
 
 use std::env;
-use std::ffi::c_int;
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,12 +39,6 @@ const UDP: u8 = 17;
 const ICMPV6: u8 = 58;
 const NEIGHBOR_SOLICITATION: u8 = 135;
 const PORT: u16 = 7;
-
-const F_SETFD: c_int = 2;
-
-unsafe extern "C" {
-    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
-}
 
 /// What the peer saw the guest send.
 #[derive(Default, Debug)]
@@ -182,31 +174,24 @@ fn serve(peer: UnixDatagram, done: Arc<AtomicBool>) -> Seen {
 /// what the peer saw.
 fn boot_linked() -> (String, Seen) {
     let (peer, link) = UnixDatagram::pair().unwrap();
-    let fd = link.as_raw_fd();
     let mut command = Command::new(env::current_exe().unwrap());
+    let copy = share::inheritable(&mut command, link.as_fd()).unwrap();
+    drop(link);
     command
         .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
-        .env(LINK_VARIABLE, fd.to_string())
+        .env(LINK_VARIABLE, copy.as_raw_fd().to_string())
         .env(KERNEL_VARIABLE, kernel_path())
         .env(INIT_VARIABLE, guest_binary::ap())
         .env(PROBE_VARIABLE, guest_binary::build("net-probe"))
         .stdin(Stdio::null())
         .stderr(Stdio::inherit());
-    // SAFETY: the closure only clears close-on-exec on a descriptor this
-    // process holds, which is safe between fork and exec.
-    unsafe {
-        command.pre_exec(move || match fcntl(fd, F_SETFD, 0) {
-            0 => Ok(()),
-            _ => Err(std::io::Error::last_os_error()),
-        });
-    }
     let done = Arc::new(AtomicBool::new(false));
     let peer = {
         let done = Arc::clone(&done);
         thread::spawn(move || serve(peer, done))
     };
     let output = command.output().unwrap();
-    drop(link);
+    drop(copy);
     done.store(true, Ordering::SeqCst);
     let seen = peer.join().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();

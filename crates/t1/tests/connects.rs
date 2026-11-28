@@ -1201,7 +1201,6 @@ const PEER_VARIABLE: &str = "AP_CONNECTS_PEER";
 /// How long the check waits for a confined process to say something.
 const QUIET: Duration = Duration::from_secs(3);
 const PR_SET_DUMPABLE: c_int = 4;
-const F_SETFD: c_int = 2;
 const AF_UNIX: c_int = 1;
 const SOCK_STREAM: c_int = 1;
 const SOCK_SEQPACKET: c_int = 5;
@@ -1214,7 +1213,6 @@ unsafe extern "C" {
     fn fork() -> c_int;
     fn _exit(status: c_int) -> !;
     fn prctl(option: c_int, ...) -> c_int;
-    fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
     fn socket(domain: c_int, kind: c_int, protocol: c_int) -> c_int;
     fn socketpair(domain: c_int, kind: c_int, protocol: c_int, fds: *mut c_int) -> c_int;
 }
@@ -1366,27 +1364,20 @@ extern "C" fn connecting_network_process() {
 fn attempt(directory: &Path, attempt: Attempt, peer: SocketAddr) -> (ExitStatus, Vec<String>) {
     let (mine, theirs) = link();
     mine.set_read_timeout(Some(QUIET)).unwrap();
-    let fd = theirs.as_raw_fd();
     let target = directory.join("unrelated");
     fs::write(&target, "a host file the network process doesn't need").unwrap();
     let mut command = Command::new(env::current_exe().unwrap());
+    let copy = share::inheritable(&mut command, theirs.as_fd()).unwrap();
+    drop(theirs);
     command
         .env(ATTEMPT_VARIABLE, attempt.name())
         .env(TARGET_VARIABLE, &target)
         .env(PEER_VARIABLE, peer.to_string())
-        .env(LINK_VARIABLE, fd.to_string())
+        .env(LINK_VARIABLE, copy.as_raw_fd().to_string())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // SAFETY: the closure only clears close-on-exec on a descriptor this
-    // process holds, which is safe between fork and the new program.
-    unsafe {
-        command.pre_exec(move || match fcntl(fd, F_SETFD, 0) {
-            0 => Ok(()),
-            _ => Err(io::Error::last_os_error()),
-        });
-    }
     let mut child = command.spawn().unwrap();
-    drop(theirs);
+    drop(copy);
     let mut said = Vec::new();
     let mut buffer = [0; 2048];
     // A read of nothing is the end of the link: the process has died.

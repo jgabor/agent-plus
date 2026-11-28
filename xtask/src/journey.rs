@@ -4,14 +4,15 @@ use crate::bench::{self, Copies};
 use crate::ledger::Downloads;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, lock, score};
+use crate::{Problem, Verdict, group, limit, lock, score};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const JOURNEY_FILE: &str = "harness/journey.toml";
 const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -21,6 +22,11 @@ const FAKE_UPSTREAM: &str = "fake-upstream";
 /// The step that proves `ap build` fetches the OS layer, so its store starts
 /// empty.
 const FETCHES_OS: i64 = 5;
+/// How long a step may run before it is stopped, and fails. The slowest step
+/// takes about a minute.
+const STEP_SECONDS: u64 = 10 * 60;
+/// Replaces `STEP_SECONDS`, so that a test needn't wait for it.
+const STEP_SECONDS_OVERRIDE: &str = "XTASK_JOURNEY_STEP_SECONDS";
 
 /// The model providers a step can spend on, each with the variable that
 /// carries its paid-check key into the step, as a user's `AUTH key` run gets
@@ -145,6 +151,7 @@ fn walk(
     if let Some(id) = only {
         steps = needed(steps, id)?;
     }
+    let limit = limit::seconds(STEP_SECONDS_OVERRIDE, STEP_SECONDS)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
     // Checked once, because each step's store shares the tree's copies.
@@ -176,7 +183,7 @@ fn walk(
             "skip"
         } else {
             let start = Instant::now();
-            let ran = run_step(root, &journey, &bin, &copies, step, given)?;
+            let ran = run_step(root, &journey, &bin, &copies, step, given, limit)?;
             timed.push((step.id, start.elapsed().as_secs_f64()));
             if ran {
                 passed.insert(step.id);
@@ -461,6 +468,9 @@ fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     Ok(bin)
 }
 
+/// Runs the step in a process group of its own, and stops the group once the
+/// step ends, so nothing it started outlives it. A step that runs past `limit`
+/// seconds is stopped, and fails, and what it was running is named.
 fn run_step(
     root: &Path,
     journey: &Path,
@@ -468,6 +478,7 @@ fn run_step(
     copies: &Copies,
     step: &Step,
     key: Option<(&str, &str)>,
+    limit: u64,
 ) -> Result<bool, Problem> {
     if let Some(floor) = &step.floor
         && !floor_check_exists(root, floor)?
@@ -507,12 +518,81 @@ fn run_step(
     if let Some((name, key)) = key {
         command.env(name, key);
     }
-    let status = command
+    command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(io::stderr()))
-        .status()
-        .map_err(|e| Problem(format!("couldn't run {}: {e}", step.script)))?;
+        .stdout(Stdio::from(io::stderr()));
+    let couldnt = |e: io::Error| Problem(format!("couldn't run {}: {e}", step.script));
+    let (mut child, watcher) = group::start(&mut command).map_err(couldnt)?;
+    let leader = child.id();
+    let (ended, end) = mpsc::channel::<()>();
+    let timer = thread::spawn(move || {
+        if end.recv_timeout(Duration::from_secs(limit)) != Err(mpsc::RecvTimeoutError::Timeout) {
+            return None;
+        }
+        let running = running(leader);
+        group::stop(leader);
+        Some(running)
+    });
+    // Only the step's end says that it ended, so it is reaped before its group
+    // is stopped, as a merge's worker is.
+    let status = child.wait().map_err(couldnt);
+    drop(ended);
+    let stopped = timer.join().unwrap_or(None);
+    // What the step left running.
+    group::stop(leader);
+    watcher.end();
+    let status = status?;
+    // A step that passed just as the timer fired did pass.
+    if !status.success()
+        && let Some(running) = stopped
+    {
+        eprintln!(
+            "step {}: stopped at its {limit} second limit, {running}",
+            step.id
+        );
+    }
     Ok(status.success())
+}
+
+/// Each process below `leader`, whose group may not hold them all, one a line
+/// with its id and how long it has run, as `ps` gives them.
+fn running(leader: u32) -> String {
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,etime=,args="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let text = match listed {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        Ok(output) => return format!("and `ps` couldn't list what ran: {}", output.status),
+        Err(e) => return format!("and `ps` couldn't list what ran: {e}"),
+    };
+    // Each process as its id, its parent's, and the rest of its line.
+    let processes: Vec<(&str, &str, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some((pid, ppid, rest.trim_start()))
+        })
+        .collect();
+    let mut ids = vec![leader.to_string()];
+    let mut next = 0;
+    while let Some(parent) = ids.get(next).cloned() {
+        let children = processes.iter().filter(|(_, ppid, _)| *ppid == parent);
+        ids.extend(children.map(|(pid, _, _)| pid.to_string()));
+        next += 1;
+    }
+    let mut listing = "while these ran:".to_string();
+    for (pid, _, rest) in ids
+        .iter()
+        .filter_map(|id| processes.iter().find(|(pid, _, _)| pid == id))
+    {
+        listing.push_str(&format!("\n  {pid} {rest}"));
+    }
+    listing
 }
 
 /// Escape checks are tests in the package `t1`.

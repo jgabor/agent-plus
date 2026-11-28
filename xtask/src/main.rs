@@ -11,6 +11,7 @@ mod forge;
 mod fuzz;
 mod gaps;
 mod gate;
+mod group;
 mod journey;
 mod json;
 mod ledger;

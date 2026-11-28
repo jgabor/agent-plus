@@ -1,12 +1,20 @@
 //! Runs `journey` against small workspaces with their own `ap` and steps.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const AP: &str = "fn main() {\n    println!(\"ap test\");\n}\n";
 const PASS: &str = "#!/bin/sh\nexit 0\n";
 const FAIL: &str = "#!/bin/sh\nexit 1\n";
+/// Writes to the journey's output, leaves a process running that writes there
+/// again if it outlives the step, and hangs. What it left running holds the
+/// output open, so the caller reads to the end only once that process is gone.
+const HANGS: &str =
+    "#!/bin/sh\necho the step started >&2\n(sleep 120; echo the step survived >&2) &\nsleep 121\n";
+/// Replaces the limit on how long a step may run.
+const STEP_SECONDS: &str = "XTASK_JOURNEY_STEP_SECONDS";
 /// The milestone that every step from `step` is in.
 const MILESTONE: &str = "[[milestone]]\nname = \"m\"\nsummary = \"s\"\ncommands = []\n\n";
 
@@ -57,17 +65,23 @@ fn journey(root: &Path) -> Output {
 
 /// Runs `journey` with `args` after it.
 fn journey_with(root: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
+    journey_command(root, args).output().unwrap()
+}
+
+/// `journey` with `args` after it, as the caller of a step runs it.
+fn journey_command(root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+    command
         .arg("journey")
         .args(args)
         .current_dir(root)
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("XTASK_ACTIVITY_HELD")
+        .env_remove(STEP_SECONDS)
         .env("JOURNEY_LEAK", "from the caller")
         .env("CC", "from the caller")
-        .env("CXX", "from the caller")
-        .output()
-        .unwrap()
+        .env("CXX", "from the caller");
+    command
 }
 
 fn stdout(output: &Output) -> String {
@@ -207,6 +221,66 @@ fn a_step_naming_a_floor_passes_once_its_check_exists() {
         ],
     );
     assert_journey(&root, "pass step 1\njourney 1 of 1\n");
+}
+
+#[test]
+fn a_step_that_runs_past_its_limit_fails_and_the_journey_goes_on() {
+    let toml = format!(
+        "{}{}",
+        step(1, "", "harness/journey/hangs.sh"),
+        step(2, "", "harness/journey/two.sh"),
+    );
+    let root = workspace(
+        "hangs",
+        &toml,
+        &[
+            ("harness/journey/hangs.sh", HANGS),
+            ("harness/journey/two.sh", PASS),
+        ],
+    );
+    let output = journey_command(&root, &[])
+        .env(STEP_SECONDS, "3")
+        .output()
+        .unwrap();
+    let stderr = stderr(&output);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        stdout(&output),
+        "fail step 1\npass step 2\njourney 1 of 2\n",
+        "{stderr}"
+    );
+    // What it wrote before the limit is kept, and what it was running is named.
+    assert!(stderr.contains("the step started\n"), "{stderr}");
+    let (_, stopped) = stderr
+        .split_once("step 1: stopped at its 3 second limit, while these ran:\n")
+        .unwrap_or_else(|| panic!("the stop isn't reported: {stderr}"));
+    assert!(stopped.contains("sleep 121\n"), "{stderr}");
+    assert!(stopped.contains("sleep 120\n"), "{stderr}");
+    assert!(!stderr.contains("the step survived"), "{stderr}");
+}
+
+#[test]
+fn a_step_stops_when_the_journey_dies() {
+    let root = workspace(
+        "orphan",
+        &step(1, "", "harness/journey/hangs.sh"),
+        &[("harness/journey/hangs.sh", HANGS)],
+    );
+    let mut journey = journey_command(&root, &[])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(journey.stderr.take().unwrap());
+    let mut seen = String::new();
+    while !seen.ends_with("the step started\n") {
+        assert_ne!(stderr.read_line(&mut seen).unwrap(), 0, "{seen}");
+    }
+    journey.kill().unwrap();
+    journey.wait().unwrap();
+    // The step holds the output open until it is gone.
+    stderr.read_to_string(&mut seen).unwrap();
+    assert!(!seen.contains("the step survived"), "{seen}");
 }
 
 #[test]

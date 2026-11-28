@@ -744,7 +744,9 @@ fn claim(
         Err(problem) => {
             // A live comment with no label beats every later claim until its
             // lease runs out, so retire it if GitHub lets us.
-            let _ = forge.edit_comment(mine, &retired);
+            if let Err(failed) = forge.edit_comment(mine, &retired) {
+                eprintln!("claim: couldn't park comment {mine}: {}", failed.0);
+            }
             return Err(problem);
         }
     };
@@ -956,8 +958,8 @@ mod tests {
         writes: RefCell<Vec<String>>,
         interfere: RefCell<Option<Interference>>,
         branch_date: Option<String>,
-        /// Whether reading one issue fails, as `gh` out of quota does.
-        unreadable: Cell<bool>,
+        /// The issue whose read fails, as `gh` out of quota does.
+        unreadable: Cell<Option<u64>>,
     }
 
     impl Fake {
@@ -968,7 +970,7 @@ mod tests {
                 writes: RefCell::new(Vec::new()),
                 interfere: RefCell::new(None),
                 branch_date: None,
-                unreadable: Cell::new(false),
+                unreadable: Cell::new(None),
             }
         }
 
@@ -1002,7 +1004,7 @@ mod tests {
         }
 
         fn issue(&self, number: u64) -> Result<Issue, Problem> {
-            if self.unreadable.get() {
+            if self.unreadable.get() == Some(number) {
                 return Err(Problem("gh: API rate limit exceeded".to_string()));
             }
             if let Some(interfere) = self.interfere.borrow_mut().take() {
@@ -1414,11 +1416,12 @@ mod tests {
     }
 
     /// A comment left live with no label would make every dispatch start a
-    /// worker that loses to it, until its lease runs out.
+    /// worker that loses to it, until its lease runs out. The read that fails
+    /// is the overlapping issue's, after the claim leads on its own.
     #[test]
     fn a_claim_that_can_not_read_again_retires_its_comment() {
         let forge = Fake::new(vec![issue(vec![]), overlapping()]);
-        forge.unreadable.set(true);
+        forge.unreadable.set(Some(8));
         let result = claim(&forge, 7, "7-x", "thread", NOW, Host::Linux, "n");
         assert!(result.is_err());
         assert!(forge.body_of(100).contains("**State:** parked"));

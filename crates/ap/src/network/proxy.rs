@@ -452,19 +452,13 @@ impl Proxy {
                     &addresses,
                     tcp,
                 );
-                if allowed.is_empty() {
-                    let port = destination.port();
-                    match (reporter, check.refused()) {
-                        (Some(reporter), Some(rule)) => {
-                            reporter.refused(&rule, name.as_deref(), addresses[0], port)
-                        }
-                        _ => report(reporter, name.as_deref(), addresses[0], port),
-                    }
-                    return Verdict::Refuse;
-                }
                 // Each request is a decision of its own.
-                if let (Some(reporter), false) = (reporter, check == Check::Requests) {
-                    reporter.decided(true, name.as_deref(), allowed[0], destination.port());
+                if check != Check::Requests || allowed.is_empty() {
+                    let port = destination.port();
+                    answered(reporter, name.as_deref(), port, &addresses, &allowed, check);
+                }
+                if allowed.is_empty() {
+                    return Verdict::Refuse;
                 }
                 if let (Check::Name, Some(name)) = (check, &name) {
                     self.checking.push(Checking::new(*flow, name, allowed, now));
@@ -1212,6 +1206,7 @@ mod tests {
         let (network, harness) = super::super::rules(&args).unwrap();
         let (mine, theirs) = super::super::link().unwrap();
         let reporter = Reporter::new(theirs.as_raw_fd(), network.clone(), harness);
+        let (mut keeper, mut log) = super::super::decisions::tests::keeper(rules);
         let name = Some("example.com");
         let addresses: [IpAddr; 1] = [Ipv4Addr::new(192, 0, 2, 1).into()];
         let (passed, check) = allowed(&network, &[], (name, &injection), port, &addresses, false);
@@ -1220,20 +1215,6 @@ mod tests {
         mine.set_nonblocking(true).unwrap();
         let mut message = [0; 512];
         let len = mine.recv(&mut message).unwrap();
-        let path = std::env::temp_dir().join(format!(
-            "ap-proxy-udp-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_file(&path);
-        let mut log = File::options()
-            .create_new(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        std::fs::remove_file(&path).unwrap();
-        let mut keeper = super::super::Keeper::new(&args, log.try_clone().unwrap());
         assert!(keeper.take(&message[..len]));
         std::io::Seek::rewind(&mut log).unwrap();
         match crate::runs::read_log(&mut log).unwrap() {

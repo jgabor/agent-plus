@@ -388,10 +388,12 @@ impl Keeper {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
-    fn keeper(rules: &[&str]) -> (Keeper, File) {
+    /// A keeper for a run with the `NETWORK` rules of `rules`, and its log,
+    /// to read back.
+    pub(in super::super) fn keeper(rules: &[&str]) -> (Keeper, File) {
         let args = super::super::arguments(&[], &[]);
         let mut args: Vec<OsString> = args;
         args.extend(rules.iter().map(OsString::from));
@@ -454,6 +456,10 @@ mod tests {
         assert_eq!(
             line(false, Rule::NotHttp, &to_host).as_deref(),
             Some("deny   host.ap.internal:8080  the host's URL rules, which only HTTP meets")
+        );
+        assert_eq!(
+            line(false, Rule::Decryption, &to_host).as_deref(),
+            Some("deny   host.ap.internal:8080  the host's decryption, which only TCP passes")
         );
     }
 

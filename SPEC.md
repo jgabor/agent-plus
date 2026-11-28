@@ -379,13 +379,16 @@ directory) and writes an image into the local store.
   `MODE`, `PLUGIN`, `SKILL`, and `MCP`.
 - **Store.** Layers are stored by the digest of their uncompressed content
   and shared across every agent in the store. A kernel, OS, or harness layer
-  is downloaded once, however many agents use it. `ap rm` and rebuilds free
-  a layer only when no agent or active run still needs it, and no repository
-  an agent kept still depends on it (see [REPO](#repo)). A run reads each
-  layer from an uncompressed copy in the store, which the first run that
-  needs the layer makes, after checking the layer against its digest. Later
-  runs read the copy as it is, without checking it again. A layer's copy is
-  freed with the layer.
+  is downloaded once, however many agents use it. When the connection ends
+  before a download is complete, `ap` starts the download over from its
+  first byte, at most 3 more times. If the last try ends early too, it fails
+  with that try's error. `ap rm` and rebuilds free a layer only when no
+  agent or active run still needs it, and no repository an agent kept still
+  depends on it (see [REPO](#repo)). A run reads each layer from an
+  uncompressed copy in the store, which the first run that needs the layer
+  makes, after checking the layer against its digest. Later runs read the
+  copy as it is, without checking it again. A layer's copy is freed with the
+  layer.
 - **Lockfile.** `ap build` writes `Agentfile.lock` next to the Agentfile. It
   records the resolved harness version and digest, the OS image digest, the
   commit for every source, and the digest of every file `ap` downloads.

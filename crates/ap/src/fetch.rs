@@ -20,6 +20,9 @@ const MAX_HEAD_BYTES: u64 = 64 * 1024;
 /// Far above any file `ap` pins, and low enough that a bad server can't fill
 /// the disk before the digest check.
 const MAX_BODY_BYTES: u64 = 1 << 30;
+/// How many times a download that ends early starts over, as cargo's
+/// `net.retry` does by default.
+const TRIES_AGAIN: u32 = 3;
 
 /// A file to download, and the digest it must have.
 pub struct Pin<'a> {
@@ -107,21 +110,23 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
-    store.put(pin.sha256, download(client, pin.url)?)
+    again(|| store.put(pin.sha256, download(client, pin.url)?))
 }
 
 /// The text at `url`, which may hold at most `max` bytes.
 pub fn text(client: &Client, url: &str, max: u64) -> io::Result<String> {
-    let body = download(client, url)?;
-    if !body.chunked && body.remaining > max {
-        return Err(bad_response("a body that is too large"));
-    }
-    let mut text = String::new();
-    body.take(max + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > max {
-        return Err(bad_response("a body that is too large"));
-    }
-    Ok(text)
+    again(|| {
+        let body = download(client, url)?;
+        if !body.chunked && body.remaining > max {
+            return Err(bad_response("a body that is too large"));
+        }
+        let mut text = String::new();
+        body.take(max + 1).read_to_string(&mut text)?;
+        if text.len() as u64 > max {
+            return Err(bad_response("a body that is too large"));
+        }
+        Ok(text)
+    })
 }
 
 /// Puts the layer `pin` names in `layers` at a zstd level, downloading it
@@ -131,8 +136,11 @@ pub fn layer(layers: &Layers, client: &Client, pin: &Pin, level: i8) -> io::Resu
     if layers.level(pin.sha256)?.is_some() {
         return Ok(false);
     }
-    let mut data = Vec::new();
-    download(client, pin.url)?.read_to_end(&mut data)?;
+    let data = again(|| {
+        let mut data = Vec::new();
+        download(client, pin.url)?.read_to_end(&mut data)?;
+        Ok(data)
+    })?;
     let mut hash = Sha256Context::new();
     hash.update(&data);
     let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
@@ -153,6 +161,20 @@ fn download(client: &Client, url: &str) -> io::Result<Body> {
         }
     }
     response.body()
+}
+
+/// What `download` returns, after starting it over up to [`TRIES_AGAIN`]
+/// times while the connection ends before it is complete. A read that ends
+/// early, and a TLS connection closed without `close_notify`, both fail with
+/// `UnexpectedEof`.
+fn again<T>(mut download: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut left = TRIES_AGAIN;
+    loop {
+        match download() {
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && left > 0 => left -= 1,
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn wrong_digest(actual: &str, pinned: &str) -> io::Error {

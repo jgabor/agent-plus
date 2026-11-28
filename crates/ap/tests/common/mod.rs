@@ -117,12 +117,25 @@ pub fn ok(body: &[u8]) -> Vec<u8> {
     reply
 }
 
+/// A reply that says it holds one byte more than `body`, so the download
+/// ends early.
+pub fn ends_early(body: &[u8]) -> Vec<u8> {
+    let mut reply = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+        body.len() + 1
+    )
+    .into_bytes();
+    reply.extend_from_slice(body);
+    reply
+}
+
 pub fn redirect(location: &str) -> Vec<u8> {
     format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").into_bytes()
 }
 
 /// An HTTPS server that answers each path with fixed bytes, and counts
-/// requests. Its thread ends with the test process.
+/// requests. A path with more than one route gets them in turn, and then
+/// the last again. Its thread ends with the test process.
 pub struct Server {
     pub port: u16,
     pub requests: Arc<AtomicUsize>,
@@ -152,8 +165,13 @@ impl Server {
                 };
                 let path = head.split(' ').nth(1).unwrap().to_owned();
                 requests.fetch_add(1, Ordering::SeqCst);
-                paths.lock().unwrap().push(path.clone());
-                let reply = routes.iter().find(|(route, _)| *route == path);
+                let earlier = {
+                    let mut paths = paths.lock().unwrap();
+                    paths.push(path.clone());
+                    paths.iter().filter(|earlier| **earlier == path).count() - 1
+                };
+                let matching: Vec<_> = routes.iter().filter(|(route, _)| *route == path).collect();
+                let reply = matching.get(earlier).or(matching.last());
                 let reply = reply.map_or(
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
                     |(_, r)| r,

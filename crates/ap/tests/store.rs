@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ap::fetch::{self, Client, Pin};
 use ap::store::{self, Store};
-use common::{Server, ok, redirect, trusting_client};
+use common::{Server, ends_early, ok, redirect, trusting_client};
 
 const BODY: &[u8] = b"a kernel, more or less";
 // `printf 'a kernel, more or less' | sha256sum`
@@ -132,13 +132,7 @@ fn a_wrong_digest_leaves_nothing_in_the_store() {
 
 #[test]
 fn a_partial_download_leaves_nothing_in_the_store() {
-    let mut short = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-        BODY.len() + 1
-    )
-    .into_bytes();
-    short.extend_from_slice(BODY);
-    let server = Server::start(|_| vec![("/vmlinux", short)]);
+    let server = Server::start(|_| vec![("/vmlinux", ends_early(BODY))]);
     fails_and_stores_nothing(&server, "partial", "/vmlinux", BODY_SHA256, "ended early");
 }
 

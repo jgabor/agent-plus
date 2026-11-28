@@ -253,4 +253,21 @@ mod tests {
         let bytes = injection.encode();
         assert_eq!(Injection::decode(&bytes[..bytes.len() - 1]), None);
     }
+
+    #[test]
+    fn a_bound_host_matches_in_any_case_with_or_without_a_final_dot() {
+        for host in ["github.com", "GitHub.com", "github.com.", "GITHUB.COM."] {
+            assert!(same_host(host, "github.com"), "{host}");
+            assert!(same_host("github.com", host), "{host}");
+        }
+        for host in [
+            "gist.github.com",
+            "github.com.evil",
+            "github.com..",
+            "",
+            ".",
+        ] {
+            assert!(!same_host(host, "github.com"), "{host}");
+        }
+    }
 }

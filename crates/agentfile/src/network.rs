@@ -348,7 +348,7 @@ pub(crate) fn decrypting(
     // For each harness host that no URL rule names, each port that a name
     // rule allows it on, with the `+` host rules it is under on that port,
     // in rule order. It doesn't depend on the `-` rule, so it is found once.
-    let covered: Vec<(String, Vec<Vec<usize>>)> = (hosts.iter())
+    let covered: Vec<(String, Vec<(u16, Vec<usize>)>)> = (hosts.iter())
         .map(|own| own.to_ascii_lowercase())
         .filter(|own| !url_host(&network, own))
         .map(|own| {
@@ -357,7 +357,7 @@ pub(crate) fn decrypting(
                     network.name_decision(&own, Scheme::Https, port, "/") == Some(Sign::Allow)
                 })
                 .map(|port| {
-                    (network.rules.iter().enumerate())
+                    let broad = (network.rules.iter().enumerate())
                         .filter(|(_, broad)| {
                             broad.sign == Sign::Allow
                                 && matches!(&broad.destination, Destination::Host { name: broader, port: at }
@@ -365,7 +365,8 @@ pub(crate) fn decrypting(
                                         && at.is_none_or(|at| at == port))
                         })
                         .map(|(at, _)| at)
-                        .collect()
+                        .collect();
+                    (port, broad)
                 })
                 .collect();
             (own, broad)
@@ -382,25 +383,36 @@ pub(crate) fn decrypting(
             Destination::Host { name, .. } | Destination::Url { host: name, .. }
                 if narrow.sign == Sign::Deny =>
             {
-                // Whether it is a URL rule, and the port a host rule names.
+                // Whether it is a URL rule, and the one port it covers, if
+                // it names one: a URL rule's port follows from its scheme.
                 let (url, only) = match narrow.destination {
                     Destination::Host { port, .. } => (false, port),
-                    _ => (true, None),
+                    Destination::Url { scheme, port, .. } => (
+                        true,
+                        Some(port.unwrap_or(match scheme {
+                            Scheme::Https => 443,
+                            Scheme::Http => 80,
+                        })),
+                    ),
+                    Destination::Address { .. } => unreachable!(),
                 };
-                let narrower = |broad: &NetworkRule| match &broad.destination {
+                // A narrower rule counts only on a port it covers, since a
+                // reused connection reaches no other.
+                let narrower = |broad: &NetworkRule, at: u16| match &broad.destination {
                     Destination::Host {
                         name: broader,
                         port,
-                    } if broad.sign == Sign::Allow => {
+                    } if broad.sign == Sign::Allow && only.is_none_or(|only| only == at) => {
                         under(name, broader)
                             || name == broader && (url || only.is_some() && port.is_none())
                     }
                     _ => false,
                 };
                 let found = covered.iter().find_map(|(own, by_port)| {
-                    (by_port.iter().flatten())
-                        .find(|&&broad| narrower(&network.rules[broad]))
-                        .map(|&broad| (own, broad))
+                    (by_port.iter())
+                        .flat_map(|(port, broad)| broad.iter().map(move |&broad| (*port, broad)))
+                        .find(|&(port, broad)| narrower(&network.rules[broad], port))
+                        .map(|(_, broad)| (own, broad))
                 });
                 let Some((own, broad)) = found else {
                     continue;

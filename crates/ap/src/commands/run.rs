@@ -454,7 +454,8 @@ const ENDING: [libc::c_int; 4] = [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, lib
 /// Your terminal in raw mode, until this drops: every key goes to the run as
 /// it is typed, and nothing turns a key into a signal. A run that `ap stop`
 /// reaches while `ap run` waits in the background of your terminal leaves
-/// its modes as they are, and holds none.
+/// its modes as they are, and holds none. One that ends in the background
+/// after `ap stop` leaves them too.
 pub(super) struct RawMode(Option<libc::termios>);
 
 impl RawMode {
@@ -517,8 +518,13 @@ fn foreground() -> bool {
 }
 
 /// Puts your terminal's modes back. A terminal that went away has nothing to
-/// restore.
+/// restore, and neither does one where a run that `ap stop` reached ends in
+/// the background: the modes there are your shell's, which keeps a stopped
+/// job's modes, and sets them again when it brings the job back.
 fn restore(modes: &libc::termios) {
+    if runs::stopping() && !foreground() {
+        return;
+    }
     // SAFETY: the struct is one that `tcgetattr` filled.
     unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSADRAIN, modes) };
 }

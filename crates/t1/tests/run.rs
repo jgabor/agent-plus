@@ -1366,18 +1366,10 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
     // Raw mode can't be set from the background, so `ap run` stops on
     // `SIGTTOU`, and again each time it resumes.
-    let shell = in_background(&scratch, &terminal, "");
-    let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
-    program.extend_from_slice(b"\0run\0");
+    let shell = as_job(&scratch, &terminal, "", "");
     let deadline = Instant::now() + SHOWN_WITHIN;
     let (run, rows) = loop {
-        let found: Vec<u32> = descendants(shell.0.id())
-            .into_iter()
-            .filter(|pid| {
-                fs::read(format!("/proc/{pid}/cmdline"))
-                    .is_ok_and(|cmdline| cmdline.starts_with(&program))
-            })
-            .collect();
+        let found = ap_runs(&shell);
         // The run is listed once the run process holds its record. The
         // harness ignores `SIGTERM` before it reports, and its report waits
         // for the suspended `ap run`, so a stop from here finds it ignored.
@@ -1437,12 +1429,82 @@ fn ap_stop_stops_a_run_whose_ap_run_its_terminal_suspends_again() {
     assert_eq!(stty(&terminal, &["-g"]), modes);
 }
 
-/// Starts `ap run open` in the background of `terminal`, as `ap run open &`
-/// would from a shell with job control, as yours is, through `wrapper`, a
-/// command that runs the rest. Once the shell gets `SIGTERM`, as from its
-/// guard, or `SIGHUP`, as when the terminal closes, it kills the run's
-/// process group, and waits for it.
-fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
+/// The `ap run` processes that `shell` started.
+fn ap_runs(shell: &Started) -> Vec<u32> {
+    let mut program = shared().0.as_os_str().as_encoded_bytes().to_vec();
+    program.extend_from_slice(b"\0run\0");
+    descendants(shell.0.id())
+        .into_iter()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline.starts_with(&program))
+        })
+        .collect()
+}
+
+// spec(ap stop): An interactive run that `ap stop` reaches leaves your terminal's modes as they are if it ends while its `ap run` is in the background of your terminal.
+#[test]
+fn ap_stop_leaves_the_shells_modes_when_it_stops_a_run_from_the_background() {
+    let scratch = Scratch::new("stopped-job");
+    scratch.build("open", &fake(""));
+    let (_controller, terminal) = open_terminal(size(24, 80)).unwrap();
+    let before = stty(&terminal, &["-g"]);
+    let shell = as_job(&scratch, &terminal, "", "fg");
+    let deadline = Instant::now() + SHOWN_WITHIN;
+    let (run, rows) = loop {
+        // In the foreground, `ap run` sets raw mode before the run is listed.
+        if let [run] = ap_runs(&shell)[..]
+            && stty(&terminal, &["-g"]) != before
+            && let rows = scratch.ps()
+            && rows.len() == 1
+        {
+            break (run, rows);
+        }
+        assert!(Instant::now() < deadline, "the run didn't start");
+        thread::sleep(Duration::from_millis(10));
+    };
+    let vm = run_process(run);
+    let name = rows[0].split_whitespace().next().unwrap().to_owned();
+    // As Ctrl-Z would, if raw mode let it. The shell takes the terminal
+    // back once the job stops, and the job's modes are its own to change.
+    let job = stat(run, 2);
+    let status = Command::new("kill")
+        .args(["-STOP", "--", &format!("-{job}")])
+        .status()
+        .unwrap();
+    assert!(status.success(), "kill -STOP -{job}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stat(run, 5) == job {
+        assert!(Instant::now() < deadline, "the shell didn't take the terminal");
+        thread::sleep(Duration::from_millis(10));
+    }
+    stty(&terminal, &["sane", "-echo"]);
+    let modes = stty(&terminal, &["-g"]);
+    assert_ne!(modes, before);
+
+    printed(&scratch.ap(&["stop", &name]), "");
+    ended(&[vm], Instant::now(), "the VM outlived ap stop");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    ended(&[run], deadline, "ap run outlived ap stop");
+    assert_eq!(stty(&terminal, &["-g"]), modes);
+}
+
+/// Field `index` of `/proc/<pid>/stat`, after its command, where 0 is its
+/// state, 2 its process group, and 5 the foreground process group of its
+/// terminal.
+fn stat(pid: u32, index: usize) -> String {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let after = stat.rsplit_once(") ").unwrap().1;
+    after.split(' ').nth(index).unwrap().to_owned()
+}
+
+/// Starts `ap run open` as a job in the background of `terminal`, as `ap run
+/// open &` would from a shell with job control, as yours is, through
+/// `wrapper`, a command that runs the rest. The shell runs `then` next, such
+/// as `fg`, which brings the job to the foreground until it stops or ends.
+/// Once the shell gets `SIGTERM`, as from its guard, or `SIGHUP`, as when the
+/// terminal closes, it kills the run's process group, and waits for it.
+fn as_job(scratch: &Scratch, terminal: &File, wrapper: &str, then: &str) -> Started {
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -1450,9 +1512,10 @@ fn in_background(scratch: &Scratch, terminal: &File, wrapper: &str) -> Started {
             "set -m
             timeout -k 10 {TIMEOUT} {wrapper} \"$0\" run open &
             run=$!
+            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM HUP
+            {then}
             sleep {TIMEOUT} &
             sleeper=$!
-            trap 'kill -KILL -$run $sleeper; wait $run; exit 0' TERM HUP
             wait $sleeper"
         ))
         .arg(&shared().0)
@@ -1479,7 +1542,7 @@ fn an_interactive_run_that_ignores_job_control_goes_on_in_the_background() {
     // `timeout` gives its command the default actions for both, so they
     // are ignored after it.
     let ignoring = "sh -c 'trap \"\" TTOU TTIN; exec \"$@\"' sh";
-    let _shell = in_background(&scratch, &terminal, ignoring);
+    let _shell = as_job(&scratch, &terminal, ignoring, "");
     let shown = Arc::new(Mutex::new(Vec::new()));
     let screen = Arc::clone(&shown);
     let (stopped, stop_reading) = io::pipe().unwrap();

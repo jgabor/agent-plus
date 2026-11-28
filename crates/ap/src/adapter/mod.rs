@@ -7,24 +7,16 @@ pub mod claude;
 pub mod codex;
 
 use agentfile::{Auth, Harness, Reserved};
-
-/// The variables that point tools at the run's certificate authority, from
-/// SPEC.md's SECRET section. Every harness gets them.
-pub const CERTIFICATES: [&str; 5] = [
-    "NODE_EXTRA_CA_CERTS",
-    "SSL_CERT_FILE",
-    "REQUESTS_CA_BUNDLE",
-    "CURL_CA_BUNDLE",
-    "GIT_SSL_CAINFO",
-];
+use guest::agent::BUNDLE_VARIABLES;
 
 /// The variables `ap` sets for every run, after `ENV`, from SPEC.md's ENV
 /// section.
 pub const RUN: [&str; 3] = ["HOME", "USER", "LOGNAME"];
 
 /// What the adapter for `harness` keeps for itself: the variables `ap` and
-/// it set, the ones the harness reads for sign-in, the one `AUTH key` reads,
-/// and the harness's own hosts.
+/// it set, which include the ones the guest points at the run's certificate
+/// authority, the ones the harness reads for sign-in, the one `AUTH key`
+/// reads, and the harness's own hosts.
 pub fn reserved(harness: Harness) -> Reserved<'static> {
     let (name, set, sign_in, key, hosts) = match harness {
         Harness::Claude => (
@@ -46,7 +38,7 @@ pub fn reserved(harness: Harness) -> Reserved<'static> {
         harness: name,
         set: RUN
             .iter()
-            .chain(&CERTIFICATES)
+            .chain(&BUNDLE_VARIABLES)
             .chain(set)
             .copied()
             .collect(),

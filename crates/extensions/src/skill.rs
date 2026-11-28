@@ -340,7 +340,9 @@ impl Keys {
             let key = match events.next()? {
                 Event::MappingEnd => break,
                 Event::Alias(_) => return Err(Problem::Key("an alias as a key")),
-                Event::Scalar(_, _, _, Some(_)) => return Err(Problem::Key("a key with a tag")),
+                Event::Scalar(_, _, _, Some(_))
+                | Event::SequenceStart(_, Some(_))
+                | Event::MappingStart(_, Some(_)) => return Err(Problem::Key("a key with a tag")),
                 Event::Scalar(key, TScalarStyle::Plain, ..) if key == "<<" => {
                     return Err(Problem::Key("`<<` as a key"));
                 }

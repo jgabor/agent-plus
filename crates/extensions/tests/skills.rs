@@ -606,6 +606,10 @@ fn a_key_that_readers_resolve_differently_is_refused() {
         "!!merge x",
         "!!merge '<<'",
         "!<tag:yaml.org,2002:merge> x",
+        "!!merge [a]",
+        "!!merge {a: b}",
+        "? !!merge [a]\n",
+        "!<tag:yaml.org,2002:merge> [a]",
         "!!str name",
         "!x license",
     ] {

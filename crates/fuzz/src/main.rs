@@ -2968,7 +2968,8 @@ mod tests {
         let longer = format!("{settings}\0\x40\x01\0\0\0\0\0\x01{data}");
         assert_eq!(h2_frames_input(&longer), 3);
         // Before the ACK, the DATA is too long.
-        let early = format!("\0\0\x06\x04\0\0\0\0\0\0\x05\0\0\x40\x01\0\x40\x01\0\0\0\0\0\x01{data}");
+        let early =
+            format!("\0\0\x06\x04\0\0\0\0\0\0\x05\0\0\x40\x01\0\x40\x01\0\0\0\0\0\x01{data}");
         assert_eq!(h2_frames_input(&early), 1);
         // A client's SETTINGS_HEADER_TABLE_SIZE of 0, its ACK, and HEADERS
         // whose block doesn't start by saying so.

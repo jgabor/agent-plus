@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::iter::Peekable;
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::slice::Iter;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, PoisonError};
@@ -234,9 +234,16 @@ fn spawn(root: &Path, package: &str, hold: &Hold) -> Result<Child, Problem> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     hold.pass_to(&mut command);
-    command
-        .spawn()
-        .map_err(|e| Problem(format!("couldn't run `systemd-run`: {e}")))
+    launch(&mut command)
+}
+
+/// Starts `command`, or names the program it couldn't start, which is
+/// `systemd-run`, or `cargo` itself on macOS, where nothing wraps it.
+fn launch(command: &mut Command) -> Result<Child, Problem> {
+    command.spawn().map_err(|e| {
+        let program = command.get_program().to_string_lossy();
+        Problem(format!("couldn't run `{program}`: {e}"))
+    })
 }
 
 /// Reads a package's results from its stdout as its tests run. Both of its
@@ -314,7 +321,19 @@ fn program_of(line: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_result, program_of};
+    use super::{launch, parse_result, program_of};
+    use std::process::Command;
+
+    #[test]
+    fn names_the_program_it_couldnt_start() {
+        let mut command = Command::new("cargo");
+        command.current_dir("/nonexistent/directory");
+        let problem = launch(&mut command).expect_err("no such directory");
+        assert!(
+            problem.0.starts_with("couldn't run `cargo`: "),
+            "{problem:?}"
+        );
+    }
 
     #[test]
     fn names_each_program_that_cargo_runs() {

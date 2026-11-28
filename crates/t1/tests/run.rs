@@ -2615,7 +2615,7 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
         ),
         (
             "dotted",
-            "NETWORK +github.com.\nSECRET GH_TOKEN @github.com.\n",
+            "NETWORK +\nSECRET GH_TOKEN @github.com.\n",
             "GH_TOKEN",
             true,
         ),

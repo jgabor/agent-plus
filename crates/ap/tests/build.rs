@@ -1344,6 +1344,7 @@ fn a_download_the_server_ends_early_starts_over() {
     );
 }
 
+// spec(Build): When the connection ends before a download is complete, `ap` starts the download over from its first byte, at most 3 more times.
 // spec(Build): If the last try ends early too, it fails with that try's error.
 #[test]
 fn a_download_that_always_ends_early_fails_after_4_tries() {

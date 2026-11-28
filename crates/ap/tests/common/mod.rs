@@ -129,6 +129,9 @@ pub fn ends_early(body: &[u8]) -> Vec<u8> {
     reply
 }
 
+/// A reply the server never sends. It resets the connection in its place.
+pub const RESET: &[u8] = b"reset the connection";
+
 pub fn redirect(location: &str) -> Vec<u8> {
     format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n").into_bytes()
 }
@@ -176,6 +179,10 @@ impl Server {
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
                     |(_, r)| r,
                 );
+                if reply == RESET {
+                    reset(&tls.sock);
+                    continue;
+                }
                 let _ = tls.write_all(reply);
                 tls.conn.send_close_notify();
                 let _ = tls.flush();
@@ -206,6 +213,27 @@ fn tls_config() -> Arc<ServerConfig> {
             .with_single_cert(certs, key)
             .unwrap(),
     )
+}
+
+/// Makes closing `stream` reset it, as a dropped connection does.
+fn reset(stream: &std::net::TcpStream) {
+    use std::os::fd::AsRawFd;
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    // SAFETY: the descriptor is open, and `linger` is a valid `SO_LINGER`
+    // value that outlives the call.
+    let set = unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_LINGER,
+            (&raw const linger).cast(),
+            size_of::<libc::linger>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "{}", io::Error::last_os_error());
 }
 
 fn read_head(stream: &mut impl Read) -> io::Result<String> {

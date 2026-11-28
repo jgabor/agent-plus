@@ -20,8 +20,8 @@ const MAX_HEAD_BYTES: u64 = 64 * 1024;
 /// Far above any file `ap` pins, and low enough that a bad server can't fill
 /// the disk before the digest check.
 const MAX_BODY_BYTES: u64 = 1 << 30;
-/// How many times a download that ends early starts over, as cargo's
-/// `net.retry` does by default.
+/// How many times a download that ends early starts over, as many as cargo's
+/// `net.retry` allows by default.
 const TRIES_AGAIN: u32 = 3;
 
 /// A file to download, and the digest it must have.
@@ -163,15 +163,22 @@ fn download(client: &Client, url: &str) -> io::Result<Body> {
     response.body()
 }
 
-/// What `download` returns, after starting it over up to [`TRIES_AGAIN`]
-/// times while the connection ends before it is complete. A read that ends
-/// early, and a TLS connection closed without `close_notify`, both fail with
-/// `UnexpectedEof`.
-fn again<T>(mut download: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+/// What `attempt` returns, after starting it over up to [`TRIES_AGAIN`]
+/// times while the connection ends before the download is complete. A read
+/// that ends early, and a TLS connection closed without `close_notify`, both
+/// fail with `UnexpectedEof`, and a reset fails with `ConnectionReset`.
+fn again<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut left = TRIES_AGAIN;
     loop {
-        match download() {
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof && left > 0 => left -= 1,
+        match attempt() {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                ) && left > 0 =>
+            {
+                left -= 1
+            }
             result => return result,
         }
     }
@@ -320,25 +327,31 @@ impl Read for Body {
             .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
         let read = self.stream.read(&mut buffer[..limit])?;
         if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the download ended early",
-            ));
+            return Err(ended_early());
         }
         self.remaining -= read as u64;
         Ok(read)
     }
 }
 
-/// One line of the response head, without its line ending.
-fn read_line(head: &mut impl BufRead) -> io::Result<String> {
+/// One line of the response head, without its line ending. A line cut off
+/// by the end of the connection, and not by the limit, ends the download
+/// early.
+fn read_line<R: BufRead>(head: &mut io::Take<R>) -> io::Result<String> {
     let mut line = Vec::new();
     head.read_until(b'\n', &mut line)?;
+    if !line.ends_with(b"\n") && head.limit() > 0 {
+        return Err(ended_early());
+    }
     if !line.ends_with(b"\r\n") {
         return Err(bad_response("a truncated head"));
     }
     line.truncate(line.len() - 2);
     String::from_utf8(line).map_err(|_| bad_response("a head that isn't UTF-8"))
+}
+
+fn ended_early() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "the download ended early")
 }
 
 fn connect(host: &str, port: u16) -> io::Result<TcpStream> {

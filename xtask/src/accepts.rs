@@ -480,11 +480,10 @@ fn budget_can_change(tree: &Path, commit: &str) -> Result<bool, Problem> {
 /// which the bench builds. A test fails while a package is on neither list,
 /// or while this one isn't what they are built from.
 #[cfg(test)]
-const BENCHED: [&str; 12] = [
+const BENCHED: [&str; 11] = [
     "agentfile",
     "ap",
     "erofs",
-    "extensions",
     "fake-harness",
     "git",
     "guest",
@@ -495,7 +494,7 @@ const BENCHED: [&str; 12] = [
     "vmm",
 ];
 /// The packages under `crates/` that neither is built from.
-const NOT_BENCHED: [&str; 5] = ["fake-upstream", "fake-vm", "fuzz", "t1", "t2"];
+const NOT_BENCHED: [&str; 6] = ["extensions", "fake-upstream", "fake-vm", "fuzz", "t1", "t2"];
 
 /// A path under `crates/` affects a budget unless it is in a package's
 /// `tests/`, or in a package that `NOT_BENCHED` names. A package on neither

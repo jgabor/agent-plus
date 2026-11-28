@@ -4,7 +4,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{OnceLock, mpsc};
@@ -44,6 +44,73 @@ const HILL_NONE: &str = "Closes #7.\n\nHill: none, tooling.\n";
 /// What a merge says when another run holds the slot.
 const SLOT_WAIT: &str = "merge: PR 9 waits for the merge slot, which another run holds";
 const NO_REBASE: &str = "the branch doesn't rebase onto `main`. Rebase it by hand, and push it";
+
+/// Far longer than any command in these tests runs, timeouts and all, and far
+/// shorter than the timeout of a merge whose proof runs these tests. So a
+/// merge that `Repo::output` runs, and that hangs past its own timeouts,
+/// fails its test, and doesn't stop the merge that runs it.
+const HUNG: Duration = Duration::from_secs(5 * 60);
+
+/// Runs `command` as `Command::output` does, until it has ended and closed its
+/// output, or until `hung` says that it hangs. Then it kills the command, and
+/// gives what the command had written as the error. A merge's supervisor that
+/// dies stops what the merge started.
+fn output_unless(command: &mut Command, mut hung: impl FnMut() -> bool) -> Result<Output, Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (said, heard) = mpsc::channel();
+    let pipes: [Box<dyn Read + Send>; 2] = [
+        Box::new(child.stdout.take().unwrap()),
+        Box::new(child.stderr.take().unwrap()),
+    ];
+    for (which, mut pipe) in pipes.into_iter().enumerate() {
+        let said = said.clone();
+        thread::spawn(move || {
+            let mut chunk = [0; 4096];
+            while let Ok(read @ 1..) = pipe.read(&mut chunk) {
+                if said.send((which, chunk[..read].to_vec())).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    drop(said);
+    let mut written = [Vec::new(), Vec::new()];
+    let mut open = true;
+    let hangs = loop {
+        if open {
+            match heard.recv_timeout(Duration::from_millis(100)) {
+                Ok((which, chunk)) => written[which].extend(chunk),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => open = false,
+            }
+        } else {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !open && child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        if hung() {
+            let _ = child.kill();
+            break true;
+        }
+    };
+    let status = child.wait().unwrap();
+    for (which, chunk) in heard.try_iter() {
+        written[which].extend(chunk);
+    }
+    let [stdout, stderr] = written;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
+    if hangs { Err(output) } else { Ok(output) }
+}
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
@@ -395,6 +462,22 @@ impl Repo {
         command
     }
 
+    /// What `command` wrote, as `Command::output` gives it. A command that
+    /// runs for `HUNG` is killed, and fails the test.
+    #[track_caller]
+    fn output(&self, command: &mut Command) -> Output {
+        let started = Instant::now();
+        match output_unless(command, || started.elapsed() > HUNG) {
+            Ok(output) => output,
+            Err(output) => panic!(
+                "killed after {HUNG:?}, because it, or what holds its output, hung\nstdout: {}\nstderr: {}\ncalls:\n{}",
+                stdout(&output),
+                stderr(&output),
+                self.calls()
+            ),
+        }
+    }
+
     fn write(&self, path: &str, content: &str) {
         let path = self.root.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -480,10 +563,7 @@ impl Repo {
     }
 
     fn xtask(&self, args: &[&str]) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(args)
-            .output()
-            .unwrap()
+        self.output(self.command(env!("CARGO_BIN_EXE_xtask")).args(args))
     }
 
     fn merge(&self) -> Output {
@@ -506,12 +586,12 @@ impl Repo {
     }
 
     fn land_running(&self, on: &str, command: &str) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(["land", "9"])
-            .env("RUN_ON", on)
-            .env("RUN_COMMAND", command)
-            .output()
-            .unwrap()
+        self.output(
+            self.command(env!("CARGO_BIN_EXE_xtask"))
+                .args(["land", "9"])
+                .env("RUN_ON", on)
+                .env("RUN_COMMAND", command),
+        )
     }
 
     /// The comments `prepare` posted on the PR, each ending in a blank line.
@@ -529,21 +609,21 @@ impl Repo {
     }
 
     fn merge_running(&self, on: &str, command: &str) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(["merge", "9"])
-            .env("RUN_ON", on)
-            .env("RUN_COMMAND", command)
-            .output()
-            .unwrap()
+        self.output(
+            self.command(env!("CARGO_BIN_EXE_xtask"))
+                .args(["merge", "9"])
+                .env("RUN_ON", on)
+                .env("RUN_COMMAND", command),
+        )
     }
 
     fn merge_killed(&self, on: &str, when: &str) -> Output {
-        self.command(env!("CARGO_BIN_EXE_xtask"))
-            .args(["merge", "9"])
-            .env("KILL_ON", on)
-            .env("KILL_WHEN", when)
-            .output()
-            .unwrap()
+        self.output(
+            self.command(env!("CARGO_BIN_EXE_xtask"))
+                .args(["merge", "9"])
+                .env("KILL_ON", on)
+                .env("KILL_WHEN", when),
+        )
     }
 }
 

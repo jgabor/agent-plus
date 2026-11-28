@@ -29,14 +29,13 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
     );
     // The hang outlasts the timeout by far, so the merge stops at the timeout
     // wherever it is when that fires.
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("HANG_ON", "cargo fmt")
-        .env("HANG_FOR", "60")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("HANG_ON", "cargo fmt")
+            .env("HANG_FOR", "60")
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "1"),
+    );
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert!(!repo.bin.join("merged").exists());
@@ -53,14 +52,13 @@ fn a_merge_past_its_timeout_stops_and_can_restart() {
 fn a_timeout_that_can_not_be_posted_is_still_a_timeout() {
     let repo = Repo::new("timeout-unposted");
     fs::write(repo.bin.join("status-fails"), "").unwrap();
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("HANG_ON", "cargo fmt")
-        .env("HANG_FOR", "60")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("HANG_ON", "cargo fmt")
+            .env("HANG_FOR", "60")
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "1"),
+    );
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     let said = stderr(&output);
     let (_, after) = said.split_once("second timeout").expect(&said);
@@ -76,15 +74,14 @@ fn a_timeout_that_can_not_be_posted_is_still_a_timeout() {
 #[test]
 fn a_command_the_proof_runs_cannot_pause_the_timeout() {
     let repo = Repo::new("timeout-paused");
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("PAUSE_ON", "cargo ")
-        .env("HANG_ON", "cargo build --release")
-        .env("HANG_FOR", "120")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("PAUSE_ON", "cargo ")
+            .env("HANG_ON", "cargo build --release")
+            .env("HANG_FOR", "120")
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "60"),
+    );
     assert!(
         repo.calls().contains("cargo build --release"),
         "{}",
@@ -109,15 +106,14 @@ fn each_proof_of_a_pr_that_changes_xtask_gets_the_timeout() {
         &[],
         &[("xtask/src/bench.rs", "// a better measurer\n")],
     );
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("HANG_ON", "cargo fmt --all")
-        .env("HANG_FOR", "15")
-        .env("HANG_UNTIL", "61")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("HANG_ON", "cargo fmt --all")
+            .env("HANG_FOR", "15")
+            .env("HANG_UNTIL", "61")
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "60"),
+    );
     assert_eq!(
         repo.calls().matches("cargo fmt --all").count(),
         2,
@@ -500,13 +496,12 @@ fn a_benchs_wait_that_its_own_xtask_only_claims_counts_against_the_timeout() {
             ("xtask/src/bench.rs", "// variant: lying\n"),
         ],
     );
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("LIED", repo.bin.join("lied"))
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "60")
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("LIED", repo.bin.join("lied"))
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "60"),
+    );
     assert!(
         repo.bin.join("lied").exists(),
         "its own bench never said it waits:\n{}\n{}",
@@ -658,21 +653,20 @@ fn a_merge_past_its_timeout_stops_what_it_started() {
     // The stray starts before the merge takes the slot, which starts the
     // timer, and the hang outlasts the timeout by far. So the timeout is what
     // stops the merge, wherever the merge is when it fires.
-    let output = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
-        .args(["merge", "9"])
-        .env("RUN_ON", "gh pr view")
-        .env("RUN_COMMAND", stray(&repo))
-        .env("HANG_ON", "cargo fmt")
-        .env("HANG_FOR", "60")
-        .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
-        // As a merge that a merge's own tests start inherits it.
-        .env(
-            "XTASK_MERGE_WORKER_OF",
-            std::os::unix::process::parent_id().to_string(),
-        )
-        .output()
-        .unwrap();
+    let output = repo.output(
+        repo.command(env!("CARGO_BIN_EXE_xtask"))
+            .args(["merge", "9"])
+            .env("RUN_ON", "gh pr view")
+            .env("RUN_COMMAND", stray(&repo))
+            .env("HANG_ON", "cargo fmt")
+            .env("HANG_FOR", "60")
+            .env("XTASK_MERGE_TIMEOUT_SECONDS", "1")
+            // As a merge that a merge's own tests start inherits it.
+            .env(
+                "XTASK_MERGE_WORKER_OF",
+                std::os::unix::process::parent_id().to_string(),
+            ),
+    );
     assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
     assert!(stderr(&output).contains("timeout"), "{}", stderr(&output));
     assert_stray_stopped(&repo);
@@ -686,29 +680,22 @@ fn a_merge_that_ends_stops_what_it_started() {
     assert_stray_stopped(&repo);
 }
 
-/// As on Ctrl-C, which reaches the caller's process group but not the merge's.
+/// As on Ctrl-C, which reaches the caller's process group but not the merge's,
+/// and as when a test gives up on a merge that hangs, so that the test fails,
+/// and the merge whose proof runs the tests goes on.
 #[test]
 fn a_merge_whose_caller_is_killed_stops_what_it_started() {
     let repo = Repo::new("caller-killed");
-    let mut merge = repo
-        .command(env!("CARGO_BIN_EXE_xtask"))
+    let mut merge = repo.command(env!("CARGO_BIN_EXE_xtask"));
+    merge
         .args(["merge", "9"])
         .env("RUN_ON", "cargo fmt")
-        .env("RUN_COMMAND", format!("{}; sleep 30", stray(&repo)))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while stray_pid(&repo).is_none() {
-        assert!(
-            Instant::now() < deadline,
-            "the merge never reached `cargo fmt`"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-    merge.kill().unwrap();
-    merge.wait().unwrap();
+        .env("RUN_COMMAND", format!("{}; sleep 30", stray(&repo)));
+    let started = Instant::now();
+    let killed = output_unless(&mut merge, || {
+        stray_pid(&repo).is_some() || started.elapsed() > HUNG
+    });
+    assert!(killed.is_err(), "the merge ended on its own: {killed:?}");
     assert_stray_stopped(&repo);
     assert_merged(&repo, &repo.merge());
 }

@@ -412,7 +412,7 @@ fn a_file_you_changed_beneath_a_directory_the_agent_removed_stays_pending() {
 /// directory the agent replaced, but each directory changed on your side
 /// all the same, so the agent's file and symlink are reported and stay
 /// pending, as your files do. A directory you left as it was is replaced.
-// spec(SHARE): Where the agent wrote a file or symlink in place of your directory, and you changed or added a file in it after that, at any depth, the directory changed on your side too.
+// spec(SHARE): Where the agent wrote a file or symlink in place of your directory, and you changed or added a file in it, at any depth, after the agent emptied it, the directory changed on your side too.
 // spec(SHARE): `ap apply` skips the agent's file, says so, and it stays pending.
 #[test]
 fn a_file_in_place_of_your_directory_where_you_changed_a_file_stays_pending() {

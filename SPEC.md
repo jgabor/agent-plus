@@ -1849,8 +1849,8 @@ attributes, because those can run commands.
     The directory stays, with its repository, as if the agent had deleted
     it.
   - Where the agent wrote a file or symlink in place of your directory, and
-    you changed or added a file in it after that, at any depth, the
-    directory changed on your side too. `ap apply` skips the agent's file,
+    you changed or added a file in it, at any depth, after the agent emptied
+    it, the directory changed on your side too. `ap apply` skips the agent's file,
     says so, and it stays pending.
   - `ap apply` makes a directory only to hold what it applies, and gives
     each file it writes and each directory it makes the permission bits

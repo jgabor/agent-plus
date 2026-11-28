@@ -520,6 +520,15 @@ const TARGETS: [Target; 14] = [
                 "\0\0\x15\x05\x04\0\0\0\x01\0\0\0\x02\u{82}\u{87}\u{84}A\x0cexample.test",
                 "\0\0\x01\x01\x04\0\0\0\x01\u{88}",
             ),
+            // A client's SETTINGS_HEADER_TABLE_SIZE and
+            // SETTINGS_MAX_FRAME_SIZE, their ACK, and a request whose block
+            // starts with the table's new size.
+            concat!(
+                "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+                "\0\0\x0c\x04\0\0\0\0\0\0\x01\0\0\0\0\0\x05\0\0\x40\x01",
+                "\0\0\0\x04\x01\0\0\0\0",
+                "\0\0\x12\x01\x05\0\0\0\x01\x20\u{82}\u{87}\u{84}A\x0cexample.test",
+            ),
         ],
         words: &[
             "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
@@ -1227,10 +1236,23 @@ fn hpack_input(input: &str) -> usize {
 /// the byte of its code point: a client's, if it starts with the preface,
 /// and a server's if it doesn't. It writes each frame the reader accepts,
 /// and panics if reading what it wrote gives other frames, or if reading
-/// `input` a byte at a time does. Returns how many frames it accepted.
+/// `input` a byte at a time does. Its SETTINGS stand in for those the other
+/// side sent, so each SETTINGS ACK acknowledges the oldest one that none
+/// has yet, as section 6.5.3 of RFC 9113 orders them, and the readers and
+/// the writer apply its settings once they pass the ACK. Returns how many
+/// frames it accepted.
 fn h2_frames_input(input: &str) -> usize {
     use net::h2::{Error, Frame, PREFACE, Reader, Writer};
+    use std::collections::VecDeque;
     const LIST_LIMIT: usize = 64 * 1024;
+    let acked = |sent: &mut VecDeque<Vec<(u16, u32)>>, frame: &Frame| match frame {
+        Frame::Settings(settings) => {
+            sent.push_back(settings.clone());
+            None
+        }
+        Frame::SettingsAck => sent.pop_front(),
+        _ => None,
+    };
     let bytes: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
     let client = bytes.starts_with(PREFACE);
     let reader = || match client {
@@ -1240,11 +1262,17 @@ fn h2_frames_input(input: &str) -> usize {
     let read = |pieces: &mut dyn Iterator<Item = &[u8]>| {
         let mut reader = reader();
         let mut frames = Vec::new();
+        let mut sent = VecDeque::new();
         for piece in pieces {
             reader.push(piece);
             loop {
                 match reader.frame() {
-                    Ok(Some(frame)) => frames.push(frame),
+                    Ok(Some(frame)) => {
+                        if let Some(settings) = acked(&mut sent, &frame) {
+                            reader.apply(&settings);
+                        }
+                        frames.push(frame);
+                    }
                     Ok(None) => break,
                     Err(error) => return (frames, Some(error)),
                 }
@@ -1257,8 +1285,12 @@ fn h2_frames_input(input: &str) -> usize {
     assert_eq!(bytewise, (frames.clone(), error), "a byte at a time");
     let mut written = if client { PREFACE.to_vec() } else { Vec::new() };
     let mut writer = Writer::new();
+    let mut sent = VecDeque::new();
     for frame in &frames {
         writer.write(frame, &mut written);
+        if let Some(settings) = acked(&mut sent, frame) {
+            writer.apply(&settings);
+        }
     }
     let again: (Vec<Frame>, _) = read(&mut std::iter::once(&written[..]));
     assert_eq!(again, (frames.clone(), None), "{written:x?}");
@@ -2918,13 +2950,48 @@ mod tests {
             .unwrap()
             .corpus;
         let counts: Vec<usize> = corpus.iter().map(|input| h2_frames_input(input)).collect();
-        assert_eq!(counts, [0, 5, 6, 3]);
+        assert_eq!(counts, [0, 5, 6, 3, 3]);
         // A PING on a stream, and nothing after it is read.
         let ping = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0\0\0\x08\x06\0\0\0\0\x01";
         assert_eq!(
             h2_frames_input(&format!("{ping}12345678\0\0\0\x04\x01\0\0\0\0")),
             1
         );
+    }
+
+    #[test]
+    fn the_h2_frames_target_applies_acknowledged_settings() {
+        // A server's SETTINGS_MAX_FRAME_SIZE of 16385, its ACK, and DATA
+        // that long.
+        let data = "x".repeat(16385);
+        let settings = "\0\0\x06\x04\0\0\0\0\0\0\x05\0\0\x40\x01\0\0\0\x04\x01\0\0\0\0";
+        let longer = format!("{settings}\0\x40\x01\0\0\0\0\0\x01{data}");
+        assert_eq!(h2_frames_input(&longer), 3);
+        // Before the ACK, the DATA is too long.
+        let early =
+            format!("\0\0\x06\x04\0\0\0\0\0\0\x05\0\0\x40\x01\0\x40\x01\0\0\0\0\0\x01{data}");
+        assert_eq!(h2_frames_input(&early), 1);
+        // A client's SETTINGS_HEADER_TABLE_SIZE of 0, its ACK, and HEADERS
+        // whose block doesn't start by saying so.
+        let table = concat!(
+            "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            "\0\0\x06\x04\0\0\0\0\0\0\x01\0\0\0\0",
+            "\0\0\0\x04\x01\0\0\0\0",
+            "\0\0\x11\x01\x05\0\0\0\x01\u{82}\u{87}\u{84}A\x0cexample.test",
+        );
+        assert_eq!(h2_frames_input(table), 2);
+        // Each ACK applies the oldest SETTINGS it hasn't, so the second
+        // ACK lowers the table, and the HEADERS after it is refused.
+        let second = concat!(
+            "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n",
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\x06\x04\0\0\0\0\0\0\x01\0\0\0\0",
+            "\0\0\0\x04\x01\0\0\0\0",
+            "\0\0\x11\x01\x05\0\0\0\x01\u{82}\u{87}\u{84}A\x0cexample.test",
+            "\0\0\0\x04\x01\0\0\0\0",
+            "\0\0\x11\x01\x05\0\0\0\x03\u{82}\u{87}\u{84}A\x0cexample.test",
+        );
+        assert_eq!(h2_frames_input(second), 5);
     }
 
     #[test]

@@ -789,8 +789,11 @@ pub fn directory(root: &Path) -> Result<PathBuf, Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ticket, Turnstile, bench_waits, open, take_exclusive, take_place, take_shared};
+    #[cfg(target_os = "linux")]
+    use super::take_place;
+    use super::{Ticket, Turnstile, bench_waits, open, take_exclusive, take_shared};
     use std::fs::{self, TryLockError};
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
@@ -914,6 +917,7 @@ mod tests {
     /// Takes the lock on `name` once it frees. A process that another test
     /// starts keeps a copy of each open file until it runs its program, so a
     /// lock can stay taken for a moment after its holder lets it go.
+    #[cfg(target_os = "linux")]
     fn take_when_free(path: &Path, name: &str) -> fs::File {
         let file = open(path, name).map_err(|e| e.0).unwrap();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -929,7 +933,8 @@ mod tests {
     }
 
     /// Returns once something in this process waits to share the lock on
-    /// `name`.
+    /// `name`. Only Linux lists the requests that wait, in `/proc/locks`.
+    #[cfg(target_os = "linux")]
     fn wait_for_a_sharer(path: &Path, name: &str) {
         let inode = fs::metadata(path.join(name)).unwrap().ino();
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -970,6 +975,10 @@ mod tests {
     /// The test keeps `ahead.lock`, as the merge slot's holder does while it
     /// waits for a place. The one place frees while a run waits for it in the
     /// queue, and that run gets it, gives it up, and waits for the holder.
+    /// The test must see that wait before it takes the place, and macOS
+    /// can't show a lock that a process waits for, so this runs on Linux
+    /// only.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_run_in_the_queue_lets_the_merge_slots_holder_have_the_next_place() {
         let path = directory("ahead");

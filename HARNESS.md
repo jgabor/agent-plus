@@ -1085,9 +1085,9 @@ The approval covers the reasons of the newest "Merging this PR at `<head>`
 accepts:" comment that GitHub took before the owner armed auto-merge, since
 that is the one they could read, and nothing if there was none. So a comment
 that a proof posted after that isn't approved, even when the proof stopped
-before it turned auto-merge off. The head in that line doesn't count. A count that fell is covered by
-a fall at least as big, on any `main`, and a reason is the same whichever xtask
-found it.
+before it turned auto-merge off. The head in that line doesn't count. A count
+that fell is covered by a fall at least as big, on any `main`, and a reason is
+the same whichever xtask found it.
 
 `cargo xtask refresh` runs on the owner's Linux machine, in a checkout of its
 own at `~/agent-plus-refresh`. That checkout is a worktree of the repository

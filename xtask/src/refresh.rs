@@ -361,17 +361,10 @@ fn changed(gh: &Gh, pr: &OpenPr) -> Result<Result<i64, String>, Problem> {
 }
 
 /// What this head's proof accepted that the owner didn't approve by arming
-/// the PR at `armed`, before the proof turned auto-merge off. A proof that
-/// accepted nothing left no comment for this head.
+/// the PR at `armed`, before the proof turned auto-merge off.
 fn newly_accepted(gh: &Gh, number: u64, head: &str, armed: i64) -> Result<Vec<String>, Problem> {
     let lists = accepts::acceptances(&gh.acceptances(number)?);
-    Ok(match lists.last() {
-        Some(list) if list.head == head => {
-            let approved = accepts::approved(&lists, armed);
-            accepts::unapproved(approved, &list.reasons)
-        }
-        _ => Vec::new(),
-    })
+    Ok(accepts::newly_accepted(&lists, head, armed))
 }
 
 /// Lets the dispatcher restart the PR's issue, and tells the PR why, once for

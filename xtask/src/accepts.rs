@@ -197,9 +197,18 @@ fn fall(reason: &str) -> Option<(&str, u64)> {
 /// What the owner approved by arming auto-merge at `armed`, in seconds: the
 /// reasons of the newest list posted before then, since that is the one they
 /// could read. `None` when no list came before it.
-pub fn approved(lists: &[Listed], armed: i64) -> Option<&[String]> {
+fn approved(lists: &[Listed], armed: i64) -> Option<&[String]> {
     let mut before = lists.iter().filter(|list| list.posted < armed);
     before.next_back().map(|list| &list.reasons[..])
+}
+
+/// What the proof of `head` accepted that arming the PR at `armed` didn't
+/// approve. A proof that accepted nothing left no list for its head.
+pub fn newly_accepted(lists: &[Listed], head: &str, armed: i64) -> Vec<String> {
+    match lists.last() {
+        Some(list) if list.head == head => unapproved(approved(lists, armed), &list.reasons),
+        _ => Vec::new(),
+    }
 }
 
 /// GitHub merges an armed PR once it is green, so a proof that accepts more

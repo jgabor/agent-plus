@@ -2256,6 +2256,8 @@ allow one.
   A UDP flow closes after 60 seconds with no datagram either way, as it
   would behind a NAT, and a reply that comes later is dropped.
 - **ICMP** isn't carried, so `ping` gets no reply.
+- **Broadcast and multicast.** A SYN or UDP datagram that the guest sends to
+  a broadcast, multicast, or unspecified address is dropped unanswered.
 - **Connections at once.** The guest can have at most 64 TCP connections
   that it has started but not finished opening, and a SYN past that is
   dropped unanswered, so the guest sends it again. The guest can send UDP to

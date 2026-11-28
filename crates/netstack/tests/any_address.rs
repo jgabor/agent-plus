@@ -1279,3 +1279,54 @@ fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
     }
     assert!(asked.is_empty(), "asked about {asked:#?}");
 }
+
+// spec(NETWORK): **Broadcast and multicast.** A SYN or UDP datagram that the guest sends to a broadcast, multicast, or unspecified address is dropped unanswered.
+#[test]
+fn a_flow_to_an_address_that_is_not_unicast_is_dropped_unanswered() {
+    let ip = |address: &str| -> IpAddr { address.parse().unwrap() };
+    let syns = [
+        syn_frame(SocketAddr::new(ip("203.0.113.7"), 443)),
+        syn_frame(SocketAddr::new(ip("2001:db8::1"), 443)),
+    ];
+    let datagrams = [
+        datagram_frame(SocketAddr::new(ip("198.51.100.9"), 53)),
+        datagram_frame(SocketAddr::new(ip("2001:db8::9"), 53)),
+    ];
+    // The guest sends each one to the stack's MAC. The third IPv4 address
+    // is the broadcast address of the stack's subnet.
+    let not_unicast = [
+        vec![
+            ip("224.0.0.1"),
+            ip("255.255.255.255"),
+            ip("10.0.2.255"),
+            ip("0.0.0.0"),
+        ],
+        vec![ip("ff02::1"), ip("ff05::2"), ip("::")],
+    ];
+    let now = Instant::now();
+    let mut asked = Vec::new();
+    for (frames, kind) in [(&syns, "SYN"), (&datagrams, "datagram")] {
+        for (frame, destinations) in frames.iter().zip(&not_unicast) {
+            for &destination in destinations {
+                let mut stack = stack();
+                stack.receive(&readdressed(frame, None, Some(destination)), now, |flow| {
+                    asked.push((kind, destination, *flow));
+                    true
+                });
+                assert_eq!(stack.sockets(), 0, "{kind} to {destination}");
+                assert!(stack.transmit().is_none(), "{kind} to {destination}");
+                assert!(stack.recv_datagram().is_none(), "{kind} to {destination}");
+            }
+        }
+    }
+    assert!(asked.is_empty(), "asked about {asked:#?}");
+    // The same frames to a unicast address are asked about.
+    for frame in syns.iter().chain(&datagrams) {
+        let mut taken = false;
+        stack().receive(frame, now, |_| {
+            taken = true;
+            true
+        });
+        assert!(taken);
+    }
+}

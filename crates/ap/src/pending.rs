@@ -1355,7 +1355,9 @@ fn kept_beneath(
 ) -> io::Result<Option<&'static str>> {
     if !host.stat(path)?.is_some_and(|m| m.is_dir()) {
         if ignore.is_ignored(bytes_path(path), false) {
-            return Ok(Some("it would replace a directory that holds a git-ignored file"));
+            return Ok(Some(
+                "it would replace a directory that holds a git-ignored file",
+            ));
         }
         return Ok(None);
     }

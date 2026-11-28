@@ -1475,7 +1475,10 @@ fn ap_stop_leaves_the_shells_modes_when_it_stops_a_run_from_the_background() {
     assert!(status.success(), "kill -STOP -{job}");
     let deadline = Instant::now() + Duration::from_secs(10);
     while stat(run, 5) == job {
-        assert!(Instant::now() < deadline, "the shell didn't take the terminal");
+        assert!(
+            Instant::now() < deadline,
+            "the shell didn't take the terminal"
+        );
         thread::sleep(Duration::from_millis(10));
     }
     stty(&terminal, &["sane", "-echo"]);

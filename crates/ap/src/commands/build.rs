@@ -15,7 +15,8 @@
 //! first. When the remote asks for them, the build asks you to approve your
 //! git credentials for the source, as for any grant that widens, and fetches
 //! again with them. The lock marks the source, so a later build lists the
-//! grant before it fetches anything. The other tiers, a `REPO` with a local
+//! grant before it fetches anything, except `ap update`, which forgets the
+//! mark with the commit. The other tiers, a `REPO` with a local
 //! source, and the instructions that need any other fetch, fail.
 //!
 //! `ap update` builds the same way, once `ap::lock::Lock::forget` has
@@ -932,8 +933,12 @@ fn settle_sources(
             repository: repository.clone(),
             reference: reference.to_string(),
             resolved,
-            credentials: approving.needs(repository),
+            credentials: false,
         });
+    }
+    // Every ref of a repository that needs your credentials is marked.
+    for source in &mut settled {
+        source.credentials = approving.needs(&source.repository);
     }
     Ok(settled)
 }

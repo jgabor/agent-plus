@@ -2911,7 +2911,7 @@ fn build_unattended(scratch: &Scratch, dir: &Path) -> Output {
 // spec(Sources): A source that needs them is a [grant](#grants), because an Agentfile could otherwise copy your private code into its agent.
 // spec(Grants): | Your git credentials, for sources that need them | `REPO`, `PLUGIN`, `SKILL`, `MCP` |
 // spec(Grants): a source that newly needs your git credentials
-// spec(Sources): `ap build` finds that a source needs them only when its fetch without them fails, so it asks you for that grant then, before it uses them.
+// spec(Sources): When the lockfile doesn't record that a source needs them, `ap build` finds out only when its fetch without them fails, and asks you for that grant then, before it uses them.
 #[test]
 fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
     let scratch = Scratch::new("repo-credentials");
@@ -3066,6 +3066,7 @@ fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
 /// that names its commit nor the same source without the grant takes it from
 /// the download cache or the store.
 // spec(Sources): A source that needs them is a [grant](#grants), because an Agentfile could otherwise copy your private code into its agent.
+// spec(Sources): The lockfile records it, so a later build asks before it fetches.
 #[test]
 fn what_your_credentials_fetched_reaches_no_source_without_the_grant() {
     let scratch = Scratch::new("repo-credentials-apart");
@@ -3089,14 +3090,13 @@ fn what_your_credentials_fetched_reaches_no_source_without_the_grant() {
         stderr(&output)
     );
 
+    // A lock that marks the source asks for the grant before it fetches,
+    // even though the store holds the layer.
     let copy = scratch.project("copy", &with_repo(&format!("REPO {url}\n")));
     let lock = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
     assert!(lock.contains(" credentials\n"), "{lock}");
-    fs::write(
-        copy.join("Agentfile.lock"),
-        lock.replace(" credentials\n", "\n"),
-    )
-    .unwrap();
+    fs::write(copy.join("Agentfile.lock"), &lock).unwrap();
+    let requests = remote.server.requests();
     let output = scratch.ap(&copy, &["build"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
@@ -3104,6 +3104,23 @@ fn what_your_credentials_fetched_reaches_no_source_without_the_grant() {
         "{}",
         stderr(&output)
     );
+    assert_eq!(
+        remote.server.requests(),
+        requests,
+        "it fetched before it asked"
+    );
+
+    // A lock that doesn't mark it can't take the layer from the store.
+    let unmarked = lock.replace(" credentials\n", "\n");
+    fs::write(copy.join("Agentfile.lock"), unmarked).unwrap();
+    let output = scratch.ap(&copy, &["build"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains(&format!("\n  {grant}")),
+        "{}",
+        stderr(&output)
+    );
+    assert!(remote.server.requests() > requests);
     assert!(!marker.exists(), "a credential helper ran");
     let built: Vec<String> = (scratch.agents().list().unwrap().into_iter())
         .map(|agent| agent.name)
@@ -3111,16 +3128,22 @@ fn what_your_credentials_fetched_reaches_no_source_without_the_grant() {
     assert_eq!(built, ["notes"]);
 }
 
-// spec(Sources): With your credentials, `git` also reads your `~/.netrc`, as it always does.
+/// Your `~/.netrc`, and a header that your global configuration sends.
+// spec(Sources): With your credentials, `git` also reads the rest of your global configuration and your `~/.netrc`, as it always does.
 #[test]
-fn a_private_source_signs_in_from_your_netrc_once_you_approve_it() {
-    let scratch = Scratch::new("repo-netrc");
+fn a_private_source_signs_in_from_your_netrc_or_configuration_once_you_approve_it() {
+    let netrc = format!("machine localhost login {USER} password {PASSWORD}\n");
+    let header = format!("[http]\n\textraHeader = Authorization: {SIGNED_IN}\n");
+    signs_in_with("repo-netrc", ".netrc", &netrc);
+    signs_in_with("repo-header", ".gitconfig", &header);
+}
+
+/// Checks that a build signs in with what `text`, in the file `file` in
+/// your home, gives, once you approve your git credentials, and not before.
+fn signs_in_with(name: &str, file: &str, text: &str) {
+    let scratch = Scratch::new(name);
     let remote = Remote::serve(&scratch, "secret", Access::Password(SIGNED_IN));
-    fs::write(
-        scratch.home.join(".netrc"),
-        format!("machine localhost login {USER} password {PASSWORD}\n"),
-    )
-    .unwrap();
+    fs::write(scratch.home.join(file), text).unwrap();
     let url = &remote.url;
     let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
     let output = scratch.ap(&dir, &["build"]);
@@ -3159,6 +3182,7 @@ fn a_remote_that_refuses_for_another_reason_is_not_asked_with_credentials() {
 }
 
 // spec(Sources): A private source then uses your own git credentials: your ssh-agent and the credential helpers in your global git configuration.
+// spec(Sources): Then `ssh` uses your ssh-agent, and none of your ssh configuration or key files.
 #[test]
 fn a_private_ssh_source_uses_your_ssh_agent_once_you_approve_it() {
     let scratch = Scratch::new("repo-ssh-agent");
@@ -3216,8 +3240,9 @@ fn a_private_ssh_source_uses_your_ssh_agent_once_you_approve_it() {
     let with = format!("agent={} ", socket.display());
     let used = tries.iter().find(|line| line.starts_with(&with));
     let used = used.unwrap_or_else(|| panic!("no try used your agent: {tries:?}"));
-    // Only your agent, and no key file of yours, signs in.
+    // Only your agent signs in, with no key file or configuration of yours.
     assert!(used.contains("IdentityFile=none"), "{used}");
+    assert!(used.contains("-F /dev/null"), "{used}");
     assert!(!used.contains("IdentityAgent=none"), "{used}");
     let image = repo_layer(&scratch, "notes", &format!("REPO {url}"));
     check_clone(

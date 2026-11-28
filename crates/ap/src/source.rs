@@ -71,7 +71,8 @@ impl std::error::Error for Asked {}
 /// What `git` says, in English, when the remote asks for credentials it
 /// doesn't have: over `https`, that it can't prompt for them, and over
 /// `ssh`, what `ssh` says when no key signs in. What the remote itself says
-/// comes on lines that start with `remote:`, and doesn't count.
+/// comes on lines that start with `remote:` or hold `remote error:`, and
+/// doesn't count.
 const ASKED: [&str; 2] = ["terminal prompts disabled", "Permission denied ("];
 
 /// What a ref resolved to.
@@ -338,7 +339,7 @@ fn run(mut command: Command, what: &str) -> io::Result<Output> {
         let said = String::from_utf8_lossy(&output.stderr);
         let message = format!("git {what} failed: {}", printable(said.trim_end()));
         let asked = (said.lines())
-            .filter(|line| !line.starts_with("remote:"))
+            .filter(|line| !line.starts_with("remote:") && !line.contains("remote error:"))
             .any(|line| ASKED.iter().any(|asked| line.contains(asked)));
         if asked {
             return Err(io::Error::new(

@@ -717,25 +717,37 @@ fn claim(
         }
         None => forge.post_comment(number, &body)?,
     };
-    let after = forge.issue(number)?;
-    let intact = after
-        .comments
-        .iter()
-        .any(|comment| comment.id == mine && comment.body == body);
-    let winner = statuses_by(&after, &view.owner)
-        .into_iter()
-        .find(|status| status.is_live(now));
-    let eligible = after.open && !is_parked(&after);
-    let mut lost = (!intact || !eligible || winner.is_none_or(|status| status.id != mine))
-        .then(|| format!("another claim on #{number} won"));
-    if lost.is_none() {
+    let read_again = || -> Result<(bool, Option<String>), Problem> {
+        let after = forge.issue(number)?;
+        let intact = after
+            .comments
+            .iter()
+            .any(|comment| comment.id == mine && comment.body == body);
+        let winner = statuses_by(&after, &view.owner)
+            .into_iter()
+            .find(|status| status.is_live(now));
+        let eligible = after.open && !is_parked(&after);
+        if !intact || !eligible || winner.is_none_or(|status| status.id != mine) {
+            return Ok((intact, Some(format!("another claim on #{number} won"))));
+        }
         for rival in &rivals {
             if !comes_first(forge.issue(*rival)?, &view.owner, now, fresh, mine) {
-                lost = Some(format!("a live claim on #{rival} overlaps #{number}"));
-                break;
+                let reason = format!("a live claim on #{rival} overlaps #{number}");
+                return Ok((intact, Some(reason)));
             }
         }
-    }
+        Ok((intact, None))
+    };
+    let retired = body.replace("**State:** working", "**State:** parked");
+    let (intact, lost) = match read_again() {
+        Ok(found) => found,
+        Err(problem) => {
+            // A live comment with no label beats every later claim until its
+            // lease runs out, so retire it if GitHub lets us.
+            let _ = forge.edit_comment(mine, &retired);
+            return Err(problem);
+        }
+    };
     let Some(reason) = lost else {
         forge.add_label(number, IN_PROGRESS)?;
         return Ok(Claim::Won {
@@ -744,7 +756,6 @@ fn claim(
         });
     };
     if intact {
-        let retired = body.replace("**State:** working", "**State:** parked");
         forge.edit_comment(mine, &retired)?;
     }
     Ok(Claim::Lost(reason))
@@ -945,6 +956,8 @@ mod tests {
         writes: RefCell<Vec<String>>,
         interfere: RefCell<Option<Interference>>,
         branch_date: Option<String>,
+        /// Whether reading one issue fails, as `gh` out of quota does.
+        unreadable: Cell<bool>,
     }
 
     impl Fake {
@@ -955,6 +968,7 @@ mod tests {
                 writes: RefCell::new(Vec::new()),
                 interfere: RefCell::new(None),
                 branch_date: None,
+                unreadable: Cell::new(false),
             }
         }
 
@@ -988,6 +1002,9 @@ mod tests {
         }
 
         fn issue(&self, number: u64) -> Result<Issue, Problem> {
+            if self.unreadable.get() {
+                return Err(Problem("gh: API rate limit exceeded".to_string()));
+            }
             if let Some(interfere) = self.interfere.borrow_mut().take() {
                 interfere(&mut self.issues.borrow_mut());
             }
@@ -1195,6 +1212,14 @@ mod tests {
         rival_at(0, id, author)
     }
 
+    /// An issue for a Mac that overlaps #7.
+    fn overlapping() -> Issue {
+        let mut issue = issue(vec![]);
+        issue.number = 8;
+        issue.labels.push("host:macos".to_string());
+        issue
+    }
+
     /// A live status comment on the issue at `index` in the forge.
     fn rival_at(index: usize, id: u64, author: &'static str) -> Interference {
         Box::new(move |issues| {
@@ -1319,6 +1344,13 @@ mod tests {
                 retired: false,
             },
             Case {
+                name: "a claim on this host waits for the claim slot instead",
+                interfere: Some(rival_at(3, 50, OWNER)),
+                reuses: false,
+                won: true,
+                retired: false,
+            },
+            Case {
                 name: "a stranger on an overlapping issue can't win",
                 interfere: Some(rival_at(1, 50, "stranger")),
                 reuses: false,
@@ -1342,13 +1374,12 @@ mod tests {
             } else {
                 (vec![], 100)
             };
-            let mut overlapping = issue(vec![]);
-            overlapping.number = 8;
-            overlapping.labels.push("host:macos".to_string());
-            let mut apart = overlapping.clone();
+            let mut apart = overlapping();
             apart.number = 9;
             apart.body = "## Touches\n`crates/b`\n".to_string();
-            let forge = Fake::new(vec![issue(comments), overlapping, apart]);
+            let mut here = issue(vec![]);
+            here.number = 10;
+            let forge = Fake::new(vec![issue(comments), overlapping(), apart, here]);
             *forge.interfere.borrow_mut() = case.interfere;
             let result = try_claim(&forge);
             assert_eq!(
@@ -1382,15 +1413,25 @@ mod tests {
         }
     }
 
+    /// A comment left live with no label would make every dispatch start a
+    /// worker that loses to it, until its lease runs out.
+    #[test]
+    fn a_claim_that_can_not_read_again_retires_its_comment() {
+        let forge = Fake::new(vec![issue(vec![]), overlapping()]);
+        forge.unreadable.set(true);
+        let result = claim(&forge, 7, "7-x", "thread", NOW, Host::Linux, "n");
+        assert!(result.is_err());
+        assert!(forge.body_of(100).contains("**State:** parked"));
+        assert_eq!(forge.writes(), ["post 7", "edit 100"]);
+    }
+
     /// The owner answers the other host's issue, and its claim lands, between
     /// this claim's two reads.
     #[test]
     fn an_overlapping_issue_parked_at_the_first_read_still_counts() {
-        let mut overlapping = issue(vec![]);
-        overlapping.number = 8;
-        overlapping.labels.push("host:macos".to_string());
-        overlapping.labels.push("answer-needed".to_string());
-        let forge = Fake::new(vec![issue(vec![]), overlapping]);
+        let mut parked = overlapping();
+        parked.labels.push("answer-needed".to_string());
+        let forge = Fake::new(vec![issue(vec![]), parked]);
         *forge.interfere.borrow_mut() = Some(Box::new(|issues| {
             issues[1].labels.retain(|label| label != "answer-needed");
             rival_at(1, 50, OWNER)(issues);

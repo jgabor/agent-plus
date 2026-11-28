@@ -975,9 +975,8 @@ mod tests {
     /// The test keeps `ahead.lock`, as the merge slot's holder does while it
     /// waits for a place. The one place frees while a run waits for it in the
     /// queue, and that run gets it, gives it up, and waits for the holder.
-    /// The test must see that wait before it takes the place, and macOS
-    /// can't show a lock that a process waits for, so this runs on Linux
-    /// only.
+    /// The test must see that wait before it takes the place, and only Linux
+    /// shows a lock that a process waits for, so this runs there only.
     #[cfg(target_os = "linux")]
     #[test]
     fn a_run_in_the_queue_lets_the_merge_slots_holder_have_the_next_place() {

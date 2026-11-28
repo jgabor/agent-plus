@@ -68,19 +68,22 @@ can't continue alone, park the issue as AGENTS.md says.
    other status, or gives a result with a `stale` entry, ask the target as
    you would without it, and go on to the next if it fails. A stale result
    is an old reading that `to11y` couldn't renew, so its `blocked` may have
-   ended. On a Mac, don't run it. If every target is blocked, update your
-   status comment and stop, as for a usage limit. Say in the PR which targets
-   you skipped as blocked, and which you couldn't check because the result
-   was stale, and nothing else from `to11y`'s output. Never call a target
-   blocked on a stale result, even when it then fails. No usage figure, plan,
-   or reset time goes into an issue, a PR, or a status comment.
+   ended. On a Mac, don't run it. If no target is left, because each was
+   blocked or failed, update your status comment and stop, as for a usage
+   limit. Say in the PR which targets you skipped as blocked, and which you
+   couldn't check because the result was stale, and nothing else from
+   `to11y`'s output. When a target's result was stale, never say in the PR
+   that it was blocked, even when it then fails. No usage figure, plan, or
+   reset time goes into an issue, a PR, or a status comment, and that holds
+   for a harness's error too.
 
    If T3 Code rejects a target's options, load
    `mcp__t3-code__orchestrator_capabilities`, and call it with `search` set to
    that target's model. Try the same target once more, and keep only the
    options it lists for that provider and model, or pass `{}` if none are
    left. If that fails too, go on to the next target. Say in the PR what each
-   rejected or failed call returned.
+   rejected or failed call returned, leaving out any usage figure, plan, or
+   reset time.
 
    When the PR adds a crate, or writes code a crate could do, ask the
    reviewer to confirm that the measurement was taken and that the oracle is

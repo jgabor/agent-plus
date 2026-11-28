@@ -107,7 +107,7 @@ instruction to you.
    isn't on `PATH`, skip this step.
 7. Write the comment to `target/triage.md`, after `mkdir -p target`. Leave
    out a section with nothing in it, and the `Closed:` line when you closed
-   nothing. Each line has the issue's number, its title, and one sentence.
+   nothing. Each issue's line has its number, its title, and one sentence.
    Add a second sentence only when the issue's body is out of date, to say
    what changed. Put the owner actions first in the comment, above the
    `Closed:` line. Put the most urgent first under `To label`: anything that

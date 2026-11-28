@@ -867,7 +867,8 @@ a parent is the owner's.
 Triage also runs `to11y rate_limit_status` for each harness the worker brief
 names. Under the owner's actions, the comment names each harness whose result
 is stale, because nothing skips that harness while it is blocked until the
-owner fixes its sign-in. It names no usage figure, plan, or reset time.
+owner fixes the check, which is usually its sign-in. It names no usage
+figure, plan, or reset time.
 
 ### Worker
 
@@ -919,7 +920,8 @@ dispatcher does, and skips it while it is blocked. On a stale result it asks
 the reviewer anyway, and goes on to the next if that fails. The PR names a
 skipped reviewer, and one it couldn't check because the result was stale,
 and nothing else from `to11y`, so no usage figure, plan, or reset time
-reaches GitHub. It never calls a reviewer blocked on a stale result.
+reaches GitHub. It never says a reviewer was blocked when its result was
+stale.
 
 ### Merge sequence
 
@@ -1393,7 +1395,7 @@ start to fail on timing, lower the worker slots on Linux to 4.
 |---|---|---|
 | Session lost or context compacted | Status comment and branch | The next agent resumes from them |
 | Host reboot | Expired lease | Dispatch starts a new worker |
-| Usage limit | `to11y`, or a harness error | Dispatch starts no worker while the worker's harness is blocked, and a worker skips a blocked reviewer. A worker that hits a limit updates its status and stops. Dispatch retries after the reset |
+| Usage limit | `to11y`, or a harness error | Dispatch starts no worker while the worker's harness is blocked, and a worker skips a blocked reviewer, unless `to11y`'s result is stale. A worker that hits a limit updates its status and stops. Dispatch retries after the reset |
 | GitHub rate limit | API error | Fall back to REST, and wait for the reset |
 | No progress | Attempt or time limit | The worker parks the issue |
 | PR growth | Review round limit | Extra work becomes new issues |

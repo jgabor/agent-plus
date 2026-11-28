@@ -123,7 +123,7 @@ fi
 
 #[test]
 fn a_tool_just_written_can_run_while_other_threads_start_processes() {
-    let directory = held_tmp().join("merge/fresh-tool");
+    let directory = tmp().join("merge/fresh-tool");
     if directory.exists() {
         fs::remove_dir_all(&directory).unwrap();
     }

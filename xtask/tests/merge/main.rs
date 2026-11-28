@@ -143,29 +143,15 @@ fn pr_json(pr: &Pr, state: &str) -> String {
 }
 
 /// Where these tests keep their repositories, variants, and tools. Each test
-/// deletes its own directory first, so a second run of them in this checkout
-/// would delete what the first is using. The first use takes a lock that the
-/// process holds until it ends, and a second run waits for it.
-fn held_tmp() -> &'static Path {
-    static HELD: OnceLock<fs::File> = OnceLock::new();
-    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    HELD.get_or_init(|| {
-        fs::create_dir_all(tmp).unwrap();
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(tmp.join("merge.lock"))
-            .unwrap();
-        lock.lock().unwrap();
-        lock
-    });
-    tmp
+/// deletes its own directory first, which a run of the tests through `xtask`
+/// can do, because it holds its target directory alone.
+fn tmp() -> &'static Path {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
 }
 
 /// Where a variant of this xtask is built.
 fn variant_binary(name: &str) -> PathBuf {
-    held_tmp()
+    tmp()
         .join("variants")
         .join(name)
         .join("target/debug/xtask")
@@ -187,7 +173,7 @@ fn copy_tree(from: &Path, to: &Path) {
 /// This xtask with one edit, built once per run of these tests. It judges a
 /// PR differently from the xtask that `main` holds in a test.
 fn variant(name: &str, file: &str, from: &str, to: &str) -> PathBuf {
-    let directory = held_tmp().join("variants").join(name);
+    let directory = tmp().join("variants").join(name);
     if directory.exists() {
         fs::remove_dir_all(&directory).unwrap();
     }
@@ -280,7 +266,7 @@ impl Repo {
     }
 
     fn with(name: &str, on_main: &[(&str, &str)], on_branch: &[(&str, &str)]) -> Repo {
-        let parent = held_tmp().join("merge").join(name);
+        let parent = tmp().join("merge").join(name);
         if parent.exists() {
             fs::remove_dir_all(&parent).unwrap();
         }

@@ -414,6 +414,12 @@ holds up a bench. A nested `xtask`
 inherits its parent's place, and the kernel frees a place when its holder
 exits. The places live beside the activity lock.
 
+A run of the tests also holds its target directory alone, so a second run in
+the same checkout waits for the first. Most tests keep their fixtures at a
+fixed path in `CARGO_TARGET_TMPDIR`, and delete it as they start. A run takes
+the directory before its place, and a nested `xtask` that inherits the place
+inherits the directory with it.
+
 A proof under the merge slot waits for a place apart from the queue, and gets
 the next one that frees, because every merge waits for it. Before each
 package, a run of the tests with a place of its own lets waiting work go
@@ -687,7 +693,7 @@ is a failure, and 2 is bad usage or an environment error.
 | `cargo xtask refresh` | Runs the [refresh](#refresh), which proves and merges the `land-needed` PRs that the owner approved |
 | `cargo xtask land <pr>` | Runs the [merge sequence](#merge-sequence) through the squash, under the rules for the owner |
 | `cargo xtask prove <pr> <merge\|prepare\|land> [--keep <file>]` | Proves a PR that changes `xtask/` outside `xtask/tests/` with its own xtask, in its rebased tree, for the [merge sequence](#merge-sequence) |
-| `cargo xtask run <command>` | Runs a build or test command in a place, under a shared hold of the activity lock and a memory limit. It refuses a command that it can't start before it waits for either. When it has to wait for one, it says so on stderr once as the wait starts, and when it starts the command, it says how long it waited. On macOS it runs with no memory limit, and says so on stderr |
+| `cargo xtask run <command>` | Runs a build or test command in a place, with its target directory held alone, under a shared hold of the activity lock and a memory limit. It refuses a command that it can't start before it waits for any of them. When it has to wait for one, it says so on stderr once as the wait starts, and when it starts the command, it says how long it waited. On macOS it runs with no memory limit, and says so on stderr |
 | `cargo xtask nightly` | Runs the [nightly sequence](#nightly-job) |
 | `cargo xtask report` | Builds the nightly report from the ledger |
 | `cargo xtask roadmap [--details]` | Prints the [roadmap](#roadmap), or its details, and writes nothing |
@@ -994,7 +1000,7 @@ status:
 | When | State | Description |
 |---|---|---|
 | The merge waits for the merge slot | `pending` | `Waiting: the merge slot` |
-| The merge waits for a place, or for the activity lock | `pending` | `Waiting: a place`, `Waiting: the activity lock` |
+| The merge waits for its target directory, a place, or the activity lock | `pending` | `Waiting: the target directory`, `Waiting: a place`, `Waiting: the activity lock` |
 | A wait during the proof ends | `pending` | What the proof is doing, as `Proving: lint` |
 | The proof starts | `pending` | `Proving: lint` |
 | The tests, T2, the journey, or a bench starts | `pending` | `Proving: tests`, `Proving: t2`, `Proving: journey`, `Proving: bench` |
@@ -1319,7 +1325,7 @@ GitHub.
 | Ports | Assigned by the OS |
 | VMs | Each has a timeout and a recorded PID |
 | Builds and VM runs | Shared hold of the activity lock, through `xtask` |
-| Test runs and `cargo xtask run` | A place, then a shared hold of the activity lock |
+| Test runs and `cargo xtask run` | Their target directory alone, a place, then a shared hold of the activity lock |
 | Bench | Exclusive hold of the activity lock |
 | Merge | Exclusive merge slot |
 | Refresh | One run at a time, and the merge slot from each PR's proof to its squash |

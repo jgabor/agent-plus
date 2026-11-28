@@ -1,6 +1,6 @@
 //! The activity lock: builds and tests share it, and a bench holds it alone.
 //! A run of the tests also takes one of a set number of places, so that only
-//! that many run at once.
+//! that many run at once, and holds its target directory alone.
 
 use crate::{Problem, Verdict, limit, refresh, workspace};
 use std::env;
@@ -44,6 +44,7 @@ const TURN_INHERITED: &str = "XTASK_TURN_HELD";
 /// What a take waits for, when it can't have its lock at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wait {
+    Target,
     Place,
     Activity,
 }
@@ -122,6 +123,8 @@ impl Held {
 
 pub struct Hold {
     directory: PathBuf,
+    /// The target directory, which a place of this process's own comes with.
+    target: Option<File>,
     place: Held,
     /// The activity lock, shared for a build or a run of the tests, and held
     /// alone by a bench.
@@ -136,6 +139,7 @@ impl Hold {
     fn new(directory: &Path) -> Hold {
         Hold {
             directory: directory.to_path_buf(),
+            target: None,
             place: Held::No,
             activity: Held::No,
             files: Vec::new(),
@@ -261,6 +265,10 @@ pub fn testing(root: &Path) -> Result<Hold, Problem> {
 /// against its timeout. The holder of the merge slot, which it passes as
 /// `slot`, gets its place ahead of every run that waits for one, and keeps
 /// it to the end, because every merge waits for a proof under the slot.
+///
+/// The place comes with the target directory, held alone and taken first, so
+/// a run never holds a place while it waits for the directory. A nested run
+/// that inherits its parent's place inherits the directory too.
 pub fn place(root: &Path, slot: Option<&Hold>) -> Result<Hold, Problem> {
     let directory = directory(root)?;
     let mut hold = Hold::new(&directory);
@@ -274,8 +282,24 @@ pub fn place(root: &Path, slot: Option<&Hold>) -> Result<Hold, Problem> {
             "the tests can't wait for a place under a hold without one, because a pending bench would wait for them".to_string(),
         ));
     }
+    hold.target = Some(take_target(root)?);
     hold.place = Held::Own(take_place(&directory, places()?, hold.ahead)?);
     Ok(hold)
+}
+
+/// Most tests keep their fixtures at a fixed path in `CARGO_TARGET_TMPDIR`,
+/// and delete it before they start, so a second run with the same target
+/// directory would delete what the first uses. A relative `CARGO_TARGET_DIR`
+/// is taken from `root`, where the tests run.
+fn take_target(root: &Path) -> Result<File, Problem> {
+    let target = env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), |target| root.join(target));
+    fs::create_dir_all(&target)
+        .map_err(|e| Problem(format!("couldn't create {}: {e}", target.display())))?;
+    let file = open(&target, "tests.lock")?;
+    take(&file, false, Wait::Target, &mut None)
+        .map_err(|e| Problem(format!("couldn't take {}: {e}", target.display())))?;
+    Ok(file)
 }
 
 fn places() -> Result<usize, Problem> {
@@ -551,6 +575,9 @@ fn testing_heard(root: &Path) -> Result<Hold, Problem> {
     let heard = Arc::clone(&waited);
     watch(Box::new(move |wait| {
         let what = match wait {
+            Some(Wait::Target) => {
+                "the target directory, because another run of the tests uses it"
+            }
             Some(Wait::Place) => "a place, because other runs hold every one",
             Some(Wait::Activity) => "the activity lock, because a bench holds it or waits for it",
             None => return,

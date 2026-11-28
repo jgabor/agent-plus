@@ -364,6 +364,24 @@ fn a_long_head_is_read() {
 }
 
 #[test]
+fn a_head_longer_than_64_kib_is_refused_without_a_retry() {
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nX-Padding: {}\r\nContent-Length: 0\r\n\r\n",
+        "x".repeat(64 * 1024)
+    )
+    .into_bytes();
+    let server = Server::start(|_| vec![("/vmlinux", reply)]);
+    fails_and_stores_nothing(
+        &server,
+        "too-long-head",
+        "/vmlinux",
+        BODY_SHA256,
+        "truncated head",
+    );
+    assert_eq!(server.requests(), 1);
+}
+
+#[test]
 fn a_body_of_exactly_the_most_a_download_may_hold_is_accepted() {
     // The server sends less than it says, so the download ends early, after
     // the length was accepted.

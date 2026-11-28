@@ -15,7 +15,7 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{
     EthernetAddress, EthernetFrame, EthernetProtocol, EthernetRepr, HardwareAddress, Icmpv4Packet,
     Icmpv4Repr, Icmpv6Packet, Icmpv6Repr, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv4Repr,
-    Ipv6Packet, Ipv6Repr, TcpPacket, UdpPacket,
+    Ipv6Packet, Ipv6Repr, TcpPacket, TcpSeqNumber, UdpPacket,
 };
 
 const GUEST_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x15];
@@ -1218,9 +1218,12 @@ fn readdressed(frame: &[u8], source: Option<IpAddr>, destination: Option<IpAddr>
     edited(&frame, false, |_| {})
 }
 
-#[test]
-fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
-    let ip = |address: &str| -> IpAddr { address.parse().unwrap() };
+fn ip(address: &str) -> IpAddr {
+    address.parse().unwrap()
+}
+
+/// The guest's SYNs and datagrams to an IPv4 and an IPv6 address.
+fn flows() -> ([Vec<u8>; 2], [Vec<u8>; 2]) {
     let syns = [
         syn_frame(SocketAddr::new(ip("203.0.113.7"), 443)),
         syn_frame(SocketAddr::new(ip("2001:db8::1"), 443)),
@@ -1229,26 +1232,40 @@ fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
         datagram_frame(SocketAddr::new(ip("198.51.100.9"), 53)),
         datagram_frame(SocketAddr::new(ip("2001:db8::9"), 53)),
     ];
-    // smoltcp drops a packet from an address that isn't unicast. The last
-    // IPv4 one is the broadcast address of the stack's subnet.
-    let not_unicast = [
-        vec![ip("224.0.0.1"), ip("255.255.255.255"), ip("10.0.2.255")],
-        vec![ip("ff02::1"), ip("::")],
-    ];
+    (syns, datagrams)
+}
+
+/// IPv4 and IPv6 addresses that aren't unicast. The third IPv4 one is the
+/// broadcast address of the stack's subnet.
+fn not_unicast() -> [Vec<IpAddr>; 2] {
+    [
+        vec![
+            ip("224.0.0.1"),
+            ip("255.255.255.255"),
+            ip("10.0.2.255"),
+            ip("0.0.0.0"),
+        ],
+        vec![ip("ff02::1"), ip("ff05::2"), ip("::")],
+    ]
+}
+
+#[test]
+fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
+    let (syns, datagrams) = flows();
+    // smoltcp drops a packet from an address that isn't unicast, except an
+    // IPv4 packet from no address. It drops a TCP segment from no address,
+    // though it takes a datagram from no IPv4 address.
+    let none = ip("0.0.0.0");
     let mut refused = Vec::new();
     for (frames, kind) in [(&syns, "SYN"), (&datagrams, "datagram")] {
-        for (frame, sources) in frames.iter().zip(&not_unicast) {
-            for &source in sources {
-                refused.push((kind, "from", source, readdressed(frame, Some(source), None)));
+        for (frame, sources) in frames.iter().zip(not_unicast()) {
+            for source in sources {
+                if kind == "datagram" && source == none {
+                    continue;
+                }
+                refused.push((kind, source, readdressed(frame, Some(source), None)));
             }
         }
-    }
-    // smoltcp drops a TCP segment from or to no address, though it takes
-    // a datagram from no IPv4 address.
-    let none = ip("0.0.0.0");
-    refused.push(("SYN", "from", none, readdressed(&syns[0], Some(none), None)));
-    for (syn, none) in syns.iter().zip([none, ip("::")]) {
-        refused.push(("SYN", "to", none, readdressed(syn, None, Some(none))));
     }
     let now = Instant::now();
     // Each frame, from another unicast address, is asked about, and so is
@@ -1268,14 +1285,66 @@ fn a_flow_from_an_address_smoltcp_drops_is_never_asked_about() {
         assert!(asked, "{other}");
     }
     let mut asked = Vec::new();
-    for (kind, side, address, frame) in refused {
+    for (kind, address, frame) in refused {
         let mut stack = stack();
         stack.receive_holding(&frame, now, |flow| {
-            asked.push((kind, side, address, *flow));
+            asked.push((kind, address, *flow));
             Verdict::Hold
         });
-        assert_eq!(stack.sockets(), 0, "{kind} {side} {address}");
-        assert!(stack.transmit().is_none(), "{kind} {side} {address}");
+        assert_eq!(stack.sockets(), 0, "{kind} from {address}");
+        assert!(stack.transmit().is_none(), "{kind} from {address}");
+    }
+    assert!(asked.is_empty(), "asked about {asked:#?}");
+}
+
+/// `syn`, a SYN frame, as the guest's ACK of a connection the stack never
+/// opened.
+fn ack_of(syn: &[u8]) -> Vec<u8> {
+    edited(syn, false, |transport| {
+        let mut tcp = TcpPacket::new_unchecked(transport);
+        tcp.set_syn(false);
+        tcp.set_ack(true);
+        tcp.set_ack_number(TcpSeqNumber(1));
+    })
+}
+
+// spec(NETWORK): **Addresses that aren't unicast.** A TCP segment or UDP datagram that the guest sends to a broadcast, multicast, or unspecified address is dropped unanswered.
+#[test]
+fn a_flow_to_an_address_that_is_not_unicast_is_dropped_unanswered() {
+    let (syns, datagrams) = flows();
+    let acks = syns.clone().map(|syn| ack_of(&syn));
+    let now = Instant::now();
+    // To a unicast address, the stack takes each SYN and datagram, and
+    // resets each ACK.
+    for frame in syns.iter().chain(&datagrams) {
+        let mut taken = false;
+        stack().receive(frame, now, |_| {
+            taken = true;
+            true
+        });
+        assert!(taken);
+    }
+    let mut v4 = introduced();
+    v4.receive(&acks[0], now, allow);
+    let reply = v4.transmit().expect("the stack answers the ACK");
+    assert_eq!(tcp_flags(&reply), Some((false, false, true)));
+    let mut v6 = stack();
+    v6.receive(&acks[1], now, allow);
+    assert!(v6.transmit().is_some(), "the stack answers the ACK");
+    let mut asked = Vec::new();
+    for (frames, kind) in [(&syns, "SYN"), (&acks, "ACK"), (&datagrams, "datagram")] {
+        for (frame, destinations) in frames.iter().zip(not_unicast()) {
+            for destination in destinations {
+                let mut stack = stack();
+                stack.receive(&readdressed(frame, None, Some(destination)), now, |flow| {
+                    asked.push((kind, destination, *flow));
+                    true
+                });
+                assert_eq!(stack.sockets(), 0, "{kind} to {destination}");
+                assert!(stack.transmit().is_none(), "{kind} to {destination}");
+                assert!(stack.recv_datagram().is_none(), "{kind} to {destination}");
+            }
+        }
     }
     assert!(asked.is_empty(), "asked about {asked:#?}");
 }

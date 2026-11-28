@@ -1,6 +1,6 @@
 //! The network process's TCP/IP stack: one Ethernet interface on the guest's
 //! link that ends every TCP connection, and takes every UDP datagram, to any
-//! address and port. It routes nothing and opens no socket on the host. Frames
+//! unicast address and port. It routes nothing and opens no socket on the host. Frames
 //! come in through [`Stack::receive`] and go out through [`Stack::transmit`].
 //! The caller takes or refuses each new [`Flow`]: a refused TCP connection
 //! gets a reset, and a refused datagram is dropped, with no answer. It can
@@ -422,7 +422,8 @@ impl Stack {
     /// one hop-by-hop header, and drops what smoltcp drops for its
     /// addresses. A frame that hides its transport, such as behind any
     /// other IPv6 extension header or in a fragment, or a flow sent to every
-    /// station, is dropped, because smoltcp would take it without asking.
+    /// station, is dropped, because smoltcp would take it without asking. So
+    /// is a flow to an address that isn't unicast.
     fn classify(&self, frame: &[u8]) -> Seen {
         let Ok(ethernet) = EthernetFrame::new_checked(frame) else {
             return Seen::Drop;
@@ -485,9 +486,13 @@ impl Stack {
         match protocol {
             // Neighbor discovery, and the stack's own ICMP.
             IpProtocol::Icmp | IpProtocol::Icmpv6 => Seen::Other,
-            IpProtocol::Tcp
-                if ours && !source.is_unspecified() && !destination.is_unspecified() =>
-            {
+            // smoltcp would take a flow sent to every station, and answer a
+            // segment to an address for many stations from that address,
+            // which RFC 1122 (4.2.3.10) says not to do. A datagram to such an
+            // address is for the guest's link, where the stack is the only
+            // other station, and it forwards nothing onto any other.
+            IpProtocol::Tcp | IpProtocol::Udp if !ours || !self.unicast(destination) => Seen::Drop,
+            IpProtocol::Tcp if !source.is_unspecified() => {
                 let tcp = TcpPacket::new_checked(payload).and_then(|tcp| {
                     TcpRepr::parse(&tcp, &source.into(), &destination.into(), &checksums)
                 });
@@ -503,7 +508,7 @@ impl Stack {
                     Err(_) => Seen::Drop,
                 }
             }
-            IpProtocol::Udp if ours => {
+            IpProtocol::Udp => {
                 let udp = UdpPacket::new_checked(payload).and_then(|udp| {
                     UdpRepr::parse(&udp, &source.into(), &destination.into(), &checksums)
                 });

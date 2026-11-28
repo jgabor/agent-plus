@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use ap::lock::Companion;
+use common::git_server::Access;
 use store::{Agent, Agents, Declared, Layers};
 
 /// A test's own directory, with a home directory and a project in it.
@@ -54,11 +55,17 @@ impl Scratch {
     /// Runs `ap` as [`Scratch::ap`] does, with `env` too. Git trusts the
     /// certificate of the tests' git server.
     fn ap_with(&self, dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
+        self.ap_granting(dir, args, env, "")
+    }
+
+    /// Runs `ap` as [`Scratch::ap_with`] does, and a build approves the
+    /// grants in the text form `also` too.
+    fn ap_granting(&self, dir: &Path, args: &[&str], env: &[(&str, &Path)], also: &str) -> Output {
         let mut args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
         if args
             .first()
             .is_some_and(|command| command == "build" || command == "update")
-            && let Some(file) = self.approval(dir, &args[1..])
+            && let Some(file) = self.approval(dir, &args[1..], also)
         {
             args.push(format!("--approve={}", file.display()));
         }
@@ -79,8 +86,9 @@ impl Scratch {
     }
 
     /// Writes the grants that the Agentfile `ap build` would read asks for,
-    /// and returns the file, or `None` if they can't be read.
-    fn approval(&self, dir: &Path, args: &[String]) -> Option<PathBuf> {
+    /// and the grants in `also`, and returns the file, or `None` if they
+    /// can't be read.
+    fn approval(&self, dir: &Path, args: &[String], also: &str) -> Option<PathBuf> {
         let mut target = None;
         let mut args = args.iter();
         while let Some(arg) = args.next() {
@@ -101,7 +109,7 @@ impl Scratch {
         })
         .ok()?;
         let file = self.root.join("approved-grants");
-        fs::write(&file, grants.to_string()).unwrap();
+        fs::write(&file, format!("{grants}{also}")).unwrap();
         Some(file)
     }
 
@@ -1104,7 +1112,7 @@ fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
         .arg("build")
         .arg(format!(
             "--approve={}",
-            scratch.approval(&dir, &[]).unwrap().display()
+            scratch.approval(&dir, &[], "").unwrap().display()
         ))
         .current_dir(&dir)
         .env_clear()
@@ -2488,11 +2496,11 @@ const POINTER: &str = "version https://git-lfs.github.com/spec/v1\n\
 
 impl Remote {
     fn new(scratch: &Scratch, name: &str) -> Remote {
-        Remote::serve(scratch, name, false)
+        Remote::serve(scratch, name, Access::Public)
     }
 
-    /// A remote whose server is private when `private`.
-    fn serve(scratch: &Scratch, name: &str, private: bool) -> Remote {
+    /// A remote whose server lets `access` fetch.
+    fn serve(scratch: &Scratch, name: &str, access: Access) -> Remote {
         let served = scratch.root.join("served");
         let work = scratch.root.join("work").join(name);
         fs::create_dir_all(&work).unwrap();
@@ -2530,7 +2538,7 @@ impl Remote {
             .output()
             .unwrap();
         assert!(output.status.success(), "{}", stderr(&output));
-        let server = common::git_server::GitServer::start(&served, private);
+        let server = common::git_server::GitServer::start(&served, access);
         let url = server.url(&format!("{name}.git"));
         Remote {
             server,
@@ -2823,7 +2831,7 @@ fn a_locked_commit_missing_from_the_cache_is_fetched_by_its_commit() {
 #[test]
 fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
     let scratch = Scratch::new("repo-private");
-    let remote = Remote::serve(&scratch, "secret", true);
+    let remote = Remote::serve(&scratch, "secret", Access::Private);
     let marker = scratch.root.join("helper-ran");
     fs::write(
         scratch.home.join(".gitconfig"),
@@ -2852,6 +2860,236 @@ fn a_source_that_needs_credentials_fails_without_them_and_names_the_source() {
     assert!(remote.server.requests() > 0);
     assert!(source_lines(&dir).is_empty());
     assert!(scratch.agents().list().unwrap().is_empty());
+}
+
+/// The user and password that only the credential helper knows.
+const USER: &str = "helper-user-3b1e";
+const PASSWORD: &str = "helper-password-9c4d";
+
+/// A value that only the global git configuration holds.
+const CONFIGURED: &str = "configured-value-71a8";
+
+/// Writes a global git configuration into the test's home, with a credential
+/// helper that gives [`USER`] and [`PASSWORD`], and [`CONFIGURED`]. It
+/// returns the file the helper leaves when it gives them.
+fn credential_helper(scratch: &Scratch) -> PathBuf {
+    let marker = scratch.root.join("helper-ran");
+    let helper = format!(
+        "!f() {{ test \\\"$1\\\" = get || exit 0; touch {}; echo username={USER}; echo password={PASSWORD}; }}; f",
+        marker.display()
+    );
+    fs::write(
+        scratch.home.join(".gitconfig"),
+        format!("[credential]\n\thelper = \"{helper}\"\n[apTest]\n\tvalue = {CONFIGURED}\n"),
+    )
+    .unwrap();
+    marker
+}
+
+/// Runs `ap build` in `dir` with no terminal and no `--approve`, so that it
+/// can only use what you approved before.
+fn build_unattended(scratch: &Scratch, dir: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ap"))
+        .arg("build")
+        .current_dir(dir)
+        .env_clear()
+        .env("HOME", &scratch.home)
+        .env(
+            "GIT_SSL_CAINFO",
+            common::git_server::certificate(&scratch.root),
+        )
+        .output()
+        .unwrap()
+}
+
+// spec(Sources): A private source then uses your own git credentials: your ssh-agent and the credential helpers in your global git configuration.
+// spec(Sources): They are used on your host, only during the build, and they never reach the guest.
+// spec(Sources): A source that needs them is a [grant](#grants), because an Agentfile could otherwise copy your private code into its agent.
+// spec(Grants): | Your git credentials, for sources that need them | `REPO`, `PLUGIN`, `SKILL`, `MCP` |
+// spec(Grants): a source that newly needs your git credentials
+#[test]
+fn a_private_source_uses_your_credential_helper_once_you_approve_it() {
+    let scratch = Scratch::new("repo-credentials");
+    let remote = Remote::serve(&scratch, "secret", Access::Password(USER, PASSWORD));
+    let marker = credential_helper(&scratch);
+    let url = &remote.url;
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
+    let grant = format!("CREDENTIALS {url}\n");
+    let signed_in = Some(common::git_server::authorization(USER, PASSWORD));
+
+    // A build that you don't approve them for fetches nothing with them.
+    let output = scratch.ap(&dir, &["build"]);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains(&format!("\n  {grant}")), "{message}");
+    assert!(!marker.exists(), "a credential helper ran");
+    assert!(remote.server.requests() > 0);
+    assert!(
+        remote.server.authorizations().iter().all(Option::is_none),
+        "a request had credentials"
+    );
+    assert!(source_lines(&dir).is_empty());
+    assert!(scratch.agents().list().unwrap().is_empty());
+
+    // Once you do, the build fetches without them first, then with them.
+    let first = remote.server.requests();
+    let output = scratch.ap_granting(&dir, &["build"], &[], &grant);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(marker.exists(), "the credential helper didn't run");
+    let sent = remote.server.authorizations();
+    assert_eq!(sent[first], None, "the first request had credentials");
+    assert!(sent[first..].contains(&signed_in), "{sent:?}");
+    assert_eq!(
+        source_lines(&dir),
+        [format!(
+            "SOURCE {url} HEAD refs/heads/main {} credentials",
+            remote.head()
+        )]
+    );
+    let label = format!("REPO {url}");
+    let image = repo_layer(&scratch, "notes", &label);
+    check_clone(
+        &unpacked(&scratch, &image, "/home/agent/git/secret"),
+        &remote.work,
+        remote.head(),
+    );
+    // Nothing that the helper gave or your configuration holds reaches the
+    // guest, nor the lockfile.
+    let lockfile = fs::read_to_string(dir.join("Agentfile.lock")).unwrap();
+    for layer in &scratch.agent("notes").layers {
+        if layer.instruction == "OS minimal" {
+            continue;
+        }
+        let image = Layers::new(scratch.store()).get(&layer.digest).unwrap();
+        for text in [USER, PASSWORD, CONFIGURED] {
+            assert!(!holds(&image, text), "{} holds {text}", layer.instruction);
+            assert!(!lockfile.contains(text), "the lockfile holds {text}");
+        }
+    }
+    // `ap inspect` lists the grant.
+    let inspect = scratch.ap(&dir, &["inspect", "notes"]);
+    assert!(stdout(&inspect).contains(&format!("\n  {grant}")), "{}", stdout(&inspect));
+    let listed = scratch.ap(&dir, &["inspect", "--grants", "notes"]);
+    assert!(stdout(&listed).contains(&grant), "{}", stdout(&listed));
+
+    // A rebuild with nothing changed fetches nothing, and keeps the grant.
+    fs::remove_file(&marker).unwrap();
+    let requests = remote.server.requests();
+    let output = build_unattended(&scratch, &dir);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(
+        layer_lines(&stdout(&output))
+            .iter()
+            .all(|(status, _)| status == "hit"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(remote.server.requests(), requests, "a rebuild made a request");
+    assert!(!marker.exists(), "a rebuild ran the credential helper");
+    let again = scratch.ap(&dir, &["inspect", "--grants", "notes"]);
+    assert_eq!(stdout(&again), stdout(&listed));
+
+    // A rebuild that adds another private source asks again, and fetches
+    // nothing with credentials until you approve them for it.
+    let other = Remote::serve(&scratch, "hidden", Access::Password(USER, PASSWORD));
+    let both = with_repo(&format!("REPO {url}\nREPO {}\n", other.url));
+    fs::write(dir.join("Agentfile"), both).unwrap();
+    let output = build_unattended(&scratch, &dir);
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    let wider = format!("asks for more than you approved:\n  CREDENTIALS {}\n", other.url);
+    assert!(message.contains(&wider), "{message}");
+    assert!(!marker.exists(), "a credential helper ran");
+    assert!(other.server.authorizations().iter().all(Option::is_none));
+    let output = scratch.ap_granting(&dir, &["build"], &[], &grant);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!marker.exists(), "a credential helper ran");
+    let more = format!("CREDENTIALS {}\n", other.url);
+    let output = scratch.ap_granting(&dir, &["build"], &[], &format!("{grant}{more}"));
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(other.server.authorizations().contains(&signed_in));
+}
+
+/// A remote that refuses a fetch for a reason other than credentials fails
+/// the build, and isn't asked again with them, even when you approved them.
+#[test]
+fn a_remote_that_refuses_for_another_reason_is_not_asked_with_credentials() {
+    let scratch = Scratch::new("repo-forbidden");
+    let remote = Remote::serve(&scratch, "secret", Access::Forbidden);
+    let marker = credential_helper(&scratch);
+    let url = &remote.url;
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
+    let output = scratch.ap_granting(&dir, &["build"], &[], &format!("CREDENTIALS {url}\n"));
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.starts_with("Agentfile:3: "), "{message}");
+    assert!(message.contains(url.as_str()) && message.contains("403"), "{message}");
+    assert!(!marker.exists(), "a credential helper ran");
+    assert_eq!(remote.server.authorizations(), [None]);
+    assert!(source_lines(&dir).is_empty());
+}
+
+// spec(Sources): A private source then uses your own git credentials: your ssh-agent and the credential helpers in your global git configuration.
+#[test]
+fn a_private_ssh_source_uses_your_ssh_agent_once_you_approve_it() {
+    let scratch = Scratch::new("repo-ssh-agent");
+    let remote = Remote::new(&scratch, "tools");
+    // An `ssh` that refuses a client that may not use an agent, as a host
+    // does for a private repository, and otherwise runs git's command here.
+    let programs = scratch.root.join("programs");
+    fs::create_dir_all(&programs).unwrap();
+    let log = scratch.root.join("ssh.log");
+    let ssh = programs.join("ssh");
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\n\
+             echo \"agent=${{SSH_AUTH_SOCK:-}} $*\" >> {}\n\
+             case \"$* \" in *IdentityAgent=none*) agent= ;; *) agent=$SSH_AUTH_SOCK ;; esac\n\
+             if [ -z \"$agent\" ]; then echo 'git@localhost: Permission denied (publickey).' >&2; exit 255; fi\n\
+             for command; do :; done\n\
+             exec sh -c \"git ${{command#git-}}\"\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths([programs.as_path(), Path::new("/usr/bin"), Path::new("/bin")])
+        .unwrap();
+    let socket = scratch.root.join("agent.sock");
+    let env = [("PATH", Path::new(&path)), ("SSH_AUTH_SOCK", socket.as_path())];
+    let url = format!("ssh://localhost{}", remote.bare.display());
+    let dir = scratch.project("notes", &with_repo(&format!("REPO {url}\n")));
+
+    let output = scratch.ap_granting(&dir, &["build"], &env, "");
+    assert_eq!(output.status.code(), Some(1));
+    let message = stderr(&output);
+    assert!(message.contains(&format!("\n  CREDENTIALS {url}\n")), "{message}");
+    let tries = fs::read_to_string(&log).unwrap();
+    assert!(
+        tries.lines().all(|line| line.starts_with("agent= ")),
+        "{tries}"
+    );
+
+    let grant = format!("CREDENTIALS {url}\n");
+    fs::remove_file(&log).unwrap();
+    let output = scratch.ap_granting(&dir, &["build"], &env, &grant);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let tries = fs::read_to_string(&log).unwrap();
+    let tries: Vec<&str> = tries.lines().collect();
+    assert!(tries[0].starts_with("agent= "), "{tries:?}");
+    let with = format!("agent={} ", socket.display());
+    let used = tries.iter().find(|line| line.starts_with(&with));
+    let used = used.unwrap_or_else(|| panic!("no try used your agent: {tries:?}"));
+    // Only your agent, and no key file of yours, signs in.
+    assert!(used.contains("IdentityFile=none"), "{used}");
+    assert!(!used.contains("IdentityAgent=none"), "{used}");
+    let image = repo_layer(&scratch, "notes", &format!("REPO {url}"));
+    check_clone(
+        &unpacked(&scratch, &image, "/home/agent/git/tools"),
+        &remote.work,
+        remote.head(),
+    );
 }
 
 // spec(Sources): It allows `git` only the `https` and `ssh` transports, and `git` checks nothing out and runs no hook.

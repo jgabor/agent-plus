@@ -32,8 +32,8 @@ const VERSIONS: [&str; 11] = [
 /// The current version, and the versions on either side of each change in
 /// what Codex accepts.
 const CODEX_VERSIONS: [&str; 13] = [
-    "0.137.0", "0.138.0", "0.144.6", "0.145.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0", "0.157.0", "0.159.3",
-    "0.160.0", "0.168.0", "0.169.0",
+    "0.137.0", "0.138.0", "0.144.6", "0.145.0", "0.146.1", "0.147.0", "0.155.1", "0.156.0",
+    "0.157.0", "0.159.3", "0.160.0", "0.168.0", "0.169.0",
 ];
 
 /// Fails unless `actual` is what the Claude Code golden file `name` holds.
@@ -211,7 +211,10 @@ fn a_codex_project_cant_change_a_subagents_effort() {
     for version in CODEX_VERSIONS {
         // Before 0.145.0, Codex reads the key as an agent role, and refuses
         // to start.
-        let number: Vec<u64> = version.split('.').map(|part| part.parse().unwrap()).collect();
+        let number: Vec<u64> = version
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect();
         let has_key = number.as_slice() >= [0, 145, 0].as_slice();
         for interactive in [false, true] {
             for mode in MODES {
@@ -226,7 +229,9 @@ fn a_codex_project_cant_change_a_subagents_effort() {
                     let expected = match effort {
                         Some(effort) if has_key => {
                             let (level, _) = codex::effort(version, effort);
-                            vec![format!("agents.default_subagent_reasoning_effort=\"{level}\"")]
+                            vec![format!(
+                                "agents.default_subagent_reasoning_effort=\"{level}\""
+                            )]
                         }
                         _ => Vec::new(),
                     };

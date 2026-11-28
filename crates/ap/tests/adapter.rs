@@ -592,6 +592,20 @@ fn each_adapter_keeps_its_variables() {
 }
 
 #[test]
+fn each_adapter_keeps_the_variables_the_guest_names_the_bundle_with() {
+    let mut env = Vec::new();
+    guest::agent::name_bundle(&mut env);
+    assert!(!env.is_empty());
+    for harness in [agentfile::Harness::Claude, agentfile::Harness::Codex] {
+        let reserved = ap::adapter::reserved(harness);
+        for (name, _) in &env {
+            let name = std::str::from_utf8(name).unwrap();
+            assert!(reserved.set.contains(&name), "{harness:?}: {name}");
+        }
+    }
+}
+
+#[test]
 fn one_harness_may_use_what_the_other_keeps() {
     let claude = "ENV CODEX_API_KEY x\nSECRET OPENAI_API_KEY\nSECRET MINE @chatgpt.com\n";
     assert!(reserved_errors("claude", claude).is_empty());

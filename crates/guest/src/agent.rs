@@ -73,7 +73,8 @@ const PROMPT: &str = "/etc/ap/prompt";
 /// keeps, which the run's authority joins.
 pub const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The variables that SPEC.md's SECRET section names, which each name
-/// [`BUNDLE`], because many tools ignore the system store.
+/// [`BUNDLE`], because many tools ignore the system store. Every adapter
+/// keeps them, so no `ENV` or `SECRET` sets one.
 pub const BUNDLE_VARIABLES: [&str; 5] = [
     "NODE_EXTRA_CA_CERTS",
     "SSL_CERT_FILE",

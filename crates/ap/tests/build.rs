@@ -2284,13 +2284,13 @@ fn a_seal_cannot_use_a_reserved_name_or_bind_a_harness_host() {
             "claude",
             "SEAL ANTHROPIC_API_KEY",
             "ANTHROPIC_API_KEY",
-            "`AUTH`",
+            "`SEAL`. Use `AUTH`",
         ),
         (
             "codex",
             "SEAL CODEX_ACCESS_TOKEN visible",
             "CODEX_ACCESS_TOKEN",
-            "`AUTH`",
+            "`SEAL`. Use `AUTH`",
         ),
         (
             "claude",

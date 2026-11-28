@@ -845,6 +845,25 @@ fn reserved_names_and_hosts_fail_on_their_own_lines() {
 }
 
 #[test]
+fn a_seal_is_checked_as_a_secret_is() {
+    let errors = reserved_errors(
+        "SEAL SET_BY_ADAPTER visible\n\
+         SEAL HARNESS_TOKEN @example.com\n\
+         SEAL MINE @API.Harness.Example\n",
+    );
+    assert_eq!(lines_of(&errors), [2, 3, 4], "{errors:?}");
+    assert!(errors[0].message.contains("`SET_BY_ADAPTER`"), "{errors:?}");
+    assert!(errors[1].message.contains("sign in"), "{errors:?}");
+    for error in &errors[..2] {
+        assert!(error.message.contains("`SEAL`"), "{errors:?}");
+    }
+    assert!(
+        errors[2].message.contains("`API.Harness.Example`"),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn a_secret_that_uses_a_set_name_fails() {
     let errors =
         reserved_errors("SECRET SET_BY_ADAPTER visible\nSECRET SET_BY_ADAPTER_2 visible\n");

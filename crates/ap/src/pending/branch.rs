@@ -825,11 +825,16 @@ impl Share<'_> {
         let landed = BTreeMap::new();
         // What the agent left differs from its `HEAD` only where it wrote,
         // and where that hides your files. A directory it made is no file,
-        // as `changed` reads it.
+        // as `changed` reads it, unless it is in place of a git-ignored
+        // file its `HEAD` holds, which stays.
         let mut paths = changed(&records, &host)?;
         paths.extend(
             (records.entries.iter())
-                .filter(|(path, entry)| !path.is_empty() && !matches!(entry, Entry::Dir { .. }))
+                .filter(|(path, entry)| {
+                    !path.is_empty()
+                        && (!matches!(entry, Entry::Dir { .. })
+                            || agent.replacing.dirs.contains(*path))
+                })
                 .map(|(path, _)| path.clone()),
         );
         for path in paths {

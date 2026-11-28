@@ -681,7 +681,7 @@ impl Http2 {
 /// well formed, by section 8.2 of RFC 9113, and so are its pseudo-header
 /// fields, by section 8.3.1. It isn't `CONNECT`, it names `name` in its
 /// `:authority`, its one `Host`, or both, and its `:path` is in origin
-/// form.
+/// form, with no byte that the `http` crate refuses there.
 fn http2_request(
     headers: &[Header],
     name: &str,
@@ -716,7 +716,13 @@ fn http2_request(
     };
     let origin = path.starts_with(b"/") || path == b"*";
     let visible = path.iter().all(u8::is_ascii_graphic);
-    if method == b"CONNECT" || !origin || !visible {
+    // The `http` crate, which servers built on `h2` read `:path` with,
+    // refuses these bytes, so such a server resets the stream.
+    let query = path.iter().position(|&b| b == b'?').unwrap_or(path.len());
+    let (before, query) = path.split_at(query);
+    let reset =
+        before.iter().any(|b| b"<>`".contains(b)) || query.iter().any(|b| b"\"<>".contains(b));
+    if method == b"CONNECT" || !origin || !visible || reset {
         return Err(Refused);
     }
     let named = |wanted: &'static [u8]| {

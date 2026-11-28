@@ -311,6 +311,31 @@ fn a_malformed_http2_request_never_passes() {
 }
 
 #[test]
+fn an_http2_path_that_a_server_would_reset_never_passes() {
+    // The `http` crate, which the `h2` crate's server reads `:path` with,
+    // refuses these, so that server resets the stream.
+    let reset = [
+        "/allowed/<",
+        "/allowed/>",
+        "/allowed/`",
+        "/allowed?\"",
+        "/allowed?<",
+        "/allowed?>",
+    ];
+    for path in reset {
+        let passed = fed(&client(&[headers(1, request(path), true)]), 64);
+        assert_eq!(passed.fed, Err(Refused), "{path}");
+        assert!(heads(&passed.frames).is_empty(), "{path}");
+        assert!(passed.asked.is_empty(), "{path}");
+    }
+    for path in ["/allowed/a", "/allowed/\"{}", "/allowed?`{}"] {
+        let passed = fed(&client(&[headers(1, request(path), true)]), 64);
+        assert_eq!(passed.fed, Ok(()), "{path}");
+        assert_eq!(heads(&passed.frames), [request(path)]);
+    }
+}
+
+#[test]
 fn an_http2_body_has_the_length_its_request_gives() {
     let sized = |length: &str| {
         let mut headers = request("/allowed");

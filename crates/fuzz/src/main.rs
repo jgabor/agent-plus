@@ -851,6 +851,7 @@ const TARGETS: [Target; 14] = [
             "\x0f\x17\x10host.ap.internal",
             "\x04\x0a/allowed/x",
             "\x04\x07/denied",
+            "\x04\x0a/allowed/<",
             "\x0f\x0d\x013",
             "\x0f\x0d\x010",
             "\0\x02te\x08trailers",
@@ -3215,6 +3216,18 @@ mod tests {
             preface!(),
             "\0\0\0\x04\0\0\0\0\0",
             "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed#/",
+        );
+        assert!(!http2_check_input(input));
+        let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();
+        assert!(paths(&served_http2(&http2_passed(&input)).0).is_empty());
+    }
+
+    #[test]
+    fn a_path_h2_resets_is_refused() {
+        let input = concat!(
+            preface!(),
+            "\0\0\0\x04\0\0\0\0\0",
+            "\0\0\x20\x01\x05\0\0\0\x01\u{82}\u{87}\x41\x10host.ap.internal\x04\x0a/allowed/<",
         );
         assert!(!http2_check_input(input));
         let input: Vec<u8> = input.chars().map(|c| c as u32 as u8).collect();

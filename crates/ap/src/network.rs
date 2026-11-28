@@ -331,8 +331,8 @@ fn decrypts(network: &Network, injection: &Injection) -> bool {
     !injection.secrets.is_empty() || url || has(Sign::Allow) && has(Sign::Deny)
 }
 
-/// The guest's gateway, seeded from the system's random source, before the
-/// filter.
+/// The guest's gateway, with a seed from the system's random source, which
+/// it must draw before the filter.
 pub fn stack() -> Stack {
     Stack::new(config(RandomState::new().hash_one(0)))
 }

@@ -1034,8 +1034,8 @@ fn frames_input(input: &str) -> (usize, usize) {
     }
 }
 
-/// The network process's stack configuration, with a fixed seed so that a
-/// run is reproduced by its own seed.
+/// The network process's stack configuration, with a fixed seed, so that
+/// the fuzzer's seed alone reproduces a run.
 fn gateway() -> netstack::Config {
     ap::network::config(0)
 }

@@ -284,8 +284,8 @@ needs them, `ap build` finds out only when its fetch without them fails, and
 asks you for that grant then, before it uses them. The lockfile records it,
 so a later build asks before it fetches. With your credentials, `git` also
 reads the rest of your global configuration and your `~/.netrc`, as it always
-does. Then `ssh` uses your ssh-agent, and none of your ssh configuration or
-key files.
+does. With them, `ssh` signs in only with your ssh-agent, and reads none of
+your ssh configuration.
 
 ## Grants
 

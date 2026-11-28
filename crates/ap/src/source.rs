@@ -45,8 +45,8 @@ const MAX_DEPTH: usize = 2048;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Credentials {
     Off,
-    /// Your ssh-agent, and the credential helpers in your global git
-    /// configuration.
+    /// Your ssh-agent, and your global git configuration, with its
+    /// credential helpers, and your `.netrc`.
     Yours,
 }
 

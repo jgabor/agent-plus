@@ -3182,7 +3182,7 @@ fn a_remote_that_refuses_for_another_reason_is_not_asked_with_credentials() {
 }
 
 // spec(Sources): A private source then uses your own git credentials: your ssh-agent and the credential helpers in your global git configuration.
-// spec(Sources): Then `ssh` uses your ssh-agent, and none of your ssh configuration or key files.
+// spec(Sources): With them, `ssh` signs in only with your ssh-agent, and reads none of your ssh configuration.
 #[test]
 fn a_private_ssh_source_uses_your_ssh_agent_once_you_approve_it() {
     let scratch = Scratch::new("repo-ssh-agent");

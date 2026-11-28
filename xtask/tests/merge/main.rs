@@ -151,10 +151,7 @@ fn tmp() -> &'static Path {
 
 /// Where a variant of this xtask is built.
 fn variant_binary(name: &str) -> PathBuf {
-    tmp()
-        .join("variants")
-        .join(name)
-        .join("target/debug/xtask")
+    tmp().join("variants").join(name).join("target/debug/xtask")
 }
 
 fn copy_tree(from: &Path, to: &Path) {

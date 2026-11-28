@@ -575,9 +575,7 @@ fn testing_heard(root: &Path) -> Result<Hold, Problem> {
     let heard = Arc::clone(&waited);
     watch(Box::new(move |wait| {
         let what = match wait {
-            Some(Wait::Target) => {
-                "the target directory, because another run of the tests uses it"
-            }
+            Some(Wait::Target) => "the target directory, because another run of the tests uses it",
             Some(Wait::Place) => "a place, because other runs hold every one",
             Some(Wait::Activity) => "the activity lock, because a bench holds it or waits for it",
             None => return,

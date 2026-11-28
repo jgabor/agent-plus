@@ -799,7 +799,8 @@ issue counts as a filed one. The planner files none if the issues in progress
 and the issues `cargo xtask next` lists already fill the worker slots on Linux.
 It also keeps a parent to at most 3 open sub-issues without `land-needed`,
 whether they are blocked or not, because a sub-issue filed far ahead is written
-before the work it builds on exists. A prepared PR waiting for the owner doesn't count.
+before the work it builds on exists. A prepared PR waiting for the owner
+doesn't count.
 
 Every run starts by adopting the issues that hold up labeled work: each open
 issue with no parent and no label, filed by the owner's account, that an open

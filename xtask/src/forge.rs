@@ -91,7 +91,8 @@ pub struct OpenPr {
 pub struct Armed {
     pub state: String,
     pub head: String,
-    pub auto_merge: bool,
+    /// When auto-merge was armed, in seconds, if it is.
+    pub auto_merge: Option<i64>,
 }
 
 pub trait Forge {
@@ -377,15 +378,26 @@ impl Gh {
         self.text(&["api", &path, "--paginate", "--jq", ".[].body"], None)
     }
 
-    /// The bodies of the comments on a PR that begin as `accepts::acceptance`
-    /// does, one after another.
-    pub fn acceptances(&self, number: u64) -> Result<String, Problem> {
+    /// The comments on a PR that begin as `accepts::acceptance` does, oldest
+    /// first, each with the time GitHub took it, in seconds.
+    pub fn acceptances(&self, number: u64) -> Result<Vec<(i64, String)>, Problem> {
         let path = format!("{ISSUES}/{number}/comments");
         let filter = format!(
-            ".[] | select(.body | startswith({})) | .body",
+            ".[] | select(.body | startswith({})) | [.created_at, .body] | @json",
             json::quoted(crate::accepts::ACCEPTS)
         );
-        self.text(&["api", &path, "--paginate", "--jq", &filter], None)
+        let text = self.text(&["api", &path, "--paginate", "--jq", &filter], None)?;
+        let read = |line: &str| {
+            let value = json::parse(line).ok()?;
+            let [posted, body] = value.as_arr()? else {
+                return None;
+            };
+            let posted = work::seconds(posted.as_str()?)?;
+            Some((posted, body.as_str()?.to_string()))
+        };
+        text.lines()
+            .map(|line| read(line).ok_or_else(|| unexpected("gh api comments")))
+            .collect()
     }
 
     /// Turns auto-merge off, which `gh` does before it reads any branch.
@@ -458,7 +470,10 @@ impl Gh {
             Some(Armed {
                 state: value.get("state")?.as_str()?.to_string(),
                 head: value.get("headRefOid")?.as_str()?.to_string(),
-                auto_merge: is_armed(&value),
+                auto_merge: match value.get("autoMergeRequest")? {
+                    Json::Null => None,
+                    request => Some(work::seconds(request.get("enabledAt")?.as_str()?)?),
+                },
             })
         };
         read().ok_or_else(|| unexpected("gh pr view"))

@@ -1122,10 +1122,13 @@ impl Repo {
     pub(super) fn approved(&self, reasons: &[&str]) {
         let lines: Vec<String> = reasons.iter().map(|reason| format!("- {reason}")).collect();
         let body = format!(
-            "Merging this PR at `0123456789abcdef0123456789abcdef01234567` accepts:\n\n{}\n\n",
+            "Merging this PR at `0123456789abcdef0123456789abcdef01234567` accepts:\n\n{}\n",
             lines.join("\n")
         );
-        fs::write(self.bin.join("pr-comments"), body).unwrap();
+        fs::write(self.bin.join("pr-comments"), format!("{body}\n")).unwrap();
+        // Before the owner armed the PR.
+        let posted = format!("[\"2025-12-31T00:00:00Z\",{}]\n", quoted(&body));
+        fs::write(self.bin.join("pr-acceptances"), posted).unwrap();
     }
 
     /// A refresh in Actions, and the summary it wrote.
@@ -1483,6 +1486,8 @@ fn a_refresh_reads_auto_merge_again_before_it_turns_it_off_again() {
 impl Repo {
     /// The owner arms auto-merge on the PR again, after every comment so far.
     fn arm_again(&self, number: u64) {
+        let armed = self.bin.join(format!("armed-{number}"));
+        fs::write(armed, self.tick()).unwrap();
         let _ = fs::remove_file(self.bin.join(format!("disarmed-{number}")));
     }
 }
@@ -1550,8 +1555,7 @@ fn a_refresh_merges_nothing_listed_after_the_owner_armed_it_until_they_arm_it_ag
 fn a_comment_that_was_posted_is_not_posted_again() {
     let repo = falling("refresh-comment-posted");
     repo.approved(&["journey fell from 2 to 1"]);
-    let comments = repo.bin.join("pr-comments").display().to_string();
-    let posted = format!("cat >> '{comments}'; echo >> '{comments}'; {SOMETHING_WENT_WRONG}");
+    let posted = format!("post_comment; {SOMETHING_WENT_WRONG}");
 
     let output = repo.refresh_running("gh pr comment 9", &posted);
     assert_eq!(

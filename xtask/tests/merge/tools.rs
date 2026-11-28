@@ -1,6 +1,21 @@
 use super::*;
 
+/// When the fake `gh` says auto-merge was armed, unless the PR's `armed-`
+/// file names a time. It comes before every comment the fake posts.
+const ARMED_AT: &str = "2026-01-01T00:00:00Z";
+/// The day of the fake's clock, whose minutes count the times it posts.
+const CLOCK: &str = "2026-01-02";
+
 impl Repo {
+    /// The next minute of the fake's clock, as `post_comment` takes it.
+    pub(super) fn tick(&self) -> String {
+        let clock = self.bin.join("clock");
+        let tick =
+            fs::read_to_string(&clock).map_or(0, |text| text.trim().parse::<u32>().unwrap()) + 1;
+        fs::write(&clock, format!("{tick}\n")).unwrap();
+        format!("{CLOCK}T{:02}:{:02}:00Z", tick / 60, tick % 60)
+    }
+
     /// Wrappers for `git` and `cargo`, and the fake `gh`. Each logs the call.
     /// `KILL_ON` kills `xtask` at the first call containing it, `KILL_WHEN`
     /// says whether before or after doing the call, `HANG_ON` makes a matching
@@ -10,13 +25,22 @@ impl Repo {
     /// even one that then hangs. `PAUSE_ON` makes each matching call that
     /// shares the merge's pipe to its supervisor write `w` to it, which would
     /// pause the timeout. The fake `gh` keeps the newest state posted on each
-    /// commit, and gives it back when asked for that commit's status.
+    /// commit, and gives it back when asked for that commit's status. It
+    /// posts a comment with `post_comment`, at the next minute of `clock`.
     pub(super) fn write_tools(&self) {
         let bin = self.bin.display();
         let prelude = format!(
             r#"#!/bin/sh
 call="$(basename "$0") $*"
 echo "$call" >> '{bin}/calls'
+post_comment() {{
+  body="$(cat; echo .)"; body="${{body%.}}"
+  printf '%s\n' "$body" >> '{bin}/pr-comments'
+  tick=$(( $(cat '{bin}/clock' 2>/dev/null || echo 0) + 1 )); echo "$tick" > '{bin}/clock'
+  at=$(printf '{CLOCK}T%02d:%02d:00Z' $((tick / 60)) $((tick % 60)))
+  printf '%s' "$body" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' |
+    awk -v at="$at" 'BEGIN {{ printf "[\"%s\",\"", at }} {{ printf "%s\\n", $0 }} END {{ print "\"]" }}' >> '{bin}/pr-acceptances'
+}}
 maybe_kill() {{
   if [ -n "$KILL_ON" ] && [ ! -f '{bin}/killed' ] && [ "$KILL_WHEN" = "$1" ]; then
     case "$call" in *"$KILL_ON"*) : > '{bin}/killed'; kill -9 "$PPID"; exit 9 ;; esac
@@ -59,7 +83,8 @@ maybe_kill before
   "repo view") echo '{{"nameWithOwner":"o/r","owner":{{"login":"o"}}}}' ;;
   "pr view") case "$*" in
     *autoMergeRequest*) if [ -f "{bin}/merged-$3" ]; then state=MERGED; else state=OPEN; fi
-      if [ -f "{bin}/armed-$3" ] && [ ! -f "{bin}/disarmed-$3" ]; then auto='{{"mergeMethod":"SQUASH"}}'; else auto=null; fi
+      if [ -f "{bin}/armed-$3" ] && [ ! -f "{bin}/disarmed-$3" ]; then at=$(cat "{bin}/armed-$3")
+        auto='{{"mergeMethod":"SQUASH","enabledAt":"'"${{at:-{ARMED_AT}}}"'"}}'; else auto=null; fi
       branch=$(cat "{bin}/branch-$3" 2>/dev/null || echo '{BRANCH}')
       head=$('{git}' --git-dir '{origin}' rev-parse "refs/heads/$branch")
       printf '{{"state":"%s","headRefOid":"%s","autoMergeRequest":%s}}\n' "$state" "$head" "$auto" ;;
@@ -68,7 +93,7 @@ maybe_kill before
   "pr list") if [ -f '{bin}/prs.json' ]; then cat '{bin}/prs.json'; else echo '[]'; fi ;;
   "issue list") cat '{bin}/issues.json' ;;
   "pr comment") if [ -f '{bin}/comment-fails' ]; then echo 'gh: no comment (HTTP 403)' >&2; exit 1; fi
-    cat >> '{bin}/pr-comments'; echo >> '{bin}/pr-comments'; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
+    post_comment; echo 'https://github.com/o/r/pull/9#issuecomment-5' ;;
   "pr merge") case "$*" in *--disable-auto*) : > "{bin}/disarmed-$3"; exit 0 ;; esac
     if [ -f '{bin}/merge-fails' ]; then echo 'no merge' >&2; exit 1; fi
     echo merged >> '{bin}/merges'; : > "{bin}/merged-$3"
@@ -83,7 +108,8 @@ maybe_kill before
     if [ -f '{bin}/status-fails' ]; then echo 'no status' >&2; exit 1; fi
     if [ -f '{bin}/pending-fails' ] && [ "$6" = state=pending ]; then echo 'no pending' >&2; exit 1; fi
     printf '{{"statuses":[{{"context":"xtask/gate","state":"%s","description":"%s"}}]}}\n' "${{6#state=}}" "${{10#description=}}" > "{bin}/status-${{4##*/}}" ;;
-  "api repos/"*/comments) cat '{bin}/pr-comments' 2>/dev/null; exit 0 ;;
+  "api repos/"*/comments) case "$*" in *@json*) cat '{bin}/pr-acceptances' ;; *) cat '{bin}/pr-comments' ;; esac 2>/dev/null
+    exit 0 ;;
   "api repos/"*) if [ -f '{bin}/status-read-fails' ]; then echo 'no status to read' >&2; exit 1; fi
     posted="${{2#*/commits/}}"; posted="{bin}/status-${{posted%/status}}"
     if [ -f "$posted" ]; then cat "$posted"; else echo '{{"statuses":[]}}'; fi ;;

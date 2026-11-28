@@ -14,11 +14,13 @@
 //!
 //! ```text
 //! SOURCE https://github.com/torvalds/linux v6.12 refs/tags/v6.12 adc218676…
+//! SOURCE https://github.com/me/private HEAD refs/heads/main 5f0c6e1b2… credentials
 //! ```
 //!
 //! `SOURCE` holds a remote source's repository, the ref the Agentfile names,
 //! or `HEAD` for none, the full name of the ref it resolved through, or `-`
-//! for a commit, and the commit. Each repository and ref has one line, in the
+//! for a commit, and the commit, and then `credentials` if fetching it
+//! needed your git credentials. Each repository and ref has one line, in the
 //! order the Agentfile first names them. Any other line is an error.
 //!
 //! [`settle`] resolves what `AGENT` names, downloads the harness into the
@@ -116,6 +118,8 @@ pub struct Source {
     pub reference: String,
     /// What it resolved to.
     pub resolved: crate::source::Resolved,
+    /// Whether fetching it needed your git credentials.
+    pub credentials: bool,
 }
 
 /// The harness a lockfile pins.
@@ -219,7 +223,11 @@ impl Lock {
                     }
                 }
                 "SOURCE" => {
-                    let source = match arguments.as_slice() {
+                    let (fields, credentials) = match arguments.as_slice() {
+                        [fields @ .., last] if last == "credentials" => (fields, true),
+                        fields => (fields, false),
+                    };
+                    let source = match fields {
                         [repository, reference, name, commit] => {
                             let name = match name.as_str() {
                                 "-" => Some(None),
@@ -231,6 +239,7 @@ impl Lock {
                                     repository: repository.clone(),
                                     reference: reference.clone(),
                                     resolved: crate::source::Resolved { name, commit },
+                                    credentials,
                                 })
                         }
                         _ => None,
@@ -240,7 +249,7 @@ impl Lock {
                     }) else {
                         return Err(fail(
                             "`SOURCE` takes a repository, a ref, the full name of the ref it \
-                             resolved through or `-`, and a commit"
+                             resolved through or `-`, a commit, and an optional `credentials`"
                                 .to_string(),
                         ));
                     };
@@ -259,11 +268,10 @@ impl Lock {
     }
 
     /// What the lock pins for `reference` in `repository`.
-    pub fn source(&self, repository: &str, reference: &str) -> Option<&crate::source::Resolved> {
+    pub fn source(&self, repository: &str, reference: &str) -> Option<&Source> {
         self.sources
             .iter()
             .find(|source| source.repository == repository && source.reference == reference)
-            .map(|source| &source.resolved)
     }
 
     /// Forgets what `ap update` resolves again: every source, and the
@@ -287,11 +295,16 @@ impl Lock {
         for source in &self.sources {
             let name = source.resolved.name.as_deref().unwrap_or("-");
             text.push_str(&format!(
-                "SOURCE {} {} {} {}\n",
+                "SOURCE {} {} {} {}{}\n",
                 print_argument(&source.repository),
                 print_argument(&source.reference),
                 print_argument(name),
-                source.resolved.commit
+                source.resolved.commit,
+                if source.credentials {
+                    " credentials"
+                } else {
+                    ""
+                }
             ));
         }
         text

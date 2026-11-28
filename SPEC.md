@@ -279,7 +279,13 @@ then uses your own git credentials: your ssh-agent and the credential
 helpers in your global git configuration. They are used on your host, only
 during the build, and they never reach the guest. A source that needs them
 is a [grant](#grants), because an Agentfile could otherwise copy your
-private code into its agent.
+private code into its agent. When the lockfile doesn't record that a source
+needs them, `ap build` finds out only when its fetch without them fails, and
+asks you for that grant then, before it uses them. The lockfile records it,
+so a later build asks before it fetches. With your credentials, `git` also
+reads the rest of your global configuration and your `~/.netrc`, as it always
+does. With them, `ssh` signs in only with your ssh-agent, and reads none of
+your ssh configuration.
 
 ## Grants
 

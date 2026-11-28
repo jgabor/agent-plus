@@ -1,34 +1,47 @@
 //! A git server on loopback, over HTTPS, for the tests that fetch a remote
 //! source. The host's `git http-backend` serves git's smart HTTP protocol for
 //! the repositories under a directory, so what `ap` fetches is what a real
-//! server sends. It counts requests, so a check can tell that a build made
-//! none.
+//! server sends. It records the credentials each request sent, so a check
+//! can tell that a build made none, and which ones had credentials.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use rustls::{ServerConnection, StreamOwned};
 
+/// Who a server lets fetch.
+#[derive(Clone, Copy)]
+pub enum Access {
+    Public,
+    /// No one. Every request gets a 401, as a host answers for a private
+    /// repository when a client sends no credentials.
+    Private,
+    /// A client that sends this `Authorization` header. Any other request
+    /// gets a 401.
+    Password(&'static str),
+    /// No one. Every request gets a 403, as a host answers a client that it
+    /// refuses for a reason other than its credentials.
+    Forbidden,
+}
+
 /// A server whose thread ends with the test process.
 pub struct GitServer {
     pub port: u16,
-    requests: Arc<AtomicUsize>,
+    /// The `Authorization` header of each request, in order.
+    requests: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl GitServer {
-    /// Serves the repositories under `root`. A `private` server answers
-    /// every request with a 401, as a host does for a private repository
-    /// when a client sends no credentials.
-    pub fn start(root: &Path, private: bool) -> GitServer {
+    /// Serves the repositories under `root` to those `access` lets fetch.
+    pub fn start(root: &Path, access: Access) -> GitServer {
         let config = super::tls_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let requests = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let counted = requests.clone();
         let root = root.to_path_buf();
         thread::spawn(move || {
@@ -40,7 +53,7 @@ impl GitServer {
                 thread::spawn(move || {
                     let connection = ServerConnection::new(config).unwrap();
                     let mut tls = StreamOwned::new(connection, stream);
-                    let _ = serve(&mut tls, &root, private, &counted);
+                    let _ = serve(&mut tls, &root, access, &counted);
                 });
             }
         });
@@ -53,7 +66,12 @@ impl GitServer {
     }
 
     pub fn requests(&self) -> usize {
-        self.requests.load(Ordering::SeqCst)
+        self.requests.lock().unwrap().len()
+    }
+
+    /// The `Authorization` header of each request so far, in order.
+    pub fn authorizations(&self) -> Vec<Option<String>> {
+        self.requests.lock().unwrap().clone()
     }
 }
 
@@ -69,8 +87,8 @@ pub fn certificate(dir: &Path) -> PathBuf {
 fn serve(
     stream: &mut (impl Read + Write),
     root: &Path,
-    private: bool,
-    requests: &AtomicUsize,
+    access: Access,
+    requests: &Mutex<Vec<Option<String>>>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     loop {
@@ -117,14 +135,21 @@ fn serve(
             reader.read_exact(&mut chunk)?;
             body = chunk;
         }
-        requests.fetch_add(1, Ordering::SeqCst);
+        let sent = header("authorization");
+        requests.lock().unwrap().push(sent.clone());
 
-        let reply = if private {
+        let unauthorized =
             b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"git\"\r\n\
-              Content-Length: 0\r\n\r\n"
-                .to_vec()
-        } else {
-            backend(root, &method, &target, &header, &body)?
+              Content-Length: 0\r\n\r\n";
+        let reply = match access {
+            Access::Private => unauthorized.to_vec(),
+            Access::Password(signed_in) if sent.as_deref() != Some(signed_in) => {
+                unauthorized.to_vec()
+            }
+            Access::Forbidden => b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            Access::Public | Access::Password(..) => {
+                backend(root, &method, &target, &header, &body)?
+            }
         };
         let stream = reader.get_mut();
         stream.write_all(&reply)?;

@@ -525,7 +525,7 @@ fn outwait_the_timeout(repo: &Repo, holding_from: Option<&str>, bench_from: &str
     }
     // To files, because nothing reads a pipe while this waits.
     let said = |name: &str| fs::File::create(repo.temp.join(name)).unwrap();
-    let mut merge = timed_merge(&repo)
+    let mut merge = timed_merge(repo)
         .stdout(said("merge.out"))
         .stderr(said("merge.err"))
         .spawn()

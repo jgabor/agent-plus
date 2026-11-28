@@ -1027,6 +1027,14 @@ EFFORT high
 - With Codex, the adapter also sets the effort of plan mode
   (`plan_mode_reasoning_effort`), so plan mode uses the same level, and a
   project's settings can't pick another.
+- With Codex 0.145.0 and later, the adapter also sets the effort a subagent
+  starts with (`agents.default_subagent_reasoning_effort`), so a project
+  can't use that key to pick another. Codex then refuses to start a subagent
+  at a level that the model's metadata doesn't list, and a model Codex
+  doesn't know lists none.
+- With Codex, a subagent can still run at another effort when the model asks
+  for one as it starts the subagent, or, when the working directory is a
+  share, when an agent role that its `.codex` defines sets one.
 - `EFFORT` overrides any effort a plugin sets.
 
 ### MODE

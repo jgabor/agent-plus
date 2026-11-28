@@ -15,6 +15,7 @@
 //! | before 0.137.0 | `codex exec` asks no reviewer, so a headless `auto` is denied what it would review |
 //! | 0.137.0 | `model_reasoning_effort` takes `low` to `xhigh`, and `approvals_reviewer` takes `auto_review` |
 //! | 0.138.0 | `model_reasoning_effort` takes `max` |
+//! | 0.145.0 | `[agents]` takes `default_subagent_reasoning_effort` |
 //! | 0.147.0 | `codex exec` has `--approve-for-me` |
 //! | 0.156.0 | the interactive `codex` has `--no-daemon`, and `[auto_review]` takes `experimental_policy_template` |
 //! | 0.157.0 | `[auto_review]` takes `extra_policy` |
@@ -48,6 +49,17 @@
 //! `model_catalog_json` can still turn the classifier on, with its own
 //! threshold and instructions, because a catalog's `guardian` policy skips
 //! the feature.
+//!
+//! A trusted project's `agents.default_subagent_reasoning_effort` sets the
+//! effort a subagent starts with, in place of the parent's, so the adapter
+//! sets it to the level of `EFFORT`. Codex 0.144.6 and older read the key as
+//! an agent role, and refuse to start. Codex checks that level against the
+//! model's metadata, as it does any level asked for a subagent, and refuses
+//! the subagent when the level isn't listed, as for a model Codex doesn't
+//! know. A role still sets its own effort, from the role's file in the
+//! project's `.codex/agents` or `[agents]`, because a role in a higher layer
+//! can't take away a lower layer's file. So can the model, when it starts
+//! the subagent.
 //!
 //! An interactive Codex 0.169.0 without `-c` overrides uses a background
 //! server, which installs a package of its own and updates it. An
@@ -102,6 +114,8 @@ pub const OLDEST: &str = "0.137.0";
 
 /// The first version whose `model_reasoning_effort` takes `max`.
 const MAX_FROM: [u64; 3] = [0, 138, 0];
+/// The first version whose `[agents]` takes `default_subagent_reasoning_effort`.
+const SUBAGENT_EFFORT_FROM: [u64; 3] = [0, 145, 0];
 /// The first version whose `codex exec` has `--approve-for-me`.
 const APPROVE_FOR_ME_FROM: [u64; 3] = [0, 147, 0];
 /// The first version whose interactive `codex` has `--no-daemon`.
@@ -176,7 +190,8 @@ pub fn effort(version_text: &str, effort: Effort) -> (&'static str, Option<Strin
 /// The arguments after `codex` for this version: `exec` for a headless run,
 /// which skips the git repository check, then the mode, the model, and the effort. `model` is passed unchanged.
 /// Without a model or an effort, Codex uses its own default. The effort is
-/// set for plan mode too.
+/// set for plan mode too, and for the subagents it starts where the version
+/// takes that.
 ///
 /// The mode is the sandbox, the approval policy, and the reviewer, and for
 /// the `workspace-write` sandbox its network access and an empty list of
@@ -259,7 +274,11 @@ pub fn arguments(
         let (level, _) = self::effort(version_text, effort);
         // Plan mode takes its own effort, from a trusted project or else
         // its preset's `medium`.
-        for key in ["model_reasoning_effort", "plan_mode_reasoning_effort"] {
+        let mut keys = vec!["model_reasoning_effort", "plan_mode_reasoning_effort"];
+        if at_least(&SUBAGENT_EFFORT_FROM) {
+            keys.push("agents.default_subagent_reasoning_effort");
+        }
+        for key in keys {
             arguments.extend(["-c".to_owned(), format!("{key}=\"{level}\"")]);
         }
     }

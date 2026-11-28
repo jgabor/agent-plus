@@ -18,7 +18,7 @@ net = { path = "../net" }
 netstack = { path = "../netstack" }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 share = { path = "../share" }
-smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 tokio = { version = "1", default-features = false }
 vmm = { path = "../vmm" }
 

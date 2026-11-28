@@ -984,9 +984,9 @@ fn dns_input(input: &str) -> bool {
 /// say whether the caller takes, refuses, or holds a flow the frame opens,
 /// and 3 takes it too. Bit 2 releases the connection held longest, taken if
 /// bit 3 is set. The rest is how many milliseconds pass before the stack
-/// polls. The last frame needs no ending. Panics if smoltcp's wire parsing
-/// reads a flow the stack asks about as another, or can't read a frame the
-/// stack sends. Returns how many flows it asked about, and frames it sent.
+/// polls. The last frame needs no ending. Panics if smoltcp's `Interface`
+/// doesn't take a flow the stack asks about as that flow, or if smoltcp's
+/// wire parsing can't read a frame the stack sends. Returns how many flows it asked about, and frames it sent.
 fn frames_input(input: &str) -> (usize, usize) {
     use netstack::{Config, Flow, Stack, Verdict};
     use std::collections::VecDeque;
@@ -1148,16 +1148,15 @@ fn interface_takes(frame: &[u8], flow: &netstack::Flow) -> bool {
 }
 
 /// The IP packet that smoltcp's wire parsing reads in an Ethernet frame,
-/// with `checksums` checked: its protocol, its addresses, and the bytes
+/// with its checksum checked: its protocol, its addresses, and the bytes
 /// after its header and one hop-by-hop header.
-fn ip_of<'a>(
-    frame: &'a [u8],
-    checksums: &smoltcp::phy::ChecksumCapabilities,
+fn ip_of(
+    frame: &[u8],
 ) -> Option<(
     smoltcp::wire::IpProtocol,
     smoltcp::wire::IpAddress,
     smoltcp::wire::IpAddress,
-    &'a [u8],
+    &[u8],
 )> {
     use smoltcp::wire::{
         EthernetFrame, EthernetProtocol, IpAddress, IpProtocol, Ipv4Packet, Ipv4Repr,
@@ -1168,7 +1167,8 @@ fn ip_of<'a>(
     match ethernet.ethertype() {
         EthernetProtocol::Ipv4 => {
             let packet = Ipv4Packet::new_checked(payload).ok()?;
-            let repr = Ipv4Repr::parse(&packet, checksums).ok()?;
+            let checksums = smoltcp::phy::ChecksumCapabilities::default();
+            let repr = Ipv4Repr::parse(&packet, &checksums).ok()?;
             let from = IpAddress::Ipv4(repr.src_addr);
             Some((
                 repr.next_header,
@@ -1221,7 +1221,7 @@ fn sent_parsed(frame: &[u8]) -> Option<()> {
         let arp = ArpPacket::new_checked(ethernet.payload()).ok()?;
         return ArpRepr::parse(&arp).ok().map(drop);
     }
-    let (protocol, from, to, payload) = ip_of(frame, &checked)?;
+    let (protocol, from, to, payload) = ip_of(frame)?;
     match protocol {
         IpProtocol::Tcp => {
             let tcp = TcpPacket::new_checked(payload).ok()?;

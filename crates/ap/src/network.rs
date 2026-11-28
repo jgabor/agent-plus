@@ -56,7 +56,7 @@ pub use decisions::{Answer, Asked, Keeper, answer};
 pub use decrypt::{Decryption, roots};
 pub use lookup::{Lookups, answer_lookups};
 pub use proxy::Proxy;
-pub use secrets::{Hidden, Injection};
+pub use secrets::{Hidden, Injection, same_host};
 
 use std::collections::hash_map::RandomState;
 use std::ffi::{OsString, c_int};

@@ -2605,6 +2605,15 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
             "GITHUB_TOKEN",
             true,
         ),
+        // The host is compared as the proxy compares it, in any case and
+        // with or without a trailing dot.
+        (
+            "cased",
+            "SECRET GITHUB_TOKEN @GitHub.com\n",
+            "GITHUB_TOKEN",
+            true,
+        ),
+        ("dotted", "SECRET GH_TOKEN @github.com.\n", "GH_TOKEN", true),
         (
             "visible",
             "SECRET GITHUB_TOKEN visible\n",
@@ -2613,7 +2622,13 @@ fn git_uses_a_github_token_bound_to_github_com_and_no_other() {
         ),
     ];
     for (agent, lines, variable, hidden) in cases {
-        scratch.build(agent, &fake(&format!("{github}{lines}")));
+        let mut agentfile = fake(&format!("{github}{lines}"));
+        // Until #1082, `NETWORK -` denies a bound host with a final dot that
+        // a `+` rule names without one.
+        if agent == "dotted" {
+            agentfile = agentfile.replace("NETWORK -\n", "NETWORK +\n");
+        }
+        scratch.build(agent, &agentfile);
         let env = [("GITHUB_TOKEN", VALUE), ("GH_TOKEN", "gh-token-value-81d4")];
         let (run, name, _) = start_reporting(&scratch, agent, &env);
         let (filled, held) = credentials(&scratch, &name, variable, "github.com");

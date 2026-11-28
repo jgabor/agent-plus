@@ -30,6 +30,14 @@ pub struct Injection {
     pub secrets: Vec<Hidden>,
 }
 
+/// Whether a secret bound to `host` is bound to `name`: in any case, and
+/// with or without a trailing dot on either.
+pub fn same_host(host: &str, name: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let name = name.strip_suffix('.').unwrap_or(name);
+    host.eq_ignore_ascii_case(name)
+}
+
 /// The bytes sent at once.
 const CHUNK: usize = 16 * 1024;
 /// The most bytes the network process takes.
@@ -43,15 +51,8 @@ impl Injection {
 
     /// The placeholders, and their values, of the secrets bound to `name`.
     pub fn swaps(&self, name: &str) -> Vec<Swap<'_>> {
-        let name = name.strip_suffix('.').unwrap_or(name);
         (self.secrets.iter())
-            .filter(|secret| {
-                (secret.hosts.iter()).any(|host| {
-                    host.strip_suffix('.')
-                        .unwrap_or(host)
-                        .eq_ignore_ascii_case(name)
-                })
-            })
+            .filter(|secret| secret.hosts.iter().any(|host| same_host(host, name)))
             .map(|secret| Swap {
                 placeholder: &secret.placeholder,
                 value: &secret.value,
@@ -62,16 +63,9 @@ impl Injection {
     /// Whether every request to `name` must carry a placeholder, and gets
     /// refused without one.
     pub fn requires(&self, name: &str) -> bool {
-        let name = name.strip_suffix('.').unwrap_or(name);
         (self.secrets.iter())
             .filter(|secret| secret.required)
-            .any(|secret| {
-                (secret.hosts.iter()).any(|host| {
-                    host.strip_suffix('.')
-                        .unwrap_or(host)
-                        .eq_ignore_ascii_case(name)
-                })
-            })
+            .any(|secret| secret.hosts.iter().any(|host| same_host(host, name)))
     }
 
     /// The headers, as [`net::inject`] takes them.
@@ -258,5 +252,22 @@ mod tests {
         // Bytes that stop short don't read.
         let bytes = injection.encode();
         assert_eq!(Injection::decode(&bytes[..bytes.len() - 1]), None);
+    }
+
+    #[test]
+    fn a_bound_host_matches_in_any_case_with_or_without_a_final_dot() {
+        for host in ["github.com", "GitHub.com", "github.com.", "GITHUB.COM."] {
+            assert!(same_host(host, "github.com"), "{host}");
+            assert!(same_host("github.com", host), "{host}");
+        }
+        for host in [
+            "gist.github.com",
+            "github.com.evil",
+            "github.com..",
+            "",
+            ".",
+        ] {
+            assert!(!same_host(host, "github.com"), "{host}");
+        }
     }
 }

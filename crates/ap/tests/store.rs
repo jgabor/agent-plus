@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ap::fetch::{self, Client, Pin};
 use ap::store::{self, Store};
-use common::{Server, ok, redirect, trusting_client};
+use common::{RESET, Server, ends_early, ok, redirect, trusting_client};
 
 const BODY: &[u8] = b"a kernel, more or less";
 // `printf 'a kernel, more or less' | sha256sum`
@@ -132,14 +132,38 @@ fn a_wrong_digest_leaves_nothing_in_the_store() {
 
 #[test]
 fn a_partial_download_leaves_nothing_in_the_store() {
-    let mut short = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
-        BODY.len() + 1
-    )
-    .into_bytes();
-    short.extend_from_slice(BODY);
-    let server = Server::start(|_| vec![("/vmlinux", short)]);
+    let server = Server::start(|_| vec![("/vmlinux", ends_early(BODY))]);
     fails_and_stores_nothing(&server, "partial", "/vmlinux", BODY_SHA256, "ended early");
+}
+
+/// Asserts that fetching `/vmlinux` from a server that answers with `first`,
+/// then with `BODY`, stores `BODY` after 2 requests.
+fn starts_over_after(test: &str, first: Vec<u8>) {
+    let server = Server::start(|_| vec![("/vmlinux", first), ("/vmlinux", ok(BODY))]);
+    let root = empty_root(test);
+    let url = server.url("/vmlinux");
+    let pin = Pin {
+        url: &url,
+        sha256: BODY_SHA256,
+    };
+    let path = fetch::fetch(&Store::new(&root), &trusting_client(), &pin).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), BODY);
+    assert_eq!(server.requests(), 2);
+    assert_eq!(files(&root), [path], "no partial file may remain");
+}
+
+// spec(Build): When the connection ends before a download is complete, `ap` starts the download over from its first byte, at most 3 more times.
+#[test]
+fn a_reset_connection_starts_the_download_over() {
+    starts_over_after("reset", RESET.to_vec());
+}
+
+// spec(Build): When the connection ends before a download is complete, `ap` starts the download over from its first byte, at most 3 more times.
+#[test]
+fn a_chunked_body_that_ends_between_chunks_starts_over() {
+    let mut first = one_chunk(BODY);
+    first.truncate(first.len() - b"0\r\n\r\n".len());
+    starts_over_after("between-chunks", first);
 }
 
 #[test]
@@ -337,6 +361,24 @@ fn a_long_head_is_read() {
     };
     let path = fetch::fetch(&Store::new(&root), &trusting_client(), &pin).unwrap();
     assert_eq!(fs::read(path).unwrap(), BODY);
+}
+
+#[test]
+fn a_head_longer_than_64_kib_is_refused_without_a_retry() {
+    let reply = format!(
+        "HTTP/1.1 200 OK\r\nX-Padding: {}\r\nContent-Length: 0\r\n\r\n",
+        "x".repeat(64 * 1024)
+    )
+    .into_bytes();
+    let server = Server::start(|_| vec![("/vmlinux", reply)]);
+    fails_and_stores_nothing(
+        &server,
+        "too-long-head",
+        "/vmlinux",
+        BODY_SHA256,
+        "truncated head",
+    );
+    assert_eq!(server.requests(), 1);
 }
 
 #[test]

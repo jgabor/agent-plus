@@ -1135,6 +1135,9 @@ fn a_cached_harness_that_is_not_a_file_fails_without_waiting() {
 /// The path under which [`anthropic`] serves Claude Code's releases.
 const RELEASES: &str = "/claude-code-releases";
 
+/// The path [`anthropic`] serves Claude Code 2.1.311's binary at.
+const CLAUDE_FILE: &str = "/claude-code-releases/2.1.311/linux-x64/claude";
+
 /// A Claude Code manifest that gives `sha256` for `linux-x64`, as Anthropic's
 /// does, with a different digest for the platforms around it.
 fn manifest(version: &str, sha256: &str) -> Vec<u8> {
@@ -1161,20 +1164,26 @@ fn manifest(version: &str, sha256: &str) -> Vec<u8> {
 /// Serves Claude Code 2.1.311 as Anthropic does, as its `stable` channel,
 /// with a manifest that gives `sha256` for its file, [`common::HARNESS`].
 fn anthropic(sha256: &str) -> common::Server {
+    anthropic_with(sha256, vec![common::ok(common::HARNESS)])
+}
+
+/// Serves Claude Code as [`anthropic`] does, with `harness` as the replies
+/// to the binary's path, in turn.
+fn anthropic_with(sha256: &str, harness: Vec<Vec<u8>>) -> common::Server {
     let manifest = manifest("2.1.311", sha256);
     common::Server::start(move |_| {
-        vec![
+        let mut routes = vec![
             ("/claude-code-releases/stable", common::ok(b"2.1.311\n")),
             ("/claude-code-releases/latest", common::ok(b"2.1.311\n")),
             (
                 "/claude-code-releases/2.1.311/manifest.json",
                 common::ok(&manifest),
             ),
-            (
-                "/claude-code-releases/2.1.311/linux-x64/claude",
-                common::ok(common::HARNESS),
-            ),
-        ]
+        ];
+        for reply in harness {
+            routes.push((CLAUDE_FILE, reply));
+        }
+        routes
     })
 }
 
@@ -1270,7 +1279,7 @@ fn claude_stable_resolves_downloads_and_writes_the_lock() {
         [
             "/claude-code-releases/stable",
             "/claude-code-releases/2.1.311/manifest.json",
-            "/claude-code-releases/2.1.311/linux-x64/claude",
+            CLAUDE_FILE,
         ]
     );
     assert_eq!(settling.cached(), [digest.as_str()]);
@@ -1307,6 +1316,52 @@ fn a_download_with_the_wrong_digest_stores_nothing_and_writes_no_lock() {
     assert!(settling.cached().is_empty(), "{:?}", settling.cached());
 }
 
+// spec(Build): When the connection ends before a download is complete, `ap` starts the download over from its first byte, at most 3 more times.
+#[test]
+fn a_download_the_server_ends_early_starts_over() {
+    let digest = common::digest(common::HARNESS);
+    let early = common::ends_early(common::HARNESS);
+    let server = anthropic_with(&digest, vec![early, common::ok(common::HARNESS)]);
+    let settling = Settling::new("settle-early", "AGENT claude:stable\nOS minimal\n");
+    assert!(settling.settle(&server).unwrap());
+    assert_eq!(
+        Settling::paths(&server),
+        [
+            "/claude-code-releases/stable",
+            "/claude-code-releases/2.1.311/manifest.json",
+            CLAUDE_FILE,
+            CLAUDE_FILE,
+        ]
+    );
+    assert_eq!(
+        settling.cached(),
+        [digest.as_str()],
+        "no partial file remains"
+    );
+    assert_eq!(
+        fs::read(settling.cache.join(&digest)).unwrap(),
+        common::HARNESS
+    );
+}
+
+// spec(Build): When the connection ends before a download is complete, `ap` starts the download over from its first byte, at most 3 more times.
+// spec(Build): If the last try ends early too, it fails with that try's error.
+#[test]
+fn a_download_that_always_ends_early_fails_after_4_tries() {
+    let digest = common::digest(common::HARNESS);
+    let server = anthropic_with(&digest, vec![common::ends_early(common::HARNESS)]);
+    let settling = Settling::new("settle-always-early", "AGENT claude:stable\nOS minimal\n");
+    let error = settling.settle(&server).unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "downloading `AGENT claude:2.1.311`: the download ended early"
+    );
+    let paths = Settling::paths(&server);
+    assert_eq!(paths[2..], [CLAUDE_FILE; 4]);
+    assert_eq!(settling.lockfile(), None);
+    assert!(settling.cached().is_empty(), "{:?}", settling.cached());
+}
+
 // spec(AGENT): Without a version, `ap` uses `latest`.
 #[test]
 fn claude_without_a_version_resolves_latest() {
@@ -1329,10 +1384,7 @@ fn an_exact_version_resolves_without_a_channel() {
     assert!(settling.settle(&server).unwrap());
     assert_eq!(
         Settling::paths(&server),
-        [
-            "/claude-code-releases/2.1.311/manifest.json",
-            "/claude-code-releases/2.1.311/linux-x64/claude",
-        ]
+        ["/claude-code-releases/2.1.311/manifest.json", CLAUDE_FILE,]
     );
     assert_eq!(
         settling.lockfile().unwrap(),
@@ -1371,10 +1423,7 @@ fn a_locked_harness_missing_from_the_cache_is_downloaded_by_its_lock() {
     let lock = format!("HARNESS claude 2.1.311 {digest}\n");
     fs::write(settling.dir.join("Agentfile.lock"), &lock).unwrap();
     assert!(!settling.settle(&server).unwrap());
-    assert_eq!(
-        Settling::paths(&server),
-        ["/claude-code-releases/2.1.311/linux-x64/claude"]
-    );
+    assert_eq!(Settling::paths(&server), [CLAUDE_FILE]);
     assert_eq!(settling.cached(), [digest]);
     assert_eq!(settling.lockfile().unwrap(), lock);
 }

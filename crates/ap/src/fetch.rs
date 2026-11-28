@@ -20,6 +20,9 @@ const MAX_HEAD_BYTES: u64 = 64 * 1024;
 /// Far above any file `ap` pins, and low enough that a bad server can't fill
 /// the disk before the digest check.
 const MAX_BODY_BYTES: u64 = 1 << 30;
+/// How many times a download that ends early starts over, as many as cargo's
+/// `net.retry` allows by default.
+const TRIES_AGAIN: u32 = 3;
 
 /// A file to download, and the digest it must have.
 pub struct Pin<'a> {
@@ -107,21 +110,23 @@ pub fn fetch(store: &Store, client: &Client, pin: &Pin) -> io::Result<PathBuf> {
     if path.is_file() {
         return Ok(path);
     }
-    store.put(pin.sha256, download(client, pin.url)?)
+    again(|| store.put(pin.sha256, download(client, pin.url)?))
 }
 
 /// The text at `url`, which may hold at most `max` bytes.
 pub fn text(client: &Client, url: &str, max: u64) -> io::Result<String> {
-    let body = download(client, url)?;
-    if !body.chunked && body.remaining > max {
-        return Err(bad_response("a body that is too large"));
-    }
-    let mut text = String::new();
-    body.take(max + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > max {
-        return Err(bad_response("a body that is too large"));
-    }
-    Ok(text)
+    again(|| {
+        let body = download(client, url)?;
+        if !body.chunked && body.remaining > max {
+            return Err(bad_response("a body that is too large"));
+        }
+        let mut text = String::new();
+        body.take(max + 1).read_to_string(&mut text)?;
+        if text.len() as u64 > max {
+            return Err(bad_response("a body that is too large"));
+        }
+        Ok(text)
+    })
 }
 
 /// Puts the layer `pin` names in `layers` at a zstd level, downloading it
@@ -131,8 +136,11 @@ pub fn layer(layers: &Layers, client: &Client, pin: &Pin, level: i8) -> io::Resu
     if layers.level(pin.sha256)?.is_some() {
         return Ok(false);
     }
-    let mut data = Vec::new();
-    download(client, pin.url)?.read_to_end(&mut data)?;
+    let data = again(|| {
+        let mut data = Vec::new();
+        download(client, pin.url)?.read_to_end(&mut data)?;
+        Ok(data)
+    })?;
     let mut hash = Sha256Context::new();
     hash.update(&data);
     let actual: String = hash.finish().iter().map(|b| format!("{b:02x}")).collect();
@@ -153,6 +161,27 @@ fn download(client: &Client, url: &str) -> io::Result<Body> {
         }
     }
     response.body()
+}
+
+/// What `attempt` returns, after starting it over up to [`TRIES_AGAIN`]
+/// times while the connection ends before the download is complete. A read
+/// that ends early, and a TLS connection closed without `close_notify`, both
+/// fail with `UnexpectedEof`, and a reset fails with `ConnectionReset`.
+fn again<T>(mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut left = TRIES_AGAIN;
+    loop {
+        match attempt() {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                ) && left > 0 =>
+            {
+                left -= 1
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(crate) fn wrong_digest(actual: &str, pinned: &str) -> io::Error {
@@ -298,25 +327,31 @@ impl Read for Body {
             .min(usize::try_from(self.remaining).unwrap_or(usize::MAX));
         let read = self.stream.read(&mut buffer[..limit])?;
         if read == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the download ended early",
-            ));
+            return Err(ended_early());
         }
         self.remaining -= read as u64;
         Ok(read)
     }
 }
 
-/// One line of the response head, without its line ending.
-fn read_line(head: &mut impl BufRead) -> io::Result<String> {
+/// One line of the response head, without its line ending. A line cut off
+/// by the end of the connection, and not by the limit, ends the download
+/// early.
+fn read_line<R: BufRead>(head: &mut io::Take<R>) -> io::Result<String> {
     let mut line = Vec::new();
     head.read_until(b'\n', &mut line)?;
+    if !line.ends_with(b"\n") && head.limit() > 0 {
+        return Err(ended_early());
+    }
     if !line.ends_with(b"\r\n") {
         return Err(bad_response("a truncated head"));
     }
     line.truncate(line.len() - 2);
     String::from_utf8(line).map_err(|_| bad_response("a head that isn't UTF-8"))
+}
+
+fn ended_early() -> io::Error {
+    io::Error::new(io::ErrorKind::UnexpectedEof, "the download ended early")
 }
 
 fn connect(host: &str, port: u16) -> io::Result<TcpStream> {

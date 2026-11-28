@@ -591,8 +591,9 @@ fn stop_late(leader: u32) -> String {
 }
 
 /// The step's processes in `ps`'s `text`, each as its id, its group's, and
-/// what follows them: the leader, the rest of its group, whose parents may
-/// have ended, and each process below them.
+/// what follows them: the leader first, then each process below it, and each
+/// other process in its group, whose parent may have ended, with each process
+/// below that.
 fn step_processes<'a>(text: &'a str, leader: &str) -> Vec<(&'a str, &'a str, &'a str)> {
     let processes: Vec<(&str, &str, &str, &str)> = text
         .lines()
@@ -603,7 +604,7 @@ fn step_processes<'a>(text: &'a str, leader: &str) -> Vec<(&'a str, &'a str, &'a
                 rest = after.trim_start();
                 Some(word)
             };
-            let (pid, ppid, group, rest) = (field()?, field()?, field()?, rest);
+            let (pid, ppid, group) = (field()?, field()?, field()?);
             Some((pid, ppid, group, rest))
         })
         .collect();

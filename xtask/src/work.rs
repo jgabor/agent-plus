@@ -560,7 +560,7 @@ fn next(
         if entries.len() == free {
             break;
         }
-        if !state.claimable() {
+        if !state.claimable() || !host.starts(issue) {
             continue;
         }
         let paths = touches(&issue.body);
@@ -568,10 +568,6 @@ fn next(
             continue;
         }
         taken.extend(paths.iter().cloned());
-        // Its paths stay taken, because no claim slot spans the two hosts.
-        if !host.starts(issue) {
-            continue;
-        }
         let branch = state.branch().cloned();
         let worktree = branch.as_ref().and_then(|b| worktrees.get(b).cloned());
         entries.push(Entry {
@@ -689,11 +685,23 @@ fn claim(
         )));
     }
     let (held, _) = view.held(&states);
-    if any_overlap(&touches(&issue.body), &held) {
+    let paths = touches(&issue.body);
+    if any_overlap(&paths, &held) {
         return Ok(Claim::Lost(format!(
             "#{number} overlaps an issue that is in progress"
         )));
     }
+    // A claim on this host waits for the claim slot, so only a claim on the
+    // other host can race this one on an overlapping issue.
+    let rivals: Vec<u64> = states
+        .iter()
+        .filter(|(other, state)| {
+            !host.starts(other)
+                && !matches!(state, State::Closed | State::Parked)
+                && any_overlap(&touches(&other.body), &paths)
+        })
+        .map(|(other, _)| other.number)
+        .collect();
 
     let body = render_status(thread, branch, now + LEASE_SECONDS, nonce);
     let statuses = view.statuses(issue);
@@ -703,6 +711,7 @@ fn claim(
     let earlier = statuses
         .into_iter()
         .find(|status| !status.is_live(now) && status.lease != Lease::Unreadable);
+    let fresh = earlier.is_none();
     let mine = match earlier {
         Some(status) => {
             forge.edit_comment(status.id, &body)?;
@@ -721,17 +730,43 @@ fn claim(
         .into_iter()
         .find(|status| status.is_live(now));
     let eligible = after.open && !is_parked(&after);
-    if intact && eligible && winner.is_some_and(|status| status.id == mine) {
+    let mut lost = (!intact || !eligible || winner.is_none_or(|status| status.id != mine))
+        .then(|| format!("another claim on #{number} won"));
+    if lost.is_none() {
+        for rival in &rivals {
+            if !comes_first(forge.issue(*rival)?, &view.owner, now, fresh, mine) {
+                lost = Some(format!("a live claim on #{rival} overlaps #{number}"));
+                break;
+            }
+        }
+    }
+    let Some(reason) = lost else {
         return Ok(Claim::Won {
             comment: mine,
             replaced,
         });
-    }
+    };
     if intact {
         let retired = body.replace("**State:** working", "**State:** parked");
         forge.edit_comment(mine, &retired)?;
     }
-    Ok(Claim::Lost(format!("another claim on #{number} won")))
+    Ok(Claim::Lost(reason))
+}
+
+/// Whether this claim comes before every live claim on `rival`, an issue that
+/// overlaps it. Each claim writes its comment before it reads the other, so
+/// of two claims at least one reads the other, and a posted comment's id says
+/// which was written first. An edited comment keeps its old id, which says
+/// nothing, so that claim backs out from any live claim it reads. Two such
+/// claims can both back out, and the next dispatch tries again.
+fn comes_first(rival: Issue, owner: &str, now: i64, fresh: bool, mine: u64) -> bool {
+    if !rival.open || is_parked(&rival) {
+        return true;
+    }
+    statuses_by(&rival, owner)
+        .iter()
+        .filter(|status| status.is_live(now))
+        .all(|status| fresh && status.id > mine)
 }
 
 /// Sets up a new worktree as `scripts/setup-worktree.sh` does, because a
@@ -1159,8 +1194,13 @@ mod tests {
     }
 
     fn rival(id: u64, author: &'static str) -> Interference {
+        rival_at(0, id, author)
+    }
+
+    /// A live status comment on the issue at `index` in the forge.
+    fn rival_at(index: usize, id: u64, author: &'static str) -> Interference {
         Box::new(move |issues| {
-            issues[0]
+            issues[index]
                 .comments
                 .push(comment(id, author, &status("working", NOW + 3600)));
         })
@@ -1171,6 +1211,7 @@ mod tests {
         struct Case {
             name: &'static str,
             interfere: Option<Interference>,
+            reuses: bool,
             won: bool,
             retired: bool,
         }
@@ -1178,24 +1219,28 @@ mod tests {
             Case {
                 name: "alone",
                 interfere: None,
+                reuses: false,
                 won: true,
                 retired: false,
             },
             Case {
                 name: "a lower live comment wins",
                 interfere: Some(rival(50, OWNER)),
+                reuses: false,
                 won: false,
                 retired: true,
             },
             Case {
                 name: "a higher live comment loses",
                 interfere: Some(rival(900, OWNER)),
+                reuses: false,
                 won: true,
                 retired: false,
             },
             Case {
                 name: "a stranger can't win",
                 interfere: Some(rival(50, "stranger")),
+                reuses: false,
                 won: true,
                 retired: false,
             },
@@ -1204,6 +1249,7 @@ mod tests {
                 interfere: Some(Box::new(|issues| {
                     issues[0].comments[0].body = status("working", NOW + 7200);
                 })),
+                reuses: false,
                 won: false,
                 retired: false,
             },
@@ -1212,6 +1258,7 @@ mod tests {
                 interfere: Some(Box::new(|issues| {
                     issues[0].labels.push("land-needed".to_string());
                 })),
+                reuses: false,
                 won: false,
                 retired: true,
             },
@@ -1220,23 +1267,90 @@ mod tests {
                 interfere: Some(Box::new(|issues| {
                     issues[0].labels.push("answer-needed".to_string());
                 })),
+                reuses: false,
                 won: false,
                 retired: true,
             },
             Case {
                 name: "closed while claiming",
                 interfere: Some(Box::new(|issues| issues[0].open = false)),
+                reuses: false,
                 won: false,
                 retired: true,
             },
             Case {
                 name: "deleted by someone",
                 interfere: Some(Box::new(|issues| issues[0].comments.clear())),
+                reuses: false,
                 won: false,
                 retired: false,
             },
+            Case {
+                name: "a lower live claim on an overlapping issue wins",
+                interfere: Some(rival_at(1, 50, OWNER)),
+                reuses: false,
+                won: false,
+                retired: true,
+            },
+            Case {
+                name: "a higher live claim on an overlapping issue loses",
+                interfere: Some(rival_at(1, 900, OWNER)),
+                reuses: false,
+                won: true,
+                retired: false,
+            },
+            Case {
+                name: "a reused comment loses to any claim on an overlapping issue",
+                interfere: Some(rival_at(1, 900, OWNER)),
+                reuses: true,
+                won: false,
+                retired: true,
+            },
+            Case {
+                name: "a reused comment wins with no claim on an overlapping issue",
+                interfere: None,
+                reuses: true,
+                won: true,
+                retired: false,
+            },
+            Case {
+                name: "a claim on an issue that doesn't overlap doesn't count",
+                interfere: Some(rival_at(2, 50, OWNER)),
+                reuses: true,
+                won: true,
+                retired: false,
+            },
+            Case {
+                name: "a stranger on an overlapping issue can't win",
+                interfere: Some(rival_at(1, 50, "stranger")),
+                reuses: false,
+                won: true,
+                retired: false,
+            },
+            Case {
+                name: "a claim on an overlapping issue that is parked doesn't count",
+                interfere: Some(Box::new(|issues| {
+                    rival_at(1, 50, OWNER)(issues);
+                    issues[1].labels.push("answer-needed".to_string());
+                })),
+                reuses: false,
+                won: true,
+                retired: false,
+            },
         ] {
-            let forge = Fake::new(vec![issue(vec![])]);
+            let earlier = comment(40, OWNER, &status("parked", NOW + 3600));
+            let (comments, mine) = if case.reuses {
+                (vec![earlier], 40)
+            } else {
+                (vec![], 100)
+            };
+            let mut overlapping = issue(vec![]);
+            overlapping.number = 8;
+            overlapping.labels.push("host:macos".to_string());
+            let mut apart = overlapping.clone();
+            apart.number = 9;
+            apart.body = "## Touches\n`crates/b`\n".to_string();
+            let forge = Fake::new(vec![issue(comments), overlapping, apart]);
             *forge.interfere.borrow_mut() = case.interfere;
             let result = try_claim(&forge);
             assert_eq!(
@@ -1245,15 +1359,15 @@ mod tests {
                 "{}",
                 case.name
             );
-            assert_eq!(
-                forge.writes().contains(&"edit 100".to_string()),
-                case.retired,
-                "{}",
-                case.name
-            );
+            let retired = forge
+                .writes()
+                .iter()
+                .skip_while(|write| !write.starts_with("label"))
+                .any(|write| *write == format!("edit {mine}"));
+            assert_eq!(retired, case.retired, "{}", case.name);
             if case.retired {
                 assert!(
-                    forge.body_of(100).contains("**State:** parked"),
+                    forge.body_of(mine).contains("**State:** parked"),
                     "{}",
                     case.name
                 );

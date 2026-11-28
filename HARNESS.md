@@ -705,16 +705,22 @@ is a failure, and 2 is bad usage or an environment error.
 `{"issue", "touches", "autonomy", "branch", "worktree"}`, lowest issue number
 first, with at most one entry per free worker slot on this host. On a Mac it
 names only issues with `host:macos`, and on Linux only issues without it.
-`claim` refuses an issue for the other host. When two issues overlap, the
-lower number stays, whichever host each is for, because no claim slot spans
-the two. Any issue that overlaps a live claim is left out, and an abandoned
-issue is included. `branch` names the existing branch of an abandoned issue,
+`claim` refuses an issue for the other host. Only a live claim holds paths,
+whichever host holds it, so an issue that overlaps a live claim is left out,
+and one that overlaps an unclaimed issue for the other host is not. When two
+issues for this host overlap, the lower number stays. An abandoned issue is
+included. `branch` names the existing branch of an abandoned issue,
 or the branch of the last claim on an available issue, if GitHub still has it.
 `worktree` names where that branch is still checked out. Both are otherwise
 null.
 
 `claim` prints `{"issue", "comment", "branch", "replaced"}`. `replaced` is the
 thread of the last claim, or null if there was none or it was this thread.
+After it writes, `claim` reads the issue again, and each open, unparked issue
+for the other host whose `Touches` overlap it, because a claim on this host
+waits for the claim slot. It wins only if its comment is the lowest live one on its
+issue, and lower than every live one on those. A claim that edited an earlier
+comment loses to any live one on those, because its id is old.
 
 While an issue has a live claim, `merge` and `prepare` refuse its PR with exit
 1, and name the holder, unless `--thread` names it. They check again after the

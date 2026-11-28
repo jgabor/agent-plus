@@ -911,16 +911,19 @@ fn a_claim_on_either_host_holds_its_paths_on_both() {
     assert_eq!(on_each_host("host-paths-linux", &issues), (vec![], vec![]));
 }
 
-/// Nothing orders a claim on a Mac against one on Linux, so of two issues
-/// that overlap, only the lower one is named, on either host.
+/// Only a live claim holds paths, so an issue that waits for a host that
+/// isn't working stops nothing on the other.
 #[test]
-fn of_two_overlapping_issues_only_the_lower_is_named_on_either_host() {
+fn an_unclaimed_issue_for_the_other_host_holds_no_paths() {
     let issues = [open(7, MAC, T), open(8, &["auto:pr"], T)];
-    assert_eq!(on_each_host("host-overlap-mac", &issues), (vec![], vec![7]));
+    assert_eq!(
+        on_each_host("host-overlap-mac", &issues),
+        (vec![8], vec![7])
+    );
     let issues = [open(7, &["auto:pr"], T), open(8, MAC, T)];
     assert_eq!(
         on_each_host("host-overlap-linux", &issues),
-        (vec![7], vec![])
+        (vec![7], vec![8])
     );
 }
 

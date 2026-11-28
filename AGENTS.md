@@ -147,8 +147,11 @@ You can claim an issue when all of these are true:
 
 To claim one, add `in-progress` and post a status comment. If earlier work
 left a status comment that is parked or has an expired lease, edit that one
-instead. Then read the issue again. If someone else's live status comment has
-a lower comment id than yours, it wins: back out and pick something else.
+instead. Then read the issue again, and each issue for the other host whose
+`Touches` overlap it. If someone else's live status comment on any of them has
+a lower comment id than yours, it wins: back out and pick something else. If
+you edited an earlier comment, its id is old, so any live status comment on an
+overlapping issue wins.
 
 Keep editing that one comment. Don't post a new one for each update. Update
 it with `cargo xtask status <issue> --thread <link>`, which reads the comment

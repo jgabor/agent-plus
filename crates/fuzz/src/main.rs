@@ -688,6 +688,16 @@ const TARGETS: [Target; 14] = [
                 "\x02\x04\x05\u{b4}",
                 "\u{101}",
             ),
+            // A SYN behind a hop-by-hop header that holds an option smoltcp
+            // discards the packet for, unasked.
+            concat!(
+                to_stack_v6!(),
+                "`\0\0\0\0 \0@",
+                "\u{fd}ap\0\0\0\0\0\0\0\0\0\0\0\0\x15&\x06G\0\0\0\0\0\0\0\0\0\0\0\x11\x11",
+                "\x06\0\x40\x04\0\0\0\0",
+                "\u{9c}D\x01\u{bb}\0\0\x03\u{e8}\0\0\0\0`\x02\u{fa}\u{f0}\x0f\u{c0}\0\0",
+                "\x02\x04\x05\u{b4}",
+            ),
             // The first fragment of a datagram.
             concat!(
                 to_stack_v4!(),
@@ -974,9 +984,9 @@ fn dns_input(input: &str) -> bool {
 /// say whether the caller takes, refuses, or holds a flow the frame opens,
 /// and 3 takes it too. Bit 2 releases the connection held longest, taken if
 /// bit 3 is set. The rest is how many milliseconds pass before the stack
-/// polls. The last frame needs no ending. Panics if smoltcp's wire parsing
-/// reads a flow the stack asks about as another, or can't read a frame the
-/// stack sends. Returns how many flows it asked about, and frames it sent.
+/// polls. The last frame needs no ending. Panics if smoltcp's `Interface`
+/// doesn't take a flow the stack asks about as that flow, or if smoltcp's
+/// wire parsing can't read a frame the stack sends. Returns how many flows it asked about, and frames it sent.
 fn frames_input(input: &str) -> (usize, usize) {
     use netstack::{Config, Flow, Stack, Verdict};
     use std::collections::VecDeque;
@@ -1030,79 +1040,123 @@ fn frames_input(input: &str) -> (usize, usize) {
     }
 }
 
-/// Panics unless smoltcp's wire parsing reads `frame` as a packet to the
-/// stack's MAC address that opens `flow`. `classify` calls the same parsers,
-/// so this checks the code around them: which headers it reads, the SYN it
-/// looks for, and the addresses and ports it takes. It reads past one
-/// hop-by-hop header, and leaves checksums unchecked.
+/// Panics unless `frame` goes to the stack's MAC address, and a bare smoltcp
+/// `Interface` on the stack's addresses takes it as `flow`: a socket that
+/// listens at the destination takes the SYN from the source, or a port bound
+/// at the destination takes the datagram from the source. The `Interface`
+/// checks every checksum, and reads every hop-by-hop option, as the stack's
+/// own does, but shares no code with `classify`.
 fn same_flow(frame: &[u8], flow: &netstack::Flow) {
-    use smoltcp::phy::ChecksumCapabilities;
-    let ignored = ChecksumCapabilities::ignored();
     assert_eq!(
-        flow_of(frame, &ignored).as_ref(),
-        Some(flow),
-        "smoltcp reads another flow in {frame:x?}"
+        frame.get(..6),
+        Some(&guest::net::GATEWAY_MAC[..]),
+        "a flow to another MAC address in {frame:x?}"
+    );
+    assert!(
+        interface_takes(frame, flow),
+        "smoltcp's Interface doesn't take {flow:?} in {frame:x?}"
     );
 }
 
-/// The flow that smoltcp's wire parsing reads in a frame to the stack's MAC
-/// address: a SYN, or a UDP datagram.
-fn flow_of(frame: &[u8], checksums: &smoltcp::phy::ChecksumCapabilities) -> Option<netstack::Flow> {
-    use smoltcp::wire::{
-        EthernetAddress, EthernetFrame, EthernetRepr, IpProtocol, TcpControl, TcpPacket, TcpRepr,
-        UdpPacket, UdpRepr,
-    };
-    use std::net::{IpAddr, SocketAddr};
-    let ethernet = EthernetFrame::new_checked(frame).ok()?;
-    let repr = EthernetRepr::parse(&ethernet).ok()?;
-    if repr.dst_addr != EthernetAddress(guest::net::GATEWAY_MAC) {
-        return None;
+/// Whether a bare smoltcp `Interface`, given `frame`, takes it as `flow`.
+fn interface_takes(frame: &[u8], flow: &netstack::Flow) -> bool {
+    use smoltcp::iface::{Config, Interface, SocketSet};
+    use smoltcp::phy::{Device, DeviceCapabilities, Medium};
+    use smoltcp::socket::{tcp, udp};
+    use smoltcp::time::Instant;
+    use smoltcp::wire::{EthernetAddress, HardwareAddress, IpCidr};
+    use std::net::SocketAddr;
+
+    /// A link that gives the `Interface` one frame, and drops what it sends.
+    struct Link(Option<Vec<u8>>);
+    struct Rx(Vec<u8>);
+    struct Tx;
+    impl smoltcp::phy::RxToken for Rx {
+        fn consume<R, F: FnOnce(&[u8]) -> R>(self, f: F) -> R {
+            f(&self.0)
+        }
     }
-    let (protocol, from, to, payload) = ip_of(frame, checksums)?;
-    let at = |ip, port| SocketAddr::new(IpAddr::from(ip), port);
-    match protocol {
-        IpProtocol::Tcp => {
-            let tcp = TcpRepr::parse(
-                &TcpPacket::new_checked(payload).ok()?,
-                &from,
-                &to,
-                checksums,
-            )
-            .ok()?;
-            let syn = tcp.control == TcpControl::Syn && tcp.ack_number.is_none();
-            syn.then(|| netstack::Flow::Tcp {
-                source: at(from, tcp.src_port),
-                destination: at(to, tcp.dst_port),
+    impl smoltcp::phy::TxToken for Tx {
+        fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
+            f(&mut vec![0; len])
+        }
+    }
+    impl Device for Link {
+        type RxToken<'a> = Rx;
+        type TxToken<'a> = Tx;
+        fn receive(&mut self, _: Instant) -> Option<(Rx, Tx)> {
+            self.0.take().map(|frame| (Rx(frame), Tx))
+        }
+        fn transmit(&mut self, _: Instant) -> Option<Tx> {
+            Some(Tx)
+        }
+        fn capabilities(&self) -> DeviceCapabilities {
+            let mut caps = DeviceCapabilities::default();
+            caps.medium = Medium::Ethernet;
+            caps.max_transmission_unit = 1514;
+            caps
+        }
+    }
+
+    let mut link = Link(Some(frame.to_vec()));
+    let mac = HardwareAddress::Ethernet(EthernetAddress(guest::net::GATEWAY_MAC));
+    let mut iface = Interface::new(Config::new(mac), &mut link, Instant::ZERO);
+    iface.update_ip_addrs(|addrs| {
+        let v4 = IpCidr::new(guest::net::IPV4_GATEWAY.into(), guest::net::IPV4_PREFIX);
+        let v6 = IpCidr::new(guest::net::IPV6_GATEWAY.into(), guest::net::IPV6_PREFIX);
+        addrs.push(v4).expect("room for IPv4");
+        addrs.push(v6).expect("room for IPv6");
+    });
+    iface.set_any_ip(true);
+    let mut sockets = SocketSet::new(Vec::new());
+    match *flow {
+        netstack::Flow::Tcp {
+            source,
+            destination,
+        } => {
+            let buffer = || tcp::SocketBuffer::new(vec![0; 64]);
+            let mut socket = tcp::Socket::new(buffer(), buffer());
+            if socket.listen(destination).is_err() {
+                return false;
+            }
+            let handle = sockets.add(socket);
+            iface.poll(Instant::ZERO, &mut link, &mut sockets);
+            let socket = sockets.get::<tcp::Socket>(handle);
+            socket.state() == tcp::State::SynReceived
+                && socket.remote_endpoint().map(SocketAddr::from) == Some(source)
+                && socket.local_endpoint().map(SocketAddr::from) == Some(destination)
+        }
+        netstack::Flow::Udp {
+            source,
+            destination,
+        } => {
+            let buffer =
+                || udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY], vec![0; frame.len()]);
+            let mut socket = udp::Socket::new(buffer(), buffer());
+            if socket.bind(destination.port()).is_err() {
+                return false;
+            }
+            let handle = sockets.add(socket);
+            iface.poll(Instant::ZERO, &mut link, &mut sockets);
+            let socket = sockets.get_mut::<udp::Socket>(handle);
+            socket.recv().is_ok_and(|(_, meta)| {
+                SocketAddr::from(meta.endpoint) == source
+                    && meta.local_address.map(std::net::IpAddr::from) == Some(destination.ip())
             })
         }
-        IpProtocol::Udp => {
-            let udp = UdpRepr::parse(
-                &UdpPacket::new_checked(payload).ok()?,
-                &from,
-                &to,
-                checksums,
-            )
-            .ok()?;
-            Some(netstack::Flow::Udp {
-                source: at(from, udp.src_port),
-                destination: at(to, udp.dst_port),
-            })
-        }
-        _ => None,
     }
 }
 
 /// The IP packet that smoltcp's wire parsing reads in an Ethernet frame,
-/// with `checksums` checked: its protocol, its addresses, and the bytes
+/// with its checksum checked: its protocol, its addresses, and the bytes
 /// after its header and one hop-by-hop header.
-fn ip_of<'a>(
-    frame: &'a [u8],
-    checksums: &smoltcp::phy::ChecksumCapabilities,
+fn ip_of(
+    frame: &[u8],
 ) -> Option<(
     smoltcp::wire::IpProtocol,
     smoltcp::wire::IpAddress,
     smoltcp::wire::IpAddress,
-    &'a [u8],
+    &[u8],
 )> {
     use smoltcp::wire::{
         EthernetFrame, EthernetProtocol, IpAddress, IpProtocol, Ipv4Packet, Ipv4Repr,
@@ -1113,7 +1167,8 @@ fn ip_of<'a>(
     match ethernet.ethertype() {
         EthernetProtocol::Ipv4 => {
             let packet = Ipv4Packet::new_checked(payload).ok()?;
-            let repr = Ipv4Repr::parse(&packet, checksums).ok()?;
+            let checksums = smoltcp::phy::ChecksumCapabilities::default();
+            let repr = Ipv4Repr::parse(&packet, &checksums).ok()?;
             let from = IpAddress::Ipv4(repr.src_addr);
             Some((
                 repr.next_header,
@@ -1166,7 +1221,7 @@ fn sent_parsed(frame: &[u8]) -> Option<()> {
         let arp = ArpPacket::new_checked(ethernet.payload()).ok()?;
         return ArpRepr::parse(&arp).ok().map(drop);
     }
-    let (protocol, from, to, payload) = ip_of(frame, &checked)?;
+    let (protocol, from, to, payload) = ip_of(frame)?;
     match protocol {
         IpProtocol::Tcp => {
             let tcp = TcpPacket::new_checked(payload).ok()?;
@@ -3267,6 +3322,7 @@ mod tests {
                 (1, 2),
                 (0, 0),
                 (0, 0),
+                (0, 0),
                 (0, 0)
             ]
         );
@@ -3312,6 +3368,29 @@ mod tests {
             &netstack::Flow::Tcp {
                 source,
                 destination,
+            },
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "smoltcp")]
+    fn a_flow_with_a_bad_checksum_is_found() {
+        let (mut frame, flow) = syn();
+        // The low byte of the TCP checksum.
+        frame[51] ^= 1;
+        same_flow(&frame, &flow);
+    }
+
+    #[test]
+    #[should_panic(expected = "smoltcp")]
+    fn a_flow_behind_an_option_smoltcp_discards_is_found() {
+        let corpus = TARGETS.iter().find(|t| t.name == "frames").unwrap().corpus;
+        let frame: Vec<u8> = corpus[5].chars().map(|c| c as u32 as u8).collect();
+        same_flow(
+            &frame,
+            &netstack::Flow::Tcp {
+                source: "[fd61:7000::15]:40004".parse().unwrap(),
+                destination: "[2606:4700::1111]:443".parse().unwrap(),
             },
         );
     }

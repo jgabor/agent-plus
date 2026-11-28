@@ -316,6 +316,9 @@ struct Node {
     /// its owner's that the server can't open it again without. Its mode
     /// and times change through this until the agent gives that back.
     kept: Option<OwnedFd>,
+    /// The agent removed the file's last name, beneath the root. No name
+    /// can lead to it again.
+    unlinked: bool,
 }
 
 /// A file or a directory the guest has open.
@@ -599,6 +602,7 @@ impl Share {
             lookups: 1,
             place,
             kept: None,
+            unlinked: false,
         };
         Ok(Self {
             root,
@@ -701,15 +705,18 @@ impl Share {
     /// can name a place beneath the root that isn't, past the top of a bind
     /// mount, so it counts once it leads to the file. In a directory with
     /// no search permission, where neither can be checked, the path must be
-    /// the directory's and the name. A file with no name left, which the
-    /// agent unlinked while it held it open, counts while its last path was
-    /// beneath the root. A file share's file is the one at its name, as for
-    /// `LOOKUP`.
+    /// the directory's and the name. A file with no name left counts only
+    /// if the agent removed its last name, because once the host removes
+    /// it, its last path can name a place beneath the root it wasn't in. A
+    /// file share's file is the one at its name, as for `LOOKUP`.
     fn still_beneath(&self, found: &Node) -> Result<(), i32> {
         let served = self.served(&found.parent);
         let named = served.and_then(|()| still_the_file(&found.fd, &found.parent, &found.name));
         if named.is_ok() || self.only.is_some() {
             return named.map(drop);
+        }
+        if found.unlinked {
+            return Ok(());
         }
         let path = |fd: BorrowedFd| {
             let number = CString::new(fd.as_raw_fd().to_string()).map_err(|_| libc::EIO)?;
@@ -730,9 +737,6 @@ impl Share {
             .strip_prefix(root)
             .and_then(|rest| rest.strip_prefix(b"/"));
         let rest = rest.ok_or(libc::ENOENT)?;
-        if sys::fstat(found.fd.as_fd()).map_err(errno)?.st_nlink == 0 {
-            return Ok(());
-        }
         let rest = CString::new(rest).map_err(|_| libc::ENOENT)?;
         still_the_file(&found.fd, &self.root, &rest).map(drop)
     }
@@ -812,6 +816,7 @@ impl Share {
                 lookups: 1,
                 place,
                 kept: None,
+                unlinked: false,
             },
         );
         Ok(entry(id, &stat, self.owner))
@@ -1170,13 +1175,15 @@ impl Share {
     }
 
     /// `UNLINK` or `RMDIR`: the name.
-    fn remove(&self, parent: u64, body: &[u8], flags: i32) -> Answer {
+    fn remove(&mut self, parent: u64, body: &[u8], flags: i32) -> Answer {
         let name = entry_name(body)?;
         let (directory, place) = self.directory(parent)?;
         if place.keeps(name.as_bytes()) {
             return Err(libc::EPERM);
         }
+        let file = sys::open_beneath(directory.as_fd(), &name, libc::O_PATH | libc::O_NOFOLLOW);
         sys::unlinkat(directory.as_fd(), &name, flags).map_err(errno)?;
+        self.unlinked(file.ok());
         Ok(Vec::new())
     }
 
@@ -1219,7 +1226,13 @@ impl Share {
         if exchange && !from_place.takes(old.as_bytes(), mode(&into, &new)?) {
             return Err(libc::EPERM);
         }
+        // A rename that replaces a file removes one of its names.
+        let replaced = match exchange {
+            true => None,
+            false => sys::open_beneath(into.as_fd(), &new, libc::O_PATH | libc::O_NOFOLLOW).ok(),
+        };
         sys::renameat2(from.as_fd(), &old, into.as_fd(), &new, flags).map_err(errno)?;
+        self.unlinked(replaced);
         // The guest keeps its nodes, so each file it knows takes its new
         // name and place.
         self.moved(&into, into_place, &new);
@@ -1227,6 +1240,26 @@ impl Share {
             self.moved(&from, from_place, &old);
         }
         Ok(Vec::new())
+    }
+
+    /// Marks the node of `file`, a file the agent just removed a name of
+    /// beneath the root, if that was its last.
+    fn unlinked(&mut self, file: Option<OwnedFd>) {
+        let Some(stat) = file.and_then(|fd| sys::fstat(fd.as_fd()).ok()) else {
+            return;
+        };
+        if stat.st_nlink != 0 {
+            return;
+        }
+        if let Some(node) = self.known_mut(&stat) {
+            node.unlinked = true;
+        }
+    }
+
+    /// The node of the file `stat` is, if the guest knows it.
+    fn known_mut(&mut self, stat: &libc::stat) -> Option<&mut Node> {
+        let node = self.known.get(&(stat.st_dev, stat.st_ino))?;
+        self.nodes.get_mut(node)
     }
 
     /// Gives the node of the file now at `name` in `directory` that name.
@@ -1238,11 +1271,7 @@ impl Share {
         let Ok(stat) = sys::fstat(fd.as_fd()) else {
             return;
         };
-        let Some(node) = self
-            .known
-            .get(&(stat.st_dev, stat.st_ino))
-            .and_then(|node| self.nodes.get_mut(node))
-        else {
+        let Some(node) = self.known_mut(&stat) else {
             return;
         };
         if !is(node.mode, libc::S_IFDIR) {

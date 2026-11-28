@@ -376,6 +376,20 @@ fn a_key_appears_once() {
         ),
         Problem::Repeated("metadata.a".to_string())
     );
+    assert_eq!(
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nhooks: 1\nhooks: 2\n---\n"
+        ),
+        Problem::Repeated("hooks".to_string())
+    );
+    assert_eq!(
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nmetadata: {}\nmetadata: {}\n---\n"
+        ),
+        Problem::Repeated("metadata".to_string())
+    );
 }
 
 #[test]

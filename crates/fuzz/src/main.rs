@@ -951,7 +951,8 @@ fn skill_input(input: &str) {
     if input.lines().any(|line| line.trim_end().starts_with("---")) {
         return;
     }
-    let Ok(skills) = read(&format!("---\n{input}\n---\n")) else {
+    let yaml = format!("{input}\n");
+    let Ok(skills) = read(&format!("---\n{yaml}---\n")) else {
         return;
     };
     let [skill] = skills.as_slice() else {
@@ -959,8 +960,14 @@ fn skill_input(input: &str) {
     };
     assert_eq!(skill.name, "fuzz");
     assert!((1..=1024).contains(&skill.description.chars().count()));
-    let documents = yaml_rust2::YamlLoader::load_from_str(input)
-        .unwrap_or_else(|e| panic!("the reader took YAML that yaml-rust2 refuses: {e}"));
+    // The reader refuses a top-level key that it saw before as text. The
+    // loader also compares keys inside a value that the reader skips, and
+    // compares each by what it resolves to, so `1` and `01` are one key.
+    let documents = match yaml_rust2::YamlLoader::load_from_str(&yaml) {
+        Err(e) if e.info().ends_with(": duplicated key in mapping") => return,
+        documents => documents
+            .unwrap_or_else(|e| panic!("the reader took YAML that yaml-rust2 refuses: {e}")),
+    };
     let [yaml_rust2::Yaml::Hash(mapping)] = documents.as_slice() else {
         panic!("the reader took YAML that isn't one mapping: {documents:?}");
     };

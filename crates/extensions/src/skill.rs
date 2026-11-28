@@ -296,7 +296,7 @@ fn within(key: &'static str, value: Option<&str>, max: usize) -> Result<(), Prob
 }
 
 /// The keys of the front matter that the specification defines. Any other
-/// key is a harness's own, and is skipped whatever its value.
+/// key is a harness's own, and its value is skipped, whatever it is.
 #[derive(Default)]
 struct Keys {
     name: Option<String>,
@@ -305,8 +305,6 @@ struct Keys {
     compatibility: Option<String>,
     metadata: BTreeMap<String, String>,
     allowed_tools: Option<String>,
-    /// Whether `metadata` was given, so a second one is refused.
-    has_metadata: bool,
 }
 
 impl Keys {
@@ -323,10 +321,20 @@ impl Keys {
             return Err(Problem::NotMapping);
         }
         let mut keys = Keys::default();
+        // YAML allows a key once in a mapping. A key that is a collection
+        // or an alias is skipped with its value, and so are the mappings
+        // inside a value that is skipped.
+        let mut seen = BTreeSet::new();
         loop {
             let key = match events.next()? {
                 Event::MappingEnd => break,
-                Event::Scalar(key, ..) => key,
+                Event::Scalar(key, ..) if seen.contains(&key) => {
+                    return Err(Problem::Repeated(key));
+                }
+                Event::Scalar(key, ..) => {
+                    seen.insert(key.clone());
+                    key
+                }
                 other => {
                     // A key that is a collection, or an alias.
                     events.skip(other)?;
@@ -341,10 +349,6 @@ impl Keys {
                 "compatibility" => ("compatibility", &mut keys.compatibility),
                 "allowed-tools" => ("allowed-tools", &mut keys.allowed_tools),
                 "metadata" => {
-                    if keys.has_metadata {
-                        return Err(Problem::Repeated(key));
-                    }
-                    keys.has_metadata = true;
                     keys.metadata = events.metadata()?;
                     continue;
                 }
@@ -353,9 +357,6 @@ impl Keys {
                     continue;
                 }
             };
-            if slot.is_some() {
-                return Err(Problem::Repeated(key));
-            }
             match events.next()? {
                 Event::Scalar(value, ..) => *slot = Some(value),
                 other => {

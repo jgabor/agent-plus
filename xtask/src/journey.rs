@@ -4,14 +4,15 @@ use crate::bench::{self, Copies};
 use crate::ledger::Downloads;
 use crate::toml::{self, Value};
 use crate::workspace::{self, no_cargo};
-use crate::{Problem, Verdict, lock, score};
+use crate::{Problem, Verdict, group, limit, lock, score};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, PoisonError};
-use std::time::Instant;
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 pub const JOURNEY_FILE: &str = "harness/journey.toml";
 const STATIC_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -21,6 +22,12 @@ const FAKE_UPSTREAM: &str = "fake-upstream";
 /// The step that proves `ap build` fetches the OS layer, so its store starts
 /// empty.
 const FETCHES_OS: i64 = 5;
+/// How long a step may run before it is stopped, and fails. The slowest step
+/// takes about a minute, and the longest `timeout` that a step gives one
+/// command is 15 minutes, which this leaves to report its own failure.
+const STEP_SECONDS: u64 = 20 * 60;
+/// Replaces `STEP_SECONDS`, so that a test needn't wait for it.
+const STEP_SECONDS_OVERRIDE: &str = "XTASK_JOURNEY_STEP_SECONDS";
 
 /// The model providers a step can spend on, each with the variable that
 /// carries its paid-check key into the step, as a user's `AUTH key` run gets
@@ -145,6 +152,7 @@ fn walk(
     if let Some(id) = only {
         steps = needed(steps, id)?;
     }
+    let limit = limit::seconds(STEP_SECONDS_OVERRIDE, STEP_SECONDS)?;
     let journey = root.join("target/journey");
     let bin = install(root, &journey)?;
     // Checked once, because each step's store shares the tree's copies.
@@ -176,7 +184,7 @@ fn walk(
             "skip"
         } else {
             let start = Instant::now();
-            let ran = run_step(root, &journey, &bin, &copies, step, given)?;
+            let ran = run_step(root, &journey, &bin, &copies, step, given, limit)?;
             timed.push((step.id, start.elapsed().as_secs_f64()));
             if ran {
                 passed.insert(step.id);
@@ -461,6 +469,9 @@ fn install(root: &Path, journey: &Path) -> Result<PathBuf, Problem> {
     Ok(bin)
 }
 
+/// Runs the step in a process group of its own, and stops the group once the
+/// step ends. A step that runs past `limit` seconds is stopped, and fails, and
+/// what it was running is named.
 fn run_step(
     root: &Path,
     journey: &Path,
@@ -468,6 +479,7 @@ fn run_step(
     copies: &Copies,
     step: &Step,
     key: Option<(&str, &str)>,
+    limit: u64,
 ) -> Result<bool, Problem> {
     if let Some(floor) = &step.floor
         && !floor_check_exists(root, floor)?
@@ -507,12 +519,116 @@ fn run_step(
     if let Some((name, key)) = key {
         command.env(name, key);
     }
-    let status = command
+    command
         .stdin(Stdio::null())
-        .stdout(Stdio::from(io::stderr()))
-        .status()
-        .map_err(|e| Problem(format!("couldn't run {}: {e}", step.script)))?;
+        .stdout(Stdio::from(io::stderr()));
+    let couldnt = |e: io::Error| Problem(format!("couldn't run {}: {e}", step.script));
+    let (mut child, watcher) = group::start(&mut command).map_err(couldnt)?;
+    let leader = child.id();
+    let (ended, end) = mpsc::channel::<()>();
+    let timer = thread::spawn(move || {
+        if end.recv_timeout(Duration::from_secs(limit)) != Err(mpsc::RecvTimeoutError::Timeout) {
+            return None;
+        }
+        Some(stop_late(leader))
+    });
+    // Only the step's end says that it ended, so it is reaped before its group
+    // is stopped, as a merge's worker is.
+    let status = child.wait().map_err(couldnt);
+    drop(ended);
+    let stopped = timer.join().unwrap_or(None);
+    // What the step left running.
+    group::stop(leader);
+    watcher.end();
+    let status = status?;
+    // A step that passed just as the timer fired did pass.
+    if !status.success()
+        && let Some(running) = stopped
+    {
+        eprintln!(
+            "step {}: stopped at its {limit} second limit, {running}",
+            step.id
+        );
+    }
     Ok(status.success())
+}
+
+/// Stops a step that ran past its limit, and says what it was running: each
+/// process in its group, and each below it. The group is held still while
+/// `ps` lists them. Each other group that the step started, as GNU `timeout`
+/// starts one, is asked to end with `SIGTERM`, so that it stops what it runs.
+fn stop_late(leader: u32) -> String {
+    group::signal(leader, "-STOP");
+    let listed = Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,pgid=,etime=,args="])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let listing = match listed {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let step = step_processes(&text, &leader.to_string());
+            let mut groups: Vec<u32> = (step.iter())
+                .filter_map(|(_, group, _)| group.parse().ok())
+                .filter(|group| *group != leader)
+                .collect();
+            groups.sort_unstable();
+            groups.dedup();
+            for group in groups {
+                group::signal(group, "-TERM");
+            }
+            let mut listing = "while these ran:".to_string();
+            for (pid, _, rest) in step {
+                listing.push_str(&format!("\n  {pid} {rest}"));
+            }
+            listing
+        }
+        Ok(output) => format!("and `ps` couldn't list what ran: {}", output.status),
+        Err(e) => format!("and `ps` couldn't list what ran: {e}"),
+    };
+    group::stop(leader);
+    listing
+}
+
+/// The step's processes in `ps`'s `text`, each as its id, its group's, and
+/// what follows them: the leader first, then each process below it, and each
+/// other process in its group, whose parent may have ended, with each process
+/// below that.
+fn step_processes<'a>(text: &'a str, leader: &str) -> Vec<(&'a str, &'a str, &'a str)> {
+    let processes: Vec<(&str, &str, &str, &str)> = text
+        .lines()
+        .filter_map(|line| {
+            let mut rest = line.trim_start();
+            let mut field = || {
+                let (word, after) = rest.split_once(char::is_whitespace)?;
+                rest = after.trim_start();
+                Some(word)
+            };
+            let (pid, ppid, group) = (field()?, field()?, field()?);
+            Some((pid, ppid, group, rest))
+        })
+        .collect();
+    let mut left: Vec<&str> = (processes.iter())
+        .filter(|(pid, _, group, _)| *group == leader && *pid != leader)
+        .map(|(pid, _, _, _)| *pid)
+        .collect();
+    left.push(leader);
+    let mut seen = HashSet::new();
+    let mut step = Vec::new();
+    while let Some(id) = left.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        for &(pid, ppid, group, rest) in &processes {
+            if pid == id {
+                step.push((pid, group, rest));
+            }
+            if ppid == id {
+                left.push(pid);
+            }
+        }
+    }
+    step
 }
 
 /// Escape checks are tests in the package `t1`.
@@ -533,4 +649,31 @@ fn floor_check_exists(root: &Path, floor: &str) -> Result<bool, Problem> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::step_processes;
+
+    #[test]
+    fn a_late_step_lists_its_group_and_each_process_below_it() {
+        // As `ps -A -o pid=,ppid=,pgid=,etime=,args=` prints them. The step
+        // leads group 10, 12 is a `timeout` it started, 14 is in its group
+        // but its parent ended, and 1 and 20 aren't the step's.
+        let text = "    1     0     1    05:00 init
+   10     1    10    00:10 /bin/sh step.sh
+   11    10    10    00:10 sleep 121
+   12    10    12    00:10 timeout 130 sh -c x
+   13    12    12    00:10 sh -c x
+   14     1    10    00:09 sleep 123
+   15    14    15    00:09 timeout 900 y
+   20     1    20    05:00 other
+";
+        let listed = step_processes(text, "10");
+        assert_eq!(listed[0], ("10", "10", "00:10 /bin/sh step.sh"));
+        let mut ids: Vec<&str> = listed.iter().map(|(pid, _, _)| *pid).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["10", "11", "12", "13", "14", "15"]);
+        assert!(listed.contains(&("15", "15", "00:09 timeout 900 y")));
+    }
 }

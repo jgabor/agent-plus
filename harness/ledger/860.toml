@@ -1,0 +1,34 @@
+issue = 860
+pr = 1132
+commit = "e89d7f82b660d8508e304a9035cde8240ec05ada"
+base = "3967fb886db21bbc2845cef0ea068519099f41dd"
+date = "2026-11-28"
+host = "linux-x86_64"
+spec = { proven = 688, promises = 1067 }
+journey = { passing = 11, steps = 19 }
+reason = ""
+
+[budgets]
+binary_bytes = 8504240
+boot_ms = 110.51
+idle_mib = 47.69
+kernel_bytes = 15363160
+noop_build_ms = 1.31
+os_bytes = 183574528
+run_ms = 134.07
+version_ms = 0.26
+
+[seconds]
+slot = 437.0
+place = 0.0
+activity_lock = 0.0
+lint = 13.5
+tests = 286.9
+journey = 85.8
+own_xtask = 383.9
+steps = { 1 = 0.0, 2 = 0.0, 3 = 0.2, 4 = 0.4, 5 = 18.4, 6 = 0.1, 7 = 0.5, 8 = 39.5, 9 = 0.8, 10 = 5.0, 11 = 7.0, 14 = 0.0, 15 = 0.0, 16 = 0.0, 17 = 0.0 }
+programs = [{ package = "xtask", name = "tests/merge/main.rs", seconds = 160.1 }, { package = "ap", name = "tests/apply.rs", seconds = 30.9 }, { package = "ap", name = "tests/decrypt.rs", seconds = 30.1 }, { package = "ap", name = "tests/build.rs", seconds = 30.0 }, { package = "t1", name = "tests/floor_hidden_secret.rs", seconds = 26.7 }, { package = "t1", name = "tests/connects.rs", seconds = 26.2 }, { package = "t1", name = "tests/floor_guest_host.rs", seconds = 21.7 }, { package = "ap", name = "tests/diff.rs", seconds = 19.1 }, { package = "xtask", name = "tests/bench.rs", seconds = 18.4 }, { package = "xtask", name = "tests/base.rs", seconds = 18.2 }]
+
+[downloads]
+layers = 1
+files = 4

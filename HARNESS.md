@@ -175,6 +175,12 @@ count out of all steps. It exits 0 whenever it could run, because what fails a
 merge is a count lower than the base's. Each step gets a new `HOME` and working
 directory, and only `HOME` and `PATH` in its environment.
 
+A step runs in a process group of its own, which is stopped when the step
+ends, and when `xtask` dies. A step that runs for 20 minutes is stopped, and
+fails. The journey names each process the step was still running, sends
+`SIGTERM` to each other process group the step started, as GNU `timeout`
+starts one, and goes on to the next step.
+
 `cargo xtask journey <step>` builds the same binaries, then runs that step and
 each step it needs, directly or through another, in id order, and no other
 step. It prints a line for each of them, as `journey` does, but no count. It

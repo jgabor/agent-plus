@@ -40,12 +40,13 @@ const DECIDES: [&str; 11] = [
 /// The rest of `xtask/src/`, which runs what those decide, measures, or
 /// reports. A test fails while a file is on neither list.
 #[cfg(test)]
-const RUNS: [&str; 20] = [
+const RUNS: [&str; 21] = [
     "xtask/src/bench.rs",
     "xtask/src/bisect.rs",
     "xtask/src/forge.rs",
     "xtask/src/fuzz.rs",
     "xtask/src/gaps.rs",
+    "xtask/src/group.rs",
     "xtask/src/json.rs",
     "xtask/src/limit.rs",
     "xtask/src/lock.rs",

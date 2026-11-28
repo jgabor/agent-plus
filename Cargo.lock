@@ -220,6 +220,7 @@ version = "0.0.0"
 dependencies = [
  "agentfile",
  "ap",
+ "extensions",
  "git",
  "h2",
  "httparse",
@@ -232,6 +233,7 @@ dependencies = [
  "smoltcp",
  "tokio",
  "vmm",
+ "yaml-rust2",
 ]
 
 [[package]]

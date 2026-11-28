@@ -72,6 +72,8 @@ fn every_skill_under_the_root_without_skill_md() {
         ("README.md", "# skills\n"),
         ("skills/pdf/SKILL.md", &front("pdf")),
         ("skills/pdf/forms/SKILL.md", &front("forms")),
+        // `-` sorts before `/`, so this comes between the two above.
+        ("skills/pdf-x/SKILL.md", &front("pdf-x")),
         ("skills/docx/SKILL.md", &front("docx")),
         ("skills/docx/ooxml.md", "notes\n"),
         ("other/deep/er/xlsx/SKILL.md", &front("xlsx")),
@@ -84,6 +86,7 @@ fn every_skill_under_the_root_without_skill_md() {
             ("other/deep/er/xlsx", "xlsx"),
             ("skills/docx", "docx"),
             ("skills/pdf", "pdf"),
+            ("skills/pdf-x", "pdf-x"),
         ]
     );
 }
@@ -96,7 +99,10 @@ fn names_limit_the_set() {
         ("skills/xlsx/SKILL.md", &front("xlsx")),
     ]);
     let skills = find(&files, "skills", &["xlsx", "pdf"]).unwrap();
-    assert_eq!(names(&skills), [("skills/pdf", "pdf"), ("skills/xlsx", "xlsx")]);
+    assert_eq!(
+        names(&skills),
+        [("skills/pdf", "pdf"), ("skills/xlsx", "xlsx")]
+    );
 }
 
 #[test]
@@ -142,12 +148,9 @@ fn a_tree_with_no_skill_is_an_error() {
 
 #[test]
 fn a_read_error_names_the_file() {
-    let error = skill::find(
-        "skills",
-        ["skills/pdf/SKILL.md"],
-        &[],
-        |_| Err(io::Error::other("gone")),
-    )
+    let error = skill::find("skills", ["skills/pdf/SKILL.md"], &[], |_| {
+        Err(io::Error::other("gone"))
+    })
     .unwrap_err();
     assert!(matches!(&error, Error::Read { path, .. } if path == "skills/pdf/SKILL.md"));
     assert_eq!(error.to_string(), "couldn't read skills/pdf/SKILL.md: gone");
@@ -179,9 +182,7 @@ fn reads_the_keys_the_specification_defines() {
             description: "Extract PDF text, fill forms, merge files. Use when handling PDFs."
                 .to_string(),
             license: Some("Apache-2.0".to_string()),
-            compatibility: Some(
-                "Requires git, docker, jq, and access to the internet".to_string()
-            ),
+            compatibility: Some("Requires git, docker, jq, and access to the internet".to_string()),
             metadata: BTreeMap::from([
                 ("author".to_string(), "example-org".to_string()),
                 ("version".to_string(), "1.0".to_string()),
@@ -261,9 +262,18 @@ fn a_file_with_no_front_matter_is_refused_by_name() {
         "skills/pdf/SKILL.md: has no front matter, which starts on its first line with `---`"
     );
     assert_eq!(problem("pdf", ""), Problem::NoFrontMatter);
-    assert_eq!(problem("pdf", "\n---\nname: pdf\n---\n"), Problem::NoFrontMatter);
-    assert_eq!(problem("pdf", "--- name: pdf\n---\n"), Problem::NoFrontMatter);
-    assert_eq!(problem("pdf", "\u{feff}---\nname: pdf\n---\n"), Problem::NoFrontMatter);
+    assert_eq!(
+        problem("pdf", "\n---\nname: pdf\n---\n"),
+        Problem::NoFrontMatter
+    );
+    assert_eq!(
+        problem("pdf", "--- name: pdf\n---\n"),
+        Problem::NoFrontMatter
+    );
+    assert_eq!(
+        problem("pdf", "\u{feff}---\nname: pdf\n---\n"),
+        Problem::NoFrontMatter
+    );
 }
 
 #[test]
@@ -275,7 +285,10 @@ fn front_matter_must_close() {
 
 #[test]
 fn front_matter_closes_at_the_end_of_the_file() {
-    assert_eq!(read("pdf", "---\nname: pdf\ndescription: d\n---").name, "pdf");
+    assert_eq!(
+        read("pdf", "---\nname: pdf\ndescription: d\n---").name,
+        "pdf"
+    );
 }
 
 #[test]
@@ -287,9 +300,15 @@ fn front_matter_is_bounded() {
     // The bound counts the fences, and a body of any length is fine.
     let fits = MAX_FRONT_MATTER - "---\nname: pdf\ndescription: d\n\n---\n".len();
     let body = "x".repeat(4 * MAX_FRONT_MATTER);
-    let text = format!("---\nname: pdf\ndescription: d\n{}\n---\n{body}", "#".repeat(fits));
+    let text = format!(
+        "---\nname: pdf\ndescription: d\n{}\n---\n{body}",
+        "#".repeat(fits)
+    );
     assert_eq!(read("pdf", &text).name, "pdf");
-    let text = format!("---\nname: pdf\ndescription: d\n{}\n---\n", "#".repeat(fits + 1));
+    let text = format!(
+        "---\nname: pdf\ndescription: d\n{}\n---\n",
+        "#".repeat(fits + 1)
+    );
     assert_eq!(problem("pdf", &text), Problem::TooLong);
 }
 
@@ -301,7 +320,10 @@ fn front_matter_is_utf8() {
     )]);
     assert!(matches!(
         find(&files, "pdf", &[]),
-        Err(Error::Invalid { problem: Problem::NotUtf8, .. })
+        Err(Error::Invalid {
+            problem: Problem::NotUtf8,
+            ..
+        })
     ));
     // The body is never read.
     let files = BTreeMap::from([(
@@ -313,20 +335,32 @@ fn front_matter_is_utf8() {
 
 #[test]
 fn front_matter_is_one_yaml_mapping() {
-    assert!(matches!(problem("pdf", "---\nname: [pdf\n---\n"), Problem::Yaml(_)));
+    assert!(matches!(
+        problem("pdf", "---\nname: [pdf\n---\n"),
+        Problem::Yaml(_)
+    ));
     assert_eq!(problem("pdf", "---\n---\n"), Problem::NotMapping);
     assert_eq!(problem("pdf", "---\n- name\n---\n"), Problem::NotMapping);
     assert_eq!(problem("pdf", "---\njust text\n---\n"), Problem::NotMapping);
     assert_eq!(
-        problem("pdf", "---\nname: pdf\ndescription: d\n...\nname: two\n---\n"),
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\n...\nname: two\n---\n"
+        ),
         Problem::NotMapping
     );
 }
 
 #[test]
 fn name_and_description_are_required() {
-    assert_eq!(problem("pdf", "---\ndescription: d\n---\n"), Problem::Missing("name"));
-    assert_eq!(problem("pdf", "---\nname: pdf\n---\n"), Problem::Missing("description"));
+    assert_eq!(
+        problem("pdf", "---\ndescription: d\n---\n"),
+        Problem::Missing("name")
+    );
+    assert_eq!(
+        problem("pdf", "---\nname: pdf\n---\n"),
+        Problem::Missing("description")
+    );
 }
 
 #[test]
@@ -336,7 +370,10 @@ fn a_key_appears_once() {
         Problem::Repeated("name".to_string())
     );
     assert_eq!(
-        problem("pdf", "---\nname: pdf\ndescription: d\nmetadata:\n  a: 1\n  a: 2\n---\n"),
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nmetadata:\n  a: 1\n  a: 2\n---\n"
+        ),
         Problem::Repeated("metadata.a".to_string())
     );
 }
@@ -356,19 +393,29 @@ fn a_known_key_has_text() {
         Problem::NotText("name")
     );
     assert_eq!(
-        problem("pdf", "---\nname: pdf\ndescription: d\nallowed-tools: [Read, Bash]\n---\n"),
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nallowed-tools: [Read, Bash]\n---\n"
+        ),
         Problem::NotText("allowed-tools")
     );
     assert_eq!(
-        problem("pdf", "---\nname: pdf\ndescription: d\nlicense:\n  - MIT\n---\n"),
+        problem(
+            "pdf",
+            "---\nname: pdf\ndescription: d\nlicense:\n  - MIT\n---\n"
+        ),
         Problem::NotText("license")
     );
 }
 
 #[test]
 fn metadata_maps_text_to_text() {
-    for metadata in ["metadata: text", "metadata: [a]", "metadata:\n  a: [b]", "metadata:\n  [a]: b"]
-    {
+    for metadata in [
+        "metadata: text",
+        "metadata: [a]",
+        "metadata:\n  a: [b]",
+        "metadata:\n  [a]: b",
+    ] {
         let text = format!("---\nname: pdf\ndescription: d\n{metadata}\n---\n");
         assert_eq!(problem("pdf", &text), Problem::Metadata, "{metadata}");
     }
@@ -403,7 +450,11 @@ fn name_follows_the_specification() {
     ] {
         let text = format!("---\nname: {name}\ndescription: d\n---\n");
         let shown = name.trim_matches('\'');
-        assert_eq!(problem(shown, &text), Problem::Name(shown.to_string()), "{name}");
+        assert_eq!(
+            problem(shown, &text),
+            Problem::Name(shown.to_string()),
+            "{name}"
+        );
     }
     let long = "a".repeat(65);
     let text = format!("---\nname: {long}\ndescription: d\n---\n");
@@ -459,7 +510,8 @@ fn description_is_1_to_1024_characters() {
 
 #[test]
 fn compatibility_is_1_to_500_characters() {
-    let at = |value: &str| format!("---\nname: pdf\ndescription: d\ncompatibility: '{value}'\n---\n");
+    let at =
+        |value: &str| format!("---\nname: pdf\ndescription: d\ncompatibility: '{value}'\n---\n");
     let full = "é".repeat(500);
     assert_eq!(read("pdf", &at(&full)).compatibility, Some(full));
     for value in [String::new(), "a".repeat(501)] {

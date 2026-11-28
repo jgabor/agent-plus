@@ -1,9 +1,9 @@
 //! Feeds generated text to the code that reads untrusted input, and stops at
 //! the first panic. It needs no fuzzing engine, so it builds on stable. Where
-//! httparse, hyper, h2, iri-string, smoltcp, `git`, or `sha1sum` does the
-//! same job, a target compares the two. miniz_oxide compresses the loose
-//! objects that `crates/git` and `git` both read. Those crates are pure Rust,
-//! so the fuzzer adds no C to the tree. A run is reproduced by passing its
+//! httparse, hyper, h2, iri-string, smoltcp, yaml-rust2's loader, `git`, or
+//! `sha1sum` does the same job, a target compares the two. miniz_oxide
+//! compresses the loose objects that `crates/git` and `git` both read. Those
+//! crates are pure Rust, so the fuzzer adds no C to the tree. A run is reproduced by passing its
 //! seed again.
 
 #![forbid(unsafe_code)]
@@ -84,7 +84,7 @@ macro_rules! preface {
     };
 }
 
-const TARGETS: [Target; 14] = [
+const TARGETS: [Target; 15] = [
     Target {
         name: "agentfile",
         check: |input| {
@@ -867,10 +867,119 @@ const TARGETS: [Target; 14] = [
             "\u{ff}",
         ],
     },
+    Target {
+        name: "skill",
+        check: |input| {
+            skill_input(input);
+        },
+        corpus: &[
+            "",
+            "name: fuzz\ndescription: Does fuzz things.\n",
+            concat!(
+                "name: fuzz\n",
+                "description: >\n  Folded\n  lines.\n",
+                "license: Apache-2.0\n",
+                "compatibility: Requires git\n",
+                "metadata:\n  author: example-org\n  version: \"1.0\"\n",
+                "allowed-tools: Bash(git:*) Read\n",
+            ),
+            concat!(
+                "name: 'fuzz'\n",
+                "description: |\n  Kept\n",
+                "hooks:\n  PreToolUse:\n    - matcher: Bash\n      hooks: [{type: command}]\n",
+                "? [a, b]\n: c\n",
+                "x: &a v\ny: *a\n",
+                "metadata: {a: 1, b: true}\n",
+            ),
+        ],
+        words: &[
+            "\n",
+            " ",
+            "  ",
+            "\t",
+            ":",
+            ": ",
+            "- ",
+            "? ",
+            "#",
+            "'",
+            "\"",
+            "|",
+            ">",
+            "|-",
+            ">+",
+            "[",
+            "]",
+            "{",
+            "}",
+            ",",
+            "&a ",
+            "*a",
+            "!!str ",
+            "!x ",
+            "%YAML 1.2\n",
+            "---",
+            "...",
+            "~",
+            "null",
+            "\r\n",
+            "\u{feff}",
+            "name",
+            "description",
+            "license",
+            "compatibility",
+            "metadata",
+            "allowed-tools",
+            "fuzz",
+            "-fuzz",
+            "fuzz--x",
+        ],
+    },
 ];
 
 /// The TLS client hello in the name check's corpus.
 const HELLO: &str = "\x16\x03\x01\x00\x57\x01\x00\x00\x53\x03\x03\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x00\x00\x02\x13\x01\x01\x00\x00\x28\x00\x00\x00\x15\x00\x13\x00\x00\x10\x68\x6f\x73\x74\x2e\x61\x70\x2e\x69\x6e\x74\x65\x72\x6e\x61\x6c\x00\x0d\x00\x04\x00\x02\x04\x03\x00\x2b\x00\x03\x02\x03\x04";
+
+/// Reads `input` as a whole `SKILL.md`, and again as the YAML of its front
+/// matter. Whatever the reader accepts, yaml-rust2's own loader must read
+/// as one mapping, with the same text for each key the reader took.
+fn skill_input(input: &str) {
+    let read = |text: &str| {
+        extensions::skill::find("fuzz", ["SKILL.md"], &[], |_| Ok(text.as_bytes().to_vec()))
+    };
+    let _ = read(input);
+    if input.lines().any(|line| line.trim_end().starts_with("---")) {
+        return;
+    }
+    let Ok(skills) = read(&format!("---\n{input}\n---\n")) else {
+        return;
+    };
+    let [skill] = skills.as_slice() else {
+        panic!("one SKILL.md read as {} skills", skills.len());
+    };
+    assert_eq!(skill.name, "fuzz");
+    assert!((1..=1024).contains(&skill.description.chars().count()));
+    let documents = yaml_rust2::YamlLoader::load_from_str(input)
+        .unwrap_or_else(|e| panic!("the reader took YAML that yaml-rust2 refuses: {e}"));
+    let [yaml_rust2::Yaml::Hash(mapping)] = documents.as_slice() else {
+        panic!("the reader took YAML that isn't one mapping: {documents:?}");
+    };
+    let text = |key: &str| match mapping.get(&yaml_rust2::Yaml::String(key.to_string())) {
+        Some(yaml_rust2::Yaml::String(text)) => Some(text.clone()),
+        _ => None,
+    };
+    for (key, ours) in [
+        ("name", Some(&skill.name)),
+        ("description", Some(&skill.description)),
+        ("license", skill.license.as_ref()),
+        ("compatibility", skill.compatibility.as_ref()),
+        ("allowed-tools", skill.allowed_tools.as_ref()),
+    ] {
+        if let Some(theirs) = text(key) {
+            assert_eq!(ours, Some(&theirs), "`{key}`");
+        }
+    }
+}
 
 const DEVICE_MEMORY: usize = 1 << 16;
 const DEVICE_QUEUES: usize = 2;

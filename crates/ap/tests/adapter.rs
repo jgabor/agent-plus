@@ -721,6 +721,25 @@ fn every_share_joins_the_codex_workspace_and_is_trusted() {
     );
 }
 
+// spec(Run): When Codex's working directory isn't in a linked git worktree, Codex loads none of them from a trusted share that doesn't hold that directory.
+#[test]
+fn the_codex_adapter_points_at_no_shares_codex_directory() {
+    // Real Codex loads nothing from such a share in T2. This checks the
+    // adapter's part: no argument names a share's `.codex`, or a file in it.
+    let (_, directories) = shares("codex");
+    let directories: Vec<&str> = directories.iter().map(String::as_str).collect();
+    for version in CODEX_VERSIONS {
+        for interactive in [false, true] {
+            for mode in MODES {
+                let mut arguments = codex::arguments(version, None, None, mode, interactive);
+                arguments.extend(codex::workspace(&directories));
+                let run = format!("{version} {mode:?} {interactive}");
+                assert!(!arguments.iter().any(|a| a.contains(".codex")), "{run}");
+            }
+        }
+    }
+}
+
 // spec(MODE): With `read`, `ask`, `edit`, or `auto`, when the working directory is a share, a rule in its `.codex/rules` that allows a command lets Codex run that command outside its sandbox without asking.
 // spec(MODE): With `auto`, when the working directory is a share, its `.codex/config.toml` can still name a model catalog (`model_catalog_json`) that gives Codex's reviewer its own policy, policy template, and model, and turns guardian v2's classifier on with its own threshold and instructions.
 #[test]

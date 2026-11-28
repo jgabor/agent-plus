@@ -141,13 +141,18 @@ fn exec_codex(scratch: &Scratch, name: &str, port: u16, arguments: Vec<String>) 
     shown
 }
 
+/// The requests to the fake upstream in `upstream`.
+fn requests(upstream: &Path) -> Vec<String> {
+    let requests = fs::read_dir(upstream.join("requests")).unwrap();
+    (requests.flatten())
+        .filter_map(|request| fs::read_to_string(request.path()).ok())
+        .collect()
+}
+
 /// The tool's outputs that requests to the fake upstream in `upstream`
 /// gave the model, which say why a tool failed.
 fn tool_outputs(upstream: &Path) -> Vec<String> {
-    let requests = fs::read_dir(upstream.join("requests")).unwrap();
-    requests
-        .flatten()
-        .filter_map(|request| fs::read_to_string(request.path()).ok())
+    (requests(upstream).into_iter())
         .filter(|text| text.contains("\"custom_tool_call_output\""))
         .collect()
 }
@@ -289,5 +294,70 @@ fn a_trusted_codex_projects_model_catalog_reaches_the_reviewer_in_auto() {
                 );
             }
         }
+    }
+}
+
+/// A `SessionStart` hook that writes `ran` to the file `$0`.
+const HOOK: &str =
+    r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo ran > \"$0\""}]}]}}"#;
+
+// spec(Run): When Codex's working directory isn't in a linked git worktree, Codex loads none of them from a trusted share that doesn't hold that directory.
+#[test]
+fn codex_loads_nothing_from_a_share_that_isnt_its_working_directory() {
+    let scratch = Scratch::new("codex-other-share");
+    let upstream = scratch.root.join("upstream");
+    let (_upstream, port) = start_upstream(&upstream);
+    let (_run, name) = start_codex(&scratch, &upstream, "full");
+    // Two trusted shares, and only `there` has a `.codex`: a configuration
+    // that gives the model instructions, a hook, and a rule that allows
+    // the command the model asks for.
+    let (here, there) = ("/home/agent/here", "/home/agent/there");
+    let instructions = "Instructions from there.";
+    let hook = HOOK.replace("$0", &format!("{there}/hook-ran"));
+    let set_up = "mkdir -p \"$0\" \"$1/.codex/rules\" && cd \"$1/.codex\" \
+                  && echo \"developer_instructions = \\\"$2\\\"\" > config.toml \
+                  && printf %s \"$3\" > hooks.json && printf %s \"$4\" > rules/allow.rules";
+    let made = scratch.ap(&[
+        "exec",
+        &name,
+        "sh",
+        "-c",
+        set_up,
+        here,
+        there,
+        instructions,
+        &hook,
+        ALLOW_RULE,
+    ]);
+    assert_eq!(made.status.code(), Some(0), "{made:?}");
+    // With `there` as the working directory, each one loads, so the check
+    // can see it.
+    for (runs, (cwd, loads)) in [(here, false), (there, true)].into_iter().enumerate() {
+        let case = format!("working directory {cwd}");
+        // The rule: the command writes outside the workspace, where the
+        // sandbox doesn't let it unless a rule allows it.
+        let wrote = format!("{cwd}-ran");
+        fs::write(upstream.join("command"), format!("echo ran > {wrote}")).unwrap();
+        let mut arguments =
+            ap::adapter::codex::arguments(pin("codex").version, None, None, Mode::Edit, false);
+        // The hook: Codex runs one only once you trust it, so this run skips
+        // that trust.
+        arguments.insert(0, "--dangerously-bypass-hook-trust".to_owned());
+        arguments.extend(["--cd".to_owned(), cwd.to_owned()]);
+        arguments.extend(ap::adapter::codex::workspace(&[here, there]));
+        let shown = exec_codex(&scratch, &name, port, arguments);
+        let answers = tool_outputs(&upstream);
+        assert_eq!(answers.len(), runs + 1, "{case}: {shown}");
+        let code = Some(if loads { 0 } else { 1 });
+        let ran = scratch.ap(&["exec", &name, "test", "-e", &wrote]);
+        let all = answers.concat();
+        assert_eq!(ran.status.code(), code, "{case}: {shown}{all}");
+        let hooked = scratch.ap(&["exec", &name, "test", "-e", &format!("{there}/hook-ran")]);
+        assert_eq!(hooked.status.code(), code, "{case}: {shown}");
+        // The configuration: the model got its instructions.
+        let instructed = requests(&upstream)
+            .iter()
+            .any(|text| text.contains(instructions));
+        assert_eq!(instructed, loads, "{case}: {shown}");
     }
 }

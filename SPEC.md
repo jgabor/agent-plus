@@ -448,8 +448,10 @@ directory) and writes an image into the local store.
   Harnesses read project instructions and settings from their working
   directory, and Claude Code keys session history by its path. The Codex
   adapter marks every share as trusted (`trust_level = "trusted"`), so
-  Codex loads a repository's own configuration, hooks, and rules. The
-  Claude Code adapter marks `/` as trusted
+  Codex loads a repository's own configuration, hooks, and rules. When
+  Codex's working directory isn't in a linked git worktree, Codex loads none
+  of them from a trusted share that doesn't hold that directory. The Claude
+  Code adapter marks `/` as trusted
   (`projects["/"].hasTrustDialogAccepted` in `~/.claude.json`), so an
   interactive run whose working directory isn't in a git repository doesn't
   ask whether to trust it. Each run also marks its working directory and
